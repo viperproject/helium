@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  # Pushes to this repository already run CI; this covers PRs from forks, whose
+  # commits never land on a branch here (the jobs below skip same-repo PRs).
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Caching: every job that compiles restores a Swatinem/rust-cache keyed on the
+# toolchain, Cargo.lock and the job, so the debug, release and clippy builds each
+# keep their own dependency artifacts. A branch without its own cache falls back
+# to the default branch's. Bumping the nightly pinned in rust-toolchain.toml
+# changes the key and rebuilds dependencies once.
+
+jobs:
+  fmt:
+    name: rustfmt
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the channel and components pinned in rust-toolchain.toml.
+      - run: rustup toolchain install && rustc -V
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install && rustc -V
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: regression tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install && rustc -V
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # Debug profile on purpose: keeps debug assertions and overflow checks on,
+      # and the whole suite still runs in seconds.
+      - name: Build tests
+        id: build
+        run: cargo test --locked --no-run
+
+      # Each suite gets its own step so one regression does not hide another.
+      - name: Unit and end-to-end tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked --lib --bins
+
+      - name: Case corpus (tests/cases)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked --test suite -- --nocapture
+
+      - name: Verification-cost baselines (benchmarks/baseline)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked --test perf_regression
+
+      - name: Doc tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo test --locked --doc
+
+  corpus:
+    name: benchmark corpora
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install && rustc -V
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # The check scripts drive target/release/verify directly.
+      - name: Build verifier
+        id: build
+        run: cargo build --locked --release --bin verify
+
+      - name: Rust benchmark corpus (benchmarks/rust)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: benchmarks/rust/check.sh
+
+      - name: Panic-freedom soundness corpus (benchmarks/panic_free)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: benchmarks/panic_free/check.sh

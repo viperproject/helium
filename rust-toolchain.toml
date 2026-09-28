@@ -1,2 +1,4 @@
 [toolchain]
-channel = "nightly"
+# Pinned so CI and local builds agree and CI caches stay warm; bump deliberately.
+channel = "nightly-2026-08-19"
+components = ["rustfmt", "clippy"]
