@@ -1,0 +1,36 @@
+// A function body reads a callee's snapshot on a path that cannot occur: the
+// arm unfolds a predicate whose body is `false` (Prusti encodes an uninhabited
+// enum variant this way; chrono `p_Numeric_snap`). The callee's precondition
+// chunk is not held there, so the read value has no provenance, and the
+// certificate walk used to give up (`purify: snap value outside footprint`).
+// On a provably dead path any value is sound; the definition takes
+// `unwrap(None)`. Counterpart: `tests/cases/failing/function_dead_arm_value_is_not_free.vpr`.
+
+field f: Int
+field d: Int
+
+predicate Inner(x: Ref) { acc(x.f) }
+predicate Dead(x: Ref) { false }
+predicate Outer(x: Ref) { acc(x.d) && (x.d == 1 ==> acc(Dead(x))) }
+
+function field0(x: Ref): Ref
+
+function inner_snap(x: Ref): Int
+  requires acc(Inner(x))
+{ unfolding acc(Inner(x)) in x.f }
+
+function outer_snap(x: Ref): Int
+  requires acc(Outer(x))
+{
+  unfolding acc(Outer(x)) in
+    (x.d == 1 ? (unfolding acc(Dead(x)) in inner_snap(field0(x))) : x.d)
+}
+
+method m(x: Ref)
+  requires acc(Outer(x))
+{
+  unfold acc(Outer(x))
+  assume x.d == 7
+  fold acc(Outer(x))
+  assert outer_snap(x) == 7
+}

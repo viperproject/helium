@@ -1,0 +1,31 @@
+// The arbitrary value a function takes on a dead path must not leak into its
+// live paths (`tests/cases/passing/functions/dead_arm_snap_outside_footprint.vpr`).
+
+field f: Int
+field d: Int
+
+predicate Inner(x: Ref) { acc(x.f) }
+predicate Dead(x: Ref) { false }
+predicate Outer(x: Ref) { acc(x.d) && (x.d == 1 ==> acc(Dead(x))) }
+
+function field0(x: Ref): Ref
+
+function inner_snap(x: Ref): Int
+  requires acc(Inner(x))
+{ unfolding acc(Inner(x)) in x.f }
+
+function outer_snap(x: Ref): Int
+  requires acc(Outer(x))
+{
+  unfolding acc(Outer(x)) in
+    (x.d == 1 ? (unfolding acc(Dead(x)) in inner_snap(field0(x))) : x.d)
+}
+
+method m(x: Ref)
+  requires acc(Outer(x))
+{
+  unfold acc(Outer(x))
+  assume x.d == 7
+  fold acc(Outer(x))
+  assert outer_snap(x) == 8
+}

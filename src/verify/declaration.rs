@@ -1805,12 +1805,39 @@ fn eval_resource_op(
             let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
             let some_id = ctx.alloc.option_some();
             let cons_id = ctx.alloc.cons(res_id, 0);
+            // A slot read without provenance on a path the walk proves dead
+            // (e.g. under `unfolding` of a predicate whose body is `false` — a
+            // Prusti enum variant that cannot occur) may take any value: the
+            // definitional axiom's ite never selects this branch. `unwrap(None)`
+            // is that unspecified value, as a term the certificate can carry.
+            let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
+                let f = expr!(ctx, false);
+                ctx.is_inconsistent() || ctx.prove_under_pc(f, &pc_lits)
+            };
+            let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
             let rb = ctx.recipe.as_mut().unwrap();
             let mut members_r = Vec::with_capacity(slot_recipes.len());
             for (i, r) in slot_recipes.iter().enumerate() {
-                let v = r.clone().ok_or(VerifyError::Unimplemented(
-                    "purify: snap value outside footprint",
-                ))?;
+                let v = match r.clone() {
+                    Some(v) => v,
+                    None if dead_path => {
+                        let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
+                            func: none_id,
+                            type_args: vec![elems[i].clone()],
+                            args: Vec::new(),
+                        });
+                        rb.emit(crate::verify::rewrite::AxiomPure::App {
+                            func: value_id,
+                            type_args: vec![elems[i].clone()],
+                            args: vec![none],
+                        })
+                    }
+                    None => {
+                        return Err(VerifyError::Unimplemented(
+                            "purify: snap value outside footprint",
+                        ));
+                    }
+                };
                 members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
                     func: some_id,
                     type_args: vec![elems[i].clone()],
