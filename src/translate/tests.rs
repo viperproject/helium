@@ -391,6 +391,28 @@ method m(a: Bool, b: Bool, x: Ref)
 }
 
 #[test]
+fn translation_is_deterministic() {
+    // The join phis are emitted in the iteration order of the merged
+    // environments. With a per-map seeded hasher that order changed from one
+    // map to the next, so the same program lowered to differently ordered
+    // (and differently numbered) instructions on every run.
+    let input = r#"
+method m(c: Bool, b: Int) returns (r0: Int, r1: Int, r2: Int, r3: Int, r4: Int, r5: Int, r6: Int, r7: Int)
+{
+    if (c) {
+        r0 := 0; r1 := 1; r2 := 2; r3 := 3; r4 := 4; r5 := 5; r6 := 6; r7 := 7
+    } else {
+        r0 := b; r1 := b; r2 := b; r3 := b; r4 := b; r5 := b; r6 := b; r7 := b
+    }
+}
+"#;
+    let first = format!("{:?}", run(input));
+    for _ in 0..8 {
+        assert_eq!(first, format!("{:?}", run(input)));
+    }
+}
+
+#[test]
 fn join_inserts_phi_for_divergent_variable() {
     // `r` takes different values on the two arms, so the merge block must
     // reconcile it with a phi `c ? a : b`; the merged value flows into the

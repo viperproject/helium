@@ -1,7 +1,6 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use std::fmt;
+
+use crate::dhash::{HashMap, HashSet};
 
 use lasso::Spur;
 use nonmax::NonMaxU32;
@@ -338,10 +337,10 @@ impl<'i> GlobalsCollector<'i> {
         Self {
             interner,
             signatures: TiVec::new(),
-            symbol_table: HashMap::new(),
-            ctor_by_name: HashMap::new(),
-            dtor_by_name: HashMap::new(),
-            adt_ctor_count: HashMap::new(),
+            symbol_table: HashMap::default(),
+            ctor_by_name: HashMap::default(),
+            dtor_by_name: HashMap::default(),
+            adt_ctor_count: HashMap::default(),
             errors: Vec::new(),
         }
     }

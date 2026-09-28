@@ -18,7 +18,7 @@
 //! rules into a running `Runner`, but it does see a new *e-node* on the next
 //! iteration.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::sync::Arc;
 
 use typed_index_collections::TiVec;

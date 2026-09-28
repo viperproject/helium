@@ -1,7 +1,7 @@
 //! Lower `typed::SpatialExp` into a `vmir::ResourceBody` (or, for source-level
 //! `assert`/`assume`, a single boolean over the held heap).
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use lasso::Spur;
 
@@ -151,7 +151,7 @@ pub(crate) fn lower_spatial_ensures(
             })
         },
     );
-    let labeled: HashMap<Spur, HeapVal> = HashMap::new();
+    let labeled: HashMap<Spur, HeapVal> = HashMap::default();
     let old = pre_state.map(|baseline| OldHeaps {
         baseline,
         labeled: &labeled,

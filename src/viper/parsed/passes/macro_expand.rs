@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt};
+use crate::dhash::HashMap;
+use std::fmt;
 
 use lasso::Spur;
 
@@ -65,7 +66,7 @@ pub fn inline_macros(
     program: &mut Program,
     interner: &Interner,
 ) -> Result<(), Vec<MacroResolutionError>> {
-    let mut macro_dict = HashMap::new();
+    let mut macro_dict = HashMap::default();
 
     // Extract and remove all Define declarations from the AST
     program.0.retain(|decl| {
@@ -169,7 +170,7 @@ impl<'i> MacroInliner<'i> {
             }
         };
 
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         for (param, arg) in macro_def.args.iter().zip(std::mem::take(&mut call.args)) {
             bindings.insert(param.0.id(), *arg.kind);
         }
@@ -265,7 +266,7 @@ impl<'i> AstWalkerMut<'_> for MacroInliner<'i> {
                 }
             };
 
-            let mut bindings = HashMap::new();
+            let mut bindings = HashMap::default();
             for (param, arg) in macro_def.args.iter().zip(std::mem::take(&mut call.args)) {
                 bindings.insert(param.0.id(), *arg.kind);
             }

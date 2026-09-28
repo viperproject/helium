@@ -1,7 +1,7 @@
 //! ADT rules: constructor/destructor/tag reductions, minted per concept as the
 //! `FuncRegistry` grows, and the shared op-indexed searcher they use.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
@@ -312,7 +312,7 @@ impl Applier<Symbolic, ConstFold> for ProjApplier {
         _rule_name: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[tag_x()]);
-        let (Some(field), _) = self.project(egraph, xc, &mut HashMap::new(), &mut Vec::new())
+        let (Some(field), _) = self.project(egraph, xc, &mut HashMap::default(), &mut Vec::new())
         else {
             return vec![];
         };

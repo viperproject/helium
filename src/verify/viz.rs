@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 
 use egg::Language;
 
@@ -87,7 +87,7 @@ impl Snapshotter {
         // that `Symbolic`'s `Display` emits to the actual source function name
         // with type arguments (e.g. `name<tys>`). The rewrite is per *node*
         // (egg labels each as `<eclass>.<idx>`).
-        let mut fresh: HashSet<u32> = HashSet::new();
+        let mut fresh: HashSet<u32> = HashSet::default();
         for class in ctx.egraph.classes() {
             for (idx, node) in class.nodes.iter().enumerate() {
                 match node {
@@ -158,7 +158,7 @@ impl Snapshotter {
         // plus the const-fold value as the cluster label when known. egg opens
         // each cluster with `subgraph cluster_<id> {\n`; inject right after it
         // (cluster-scope `label` is the cluster's own, so no leakage).
-        let mut type_memo: HashMap<egg::Id, Option<Type>> = HashMap::new();
+        let mut type_memo: HashMap<egg::Id, Option<Type>> = HashMap::default();
         for class in ctx.egraph.classes() {
             let ty = crate::verify::types::infer_type(
                 &ctx.egraph,
@@ -346,7 +346,7 @@ pub(crate) fn dump_term(ctx: &VerifyContext<'_>, root: egg::Id, depth: usize) ->
     use std::collections::VecDeque;
     let eg = &ctx.egraph;
     let root = eg.find(root);
-    let mut seen: HashSet<egg::Id> = HashSet::new();
+    let mut seen: HashSet<egg::Id> = HashSet::default();
     let mut order: Vec<egg::Id> = Vec::new();
     let mut q: VecDeque<(egg::Id, usize)> = VecDeque::new();
     seen.insert(root);

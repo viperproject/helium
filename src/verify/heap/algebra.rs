@@ -203,7 +203,7 @@ fn perm_add_wildcard(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) 
 /// The visited set only breaks cycles — ids are removed on the way out, so a
 /// shared subterm is not poisoned by an in-progress ancestor.
 fn perm_known_positive(ctx: &VerifyContext<'_>, id: egg::Id) -> bool {
-    perm_sign(ctx, id, true, &mut std::collections::HashSet::new())
+    perm_sign(ctx, id, true, &mut crate::dhash::HashSet::default())
 }
 
 /// Whether `0 < id` is already a **proven** fact in the graph, by pure lookup: the
@@ -236,7 +236,7 @@ fn perm_sign(
     ctx: &VerifyContext<'_>,
     id: egg::Id,
     strict: bool,
-    seen: &mut std::collections::HashSet<(egg::Id, bool)>,
+    seen: &mut crate::dhash::HashSet<(egg::Id, bool)>,
 ) -> bool {
     let id = ctx.egraph.find(id);
     if !seen.insert((id, strict)) {

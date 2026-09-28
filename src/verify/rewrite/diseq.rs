@@ -2,7 +2,7 @@
 //! information about its arguments, plus the contra-congruence and
 //! distinguishing-observation appliers.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
@@ -270,7 +270,7 @@ thread_local! {
     /// on another — ground and its clones share ids, and a clone's extra unions
     /// give the same id a different observation set.
     static OBS_CACHE: std::cell::RefCell<HashMap<(Id, usize), Arc<Observations>>> =
-        std::cell::RefCell::new(HashMap::new());
+        std::cell::RefCell::new(HashMap::default());
 }
 
 /// Start a new observation-cache generation. Called once per saturation run: the
@@ -302,7 +302,7 @@ pub(super) fn unary_observations(egraph: &EGraph<Symbolic, ConstFold>, x: Id) ->
     if let Some(hit) = OBS_CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return hit;
     }
-    let mut out = Observations::new();
+    let mut out = Observations::default();
     for p in egraph[x].parents() {
         let p = egraph.find(p);
         for node in &egraph[p].nodes {

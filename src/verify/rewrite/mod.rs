@@ -1,6 +1,6 @@
 //! Structural egg rewrite rules for the verifier.
 
-use std::collections::HashSet;
+use crate::dhash::HashSet;
 
 use egg::{Rewrite, Var};
 

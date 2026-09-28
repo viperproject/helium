@@ -84,7 +84,7 @@ impl Type {
     }
 
     /// Record every `Generic(i)` index occurring in this type into `out`.
-    pub fn collect_generics(&self, out: &mut std::collections::HashSet<usize>) {
+    pub fn collect_generics(&self, out: &mut crate::dhash::HashSet<usize>) {
         match self {
             Type::Generic(i) => {
                 out.insert(*i);

@@ -14,7 +14,7 @@
 //! the global). That is enough to answer the one question the pipeline asks:
 //! once a unit is rejected, which other units cannot be verified either?
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 
 use crate::viper::parsed::ast::*;
 use crate::viper::walk::{AstWalkable, AstWalker};
@@ -41,7 +41,7 @@ impl Units {
         let mut units: Vec<Unit> = Vec::new();
         // A `domain`/`adt` and its members are consecutive declarations; the
         // members are appended to the group the header opened.
-        let mut open: HashMap<String, usize> = HashMap::new();
+        let mut open: HashMap<String, usize> = HashMap::default();
         let mut last_adt: Option<usize> = None;
 
         for (idx, decl) in program.0.iter().enumerate() {
@@ -111,7 +111,7 @@ impl Units {
         let mut out: Vec<(usize, String)> = Vec::new();
         loop {
             // Names currently unavailable, each mapped to the unit that lost it.
-            let mut lost: HashMap<&str, &str> = HashMap::new();
+            let mut lost: HashMap<&str, &str> = HashMap::default();
             for &u in &poisoned {
                 for name in &self.0[u].provides {
                     lost.insert(name.as_str(), self.0[u].name.as_str());
@@ -229,7 +229,7 @@ fn idents_of(decl: &Declaration) -> HashSet<String> {
             }
         }
     }
-    let mut c = Collect(HashSet::new());
+    let mut c = Collect(HashSet::default());
     decl.walk(&mut c);
     c.0
 }

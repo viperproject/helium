@@ -19,7 +19,7 @@
 //! the abstract case mints no `Resource`, a `fold`/`unfold`/`unfolding` on it is
 //! not merely rejected but unrepresentable — see `pure_exp::lower_pred_call`.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::marker::PhantomData;
 
 use lasso::Spur;
@@ -121,7 +121,7 @@ impl PredicateTranslator<'_, Metaed> {
                     .expect("declare took the concrete arm only for a predicate with a body");
                 // Self-framed: params occupy `Val::Temp(0..n)`, heaps accumulate
                 // from `Empty` starting at `HeapVal::Temp(0)`.
-                let mut env: HashMap<Spur, vmir::Val> = HashMap::new();
+                let mut env: HashMap<Spur, vmir::Val> = HashMap::default();
                 for (i, param) in p.params.iter().enumerate() {
                     env.insert(param.name.0, vmir::Val::Temp(i));
                 }

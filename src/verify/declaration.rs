@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
 use crate::vmir::display::VmirDisplay;
@@ -58,7 +58,7 @@ struct EvalState {
     /// block's exit heap is its predecessor's temp, so tagging the temp also
     /// tagged every live block that passes the same heap through, and a later
     /// join dropped a live arm.
-    dead_blocks: std::collections::HashSet<usize>,
+    dead_blocks: crate::dhash::HashSet<usize>,
     /// For the join block being evaluated: whether its (then, else) predecessor
     /// blocks are dead. The `Merge` reads this; `None` outside a method join.
     join_arms_dead: Option<(bool, bool)>,
@@ -73,7 +73,7 @@ impl EvalState {
             heaps: Vec::new(),
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_blocks: std::collections::HashSet::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
         }
     }
@@ -89,7 +89,7 @@ impl EvalState {
             heaps: Vec::new(),
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_blocks: std::collections::HashSet::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
         }
     }
@@ -151,7 +151,7 @@ impl EvalState {
             // A quantifier body is permission-free, like it is heap-free.
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_blocks: std::collections::HashSet::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
@@ -771,7 +771,7 @@ fn perm_recipe(state: &EvalState, perm: &vmir::PermVal) -> Result<PermRecipe<Val
         })
     }
     let mut steps = Vec::new();
-    let mut memo = HashMap::new();
+    let mut memo = HashMap::default();
     let res = leaf(state, perm, &mut steps, &mut memo)?;
     Ok(PermRecipe { steps, res })
 }
@@ -2027,7 +2027,7 @@ pub(crate) fn prepare_trig_term(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     term: &vmir::TrigTerm,
     binder_base: usize,
-    slot: &std::collections::HashMap<usize, usize>,
+    slot: &crate::dhash::HashMap<usize, usize>,
 ) -> crate::verify::rewrite::PreparedTerm {
     use crate::verify::rewrite::PreparedTerm;
     match term {
@@ -2601,7 +2601,7 @@ pub(crate) fn verify_function(
     // `None`). In-SCC callees are retargeted to their limited twin in the recipe,
     // and this function's own limited twin is recorded so its unfold rule frames
     // `f(x) == f'(x)`.
-    recursive_scc: Option<&std::collections::HashSet<MemberId>>,
+    recursive_scc: Option<&crate::dhash::HashSet<MemberId>>,
     alloc: &mut crate::verify::func_registry::FuncRegistry,
 ) -> Result<Option<std::sync::Arc<FunctionDefinition>>, VerifyError> {
     let Some(body) = function.body.as_ref() else {

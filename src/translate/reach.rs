@@ -7,7 +7,7 @@
 //! edge cubes is minimized by adjacency so straight-line code keeps a trivial
 //! `<>` guard. Also builds the phi (`ite`) environment merge at joins.
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 
 use lasso::Spur;
 
@@ -194,10 +194,10 @@ pub(crate) fn merge_two_envs(
     els_env: &HashMap<Spur, Val>,
     var_types: &HashMap<Spur, Type>,
 ) -> HashMap<Spur, Val> {
-    let mut names: HashSet<Spur> = HashSet::new();
+    let mut names: HashSet<Spur> = HashSet::default();
     names.extend(then_env.keys().copied());
     names.extend(els_env.keys().copied());
-    let mut out: HashMap<Spur, Val> = HashMap::new();
+    let mut out: HashMap<Spur, Val> = HashMap::default();
     for name in names {
         let merged = match (then_env.get(&name), els_env.get(&name)) {
             (Some(t), Some(e)) if t == e => t.clone(),

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::marker::PhantomData;
 
 use lasso::Spur;
@@ -161,7 +161,7 @@ impl FunctionTranslator<'_, Metaed> {
         let ret = ctx.lower_type(&f.ret);
 
         // Params occupy `Val::Temp(0..n_params)` in every body lowered below.
-        let mut env: HashMap<Spur, vmir::Val> = HashMap::new();
+        let mut env: HashMap<Spur, vmir::Val> = HashMap::default();
         for (i, p) in f.params.iter().enumerate() {
             env.insert(p.name.0, vmir::Val::Temp(i));
         }

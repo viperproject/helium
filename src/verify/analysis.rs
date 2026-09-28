@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::sync::Arc;
 
 use egg::{Analysis, DidMerge, EGraph, Id};

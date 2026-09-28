@@ -3,7 +3,7 @@
 //! the location's own function — the field's, or the predicate's — with the
 //! `Type::Addr` return type published in `addr_types` during `declare`/`meta`.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use lasso::Spur;
 

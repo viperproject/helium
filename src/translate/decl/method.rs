@@ -5,7 +5,7 @@
 //! by a single linear heap for now. Joins are binary; an n-ary (multi-goto)
 //! merge is normalised into a chain of synthetic binary-join blocks.
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 use std::marker::PhantomData;
 
 use lasso::Spur;
@@ -121,7 +121,7 @@ impl MethodTranslator<'_, Metaed> {
         if let Some(requires) = &m.requires {
             let slot = requires_slot.expect("declared when m.requires is Some");
             let params: Vec<vmir::Type> = m.params.iter().map(|p| ctx.lower_type(&p.ty)).collect();
-            let mut env: HashMap<Spur, vmir::Val> = HashMap::new();
+            let mut env: HashMap<Spur, vmir::Val> = HashMap::default();
             for (i, p) in m.params.iter().enumerate() {
                 env.insert(p.name.0, vmir::Val::Temp(i));
             }
@@ -155,7 +155,7 @@ impl MethodTranslator<'_, Metaed> {
             let mut params: Vec<vmir::Type> =
                 m.params.iter().map(|p| ctx.lower_type(&p.ty)).collect();
             params.extend(m.rets.iter().map(|r| ctx.lower_type(&r.ty)));
-            let mut env: HashMap<Spur, vmir::Val> = HashMap::new();
+            let mut env: HashMap<Spur, vmir::Val> = HashMap::default();
             for (i, p) in m.params.iter().enumerate() {
                 env.insert(p.name.0, vmir::Val::Temp(i));
             }
@@ -242,7 +242,7 @@ pub(crate) fn lower_method(
 
     // Initial environment: fresh values for params and rets. The method has no
     // signature on the VMIR side — params/rets are just initial Fresh insts.
-    let mut init_env: HashMap<Spur, Val> = HashMap::new();
+    let mut init_env: HashMap<Spur, Val> = HashMap::default();
     let mut param_vals: Vec<Val> = Vec::with_capacity(m.params.len());
     for p in &m.params {
         let v = sink.emit_pure(b.lower_type(&p.ty), PureInst::Fresh);
@@ -257,7 +257,7 @@ pub(crate) fn lower_method(
     }
 
     // Types of every method-scoped variable, needed to type phi nodes at joins.
-    let mut var_types: HashMap<Spur, Type> = HashMap::new();
+    let mut var_types: HashMap<Spur, Type> = HashMap::default();
     for p in &m.params {
         var_types.insert(p.name.0, b.lower_type(&p.ty));
     }
@@ -292,17 +292,17 @@ pub(crate) fn lower_method(
     }
     // Baseline for unlabeled `old`: the post-requires-inhale heap.
     let baseline = current_heap;
-    let mut labeled: HashMap<Spur, HeapVal> = HashMap::new();
+    let mut labeled: HashMap<Spur, HeapVal> = HashMap::default();
 
     // Structural heap merge (fork model): each block's `h_in` is derived from
     // its `Preds` (a `HeapInst::Merge` at a `Join`) and arms lower unguarded.
     // `h_out_of` records every pushed block's exit heap so a later join's
     // `Merge` can name its predecessors' heaps.
-    let mut h_out_of: HashMap<vmir::BlockId, HeapVal> = HashMap::new();
+    let mut h_out_of: HashMap<vmir::BlockId, HeapVal> = HashMap::default();
     // Per loop head (CFG block id): the exhale residual set aside at the cut.
     // Any edge leaving that loop unions it back — see the head/exit handling in
     // the block walk below.
-    let mut frame_of: HashMap<BlockId, HeapVal> = HashMap::new();
+    let mut frame_of: HashMap<BlockId, HeapVal> = HashMap::default();
 
     let order = cfg.topo_order();
     let cfg_preds = cfg.predecessors();
@@ -319,14 +319,14 @@ pub(crate) fn lower_method(
         (0..n).map(|_| vec![PathConds::default()]).collect();
     let mut reach_val: TiVec<BlockId, Val> = (0..n).map(|_| TRUE).collect();
     let mut cond_val: TiVec<BlockId, Option<Val>> = (0..n).map(|_| None).collect();
-    let mut exit_env: HashMap<BlockId, HashMap<Spur, Val>> = HashMap::new();
+    let mut exit_env: HashMap<BlockId, HashMap<Spur, Val>> = HashMap::default();
 
     // Block-structured output: VMIR blocks in topological order plus the synthetic
     // binary-join blocks that normalise n-ary (multi-goto) merges, and the
     // cfg→vmir id map so a `Preds` can name its predecessors. `blocks` order is a
     // valid topo order (a block's preds — real or synthetic — are pushed first).
     let mut blocks: Vec<vmir::Block> = Vec::new();
-    let mut vmir_id: HashMap<BlockId, vmir::BlockId> = HashMap::new();
+    let mut vmir_id: HashMap<BlockId, vmir::BlockId> = HashMap::default();
     // The method prologue (param/ret fresh temps + the `#requires` inhale) is the
     // entry block's join prefix.
     let prologue = sink.take_since(0);
@@ -770,7 +770,7 @@ fn lower_invariant(
 /// information); under-approximating is not, since a variable the body mutates
 /// would keep its pre-loop value across the cut.
 fn loop_written_vars(cfg: &cfg::Cfg, l: &cfg::Loop) -> HashSet<Spur> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for bid in &l.body {
         for stmt in &cfg.blocks[*bid].stmts {
             match stmt {
