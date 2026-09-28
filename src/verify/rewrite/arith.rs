@@ -87,14 +87,18 @@ pub(super) fn static_rules() -> Vec<Rule> {
     // Disequality reasoning over disproven `==` classes — standalone rules that
     // share the `Eq` bucket + the `Known(false)` gate.
     rules.push(
-        Rewrite::new("eq-false-mirror", EqBucketSearcher, EqFalseMirrorApplier)
-            .expect("eq-false-mirror rule"),
+        Rewrite::new(
+            "eq-false-mirror",
+            EqBucketSearcher,
+            PerClass(EqFalseMirrorApplier),
+        )
+        .expect("eq-false-mirror rule"),
     );
     rules.push(
         Rewrite::new(
             "contra-congruence",
             EqBucketSearcher,
-            ContraCongruenceApplier { memo: Memo::new() },
+            PerClass(ContraCongruenceApplier { memo: Memo::new() }),
         )
         .expect("contra-congruence rule"),
     );
@@ -102,7 +106,7 @@ pub(super) fn static_rules() -> Vec<Rule> {
         Rewrite::new(
             "distinguishing-observation",
             EqBucketSearcher,
-            DistinguishingObsApplier { memo: Memo::new() },
+            PerClass(DistinguishingObsApplier { memo: Memo::new() }),
         )
         .expect("distinguishing-observation rule"),
     );
@@ -132,7 +136,7 @@ fn lt_asymmetry_rules() -> Vec<Rule> {
                 BinOp::LtI => "lt-asymmetry-int",
                 _ => "lt-asymmetry-real",
             };
-            Rewrite::new(name, LtBucketSearcher(op), LtAsymmetryApplier(op))
+            Rewrite::new(name, LtBucketSearcher(op), PerClass(LtAsymmetryApplier(op)))
                 .expect("lt-asymmetry rule")
         })
         .collect()

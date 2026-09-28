@@ -22,19 +22,19 @@ pub(super) fn disequality_unit_prop_rules() -> Vec<Rule> {
         Rewrite::new(
             "eq-false-then",
             EqBucketSearcher,
-            EqFalseUnitApplier {
+            PerClass(EqFalseUnitApplier {
                 then_side: true,
                 memo: Memo::new(),
-            },
+            }),
         )
         .expect("eq-false-then rule"),
         Rewrite::new(
             "eq-false-else",
             EqBucketSearcher,
-            EqFalseUnitApplier {
+            PerClass(EqFalseUnitApplier {
                 then_side: false,
                 memo: Memo::new(),
-            },
+            }),
         )
         .expect("eq-false-else rule"),
     ]

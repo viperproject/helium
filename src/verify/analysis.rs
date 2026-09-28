@@ -1,7 +1,7 @@
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
-use egg::{Analysis, DidMerge, EGraph, Id};
+use egg::{Analysis, DidMerge, EGraph, Id, Justification};
 use num::BigRational;
 
 use crate::verify::lang::{FuncId, Symbolic};
@@ -116,11 +116,17 @@ pub struct ConstFold {
     /// ordinary function, not a constructor. Empty by default (tests without
     /// ADTs), which simply disables the distinctness lattice.
     ctors: Arc<HashMap<FuncId, MemberId>>,
+    /// While a bucket rule is applied (`rewrite::PerClass`), the classes whose
+    /// nodes read differently after each union; see [`Analysis::pre_union`].
+    pub(crate) union_log: std::cell::RefCell<Option<Vec<Id>>>,
 }
 
 impl ConstFold {
     pub fn new(ctors: Arc<HashMap<FuncId, MemberId>>) -> Self {
-        Self { ctors }
+        Self {
+            ctors,
+            union_log: Default::default(),
+        }
     }
 
     /// The ADT head of `f`, if `f` is a constructor.
@@ -238,6 +244,34 @@ impl Analysis<Symbolic> for ConstFold {
             }
             (Known(_), Unknown) => DidMerge(false, true),
             (Unknown, Unknown) => DidMerge(false, false),
+        }
+    }
+
+    /// When `union_log` is on, record the classes whose nodes will read
+    /// differently after this union: the root that survives (it gains nodes),
+    /// the parents of the class absorbed (a child's identity changes), and the
+    /// parents of the survivor if its data changes. egg keeps the class with more
+    /// parents as the root, the first on a tie; were that to change, only which
+    /// classes get walked again would, never what a walk may derive.
+    fn pre_union(egraph: &EGraph<Symbolic, Self>, id1: Id, id2: Id, _: &Option<Justification>) {
+        let mut log = egraph.analysis.union_log.borrow_mut();
+        let Some(log) = log.as_mut() else {
+            return;
+        };
+        let (a, b) = (egraph.find(id1), egraph.find(id2));
+        if a == b {
+            return;
+        }
+        let (keep, gone) = if egraph[a].parents().len() < egraph[b].parents().len() {
+            (b, a)
+        } else {
+            (a, b)
+        };
+        log.push(keep);
+        log.extend(egraph[gone].parents());
+        let (kept, absorbed) = (&egraph[keep].data, &egraph[gone].data);
+        if kept != absorbed && *absorbed != Data::Unknown && *kept != Data::Inconsistent {
+            log.extend(egraph[keep].parents());
         }
     }
 
