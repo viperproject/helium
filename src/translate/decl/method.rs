@@ -8,6 +8,7 @@
 use crate::dhash::{HashMap, HashSet};
 use std::marker::PhantomData;
 
+use itertools::Itertools;
 use lasso::Spur;
 use typed_index_collections::TiVec;
 
@@ -797,12 +798,12 @@ fn lower_invariant(
     exhale: bool,
     old: &pure_exp::OldHeaps<'_>,
 ) -> Result<HeapVal, TranslationError> {
-    let Some((first, rest)) = invs.split_first() else {
+    // Balanced, like `combine_spatial`'s contract clauses.
+    let Some(conj) = invs.iter().cloned().tree_reduce(|l, r| {
+        typed::SpatialExp(Box::new(typed::SpatialExpKind::Conj(l, r)))
+    }) else {
         return Ok(heap);
     };
-    let conj = rest.iter().cloned().fold(first.clone(), |acc, inv| {
-        typed::SpatialExp(Box::new(typed::SpatialExpKind::Conj(acc, inv)))
-    });
     let mode = if exhale {
         SpatialMode::Exhale { value_heap: heap }
     } else {

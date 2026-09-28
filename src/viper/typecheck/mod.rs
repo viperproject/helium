@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use lasso::Spur;
 use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
 use crate::dhash::{HashMap, HashSet};
@@ -541,16 +542,16 @@ fn combine_spatial<Ext: PureExt>(
     exps: &mut [viper::Exp],
     ctx: &LocalEnv,
 ) -> Result<Option<SpatialExp<Ext>>, TypeError> {
-    let mut iter = exps.iter_mut();
-    let first = match iter.next() {
-        None => return Ok(None),
-        Some(e) => ctx.typecheck_spatial(e)?,
-    };
-    let combined = iter.try_fold(first, |acc, e| {
-        let next = ctx.typecheck_spatial(e)?;
-        Ok::<_, TypeError>(SpatialExp(Box::new(SpatialExpKind::Conj(acc, next))))
-    })?;
-    Ok(Some(combined))
+    // Balanced, not a left fold: a contract can have thousands of clauses, and
+    // every pass recursing over a clause-per-level spine overflowed the stack.
+    // Conjunction is associative and the clause order is kept.
+    let clauses = exps
+        .iter_mut()
+        .map(|e| ctx.typecheck_spatial(e))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(clauses
+        .into_iter()
+        .tree_reduce(|l, r| SpatialExp(Box::new(SpatialExpKind::Conj(l, r)))))
 }
 
 // ==========================================
@@ -1879,25 +1880,17 @@ fn typecheck_function(
         .transpose()?;
 
     // Postconditions enable `result`, typed as the return type.
-    let ensures = {
-        let mut iter = func.contract.postcondition.iter_mut();
-        match iter.next() {
-            None => None,
-            Some(e) => {
-                let first =
-                    ctx.typecheck_pure::<FuncEnsuresExt>(e, &Type::Bool, Some(ret_ty.clone()))?;
-                let combined = iter.try_fold(first, |acc, e| {
-                    let next =
-                        ctx.typecheck_pure::<FuncEnsuresExt>(e, &Type::Bool, Some(ret_ty.clone()))?;
-                    Ok::<_, TypeError>(TypedPureExp {
-                        ty: Type::Bool,
-                        exp: Box::new(PureExpKind::Binary(BinOp::And, acc, next)),
-                    })
-                })?;
-                Some(combined)
-            }
-        }
-    };
+    let clauses = func
+        .contract
+        .postcondition
+        .iter_mut()
+        .map(|e| ctx.typecheck_pure::<FuncEnsuresExt>(e, &Type::Bool, Some(ret_ty.clone())))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Balanced, like `combine_spatial`.
+    let ensures = clauses.into_iter().tree_reduce(|l, r| TypedPureExp {
+        ty: Type::Bool,
+        exp: Box::new(PureExpKind::Binary(BinOp::And, l, r)),
+    });
 
     Ok(typed::Declaration::Function(typed::Function {
         name,
