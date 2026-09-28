@@ -1913,14 +1913,17 @@ pub(crate) fn summarize_perm_at(
                 if !c.guard().is_empty() && ctx.prove_under_pc(eq, &presence) {
                     (held, c.guard_pc())
                 } else {
+                    // Structural, not folded into the term. Gating the amount as
+                    // `ite(eq, held, 0)` collapses the whole summary to one flat
+                    // leaf, and `prove_perm_leaves` then has nothing to split on:
+                    // sufficiency has to be shown against
+                    // `ite(a==c, p, 0) + ite(b==c, q, 0)` with every alias gate
+                    // still open. Kept as a `Select`, `perm_add` distributes it,
+                    // and each leaf is proven under its own gate polarities.
                     let cube = vec![(eq, Polarity::Positive)];
-                    let held = held.to_id(ctx);
-                    let gated = gate_amount_by_pc(ctx, held, &cube);
+                    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
                     (
-                        ChunkPerm::Leaf {
-                            id: gated,
-                            wild: c.ungated_perm().has_wild(),
-                        },
+                        ChunkPerm::select(ctx, eq, held, zero),
                         std::rc::Rc::from(cube),
                     )
                 }

@@ -1,0 +1,26 @@
+// The Σ-ite summary of a location gates each conditionally-aliasing chunk by its
+// address equality. Folded into the term (`ite(x.f == z.f, p, 0) + ...`) the whole
+// sum was ONE opaque leaf, so sufficiency had to be shown with every alias gate
+// still open, and a demand that holds in every gate combination the pc allows
+// was rejected. Kept structural, each combination is its own leaf and the ones
+// the pc excludes discharge vacuously.
+
+field f: Int
+
+method either_alias(x: Ref, y: Ref, z: Ref)
+  requires acc(x.f) && acc(y.f) && (z == x || z == y)
+{
+  exhale acc(z.f)
+}
+
+method alias_by_flag(x: Ref, y: Ref, z: Ref, b: Bool)
+  requires acc(x.f) && acc(y.f) && (b ==> z == x) && (!b ==> z == y)
+{
+  exhale acc(z.f)
+}
+
+method either_alias_half(x: Ref, y: Ref, z: Ref)
+  requires acc(x.f) && acc(y.f) && (z == x || z == y)
+{
+  exhale acc(z.f, 1/2)
+}
