@@ -1,0 +1,11 @@
+// Counterpart of passing/permissions/alias_summary_split_per_gate.vpr: with only
+// half of each location held, `z` aliasing one of them does not give a full
+// permission (unless x == y, which the pc does not force).
+
+field f: Int
+
+method half_each(x: Ref, y: Ref, z: Ref)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && (z == x || z == y)
+{
+  exhale acc(z.f)
+}

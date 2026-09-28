@@ -19,7 +19,7 @@
 //! and their dependents, and lower again. The loop runs at most once per
 //! rejected unit and terminates because every round removes at least one.
 
-use std::collections::HashSet;
+use crate::dhash::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 

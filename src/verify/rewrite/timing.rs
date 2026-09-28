@@ -4,7 +4,7 @@
 //! sink, drained into `VerifyStats` at the end of a run. Pure observation: search
 //! results and applications are delegated unchanged.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
@@ -129,7 +129,7 @@ thread_local! {
     /// tests don't bleed into each other; one verification runs on one thread.
     /// Keyed by the interned rule `Symbol` (Copy) — stringified only at drain.
     static RULE_TIMING: std::cell::RefCell<HashMap<Symbol, RuleTime>> =
-        std::cell::RefCell::new(HashMap::new());
+        std::cell::RefCell::new(HashMap::default());
 }
 
 use crate::verify::stats::RuleTime;

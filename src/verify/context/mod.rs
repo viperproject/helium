@@ -2,7 +2,7 @@ pub(crate) mod prove;
 
 use prove::BlockScratch;
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use crate::{
     verify::{
@@ -110,7 +110,7 @@ pub(crate) struct VerifyContext<'a> {
     /// and pcs are pairwise equal, i.e. the *same* obligation — so a hit is
     /// sound; a stale leader after an unrelated merge only causes a safe
     /// re-prove.
-    proven_imps: std::collections::HashSet<egg::Id>,
+    proven_imps: crate::dhash::HashSet<egg::Id>,
     /// The current method block's control cube (the shared pc of all its insts),
     /// as live-graph literal ids. Set by [`Self::begin_block`]; the scratch
     /// assumes it. Empty outside a method block (functions/resources don't use
@@ -188,14 +188,14 @@ impl<'a> VerifyContext<'a> {
             decls,
             groups,
             alloc,
-            fresh_types: HashMap::new(),
-            func_ret_types: HashMap::new(),
+            fresh_types: HashMap::default(),
+            func_ret_types: HashMap::default(),
             fn_certs: None,
             recipe: None,
             clean: None,
             has_wildcard: decls_have_wildcard(decls),
             oob_memo: std::env::var_os("SILVER_OXIDE_OOB_MEMO").is_some(),
-            proven_imps: std::collections::HashSet::new(),
+            proven_imps: crate::dhash::HashSet::default(),
             current_cube: Vec::new(),
             in_block: false,
             scratch: None,

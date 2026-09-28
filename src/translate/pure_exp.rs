@@ -1,6 +1,6 @@
 //! Lower `typed::TypedPureExp<Ext>` into VMIR `PureInst` chains.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use lasso::Spur;
 

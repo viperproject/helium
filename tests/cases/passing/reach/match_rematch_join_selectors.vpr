@@ -1,0 +1,483 @@
+// Regression: a chunk merged at a match's joins must be recoverable at a later
+// exhale (Prusti encoding of matching the same enum twice, from
+// benchmarks/panic_free probe_unreachable_nonarith, unused declarations
+// removed).
+//
+// A join's heap `Merge` (and each phi) selects a predecessor by the condition
+// of its incoming edge. Built as that edge's full reach, the selector restated
+// the whole decision history above the join, and the postcondition's chunk,
+// gated by those selectors across both matches, could not be shown present:
+// `insufficient permission` at the `ensures` exhale. A selector need only be
+// exact where its level of the join is reached, where it reduces to the
+// branch literal that separates the arms.
+domain s_Int_i32  {
+  
+  function s_Int_i32_cons(arg0: Int): s_Int_i32 
+  
+  function s_Int_i32_value(arg0: s_Int_i32): Int 
+  
+  axiom s_Int_i32_ax_cons {
+    (forall s: s_Int_i32 ::
+      { s_Int_i32_value(s) }
+      s_Int_i32_cons(s_Int_i32_value(s)) == s)
+  }
+  
+  axiom s_Int_i32_ax_bounds {
+    (forall s: s_Int_i32 ::
+      { s_Int_i32_value(s) }
+      -2147483648 <= s_Int_i32_value(s) && s_Int_i32_value(s) <= 2147483647)
+  }
+  
+  axiom s_Int_i32_ax_value {
+    (forall value: Int ::
+      { s_Int_i32_cons(value) }
+      -2147483648 <= value && value <= 2147483647 ==>
+      s_Int_i32_value(s_Int_i32_cons(value)) == value)
+  }
+}
+
+domain s_Bool  {
+  
+  function s_Bool_cons(arg0: Bool): s_Bool 
+  
+  function s_Bool_value(arg0: s_Bool): Bool 
+  
+  axiom s_Bool_ax_cons {
+    (forall s: s_Bool ::
+      { s_Bool_value(s) }
+      s_Bool_cons(s_Bool_value(s)) == s)
+  }
+  
+  axiom s_Bool_ax_value {
+    (forall value: Bool ::
+      { s_Bool_cons(value) }
+      s_Bool_value(s_Bool_cons(value)) == value)
+  }
+}
+
+domain s_Int_isize  {
+  
+  function s_Int_isize_cons(arg0: Int): s_Int_isize 
+  
+  function s_Int_isize_value(arg0: s_Int_isize): Int 
+  
+  axiom s_Int_isize_ax_cons {
+    (forall s: s_Int_isize ::
+      { s_Int_isize_value(s) }
+      s_Int_isize_cons(s_Int_isize_value(s)) == s)
+  }
+  
+  axiom s_Int_isize_ax_bounds {
+    (forall s: s_Int_isize ::
+      { s_Int_isize_value(s) }
+      -9223372036854775808 <= s_Int_isize_value(s) &&
+      s_Int_isize_value(s) <= 9223372036854775807)
+  }
+  
+  axiom s_Int_isize_ax_value {
+    (forall value: Int ::
+      { s_Int_isize_cons(value) }
+      -9223372036854775808 <= value && value <= 9223372036854775807 ==>
+      s_Int_isize_value(s_Int_isize_cons(value)) == value)
+  }
+}
+
+domain s_Param  {
+  
+  
+}
+
+domain s_Str  {
+  
+  function s_Str_arbitrary(): s_Str 
+}
+
+domain s_UInt_usize  {
+  
+  function s_UInt_usize_cons(arg0: Int): s_UInt_usize 
+  
+  function s_UInt_usize_value(arg0: s_UInt_usize): Int 
+  
+  axiom s_UInt_usize_ax_cons {
+    (forall s: s_UInt_usize ::
+      { s_UInt_usize_value(s) }
+      s_UInt_usize_cons(s_UInt_usize_value(s)) == s)
+  }
+  
+  axiom s_UInt_usize_ax_bounds {
+    (forall s: s_UInt_usize ::
+      { s_UInt_usize_value(s) }
+      0 <= s_UInt_usize_value(s) &&
+      s_UInt_usize_value(s) <= 18446744073709551615)
+  }
+  
+  axiom s_UInt_usize_ax_value {
+    (forall value: Int ::
+      { s_UInt_usize_cons(value) }
+      0 <= value && value <= 18446744073709551615 ==>
+      s_UInt_usize_value(s_UInt_usize_cons(value)) == value)
+  }
+}
+
+domain TypeOf  {
+  
+  function s_Str_typeof(arg0: s_Str): Type 
+  
+  function s_Param_typeof(arg0: s_Param): Type 
+  
+  function s_UInt_usize_typeof(arg0: s_UInt_usize): Type 
+  
+  function s_Kind_typeof(arg0: s_Kind): Type 
+  
+  function s_0_Tuple_typeof(arg0: s_0_Tuple): Type 
+  
+  function s_Pair_typeof(arg0: s_Pair): Type 
+}
+
+domain trait_Pointee  {
+  
+  function Pointee_assoc_type_Metadata(arg0: Type): Type 
+  
+  function impl_Pointee(arg0: Type): Bool 
+}
+
+field p_Int_i32_val: s_Int_i32
+
+field p_Int_isize_val: s_Int_isize
+
+field p_Ref_immutable_val: s_Ref_immutable
+
+function cf_core$col$$col$panicking$col$$col$panic(_1s: s_Ref_immutable): s_Never
+  requires s_Bool_value((let _0_2s_bb0_s1_i1 ==
+      (s_Bool_cons(false)) in
+      (let _0_0s_bb0_s4_i1 ==
+        (_0_2s_bb0_s1_i1) in
+        _0_0s_bb0_s4_i1)))
+{
+  f_core$col$$col$panicking$col$$col$panic(_1s)
+}
+
+function f_core$col$$col$panicking$col$$col$panic(_1s: s_Ref_immutable): s_Never
+  decreases *
+
+
+function make_generic_s_Str(self: s_Str): s_Param
+  ensures s_Param_typeof(result) == s_Str_type()
+  ensures make_concrete_s_Str(result) == self
+
+
+function make_concrete_s_Str(snap: s_Param): s_Str
+  ensures make_generic_s_Str(result) == snap
+
+
+function make_generic_s_UInt_usize(self: s_UInt_usize): s_Param
+  ensures s_Param_typeof(result) == s_UInt_usize_type()
+  ensures make_concrete_s_UInt_usize(result) == self
+
+
+function make_concrete_s_UInt_usize(snap: s_Param): s_UInt_usize
+  ensures make_generic_s_UInt_usize(result) == snap
+
+
+function make_generic_s_Kind(self: s_Kind): s_Param
+  ensures s_Param_typeof(result) == s_Kind_type()
+  ensures make_concrete_s_Kind(result) == self
+
+
+function make_concrete_s_Kind(snap: s_Param): s_Kind
+  ensures make_generic_s_Kind(result) == snap
+
+
+function make_generic_s_0_Tuple(self: s_0_Tuple): s_Param
+  ensures s_Param_typeof(result) == s_0_Tuple_type()
+  ensures make_concrete_s_0_Tuple(result) == self
+
+
+function make_concrete_s_0_Tuple(snap: s_Param): s_0_Tuple
+  ensures make_generic_s_0_Tuple(result) == snap
+
+
+function make_generic_s_Pair(self: s_Pair): s_Param
+  ensures s_Param_typeof(result) == s_Pair_type()
+  ensures make_concrete_s_Pair(result) == self
+
+
+function make_concrete_s_Pair(snap: s_Param): s_Pair
+  ensures make_generic_s_Pair(result) == snap
+
+
+function s_Never_unreachable(): s_Never
+  ensures false
+
+
+function s_Kind_discr(self: s_Kind): s_Int_isize
+{
+  (self.iss_Kind_2_cons ?
+    s_Int_isize_cons(2) :
+    (self.iss_Kind_1_cons ? s_Int_isize_cons(1) : s_Int_isize_cons(0)))
+}
+
+function p_Int_i32_snap(self: Ref): s_Int_i32
+  requires acc(p_Int_i32(self), write)
+{
+  (unfolding acc(p_Int_i32(self), write) in self.p_Int_i32_val)
+}
+
+function p_Int_isize_snap(self: Ref): s_Int_isize
+  requires acc(p_Int_isize(self), write)
+{
+  (unfolding acc(p_Int_isize(self), write) in self.p_Int_isize_val)
+}
+
+function p_Never_field_discr(self: Ref): Ref
+  ensures (self == null) == (result == null)
+
+
+function p_Never_snap(self: Ref): s_Never
+  requires acc(p_Never(self), write)
+{
+  (unfolding acc(p_Never(self), write) in s_Never_unreachable())
+}
+
+function p_Ref_immutable_snap(self: Ref, U$1: Type): s_Ref_immutable
+  requires acc(p_Ref_immutable(self, U$1), write)
+{
+  (unfolding acc(p_Ref_immutable(self, U$1), write) in
+    self.p_Ref_immutable_val)
+}
+
+function const_142_23_8(): s_Str
+
+
+function const_141_23_9(): s_Str
+
+
+function addr_to_ref(arg: Int): Ref
+
+
+predicate p_Int_i32(self: Ref) {
+  acc(self.p_Int_i32_val, write)
+}
+
+predicate p_Int_isize(self: Ref) {
+  acc(self.p_Int_isize_val, write)
+}
+
+predicate p_Never(self: Ref) {
+  acc(p_Int_isize(p_Never_field_discr(self)), write) && (false && true)
+}
+
+predicate p_Ref_immutable(self: Ref, U$1: Type) {
+  acc(self.p_Ref_immutable_val, write)
+}
+
+method m_enum_rematch(_0p: Ref, _1p: Ref)
+  requires acc(p_Ref_immutable(_1p, s_Kind_type()), write)
+  ensures acc(p_Int_i32(_0p), write)
+{
+  var _2p: Ref
+  var _3p: Ref
+  var _4p: Ref
+  var _5p: Ref
+  var _from_bb8_to_bb12: Bool
+  var _from_bb6_to_bb7: Bool
+  var _from_bb6_to_bb10: Bool
+  var _from_bb6_to_bb9: Bool
+  var _from_bb12_to_bb13: Bool
+  var _from_bb4_to_bb13: Bool
+  var _from_bb0_to_bb2: Bool
+  var _from_bb5_to_bb13: Bool
+  var _from_bb9_to_bb11: Bool
+  var _from_bb0_to_bb4: Bool
+  var _from_bb0_to_bb1: Bool
+  var _from_bb3_to_bb5: Bool
+  var _from_bb6_to_bb8: Bool
+  var _from_bb2_to_bb6: Bool
+  var _from_bb0_to_bb3: Bool
+  var _tmp0: s_Int_isize
+  var _tmp1: s_Int_isize
+  label start
+  _from_bb8_to_bb12 := false
+  _from_bb6_to_bb7 := false
+  _from_bb6_to_bb10 := false
+  _from_bb6_to_bb9 := false
+  _from_bb12_to_bb13 := false
+  _from_bb4_to_bb13 := false
+  _from_bb0_to_bb2 := false
+  _from_bb5_to_bb13 := false
+  _from_bb9_to_bb11 := false
+  _from_bb0_to_bb4 := false
+  _from_bb0_to_bb1 := false
+  _from_bb3_to_bb5 := false
+  _from_bb6_to_bb8 := false
+  _from_bb2_to_bb6 := false
+  _from_bb0_to_bb3 := false
+  goto bb_0
+  label bb_0
+  label _before_0_0
+  label _before_0_1
+  p_Int_isize_assign(_2p, s_Kind_discr(make_concrete_s_Kind(p_Ref_immutable_snap(_1p,
+    s_Kind_type()).s_Ref_immutable_2)))
+  label _before_0_2
+  _tmp0 := p_Int_isize_snap(_2p)
+  exhale acc(p_Int_isize(_2p), write)
+  if (s_Int_isize_value(_tmp0) == 0) {
+    _from_bb0_to_bb2 := true
+    goto bb_2
+  } elseif (s_Int_isize_value(_tmp0) == 1) {
+    _from_bb0_to_bb3 := true
+    goto bb_3
+  } elseif (s_Int_isize_value(_tmp0) == 2) {
+    _from_bb0_to_bb4 := true
+    goto bb_4
+  } else {
+    _from_bb0_to_bb1 := true
+    goto bb_1
+  }
+  label bb_2
+  label _before_2_0
+  _from_bb2_to_bb6 := true
+  goto bb_6
+  label bb_3
+  label _before_3_0
+  _from_bb3_to_bb5 := true
+  goto bb_5
+  label bb_4
+  label _before_4_0
+  p_Int_i32_assign(_0p, s_Int_i32_cons(3))
+  label _before_4_1
+  _from_bb4_to_bb13 := true
+  goto bb_13
+  label bb_1
+  label _before_1_0
+  label _before_1_1
+  exhale false
+  inhale false
+  goto end
+  label bb_6
+  label _before_6_0
+  label _before_6_1
+  p_Int_isize_assign(_3p, s_Kind_discr(make_concrete_s_Kind(p_Ref_immutable_snap(_1p,
+    s_Kind_type()).s_Ref_immutable_2)))
+  label _before_6_2
+  _tmp1 := p_Int_isize_snap(_3p)
+  exhale acc(p_Int_isize(_3p), write)
+  if (s_Int_isize_value(_tmp1) == 0) {
+    _from_bb6_to_bb8 := true
+    goto bb_8
+  } elseif (s_Int_isize_value(_tmp1) == 1) {
+    _from_bb6_to_bb9 := true
+    goto bb_9
+  } elseif (s_Int_isize_value(_tmp1) == 2) {
+    _from_bb6_to_bb10 := true
+    goto bb_10
+  } else {
+    _from_bb6_to_bb7 := true
+    goto bb_7
+  }
+  label bb_5
+  label _before_5_0
+  p_Int_i32_assign(_0p, s_Int_i32_cons(2))
+  label _before_5_1
+  _from_bb5_to_bb13 := true
+  goto bb_13
+  label bb_13
+  label _before_13_0
+  label package_post0
+  goto end
+  label bb_8
+  label _before_8_0
+  _from_bb8_to_bb12 := true
+  goto bb_12
+  label bb_9
+  label _before_9_0
+  _from_bb9_to_bb11 := true
+  goto bb_11
+  label bb_10
+  label _before_10_0
+  label _before_10_1
+  goto bb_term_10
+  label bb_term_10
+  p_Never_assign(_5p, cf_core$col$$col$panicking$col$$col$panic(s_Ref_immutable_cons(addr_to_ref(18446744073709551616), make_generic_s_UInt_usize(s_UInt_usize_cons(40)), make_generic_s_Str(const_142_23_8()))))
+  exhale false
+  inhale false
+  goto end
+  label bb_7
+  label _before_7_0
+  label _before_7_1
+  exhale false
+  inhale false
+  goto end
+  label bb_12
+  label _before_12_0
+  p_Int_i32_assign(_0p, s_Int_i32_cons(1))
+  label _before_12_1
+  _from_bb12_to_bb13 := true
+  goto bb_13
+  label bb_11
+  label _before_11_0
+  label _before_11_1
+  goto bb_term_11
+  label bb_term_11
+  p_Never_assign(_4p, cf_core$col$$col$panicking$col$$col$panic(s_Ref_immutable_cons(addr_to_ref(18446744073709551616), make_generic_s_UInt_usize(s_UInt_usize_cons(40)), make_generic_s_Str(const_141_23_9()))))
+  exhale false
+  inhale false
+  goto end
+  label bb_14
+  assert false
+  goto end
+  label end
+}
+
+
+
+
+
+
+
+
+method p_Int_i32_assign(self: Ref, value: s_Int_i32)
+  ensures acc(p_Int_i32(self), write)
+  ensures p_Int_i32_snap(self) == value
+
+
+method p_Int_isize_assign(self: Ref, value: s_Int_isize)
+  ensures acc(p_Int_isize(self), write)
+  ensures p_Int_isize_snap(self) == value
+
+
+method p_Never_assign(self: Ref, value: s_Never)
+  ensures acc(p_Never(self), write)
+  ensures p_Never_snap(self) == value
+
+
+adt s_0_Tuple {
+  s_0_Tuple_cons()
+}
+
+adt s_Never {
+  s_Never_DummyConstructor()
+}
+
+adt s_Ref_immutable {
+  s_Ref_immutable_cons(s_Ref_immutable_0: Ref, s_Ref_immutable_1: s_Param, s_Ref_immutable_2: s_Param)
+}
+
+adt s_Kind {
+  s_Kind_0_cons()
+  s_Kind_1_cons()
+  s_Kind_2_cons()
+}
+
+adt s_Pair {
+  s_Pair_cons(s_Pair_0: s_Int_i32, s_Pair_1: s_Int_i32)
+}
+
+adt Type {
+  s_Str_type()
+  s_UInt_usize_type()
+  s_Kind_type()
+  s_0_Tuple_type()
+  s_Pair_type()
+  Unknown_type(non_unit: Int)
+}

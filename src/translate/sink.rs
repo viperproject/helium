@@ -3,7 +3,7 @@
 //! uniform; how the resulting stream is interpreted is the caller's concern
 //! (resource delta+bool, method effects, function result).
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use crate::vmir::{
     self, BinOp, HeapInst, HeapVal, Inst, InstKind, Literal, PathConds, PermInst, PermVal,
@@ -115,7 +115,7 @@ impl Sink {
             pc: Vec::new(),
             ambient: 0,
             heap: None,
-            memo: HashMap::new(),
+            memo: HashMap::default(),
             read_only: false,
             in_resource_body: false,
             in_method_body: false,

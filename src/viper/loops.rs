@@ -21,7 +21,7 @@
 //!   at once (a `break` out of a nested loop) must have each loop's frame
 //!   restored in order, so the order is part of the contract, not incidental.
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 use std::hash::Hash;
 
 use petgraph::algo::{dominators, tarjan_scc};
@@ -107,8 +107,8 @@ where
 
         // A back edge is `n → h` with `h` dominating `n`. `dominators` yields
         // `None` for an unreachable node, which correctly excludes dead code.
-        let mut back_edges: HashSet<(N, N)> = HashSet::new();
-        let mut tails_of: HashMap<N, Vec<N>> = HashMap::new();
+        let mut back_edges: HashSet<(N, N)> = HashSet::default();
+        let mut tails_of: HashMap<N, Vec<N>> = HashMap::default();
         for (u, v, _) in graph.all_edges() {
             let Some(mut ds) = doms.dominators(u) else {
                 continue; // unreachable tail
@@ -209,7 +209,7 @@ fn natural_loop_body<N>(graph: &DiGraphMap<N, ()>, head: N, tails: &[N]) -> Hash
 where
     N: Copy + Ord + Hash,
 {
-    let mut body: HashSet<N> = HashSet::new();
+    let mut body: HashSet<N> = HashSet::default();
     body.insert(head);
     let mut stack: Vec<N> = Vec::new();
     for &t in tails {
@@ -245,7 +245,7 @@ fn check_reducible<N>(graph: &DiGraphMap<N, ()>, entry: N) -> Result<(), LoopErr
 where
     N: Copy + Ord + Hash,
 {
-    let mut live: HashSet<N> = HashSet::new();
+    let mut live: HashSet<N> = HashSet::default();
     let mut stack = vec![entry];
     while let Some(n) = stack.pop() {
         if live.insert(n) && graph.contains_node(n) {

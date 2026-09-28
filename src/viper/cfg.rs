@@ -16,7 +16,7 @@
 //! Only genuinely irreducible control flow (a cycle entered at more than one
 //! point) is rejected, as [`CfgError::Irreducible`].
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 
 use derive_more::{From, Into};
 use lasso::Spur;
@@ -195,7 +195,7 @@ impl Cfg {
     /// The set of blocks reachable from the entry (the rest are dead code an
     /// `if`/`goto` left behind and need not be lowered).
     pub fn reachable(&self) -> HashSet<BlockId> {
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut stack = vec![self.entry];
         while let Some(b) = stack.pop() {
             if seen.insert(b) {

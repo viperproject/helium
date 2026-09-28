@@ -44,7 +44,7 @@ impl AnalyzedProgram {
     /// self-looping singleton); `None` for an ordinary non-recursive member.
     /// Call sites within a recursive function retarget in-set callees to their
     /// limited twin.
-    pub fn recursive_scc(&self, m: MemberId) -> Option<std::collections::HashSet<MemberId>> {
+    pub fn recursive_scc(&self, m: MemberId) -> Option<crate::dhash::HashSet<MemberId>> {
         let scc = self.scc_order.iter().find(|scc| scc.contains(&m))?;
         let recursive = scc.len() > 1 || self.dep_graph.contains_edge(m, m);
         recursive.then(|| scc.iter().copied().collect())
@@ -353,7 +353,7 @@ mod tests {
         PathConds, Precond, Preds, Resource, ResourceCall, Val,
     };
     use lasso::{Key, Rodeo};
-    use std::collections::HashSet;
+    use crate::dhash::HashSet;
     use typed_index_collections::TiVec;
 
     /// A function whose body calls `callee` (a plain, non-address `FunctionCall`),
@@ -509,7 +509,7 @@ mod tests {
         let analyzed = analyze(prog).expect("function recursion is accepted");
         assert!(analyzed.dep_graph.contains_edge(f, f));
         let scc = analyzed.recursive_scc(f).expect("f is recursive");
-        assert_eq!(scc, HashSet::from([f]));
+        assert_eq!(scc, HashSet::from_iter([f]));
     }
 
     #[test]
@@ -520,8 +520,8 @@ mod tests {
         let prog = program(&["f", "g"], vec![function_calling(g), function_calling(f)]);
         let analyzed = analyze(prog).expect("mutual function recursion is accepted");
         let scc = analyzed.recursive_scc(f).expect("f is recursive");
-        assert_eq!(scc, HashSet::from([f, g]));
-        assert_eq!(analyzed.recursive_scc(g), Some(HashSet::from([f, g])));
+        assert_eq!(scc, HashSet::from_iter([f, g]));
+        assert_eq!(analyzed.recursive_scc(g), Some(HashSet::from_iter([f, g])));
     }
 
     #[test]
@@ -555,7 +555,7 @@ mod tests {
         let scheduled: HashSet<MemberId> = analyzed.dep_graph.nodes().collect();
         assert_eq!(
             scheduled,
-            HashSet::from([MemberId(0), MemberId(1), MemberId(2)])
+            HashSet::from_iter([MemberId(0), MemberId(1), MemberId(2)])
         );
     }
 }

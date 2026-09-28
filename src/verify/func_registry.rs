@@ -18,7 +18,7 @@
 //! appears — required for a resource certificate's grafted nodes to
 //! congruence-match the caller.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
@@ -94,9 +94,9 @@ impl FuncRegistry {
     /// (ADT declarations and predicate snapshots, keyed by the predicate's own
     /// Resource id) so instances can be minted on demand. Mints nothing yet.
     pub fn new(program: &Program) -> Self {
-        let mut shapes = HashMap::new();
-        let mut head_names = HashMap::new();
-        let mut variant_names: HashMap<MemberId, Vec<Option<String>>> = HashMap::new();
+        let mut shapes = HashMap::default();
+        let mut head_names = HashMap::default();
+        let mut variant_names: HashMap<MemberId, Vec<Option<String>>> = HashMap::default();
         let vname = |adt: &crate::vmir::Adt| -> Vec<Option<String>> {
             adt.variants
                 .iter()
@@ -127,7 +127,7 @@ impl FuncRegistry {
             }
         }
 
-        let mut names = HashMap::new();
+        let mut names = HashMap::default();
         names.insert(BUILTIN_OPTION_SOME, "Option::Some".to_string());
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
@@ -136,21 +136,21 @@ impl FuncRegistry {
         let mut rules = Vec::new();
         rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
         rules.push(inj_rule(BUILTIN_OPTION_SOME));
-        let mut option_tags = HashMap::new();
+        let mut option_tags = HashMap::default();
         option_tags.insert(BUILTIN_OPTION_SOME, 0);
         option_tags.insert(BUILTIN_OPTION_NONE, 1);
         rules.push(tag_rule(BUILTIN_OPTION_TAG, option_tags));
-        let mut ctor_head = HashMap::new();
+        let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
 
         let mut registry = FuncRegistry {
             next: program.decls.len(),
-            cons: HashMap::new(),
-            proj: HashMap::new(),
-            tag: HashMap::new(),
-            limited: HashMap::new(),
-            fn_pre_token: HashMap::new(),
+            cons: HashMap::default(),
+            proj: HashMap::default(),
+            tag: HashMap::default(),
+            limited: HashMap::default(),
+            fn_pre_token: HashMap::default(),
             names,
             rules,
             shapes,
@@ -182,7 +182,7 @@ impl FuncRegistry {
     /// An empty allocator (no ADT heads). For tests / programs without ADTs.
     #[cfg(test)]
     pub fn empty() -> Self {
-        let mut names = HashMap::new();
+        let mut names = HashMap::default();
         names.insert(BUILTIN_OPTION_SOME, "Option::Some".to_string());
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
@@ -191,27 +191,27 @@ impl FuncRegistry {
         let mut rules = Vec::new();
         rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
         rules.push(inj_rule(BUILTIN_OPTION_SOME));
-        let mut option_tags = HashMap::new();
+        let mut option_tags = HashMap::default();
         option_tags.insert(BUILTIN_OPTION_SOME, 0);
         option_tags.insert(BUILTIN_OPTION_NONE, 1);
         rules.push(tag_rule(BUILTIN_OPTION_TAG, option_tags));
-        let mut ctor_head = HashMap::new();
+        let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
 
         FuncRegistry {
             next: 0,
-            cons: HashMap::new(),
-            proj: HashMap::new(),
-            tag: HashMap::new(),
-            limited: HashMap::new(),
-            fn_pre_token: HashMap::new(),
+            cons: HashMap::default(),
+            proj: HashMap::default(),
+            tag: HashMap::default(),
+            limited: HashMap::default(),
+            fn_pre_token: HashMap::default(),
             names,
             rules,
             quant_table: Default::default(),
-            shapes: HashMap::new(),
-            head_names: HashMap::new(),
-            variant_names: HashMap::new(),
+            shapes: HashMap::default(),
+            head_names: HashMap::default(),
+            variant_names: HashMap::default(),
             ctor_head,
         }
     }
@@ -326,7 +326,7 @@ impl FuncRegistry {
         let tag_id = self.mint(format!("{label}@tag"));
         self.tag.insert(adt, tag_id);
 
-        let mut ctor_tags = HashMap::new();
+        let mut ctor_tags = HashMap::default();
         for (variant, &fields) in counts.iter().enumerate() {
             // `Adt::Ctor` for a named constructor, `Adt::#i` for an anonymous one.
             let cons_label = match self.variant_name(adt, variant) {

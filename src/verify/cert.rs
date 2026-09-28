@@ -254,7 +254,7 @@ pub(crate) struct RecipeBuilder {
     steps: Vec<RecipeStep>,
     /// In-SCC callees (a recursion cycle's members), lowered to their limited
     /// twin so a downstream unfold halts after one level.
-    recursive_scc: Option<std::collections::HashSet<MemberId>>,
+    recursive_scc: Option<crate::dhash::HashSet<MemberId>>,
     /// Footprint slots recorded by a resource body's `acc`s, in body order:
     /// the slot's location kind, element type, and the recipe temps of its
     /// address and permission (sliced into standalone [`SlotRecipe`]s at the
@@ -274,7 +274,7 @@ pub(crate) struct RecipeBuilder {
 impl RecipeBuilder {
     pub(crate) fn new(
         n_params: usize,
-        recursive_scc: Option<std::collections::HashSet<MemberId>>,
+        recursive_scc: Option<crate::dhash::HashSet<MemberId>>,
     ) -> Self {
         Self {
             n_params,

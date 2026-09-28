@@ -1,0 +1,18 @@
+// SOUNDNESS CANARY for the per-cube assert distribution (lower_method).
+//
+// A pure assert under a multi-cube reach is split into one copy per cube
+// ((c1 || c2) ==> P  <==>  (c1 ==> P) && (c2 ==> P)). The assertion here holds
+// on the first cube (`x == 1`) and is WRONG on the second (`x == 2`): if the
+// distribution ever drops, dedupes away, or mis-splices a cube, the failing
+// copy disappears and the method wrongly verifies.
+method m(x: Int)
+{
+  if (x == 1) { goto tgt } else { goto next1 }
+  label next1
+  if (x == 2) { goto tgt } else { goto fin0 }
+  label fin0
+  goto fin
+  label tgt
+  assert x == 1
+  label fin
+}

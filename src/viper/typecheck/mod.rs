@@ -1,6 +1,7 @@
+use itertools::Itertools;
 use lasso::Spur;
 use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 
 use crate::viper::{
     self,
@@ -23,7 +24,8 @@ use lattice::{ViperTcType, type_to_tc};
 // 3. Context types
 // ==========================================
 
-type TypeTable = HashMap<TcKey, Type>;
+// Produced by the type-inference crate (a `std` map); only looked up, never iterated.
+type TypeTable = std::collections::HashMap<TcKey, Type>;
 
 /// Reject `fold` / `unfold` / `unfolding` on a bodyless (abstract) predicate.
 /// An abstract predicate is a bare location — it has no body to exchange the
@@ -65,8 +67,8 @@ impl<'g> LocalEnv<'g> {
         Self {
             globals,
             interner,
-            locals: HashMap::new(),
-            labels: HashSet::new(),
+            locals: HashMap::default(),
+            labels: HashSet::default(),
         }
     }
 
@@ -99,7 +101,7 @@ impl<'g> LocalEnv<'g> {
         // Impose the expected type with full structure (including any `Domain`
         // type arguments) so a nested mismatch (e.g. `Option[Int]` vs
         // `Option[Bool]`) is caught at the root.
-        c.impose_type(root, expected, &HashMap::new())?;
+        c.impose_type(root, expected, &HashMap::default())?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
         LoweringCtx::new(self, &table).lower_pure::<Ext>(exp)
     }
@@ -118,7 +120,7 @@ impl<'g> LocalEnv<'g> {
         let mut c = ConstraintCtx::new(self, None);
         c.rigid_generics = rigid.iter().copied().collect();
         let root = c.constrain_pure(exp)?;
-        c.impose_type(root, &Type::Bool, &HashMap::new())?;
+        c.impose_type(root, &Type::Bool, &HashMap::default())?;
         // Peek at the solved variants (preliminary pass on a clone; the real
         // checker stays open for the defaulting impositions below).
         let prelim =
@@ -208,9 +210,9 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         Self {
             env,
             tc: TypeChecker::without_vars(),
-            let_bindings: HashMap::new(),
+            let_bindings: HashMap::default(),
             result_ty,
-            rigid_generics: HashSet::new(),
+            rigid_generics: HashSet::default(),
             generic_insts: Vec::new(),
         }
     }
@@ -540,16 +542,16 @@ fn combine_spatial<Ext: PureExt>(
     exps: &mut [viper::Exp],
     ctx: &LocalEnv,
 ) -> Result<Option<SpatialExp<Ext>>, TypeError> {
-    let mut iter = exps.iter_mut();
-    let first = match iter.next() {
-        None => return Ok(None),
-        Some(e) => ctx.typecheck_spatial(e)?,
-    };
-    let combined = iter.try_fold(first, |acc, e| {
-        let next = ctx.typecheck_spatial(e)?;
-        Ok::<_, TypeError>(SpatialExp(Box::new(SpatialExpKind::Conj(acc, next))))
-    })?;
-    Ok(Some(combined))
+    // Balanced, not a left fold: a contract can have thousands of clauses, and
+    // every pass recursing over a clause-per-level spine overflowed the stack.
+    // Conjunction is associative and the clause order is kept.
+    let clauses = exps
+        .iter_mut()
+        .map(|e| ctx.typecheck_spatial(e))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(clauses
+        .into_iter()
+        .tree_reduce(|l, r| SpatialExp(Box::new(SpatialExpKind::Conj(l, r)))))
 }
 
 // ==========================================
@@ -579,7 +581,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     let ty = self.env.locals.get(&spur).cloned().ok_or_else(|| {
                         TypeError::UndefinedVariable(self.env.interner.resolve(&spur).to_string())
                     })?;
-                    self.impose_type(key, &ty, &HashMap::new())?;
+                    self.impose_type(key, &ty, &HashMap::default())?;
                 }
             }
 
@@ -588,7 +590,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .result_ty
                     .clone()
                     .ok_or(TypeError::IllegalResultUsage)?;
-                self.impose_type(key, &ty, &HashMap::new())?;
+                self.impose_type(key, &ty, &HashMap::default())?;
             }
 
             ExpKind::Old(_label, inner) => {
@@ -599,8 +601,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             ExpKind::Ascribe(inner, ascribed_ty) => {
                 let target = Type::from(&*ascribed_ty);
                 let inner_key = self.constrain_pure(inner)?;
-                self.impose_type(inner_key, &target, &HashMap::new())?;
-                self.impose_type(key, &target, &HashMap::new())?;
+                self.impose_type(inner_key, &target, &HashMap::default())?;
+                self.impose_type(key, &target, &HashMap::default())?;
             }
 
             ExpKind::UnOp(op, inner) => self.constrain_unop(op, inner, key)?,
@@ -672,7 +674,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 // Map each of the ADT's type parameters to the scrutinee's
                 // corresponding type argument (its `i`-th child), so a generic
                 // field type `T` resolves to the concrete instantiation.
-                let mut subst = HashMap::new();
+                let mut subst = HashMap::default();
                 for (i, pname) in adt_params.iter().enumerate() {
                     let child = self.tc.get_child_key(base_key, i)?;
                     subst.insert(*pname, child);
@@ -996,7 +998,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         let base_key = self.constrain_pure(base)?;
         self.tc
             .impose(base_key.concretizes_explicit(ViperTcType::Ref))?;
-        self.impose_type(key, &ret_ty, &HashMap::new())?;
+        self.impose_type(key, &ret_ty, &HashMap::default())?;
         Ok(())
     }
 
@@ -1044,7 +1046,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         let expected_params: Vec<Type> = sig.params.clone();
         for (arg, expected) in call.args.iter_mut().zip(expected_params.iter()) {
             let arg_key = self.constrain_pure(arg)?;
-            self.impose_type(arg_key, expected, &HashMap::new())?;
+            self.impose_type(arg_key, expected, &HashMap::default())?;
         }
         Ok(())
     }
@@ -1878,25 +1880,17 @@ fn typecheck_function(
         .transpose()?;
 
     // Postconditions enable `result`, typed as the return type.
-    let ensures = {
-        let mut iter = func.contract.postcondition.iter_mut();
-        match iter.next() {
-            None => None,
-            Some(e) => {
-                let first =
-                    ctx.typecheck_pure::<FuncEnsuresExt>(e, &Type::Bool, Some(ret_ty.clone()))?;
-                let combined = iter.try_fold(first, |acc, e| {
-                    let next =
-                        ctx.typecheck_pure::<FuncEnsuresExt>(e, &Type::Bool, Some(ret_ty.clone()))?;
-                    Ok::<_, TypeError>(TypedPureExp {
-                        ty: Type::Bool,
-                        exp: Box::new(PureExpKind::Binary(BinOp::And, acc, next)),
-                    })
-                })?;
-                Some(combined)
-            }
-        }
-    };
+    let clauses = func
+        .contract
+        .postcondition
+        .iter_mut()
+        .map(|e| ctx.typecheck_pure::<FuncEnsuresExt>(e, &Type::Bool, Some(ret_ty.clone())))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Balanced, like `combine_spatial`.
+    let ensures = clauses.into_iter().tree_reduce(|l, r| TypedPureExp {
+        ty: Type::Bool,
+        exp: Box::new(PureExpKind::Binary(BinOp::And, l, r)),
+    });
 
     Ok(typed::Declaration::Function(typed::Function {
         name,
@@ -1968,7 +1962,7 @@ fn check_triggers(
         return Err(TypeError::MissingTrigger);
     }
     for group in triggers {
-        let mut covered: HashSet<Spur> = HashSet::new();
+        let mut covered: HashSet<Spur> = HashSet::default();
         for term in group {
             if !is_trigger_application(term) {
                 return Err(TypeError::TriggerNotAnApplication);
@@ -2102,11 +2096,11 @@ pub fn typecheck_program_reporting(
 
     // Domain functions/axioms are separate `DomainElement` decls; gather the
     // functions and axioms per owning domain so each `Domain` can carry them.
-    let mut domain_fns: std::collections::HashMap<lasso::Spur, Vec<typed::DomainFunction>> =
-        std::collections::HashMap::new();
+    let mut domain_fns: crate::dhash::HashMap<lasso::Spur, Vec<typed::DomainFunction>> =
+        crate::dhash::HashMap::default();
     // Each domain's type parameters, so a function signature that mentions one
     // (`f1(x: T): Int`) lowers it to `Generic(T)` rather than an opaque domain.
-    let domain_params: std::collections::HashMap<lasso::Spur, Vec<lasso::Spur>> = program
+    let domain_params: crate::dhash::HashMap<lasso::Spur, Vec<lasso::Spur>> = program
         .0
         .iter()
         .filter_map(|decl| match decl {
@@ -2143,8 +2137,8 @@ pub fn typecheck_program_reporting(
     // Typecheck each axiom against its owning domain's params (in scope as
     // rigid types), then enforce the no-precondition restriction on any Silver
     // function it calls.
-    let mut domain_axioms: std::collections::HashMap<lasso::Spur, Vec<typed::Axiom>> =
-        std::collections::HashMap::new();
+    let mut domain_axioms: crate::dhash::HashMap<lasso::Spur, Vec<typed::Axiom>> =
+        crate::dhash::HashMap::default();
     for decl in &mut program.0 {
         if let viper::Declaration::DomainElement(de) = decl
             && let viper::DomainElementKind::Axiom(ax) = &mut de.kind

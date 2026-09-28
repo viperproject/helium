@@ -1,0 +1,10 @@
+// Counterpart of passing/permissions/alias_summary_split_per_gate.vpr: the alias
+// is known on the `b` arm only, so on `!b` nothing covers `z.f`.
+
+field f: Int
+
+method one_arm(x: Ref, y: Ref, z: Ref, b: Bool)
+  requires acc(x.f) && acc(y.f) && (b ==> z == x)
+{
+  exhale acc(z.f)
+}

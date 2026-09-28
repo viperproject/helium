@@ -1,0 +1,17 @@
+// Deadness belongs to a BLOCK, not to its exit heap temp. The empty then-arm of
+// `if (false)` is dead, and its exit heap is its predecessor's temp -- which the
+// empty `if (c)` arm of the else branch passes through as well. Tagging the temp
+// dead made the inner join drop that LIVE arm and keep only the other arm's
+// heap, so the permission inhaled on the `!c` path counted on the `c` path too
+// and the write verified without any permission.
+
+field f: Int
+
+method shared_temp(c: Bool, x: Ref, y: Ref)
+  requires acc(x.f)
+{
+  if (false) { } else {
+    if (c) { } else { inhale acc(y.f) }
+  }
+  y.f := 1
+}

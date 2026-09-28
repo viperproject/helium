@@ -3,7 +3,7 @@
 //! recovered here from the node shape plus the irreducible `Fresh`/`FuncApp`
 //! sources recorded in `VerifyContext`'s side-oracle maps.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use egg::{EGraph, Id};
 

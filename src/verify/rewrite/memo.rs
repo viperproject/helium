@@ -6,7 +6,7 @@
 //! meaningless) and carries a **scratch overlay** so a throwaway probe clone can
 //! record instances without polluting the live run.
 
-use std::collections::HashSet;
+use crate::dhash::HashSet;
 use std::sync::Mutex;
 
 /// Mint a scope id to be `resume`d later — for a scratch graph that outlives a
@@ -113,7 +113,7 @@ impl<K: Eq + std::hash::Hash> Memo<K> {
     pub(super) fn new() -> Self {
         Self(Mutex::new(MemoInner {
             unit: u64::MAX,
-            base: HashSet::new(),
+            base: HashSet::default(),
             overlays: Vec::new(),
         }))
     }
@@ -152,7 +152,7 @@ impl<K: Eq + std::hash::Hash> Memo<K> {
         // everything its parent had, so an empty set for a scope is just "nothing
         // recorded there yet"), then record against the innermost.
         for (id, _) in &stack[memo.overlays.len()..] {
-            memo.overlays.push((*id, HashSet::new()));
+            memo.overlays.push((*id, HashSet::default()));
         }
         memo.overlays
             .last_mut()

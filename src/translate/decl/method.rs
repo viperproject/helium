@@ -5,13 +5,14 @@
 //! by a single linear heap for now. Joins are binary; an n-ary (multi-goto)
 //! merge is normalised into a chain of synthetic binary-join blocks.
 
-use std::collections::{HashMap, HashSet};
+use crate::dhash::{HashMap, HashSet};
 use std::marker::PhantomData;
 
+use itertools::Itertools;
 use lasso::Spur;
 use typed_index_collections::TiVec;
 
-use crate::translate::reach::{and_val, block_reach, merge_two_envs, not_val};
+use crate::translate::reach::{Reach, ReachRef, merge_two_envs};
 use crate::translate::sink::{PcKind, Sink};
 use crate::translate::spatial::{self, SpatialMode};
 use crate::translate::{DeclSlot, Declarator, Definer};
@@ -22,7 +23,7 @@ use crate::translate::{
 use crate::viper::cfg::{self, BlockId, EdgeSide, Terminator};
 use crate::viper::typed;
 use crate::vmir::{
-    self, HeapInst, HeapVal, Inst, PathConds, Polarity, PureInst, ResourceCall, TRUE, Type, Val,
+    self, HeapInst, HeapVal, Inst, PathConds, Polarity, PureInst, ResourceCall, Type, Val,
 };
 
 /// One translator per Silver `method`: owns its `#requires` / `#ensures`
@@ -121,7 +122,7 @@ impl MethodTranslator<'_, Metaed> {
         if let Some(requires) = &m.requires {
             let slot = requires_slot.expect("declared when m.requires is Some");
             let params: Vec<vmir::Type> = m.params.iter().map(|p| ctx.lower_type(&p.ty)).collect();
-            let mut env: HashMap<Spur, vmir::Val> = HashMap::new();
+            let mut env: HashMap<Spur, vmir::Val> = HashMap::default();
             for (i, p) in m.params.iter().enumerate() {
                 env.insert(p.name.0, vmir::Val::Temp(i));
             }
@@ -155,7 +156,7 @@ impl MethodTranslator<'_, Metaed> {
             let mut params: Vec<vmir::Type> =
                 m.params.iter().map(|p| ctx.lower_type(&p.ty)).collect();
             params.extend(m.rets.iter().map(|r| ctx.lower_type(&r.ty)));
-            let mut env: HashMap<Spur, vmir::Val> = HashMap::new();
+            let mut env: HashMap<Spur, vmir::Val> = HashMap::default();
             for (i, p) in m.params.iter().enumerate() {
                 env.insert(p.name.0, vmir::Val::Temp(i));
             }
@@ -242,7 +243,7 @@ pub(crate) fn lower_method(
 
     // Initial environment: fresh values for params and rets. The method has no
     // signature on the VMIR side — params/rets are just initial Fresh insts.
-    let mut init_env: HashMap<Spur, Val> = HashMap::new();
+    let mut init_env: HashMap<Spur, Val> = HashMap::default();
     let mut param_vals: Vec<Val> = Vec::with_capacity(m.params.len());
     for p in &m.params {
         let v = sink.emit_pure(b.lower_type(&p.ty), PureInst::Fresh);
@@ -257,7 +258,7 @@ pub(crate) fn lower_method(
     }
 
     // Types of every method-scoped variable, needed to type phi nodes at joins.
-    let mut var_types: HashMap<Spur, Type> = HashMap::new();
+    let mut var_types: HashMap<Spur, Type> = HashMap::default();
     for p in &m.params {
         var_types.insert(p.name.0, b.lower_type(&p.ty));
     }
@@ -292,41 +293,41 @@ pub(crate) fn lower_method(
     }
     // Baseline for unlabeled `old`: the post-requires-inhale heap.
     let baseline = current_heap;
-    let mut labeled: HashMap<Spur, HeapVal> = HashMap::new();
+    let mut labeled: HashMap<Spur, HeapVal> = HashMap::default();
 
     // Structural heap merge (fork model): each block's `h_in` is derived from
     // its `Preds` (a `HeapInst::Merge` at a `Join`) and arms lower unguarded.
     // `h_out_of` records every pushed block's exit heap so a later join's
     // `Merge` can name its predecessors' heaps.
-    let mut h_out_of: HashMap<vmir::BlockId, HeapVal> = HashMap::new();
+    let mut h_out_of: HashMap<vmir::BlockId, HeapVal> = HashMap::default();
     // Per loop head (CFG block id): the exhale residual set aside at the cut.
     // Any edge leaving that loop unions it back — see the head/exit handling in
     // the block walk below.
-    let mut frame_of: HashMap<BlockId, HeapVal> = HashMap::new();
+    let mut frame_of: HashMap<BlockId, HeapVal> = HashMap::default();
 
     let order = cfg.topo_order();
     let cfg_preds = cfg.predecessors();
     let reachable = cfg.reachable();
 
-    // Per-block reaching condition (`pc`), its materialized boolean `Val` (for
-    // edges/phis), and the branch condition `Val` of a `Branch` block.
+    // Per-block reaching condition, as a BDD node (see `Reach`) and as the
+    // lowering guard (`pc`) built from it, and the branch condition `Val` of a
+    // `Branch` block.
     let n = cfg.blocks.len();
+    let mut reach = Reach::new();
+    let mut reach_bdd: TiVec<BlockId, ReachRef> = (0..n).map(|_| Reach::TRUE).collect();
     let mut reach_pc: TiVec<BlockId, PathConds> = (0..n).map(|_| PathConds::default()).collect();
-    // Reach as a minimized cube set (DNF), threaded so successors pool the raw
-    // cubes and reduce further — a chain-decoded n-way `match` only telescopes
-    // to `<>` once the final join also pools the `else` cube (see `block_reach`).
-    let mut reach_dnf: TiVec<BlockId, Vec<PathConds>> =
-        (0..n).map(|_| vec![PathConds::default()]).collect();
-    let mut reach_val: TiVec<BlockId, Val> = (0..n).map(|_| TRUE).collect();
+    // A disjunctive reach split into the conditions of the edges that make it
+    // disjunctive (see the assert distribution below); empty for a cube reach.
+    let mut reach_split: TiVec<BlockId, Vec<PathConds>> = (0..n).map(|_| Vec::new()).collect();
     let mut cond_val: TiVec<BlockId, Option<Val>> = (0..n).map(|_| None).collect();
-    let mut exit_env: HashMap<BlockId, HashMap<Spur, Val>> = HashMap::new();
+    let mut exit_env: HashMap<BlockId, HashMap<Spur, Val>> = HashMap::default();
 
     // Block-structured output: VMIR blocks in topological order plus the synthetic
     // binary-join blocks that normalise n-ary (multi-goto) merges, and the
     // cfg→vmir id map so a `Preds` can name its predecessors. `blocks` order is a
     // valid topo order (a block's preds — real or synthetic — are pushed first).
     let mut blocks: Vec<vmir::Block> = Vec::new();
-    let mut vmir_id: HashMap<BlockId, vmir::BlockId> = HashMap::new();
+    let mut vmir_id: HashMap<BlockId, vmir::BlockId> = HashMap::default();
     // The method prologue (param/ret fresh temps + the `#requires` inhale) is the
     // entry block's join prefix.
     let prologue = sink.take_since(0);
@@ -341,53 +342,76 @@ pub(crate) fn lower_method(
 
         // --- join phase: reach/edge emissions ---
         let join_mark = sink.insts.len();
-        let (pc, dnf, rval, edges) = if is_entry {
-            (
-                PathConds::default(),
-                vec![PathConds::default()],
-                TRUE,
-                Vec::new(),
-            )
+        let (pc, edges) = if is_entry {
+            (PathConds::default(), Vec::new())
         } else {
-            // Pool every reachable predecessor's reach cubes (each extended by the
-            // taken branch literal) for `block_reach`, and in the same pass build
-            // the per-pred materialized `Val` that phis reconcile over.
-            let mut pool: Vec<PathConds> = Vec::new();
+            // The reach is the OR of the incoming edges' conditions; in the same
+            // pass build the per-pred materialized `Val` that phis reconcile over.
+            let mut f = Reach::FALSE;
             let mut edges: Vec<(BlockId, Val)> = Vec::new();
+            // Each edge's condition as a pc: the pred's pc plus the taken literal.
+            let mut edge_pcs: Vec<PathConds> = Vec::new();
+            let mut single_edge = None;
+            let mut edge_fs: Vec<(BlockId, ReachRef)> = Vec::new();
             for (p, side) in cfg_preds[bid].iter().filter(|(p, _)| reachable.contains(p)) {
-                let rv = reach_val[*p].clone();
-                let (lit, ev) = match side {
-                    EdgeSide::Goto => (None, rv),
-                    EdgeSide::Then => {
+                let lit = match side {
+                    EdgeSide::Goto => None,
+                    EdgeSide::Then | EdgeSide::Else => {
                         let c = cond_val[*p].clone().expect("branch pred has a condition");
-                        (
-                            Some((c.clone(), Polarity::Positive)),
-                            and_val(&mut sink, rv, c),
-                        )
-                    }
-                    EdgeSide::Else => {
-                        let c = cond_val[*p].clone().expect("branch pred has a condition");
-                        let nc = not_val(&mut sink, c.clone());
-                        (Some((c, Polarity::Negative)), and_val(&mut sink, rv, nc))
+                        let pol = if matches!(side, EdgeSide::Then) {
+                            Polarity::Positive
+                        } else {
+                            Polarity::Negative
+                        };
+                        Some((c, pol))
                     }
                 };
-                for cube in &reach_dnf[*p] {
-                    let mut cube = cube.clone();
-                    if let Some(l) = &lit {
-                        cube.conds.push(l.clone());
-                    }
-                    if !pool.contains(&cube) {
-                        pool.push(cube);
-                    }
+                let mut ef = reach_bdd[*p];
+                let mut epc = reach_pc[*p].clone();
+                if let Some((c, pol)) = &lit {
+                    let l = reach.lit(c, *pol);
+                    ef = reach.and(ef, l);
+                    epc.conds.push((c.clone(), *pol));
                 }
-                edges.push((*p, ev));
+                f = reach.or(f, ef);
+                edge_fs.push((*p, ef));
+                edge_pcs.push(epc);
+                single_edge = Some((*p, lit));
             }
-            let (dnf, pc, rval) = block_reach(&mut sink, &pool);
-            (pc, dnf, rval, edges)
+            reach_bdd[bid] = f;
+            // An edge's `Val` selects its pred's heap and values at this join,
+            // in the right fold `ite(e0, v0, ite(e1, v1, … v_last))` below, so it
+            // need only be exact where that level is reached: where one of edges
+            // `i..` is taken (an execution enters a join by exactly one edge).
+            // Simplified against that, a diamond's edge is its branch literal
+            // rather than the whole decision history above it.
+            let mut care = vec![Reach::FALSE; edge_fs.len() + 1];
+            for i in (0..edge_fs.len()).rev() {
+                care[i] = reach.or(edge_fs[i].1, care[i + 1]);
+            }
+            for (i, (p, ef)) in edge_fs.into_iter().enumerate() {
+                let g = reach.simplify(ef, care[i]);
+                edges.push((p, reach.val(&mut sink, g)));
+            }
+            let (pc, disjunctive) = reach.pc(&mut sink, f);
+            // A join splits into its incoming edges. A single edge adds its
+            // literal to each part of the pred's split: the disjunction came
+            // from the pred, and `(∨ᵢ eᵢ) ∧ l = ∨ᵢ (eᵢ ∧ l)`.
+            reach_split[bid] = match single_edge {
+                _ if !disjunctive => Vec::new(),
+                Some((p, lit)) if edge_pcs.len() == 1 => reach_split[p]
+                    .iter()
+                    .map(|part| {
+                        let mut part = part.clone();
+                        part.conds.extend(lit.clone());
+                        part
+                    })
+                    .collect(),
+                _ => edge_pcs,
+            };
+            (pc, edges)
         };
         reach_pc[bid] = pc.clone();
-        reach_dnf[bid] = dnf;
-        reach_val[bid] = rval;
         // Reach insts precede every phi; carried into the real block's join
         // (k ≤ 2) or the innermost synthetic block (n-ary), so all `ev` defs come
         // first in the flattened stream.
@@ -668,9 +692,41 @@ pub(crate) fn lower_method(
             Ok::<_, TranslationError>((heap, cond))
         })?;
         current_heap = new_heap;
+        if let Some(c) = &cond {
+            reach.declare(c);
+        }
         cond_val[bid] = cond;
         exit_env.insert(bid, env);
-        let body = sink.take_since(body_mark);
+        let mut body = sink.take_since(body_mark);
+        // Assert distribution. When this block's reach is a genuine
+        // disjunction, its pc ends in one opaque materialized literal, and a pure
+        // `Assert` under it is provable only by refuting the whole disjunction at
+        // once — case analysis the prover does not perform (the shape: the
+        // `assert false` of a `match`'s shared unreachable otherwise-target,
+        // reached by one impossible edge per match; or an obligation on a value
+        // merged by a match, which is constant per arm). For a pure obligation
+        // `(∨ᵢ eᵢ) ⇒ φ ⟺ ∧ᵢ (eᵢ ⇒ φ)`, so emit one copy per part of the reach's
+        // split (`reach_split`) under that part's pc. `Inst.pc` is a delta over
+        // the (elided) ambient cube, so the part's pc is *prepended*: a copy's
+        // effective pc is `reach ∧ eᵢ ∧ delta`, which equals `eᵢ ∧ delta`.
+        // Positionally safe: `Assert` produces no temp.
+        if reach_split[bid].len() > 1 {
+            let mut out: Vec<Inst> = Vec::with_capacity(body.len());
+            for inst in body {
+                if matches!(inst.kind, vmir::InstKind::Assert(_)) {
+                    for epc in &reach_split[bid] {
+                        let mut copy = inst.clone();
+                        let mut conds = epc.conds.clone();
+                        conds.extend(copy.pc.conds.iter().cloned());
+                        copy.pc.conds = conds;
+                        out.push(copy);
+                    }
+                } else {
+                    out.push(inst);
+                }
+            }
+            body = out;
+        }
 
         // Push the real block after its synthetic join blocks (if any), so preds
         // always precede successors in `blocks`.
@@ -742,12 +798,12 @@ fn lower_invariant(
     exhale: bool,
     old: &pure_exp::OldHeaps<'_>,
 ) -> Result<HeapVal, TranslationError> {
-    let Some((first, rest)) = invs.split_first() else {
+    // Balanced, like `combine_spatial`'s contract clauses.
+    let Some(conj) = invs.iter().cloned().tree_reduce(|l, r| {
+        typed::SpatialExp(Box::new(typed::SpatialExpKind::Conj(l, r)))
+    }) else {
         return Ok(heap);
     };
-    let conj = rest.iter().cloned().fold(first.clone(), |acc, inv| {
-        typed::SpatialExp(Box::new(typed::SpatialExpKind::Conj(acc, inv)))
-    });
     let mode = if exhale {
         SpatialMode::Exhale { value_heap: heap }
     } else {
@@ -770,7 +826,7 @@ fn lower_invariant(
 /// information); under-approximating is not, since a variable the body mutates
 /// would keep its pre-loop value across the cut.
 fn loop_written_vars(cfg: &cfg::Cfg, l: &cfg::Loop) -> HashSet<Spur> {
-    let mut out = HashSet::new();
+    let mut out = HashSet::default();
     for bid in &l.body {
         for stmt in &cfg.blocks[*bid].stmts {
             match stmt {

@@ -1,0 +1,33 @@
+// A pc-alias partner counts only where it is present.
+//
+// Inside the branch, `y`, `x` and `z` coincide only under the path condition, so
+// the consumes of `Conc(y)` go down the pc-alias path: every held chunk equal to
+// `y` under the pc joins a sum. The first `to_gen(y)` uses up `Conc(x)`. After the
+// `if (b)`, the only other `Conc` chunk is the one `to_conc(z)` produced, held
+// under the join guard `[b+]`. On the `!b` path nothing covers the second
+// `to_gen(y)`, and Silicon rejects it there.
+//
+// Regression for a real unsoundness: `pc_alias_set` summed the partners'
+// UNGATED amounts, and the debit distribution in `heap_subtract_summarized` did
+// the same, so the guarded chunk counted a full `1/1` on the arm where it does
+// not exist. Found on tempfile `create_unlinked`, bytes `Bytes::truncate` and url
+// `quirks::set_pathname`, where Prusti's path-flag guarded `make_concrete_*`
+// produces exactly this shape.
+
+field f: Int
+predicate Conc(x: Ref) { acc(x.f) }
+predicate Gen(x: Ref) { acc(x.f) }
+method to_gen(x: Ref) requires Conc(x) ensures Gen(x)
+method to_conc(x: Ref) requires Gen(x) ensures Conc(x)
+
+method guarded_partner(c: Bool, b: Bool, x: Ref, y: Ref, z: Ref)
+  requires Conc(x)
+{
+  if (c) {
+    assume y == x
+    assume z == x
+    to_gen(y)
+    if (b) { to_conc(z) }
+    to_gen(y)
+  }
+}

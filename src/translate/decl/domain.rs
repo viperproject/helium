@@ -8,7 +8,7 @@
 //! instantiated off a *type* trigger, which Silver has no syntax to write —
 //! rather than infer one, we refuse. Generics live on ADTs.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::marker::PhantomData;
 
 use lasso::Spur;
@@ -123,7 +123,7 @@ impl DomainTranslator<'_, Metaed> {
         // precondition-free Silver function (typecheck-enforced), so the inert
         // `Empty` heap is never read. Axiom bodies are never verified, only
         // assumed.
-        let env = HashMap::new();
+        let env = HashMap::default();
         for (i, (ax, aslot)) in self.src.axioms.iter().zip(self.axiom_slots).enumerate() {
             let body = pure_exp::lower_axiom_body(ctx, &env, &ax.exp)?;
             // The axiom's carried name matches its slot registration: the

@@ -1,0 +1,18 @@
+// SOUNDNESS CANARY for the per-cube assert distribution (lower_method).
+//
+// The shared target is reachable via two FEASIBLE cubes -- `x == 1` and
+// `!(x == 1) && x == 2` -- of different lengths, so they neither telescope nor
+// absorb: the block's reach is a genuine multi-cube disjunction. `assert false`
+// there may only be discharged vacuously, which requires EVERY cube to be
+// refuted; both are satisfiable.
+method m(x: Int)
+{
+  if (x == 1) { goto tgt } else { goto next1 }
+  label next1
+  if (x == 2) { goto tgt } else { goto fin0 }
+  label fin0
+  goto fin
+  label tgt
+  assert false
+  label fin
+}

@@ -587,13 +587,15 @@ impl Chunk {
 /// per chunk, and the consume sites gate against `guard ∧` the instruction pc.
 #[derive(Debug, Clone)]
 pub struct Heap {
-    groups: im::HashMap<LocationKind, Rc<[Chunk]>>,
+    /// Unseeded hasher: iteration order (and so the order join/consume code mints
+    /// terms in) must be a function of the heap alone, not of the process.
+    groups: im::HashMap<LocationKind, Rc<[Chunk]>, rustc_hash::FxBuildHasher>,
 }
 
 impl Heap {
     pub fn empty() -> Self {
         Self {
-            groups: im::HashMap::new(),
+            groups: im::HashMap::default(),
         }
     }
 
@@ -664,5 +666,32 @@ impl Heap {
         self.chunks_of(kind)
             .iter()
             .find(|c| ctx.egraph.find(c.addr) == canon)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two heaps built by the same insertions iterate their groups in the same
+    /// order. With a per-map random seed they did not, even within one process.
+    #[test]
+    fn group_iteration_order_is_deterministic() {
+        let mut rodeo = lasso::Rodeo::default();
+        let kinds: Vec<LocationKind> = (0..32)
+            .map(|i| LocationKind {
+                group: rodeo.get_or_intern(format!("g{i}")),
+                value: Type::Int,
+                bound: Bound::Unbounded,
+            })
+            .collect();
+        let build = || {
+            kinds.iter().enumerate().fold(Heap::empty(), |h, (i, k)| {
+                let id = egg::Id::from(i);
+                h.with_chunk(k, Chunk::new(id, id, id))
+            })
+        };
+        let order = |h: &Heap| h.kinds().cloned().collect::<Vec<_>>();
+        assert_eq!(order(&build()), order(&build()));
     }
 }

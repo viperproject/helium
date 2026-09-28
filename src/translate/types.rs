@@ -1,6 +1,6 @@
 //! Lower a typed Silver `Type` to a VMIR `Type`.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use lasso::Spur;
 

@@ -1,0 +1,3 @@
+// Truncating quotient on a negative dividend: false under Viper's Euclidean
+// `\` (`tests/cases/passing/euclidean_div_mod.vpr`).
+method wrong_div() { assert -7 \ 3 == -2 }

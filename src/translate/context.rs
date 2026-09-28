@@ -7,7 +7,7 @@
 //! take `&TranslationContext` and `&mut impl Definer` in one call without an
 //! aliasing conflict.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use lasso::{Rodeo, Spur};
 
@@ -72,10 +72,10 @@ impl<'a> TranslationContext<'a> {
     pub(crate) fn new(interner: &'a Interner) -> Self {
         Self {
             interner,
-            name_map: HashMap::new(),
-            addr_types: HashMap::new(),
-            pred_resources: HashMap::new(),
-            contracts: HashMap::new(),
+            name_map: HashMap::default(),
+            addr_types: HashMap::default(),
+            pred_resources: HashMap::default(),
+            contracts: HashMap::default(),
             adt: AdtInfo::default(),
             groups: Rodeo::new(),
         }

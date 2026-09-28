@@ -1,0 +1,19 @@
+// A consume on a path that cannot be taken owes nothing. `exhale acc(x.f)` on a
+// dead branch already discharged vacuously, but `unfold` looked the predicate
+// chunk up before any prover ran and reported a missing permission.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method dead_branch_bool(x: Ref, b: Bool)
+  requires b
+{
+  if (!b) { unfold P(x) }
+}
+
+method dead_branch_arith(x: Ref, y: Ref, i: Int)
+  requires P(y) && i > 0
+{
+  if (i < 0) { unfold P(x) }
+}

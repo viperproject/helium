@@ -9,7 +9,7 @@
 //! the fixpoint cache (engine state) *and* the scratch (prover state), so the
 //! outer type keeps that coordination.
 
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use egg::Language as _;
 
@@ -440,7 +440,7 @@ impl<'a> VerifyContext<'a> {
         self.current_cube = cube;
         self.scratch = Some(BlockScratch {
             egraph,
-            map: HashMap::new(),
+            map: HashMap::default(),
             watermark,
             true_id,
             dirty: true,
@@ -733,7 +733,7 @@ impl<'a> VerifyContext<'a> {
         let mut work = probe.clone();
         let mut goal = goal;
         let mut rung = entry;
-        let mut assumed: std::collections::HashSet<egg::Id> = std::collections::HashSet::new();
+        let mut assumed: crate::dhash::HashSet<egg::Id> = crate::dhash::HashSet::default();
         loop {
             // The assumptions accumulated along this chain are contradictory, so
             // the surviving arm is unreachable and the goal holds vacuously. This
@@ -763,7 +763,7 @@ impl<'a> VerifyContext<'a> {
             // `c ⟹ e` (the as-written direction) is preferred over its negated
             // dual.
             let usable = |work: &egg::EGraph<Symbolic, ConstFold>,
-                          assumed: &std::collections::HashSet<egg::Id>,
+                          assumed: &crate::dhash::HashSet<egg::Id>,
                           cond: egg::Id,
                           branch: egg::Id| {
                 work.find(branch) != g && !assumed.contains(&work.find(cond))

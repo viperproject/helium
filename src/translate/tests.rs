@@ -359,7 +359,7 @@ method m(a: Bool, b: Bool, x: Ref)
 #[test]
 fn exhaustive_three_way_join_minimizes_to_empty_pc() {
     // A 3-way `goto` join whose reach is `a ∨ (!a∧b) ∨ (!a∧!b)` — a tautology.
-    // Cube minimization (`merge_cubes`) collapses it, so the post-merge
+    // The reach BDD (`Reach`) is canonical and collapses it, so the post-merge
     // `ensures` exhale must carry the trivial `<>`, not a materialized-OR
     // literal: the permission stays ungated.
     let input = r#"
@@ -388,6 +388,28 @@ method m(a: Bool, b: Bool, x: Ref)
         "exhaustive 3-way join must minimize to <>, got {:?}",
         exhale.pc
     );
+}
+
+#[test]
+fn translation_is_deterministic() {
+    // The join phis are emitted in the iteration order of the merged
+    // environments. With a per-map seeded hasher that order changed from one
+    // map to the next, so the same program lowered to differently ordered
+    // (and differently numbered) instructions on every run.
+    let input = r#"
+method m(c: Bool, b: Int) returns (r0: Int, r1: Int, r2: Int, r3: Int, r4: Int, r5: Int, r6: Int, r7: Int)
+{
+    if (c) {
+        r0 := 0; r1 := 1; r2 := 2; r3 := 3; r4 := 4; r5 := 5; r6 := 6; r7 := 7
+    } else {
+        r0 := b; r1 := b; r2 := b; r3 := b; r4 := b; r5 := b; r6 := b; r7 := b
+    }
+}
+"#;
+    let first = format!("{:?}", run(input));
+    for _ in 0..8 {
+        assert_eq!(first, format!("{:?}", run(input)));
+    }
 }
 
 #[test]

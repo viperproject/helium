@@ -387,7 +387,7 @@ fn verify_named_resource(program: &vmir::Program, name: &str) -> Result<(), Veri
     // unfolds another predicate can graft its certificate. The target itself is
     // skipped so a deliberately-failing target still returns `Err`.
     let fn_certs = build_fn_certs(program, &mut alloc);
-    let mut certs = HashMap::new();
+    let mut certs = HashMap::default();
     for (cid, decl) in program.decls.iter_enumerated() {
         if cid == id {
             continue;
@@ -413,8 +413,8 @@ fn build_fn_certs_except(
     skip: Option<MemberId>,
     alloc: &mut crate::verify::func_registry::FuncRegistry,
 ) -> HashMap<MemberId, Arc<FunctionDefinition>> {
-    let no_certs = HashMap::new();
-    let mut fn_certs = HashMap::new();
+    let no_certs = HashMap::default();
+    let mut fn_certs = HashMap::default();
     loop {
         let mut progress = false;
         for (id, decl) in program.decls.iter_enumerated() {
@@ -453,7 +453,7 @@ fn build_certs(
     fn_certs: &HashMap<MemberId, Arc<FunctionDefinition>>,
     alloc: &mut crate::verify::func_registry::FuncRegistry,
 ) -> HashMap<MemberId, ResourceDefinition> {
-    let mut certs = HashMap::new();
+    let mut certs = HashMap::default();
     for (id, decl) in program.decls.iter_enumerated() {
         if let vmir::Declaration::Resource(r) = decl {
             let name = program.name(id).to_string();
@@ -524,8 +524,8 @@ fn build_all_certs(
     HashMap<MemberId, ResourceDefinition>,
     HashMap<MemberId, Arc<FunctionDefinition>>,
 ) {
-    let mut certs = HashMap::new();
-    let mut fn_certs = HashMap::new();
+    let mut certs = HashMap::default();
+    let mut fn_certs = HashMap::default();
     loop {
         let mut progress = false;
         for (id, decl) in program.decls.iter_enumerated() {
@@ -1918,7 +1918,7 @@ function loop(x: Int): Int { loop(x) }
     let analyzed = crate::vmir::analyze(program).expect("function recursion is accepted");
     assert_eq!(
         analyzed.recursive_scc(loop_id),
-        Some(std::collections::HashSet::from([loop_id])),
+        Some(crate::dhash::HashSet::from_iter([loop_id])),
         "self-recursive function should be its own recursive SCC"
     );
 }

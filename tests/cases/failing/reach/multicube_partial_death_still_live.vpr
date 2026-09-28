@@ -1,0 +1,20 @@
+// SOUNDNESS CANARY for the per-cube assert distribution (lower_method).
+//
+// Three cubes reach the target: `x == 1` (live), `x == 2` (live), and a third
+// whose path carries `inhale x != 3` under `x == 3` -- semantically dead, so
+// its copy of the assert discharges vacuously. `assert false` must still fail:
+// one dead cube (or any strict subset) never vacuates the block.
+method m(x: Int)
+{
+  if (x == 1) { goto tgt } else { goto next1 }
+  label next1
+  if (x == 2) { goto tgt } else { goto next2 }
+  label next2
+  if (x == 3) { inhale x != 3
+                goto tgt } else { goto fin0 }
+  label fin0
+  goto fin
+  label tgt
+  assert false
+  label fin
+}

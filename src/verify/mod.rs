@@ -65,17 +65,17 @@ pub fn verify_with_stats(
     // Resources are verified before the methods that use them (dependency
     // order), so each resource's proof certificate is cached and grafted at
     // call sites rather than re-walking the body.
-    let mut certs: std::collections::HashMap<vmir::MemberId, cert::ResourceDefinition> =
-        std::collections::HashMap::new();
+    let mut certs: crate::dhash::HashMap<vmir::MemberId, cert::ResourceDefinition> =
+        crate::dhash::HashMap::default();
     // Verified function bodies, cached in dependency order (callees before
     // callers). Each unit's `assume_axioms` installs one lazy unfold rule per
     // entry here (see `rewrite::function_rule`), which installs the
     // definitional equality `f(args) == body` the moment a `FuncApp(f, ..)`
     // occurrence is seen during that unit's own saturation.
-    let mut fn_certs: std::collections::HashMap<
+    let mut fn_certs: crate::dhash::HashMap<
         vmir::MemberId,
         std::sync::Arc<cert::FunctionDefinition>,
-    > = std::collections::HashMap::new();
+    > = crate::dhash::HashMap::default();
     // Shared function-id registry: one per run so ADT/builtin ids stay
     // consistent across certificate grafts. Threaded `&mut` into each unit.
     let mut alloc = func_registry::FuncRegistry::new(program);
@@ -88,7 +88,7 @@ pub fn verify_with_stats(
         // being verified, which is what makes recursion terminate.
         let recursive = group.len() > 1 || analyzed.dep_graph.contains_edge(group[0], group[0]);
         if recursive {
-            let scc: std::collections::HashSet<vmir::MemberId> = group.iter().copied().collect();
+            let scc: crate::dhash::HashSet<vmir::MemberId> = group.iter().copied().collect();
             let mut batch_defs = Vec::new();
             for &id in &group {
                 let name = program.name(id).to_string();

@@ -65,7 +65,7 @@ impl Forall {
     /// reference to an outer binder stops here rather than escaping further out.
     pub fn free_temps(&self) -> Vec<usize> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = crate::dhash::HashSet::default();
         let mut visit = |v: &Val| {
             if let Val::Temp(k) = v
                 && *k < self.binder_base

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
 use crate::vmir::display::VmirDisplay;
@@ -48,12 +48,20 @@ struct EvalState {
     /// slice a [`PermRecipe`], and a `ChunkPerm` has already lost which operands
     /// it came from.
     perm_defs: Vec<vmir::PermInst>,
-    /// Heap temps produced on a **provably unreachable** path (a block whose
-    /// cube is refuted in the ground graph — e.g. after `bb_unreach`'s `inhale
-    /// false`). The Stage-4 join merge drops such an arm outright instead of
-    /// selecting a `0`-leaf against it (which would need an exhaustiveness
-    /// split). Keyed by `HeapVal::Temp` index.
-    dead_heaps: std::collections::HashSet<usize>,
+    /// Blocks proven **unreachable** (method bodies): the block's cube is
+    /// refuted in the ground graph — e.g. after `bb_unreach`'s `inhale false` —
+    /// or every predecessor is. The Stage-4 join merge drops such an arm outright
+    /// instead of selecting a `0`-leaf against it (which would need an
+    /// exhaustiveness split).
+    ///
+    /// Deadness is a property of a BLOCK, not of its exit heap temp: an empty
+    /// block's exit heap is its predecessor's temp, so tagging the temp also
+    /// tagged every live block that passes the same heap through, and a later
+    /// join dropped a live arm.
+    dead_blocks: crate::dhash::HashSet<usize>,
+    /// For the join block being evaluated: whether its (then, else) predecessor
+    /// blocks are dead. The `Merge` reads this; `None` outside a method join.
+    join_arms_dead: Option<(bool, bool)>,
 }
 
 impl EvalState {
@@ -65,7 +73,8 @@ impl EvalState {
             heaps: Vec::new(),
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_heaps: std::collections::HashSet::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
+            join_arms_dead: None,
         }
     }
 
@@ -80,7 +89,8 @@ impl EvalState {
             heaps: Vec::new(),
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_heaps: std::collections::HashSet::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
+            join_arms_dead: None,
         }
     }
 
@@ -141,7 +151,8 @@ impl EvalState {
             // A quantifier body is permission-free, like it is heap-free.
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_heaps: std::collections::HashSet::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
+            join_arms_dead: None,
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
@@ -206,12 +217,6 @@ fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
         HeapVal::Empty => Heap::empty(),
         HeapVal::Temp(n) => state.heaps[*n].clone(),
     }
-}
-
-/// Whether a heap operand was produced on a provably-unreachable path (see
-/// [`EvalState::dead_heaps`]).
-fn heapval_dead(state: &EvalState, hv: &HeapVal) -> bool {
-    matches!(hv, HeapVal::Temp(n) if state.dead_heaps.contains(n))
 }
 
 /// Heaps to visualize for an instruction, labeled as in VMIR (`h0`, `h1`, …).
@@ -766,7 +771,7 @@ fn perm_recipe(state: &EvalState, perm: &vmir::PermVal) -> Result<PermRecipe<Val
         })
     }
     let mut steps = Vec::new();
-    let mut memo = HashMap::new();
+    let mut memo = HashMap::default();
     let res = leaf(state, perm, &mut steps, &mut memo)?;
     Ok(PermRecipe { steps, res })
 }
@@ -952,7 +957,7 @@ fn eval_heap_inst(
             // An unreachable predecessor arm (its cube refuted, e.g. the enum
             // `bb_unreach` after `inhale false`) is dropped outright — selecting
             // a `0`-leaf against it would need an exhaustiveness case split.
-            match (heapval_dead(state, then_h), heapval_dead(state, els_h)) {
+            match state.join_arms_dead.unwrap_or((false, false)) {
                 (false, true) => return Ok(get_heap(state, then_h)),
                 (true, false) => return Ok(get_heap(state, els_h)),
                 _ => {}
@@ -1605,15 +1610,27 @@ fn eval_sub_yield(
         .map(|(v, p)| (state.get_val(ctx, v), *p))
         .collect();
 
-    // The held value, and (certificate walks) its provenance. A miss is an
-    // outright failure, which is what makes the `Option` below concretely
-    // `Some` on every path that continues: `None` is reachable only at a
+    // The held value, and (certificate walks) its provenance. The `Option` below
+    // is concretely `Some` on every path that continues: `heap_subtract` fails
+    // unless the permission is held, so `None` is reachable only at a
     // provably-non-positive permission.
+    //
+    // A miss of this canonical-address scan is not yet a missing permission: the
+    // subtraction below also matches a chunk whose address equals the demand only
+    // under the path condition, and owes nothing on a dead path -- a plain
+    // `exhale` of the same location succeeds in both cases. So stand in a fresh
+    // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
+    // consumes. A certificate walk needs the held chunk's recipe, so there a miss
+    // stays a failure.
     let a = ctx.egraph.find(addr);
-    let (held, held_recipe) = base_h
+    let hit = base_h
         .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())))
-        .ok_or(VerifyError::InsufficientPermission)?;
+        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
+    let (held, held_recipe) = match hit {
+        Some(x) => x,
+        None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
+        None => return Err(VerifyError::InsufficientPermission),
+    };
     if ctx.recipe.is_some() && held_recipe.is_none() {
         return Err(VerifyError::Unimplemented(
             "purify: consume of an unheld location",
@@ -1788,12 +1805,39 @@ fn eval_resource_op(
             let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
             let some_id = ctx.alloc.option_some();
             let cons_id = ctx.alloc.cons(res_id, 0);
+            // A slot read without provenance on a path the walk proves dead
+            // (e.g. under `unfolding` of a predicate whose body is `false` — a
+            // Prusti enum variant that cannot occur) may take any value: the
+            // definitional axiom's ite never selects this branch. `unwrap(None)`
+            // is that unspecified value, as a term the certificate can carry.
+            let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
+                let f = expr!(ctx, false);
+                ctx.is_inconsistent() || ctx.prove_under_pc(f, &pc_lits)
+            };
+            let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
             let rb = ctx.recipe.as_mut().unwrap();
             let mut members_r = Vec::with_capacity(slot_recipes.len());
             for (i, r) in slot_recipes.iter().enumerate() {
-                let v = r.clone().ok_or(VerifyError::Unimplemented(
-                    "purify: snap value outside footprint",
-                ))?;
+                let v = match r.clone() {
+                    Some(v) => v,
+                    None if dead_path => {
+                        let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
+                            func: none_id,
+                            type_args: vec![elems[i].clone()],
+                            args: Vec::new(),
+                        });
+                        rb.emit(crate::verify::rewrite::AxiomPure::App {
+                            func: value_id,
+                            type_args: vec![elems[i].clone()],
+                            args: vec![none],
+                        })
+                    }
+                    None => {
+                        return Err(VerifyError::Unimplemented(
+                            "purify: snap value outside footprint",
+                        ));
+                    }
+                };
                 members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
                     func: some_id,
                     type_args: vec![elems[i].clone()],
@@ -1983,7 +2027,7 @@ pub(crate) fn prepare_trig_term(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     term: &vmir::TrigTerm,
     binder_base: usize,
-    slot: &std::collections::HashMap<usize, usize>,
+    slot: &crate::dhash::HashMap<usize, usize>,
 ) -> crate::verify::rewrite::PreparedTerm {
     use crate::verify::rewrite::PreparedTerm;
     match term {
@@ -2376,6 +2420,13 @@ pub(crate) fn verify_method(
         // No scratch during the join phase: the cube's reach boolean is
         // materialized *by* the join, so it isn't resolvable until join runs.
         ctx.end_block();
+        state.join_arms_dead = match &block.preds {
+            vmir::Preds::Join { then_, els, .. } => Some((
+                state.dead_blocks.contains(&then_.0),
+                state.dead_blocks.contains(&els.0),
+            )),
+            _ => None,
+        };
         walk_body(
             &mut ctx,
             program,
@@ -2402,22 +2453,28 @@ pub(crate) fn verify_method(
         )?;
         // Dead-arm tagging: if the block's cube is now refuted in the ground
         // graph (an unreachable arm — e.g. after `inhale false` unioned a reach
-        // flag with `false`), tag its exit heap so a downstream join merge drops
-        // it instead of forming a `0`-leaf that would need a case split. Cheap:
-        // just consults folded literals, no clone.
-        if let vmir::HeapVal::Temp(n) = block.h_out {
-            // Raw: this runs *inside* the block, so `collect_pc_lits` would
-            // prepend the very cube being lowered.
-            let lits = pc_lits_raw(&mut ctx, &state, &block.cube);
-            let refuted = lits.iter().any(|(id, pol)| {
+        // flag with `false`), tag the block so a downstream join merge drops its
+        // heap instead of forming a `0`-leaf that would need a case split. Cheap:
+        // just consults folded literals, no clone. Reachability propagates too: a
+        // block whose only predecessor is dead, or whose join has both arms dead,
+        // is dead.
+        let unreached = match &block.preds {
+            vmir::Preds::From(p) => state.dead_blocks.contains(&p.0),
+            vmir::Preds::Join { .. } => state.join_arms_dead == Some((true, true)),
+            vmir::Preds::Entry => false,
+        };
+        // Raw: this runs *inside* the block, so `collect_pc_lits` would
+        // prepend the very cube being lowered.
+        let lits = pc_lits_raw(&mut ctx, &state, &block.cube);
+        let refuted = unreached
+            || lits.iter().any(|(id, pol)| {
                 matches!(
                     ctx.egraph[ctx.egraph.find(*id)].data.known(),
                     Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
                 )
             });
-            if refuted {
-                state.dead_heaps.insert(n);
-            }
+        if refuted {
+            state.dead_blocks.insert(bid.0);
         }
     }
     ctx.end_block();
@@ -2544,7 +2601,7 @@ pub(crate) fn verify_function(
     // `None`). In-SCC callees are retargeted to their limited twin in the recipe,
     // and this function's own limited twin is recorded so its unfold rule frames
     // `f(x) == f'(x)`.
-    recursive_scc: Option<&std::collections::HashSet<MemberId>>,
+    recursive_scc: Option<&crate::dhash::HashSet<MemberId>>,
     alloc: &mut crate::verify::func_registry::FuncRegistry,
 ) -> Result<Option<std::sync::Arc<FunctionDefinition>>, VerifyError> {
     let Some(body) = function.body.as_ref() else {

@@ -86,6 +86,13 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
             True,
             False,
         }
+        // An inconsistent class (`true` merged with `false`) has nothing left to
+        // derive. Matches go stale within an iteration, so once a graph collapses
+        // every remaining match resolves to that one class, and walking its
+        // nodes per match would cost the class size times the match count.
+        if egraph[eclass].data.is_inconsistent() {
+            return Vec::new();
+        }
         let mut unions: Vec<(Id, Target)> = Vec::new();
         let self_lit = known_bool(egraph, eclass);
         for node in &egraph[eclass].nodes {

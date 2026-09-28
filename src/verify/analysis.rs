@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::dhash::HashMap;
 use std::sync::Arc;
 
 use egg::{Analysis, DidMerge, EGraph, Id};
@@ -310,19 +310,23 @@ pub fn eval_binary(op: BinOp, l: &Literal, r: &Literal) -> Option<Literal> {
             let (a, b) = operands!(Real);
             Real(a * b)
         }
+        // Viper's `%` and `\` are SMT-LIB's `mod` and `div`: Euclidean, the
+        // remainder always in `[0, |b|)`. Rust's (and BigInt's) operators
+        // truncate toward zero instead, which differs on a negative dividend
+        // (`-7 % 3`: 2 in Viper, -1 truncated).
         BinOp::Mod => {
             let (a, b) = operands!(Int);
             if *b == num::BigInt::ZERO {
                 return None;
             }
-            Int(a % b)
+            Int(euclid_mod(a, b))
         }
         BinOp::DivI => {
             let (a, b) = operands!(Int);
             if *b == num::BigInt::ZERO {
                 return None;
             }
-            Int(a / b)
+            Int((a - euclid_mod(a, b)) / b)
         }
         BinOp::DivR => {
             let (a, b) = operands!(Real);
@@ -341,4 +345,11 @@ pub fn eval_binary(op: BinOp, l: &Literal, r: &Literal) -> Option<Literal> {
         }
         BinOp::Eq => Literal::Bool(l == r),
     })
+}
+
+/// SMT-LIB `mod`: the remainder of `a` by `b` (nonzero) in `[0, |b|)`.
+fn euclid_mod(a: &num::BigInt, b: &num::BigInt) -> num::BigInt {
+    use num::Signed as _;
+    let r = a % b;
+    if r.is_negative() { r + b.abs() } else { r }
 }
