@@ -1,0 +1,10 @@
+// Viper's `%` and `\` are SMT-LIB `mod` and `div` (Euclidean: the remainder is
+// in [0, |b|)), not Rust's truncating operators. Constant folding used the
+// latter and proved `-7 % 3 == -1`. Counterparts:
+// `tests/cases/failing/truncating_mod_negative.vpr`,
+// `tests/cases/failing/truncating_div_negative.vpr`.
+
+method neg_dividend() { assert -7 % 3 == 2 && -7 \ 3 == -3 }
+method neg_divisor() { assert 7 % -3 == 1 && 7 \ -3 == -2 }
+method neg_both() { assert -7 % -3 == 2 && -7 \ -3 == 3 }
+method exact() { assert -6 % 3 == 0 && -6 \ 3 == -2 }
