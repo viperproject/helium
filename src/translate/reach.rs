@@ -62,7 +62,10 @@ impl Reach {
 
     pub(crate) fn new() -> Self {
         Reach {
-            nodes: vec![(u32::MAX, BDD_FALSE, BDD_FALSE), (u32::MAX, BDD_TRUE, BDD_TRUE)],
+            nodes: vec![
+                (u32::MAX, BDD_FALSE, BDD_FALSE),
+                (u32::MAX, BDD_TRUE, BDD_TRUE),
+            ],
             unique: HashMap::default(),
             apply_memo: HashMap::default(),
             vars: Vec::new(),
@@ -281,7 +284,11 @@ impl Reach {
         let mut conds: Vec<(Val, Polarity)> = Vec::with_capacity(cube.len() + 1);
         let fixed: HashMap<u32, bool> = cube.iter().copied().collect();
         for &(v, pos) in &cube {
-            let pol = if pos { Polarity::Positive } else { Polarity::Negative };
+            let pol = if pos {
+                Polarity::Positive
+            } else {
+                Polarity::Negative
+            };
             conds.push((self.vars[v as usize].clone(), pol));
         }
         let rest = self.restrict(f, &fixed, &mut HashMap::default());

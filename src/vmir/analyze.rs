@@ -348,12 +348,12 @@ fn method_deps(m: &Method, out: &mut Vec<MemberId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dhash::HashSet;
     use crate::vmir::{
         Block, BlockId, Function, FunctionBody, FunctionCall, HeapInst, HeapVal, Inst, InstKind,
         PathConds, Precond, Preds, Resource, ResourceCall, Val,
     };
     use lasso::{Key, Rodeo};
-    use crate::dhash::HashSet;
     use typed_index_collections::TiVec;
 
     /// A function whose body calls `callee` (a plain, non-address `FunctionCall`),

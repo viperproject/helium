@@ -271,6 +271,8 @@ pub struct ResolvedSymbol<'a> {
     mid: MemberId,
 }
 
+// A throwaway view: the `as_*` accessors consume it and borrow from `globals`.
+#[allow(clippy::wrong_self_convention)]
 impl<'a> ResolvedSymbol<'a> {
     pub fn id(self) -> MemberId {
         self.mid

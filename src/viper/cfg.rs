@@ -428,7 +428,7 @@ impl Builder {
         // Give every loop head a single in-edge, so the lowering has one place
         // to establish the invariant and one frame to restore on exit. Distinct
         // in-edges would otherwise each carry their own residual heap.
-        if insert_preheaders(&mut blocks, &mut loops, entry) {
+        if insert_preheaders(&mut blocks, &loops, entry) {
             // Block ids moved; re-derive rather than patching the structure.
             loops = detect(&blocks, entry)?;
         }

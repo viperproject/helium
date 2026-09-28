@@ -21,3 +21,11 @@ rusttyc = "0.5.0"
 im = "15.1.0"
 itertools = "0.13"
 rustc-hash = "2"
+
+[lints.clippy]
+# Style lints the existing code trips; the CI clippy gate runs with `-D warnings`.
+collapsible_if = "allow"
+items_after_test_module = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+unnecessary_unwrap = "allow"

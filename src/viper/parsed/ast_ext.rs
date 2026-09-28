@@ -10,17 +10,11 @@ impl Program {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (usize, &Declaration)> {
-        self.0
-            .iter()
-            .enumerate()
-            .map(|(id, decl)| (id.into(), decl))
+        self.0.iter().enumerate()
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut Declaration)> {
-        self.0
-            .iter_mut()
-            .enumerate()
-            .map(|(id, decl)| (id.into(), decl))
+        self.0.iter_mut().enumerate()
     }
 }
 

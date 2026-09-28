@@ -7,7 +7,7 @@
 use crate::verify::context::VerifyContext;
 use crate::verify::heap::LocationKind;
 use crate::verify::lang::Symbolic;
-use crate::vmir::{self, BinOp, Bound, Literal, Type};
+use crate::vmir::{self, Bound, Literal, Type};
 
 /// A verification context over an empty program.
 ///
@@ -42,13 +42,4 @@ pub(crate) fn test_kind() -> LocationKind {
         value: Type::Int,
         bound: Bound::Unbounded,
     }
-}
-
-/// `d != 0`, desugared to the `Ite` form the verifier builds.
-pub(crate) fn ne_zero(ctx: &mut VerifyContext<'_>, d: egg::Id) -> egg::Id {
-    let zero = ctx.add(Symbolic::Lit(Literal::Int(num::BigInt::from(0))));
-    let eq = ctx.add(Symbolic::Binary(BinOp::Eq, [d, zero]));
-    let false_ = ctx.add(Symbolic::Lit(Literal::Bool(false)));
-    let true_ = ctx.add(Symbolic::Lit(Literal::Bool(true)));
-    ctx.add(Symbolic::Ite([eq, false_, true_]))
 }

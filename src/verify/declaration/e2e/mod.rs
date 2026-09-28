@@ -446,25 +446,6 @@ fn build_fn_certs(
     build_fn_certs_except(program, None, alloc)
 }
 
-/// Build certificates for every resource in `program` (test helper). Shares the
-/// `alloc` so certificate ids match the method's later use.
-fn build_certs(
-    program: &vmir::Program,
-    fn_certs: &HashMap<MemberId, Arc<FunctionDefinition>>,
-    alloc: &mut crate::verify::func_registry::FuncRegistry,
-) -> HashMap<MemberId, ResourceDefinition> {
-    let mut certs = HashMap::default();
-    for (id, decl) in program.decls.iter_enumerated() {
-        if let vmir::Declaration::Resource(r) = decl {
-            let name = program.name(id).to_string();
-            let cert = verify_resource(program, &name, r, &certs, fn_certs, alloc)
-                .expect("resource verifies");
-            certs.insert(id, cert);
-        }
-    }
-    certs
-}
-
 #[test]
 fn resource_negative_permission_rejected() {
     // `acc(x.f, 1/1 - 2/1)` folds to permission -1 → side condition fails.

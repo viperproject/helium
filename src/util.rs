@@ -94,7 +94,7 @@ pub struct PairAdapter<'a, K, V>(&'a TiSlice<K, V>);
 
 impl<'a, K, V> Clone for PairAdapter<'a, K, V> {
     fn clone(&self) -> Self {
-        Self(self.0)
+        *self
     }
 }
 
