@@ -359,7 +359,7 @@ method m(a: Bool, b: Bool, x: Ref)
 #[test]
 fn exhaustive_three_way_join_minimizes_to_empty_pc() {
     // A 3-way `goto` join whose reach is `a ∨ (!a∧b) ∨ (!a∧!b)` — a tautology.
-    // Cube minimization (`merge_cubes`) collapses it, so the post-merge
+    // The reach BDD (`Reach`) is canonical and collapses it, so the post-merge
     // `ensures` exhale must carry the trivial `<>`, not a materialized-OR
     // literal: the permission stays ungated.
     let input = r#"

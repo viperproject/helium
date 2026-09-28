@@ -1,0 +1,24 @@
+// Regression: an assert under a genuinely disjunctive reach.
+//
+// `j` is reached via two cubes (`a == 0`, `a != 0 && a == 1`) — the double
+// miss leaves for `end`, so they never telescope — and `dead` adds
+// `b != 0 && b != 1` to each. The block's pc used to be one opaque
+// materialized or-literal, and refuting it needs case analysis the prover
+// does not do, so `assert false` failed. The pc now carries the literals every
+// path implies (`b != 0`, `b != 1`) conjunctively, and those contradict the
+// precondition.
+method m(a: Int, b: Int)
+  requires a == 0 || a == 1
+  requires b == 0 || b == 1
+{
+  if (a == 0) { goto j } else { goto a1 }
+  label a1
+  if (a == 1) { goto j } else { goto end }
+  label j
+  if (b == 0) { goto end } else { goto b1 }
+  label b1
+  if (b == 1) { goto end } else { goto dead }
+  label dead
+  assert false
+  label end
+}

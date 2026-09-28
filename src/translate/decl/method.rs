@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use lasso::Spur;
 use typed_index_collections::TiVec;
 
-use crate::translate::reach::{and_val, block_reach, merge_two_envs, not_val};
+use crate::translate::reach::{Reach, ReachRef, merge_two_envs};
 use crate::translate::sink::{PcKind, Sink};
 use crate::translate::spatial::{self, SpatialMode};
 use crate::translate::{DeclSlot, Declarator, Definer};
@@ -22,7 +22,7 @@ use crate::translate::{
 use crate::viper::cfg::{self, BlockId, EdgeSide, Terminator};
 use crate::viper::typed;
 use crate::vmir::{
-    self, HeapInst, HeapVal, Inst, PathConds, Polarity, PureInst, ResourceCall, TRUE, Type, Val,
+    self, HeapInst, HeapVal, Inst, PathConds, Polarity, PureInst, ResourceCall, Type, Val,
 };
 
 /// One translator per Silver `method`: owns its `#requires` / `#ensures`
@@ -308,16 +308,16 @@ pub(crate) fn lower_method(
     let cfg_preds = cfg.predecessors();
     let reachable = cfg.reachable();
 
-    // Per-block reaching condition (`pc`), its materialized boolean `Val` (for
-    // edges/phis), and the branch condition `Val` of a `Branch` block.
+    // Per-block reaching condition, as a BDD node (see `Reach`) and as the
+    // lowering guard (`pc`) built from it, and the branch condition `Val` of a
+    // `Branch` block.
     let n = cfg.blocks.len();
+    let mut reach = Reach::new();
+    let mut reach_bdd: TiVec<BlockId, ReachRef> = (0..n).map(|_| Reach::TRUE).collect();
     let mut reach_pc: TiVec<BlockId, PathConds> = (0..n).map(|_| PathConds::default()).collect();
-    // Reach as a minimized cube set (DNF), threaded so successors pool the raw
-    // cubes and reduce further — a chain-decoded n-way `match` only telescopes
-    // to `<>` once the final join also pools the `else` cube (see `block_reach`).
-    let mut reach_dnf: TiVec<BlockId, Vec<PathConds>> =
-        (0..n).map(|_| vec![PathConds::default()]).collect();
-    let mut reach_val: TiVec<BlockId, Val> = (0..n).map(|_| TRUE).collect();
+    // A disjunctive reach split into the conditions of the edges that make it
+    // disjunctive (see the assert distribution below); empty for a cube reach.
+    let mut reach_split: TiVec<BlockId, Vec<PathConds>> = (0..n).map(|_| Vec::new()).collect();
     let mut cond_val: TiVec<BlockId, Option<Val>> = (0..n).map(|_| None).collect();
     let mut exit_env: HashMap<BlockId, HashMap<Spur, Val>> = HashMap::default();
 
@@ -341,53 +341,76 @@ pub(crate) fn lower_method(
 
         // --- join phase: reach/edge emissions ---
         let join_mark = sink.insts.len();
-        let (pc, dnf, rval, edges) = if is_entry {
-            (
-                PathConds::default(),
-                vec![PathConds::default()],
-                TRUE,
-                Vec::new(),
-            )
+        let (pc, edges) = if is_entry {
+            (PathConds::default(), Vec::new())
         } else {
-            // Pool every reachable predecessor's reach cubes (each extended by the
-            // taken branch literal) for `block_reach`, and in the same pass build
-            // the per-pred materialized `Val` that phis reconcile over.
-            let mut pool: Vec<PathConds> = Vec::new();
+            // The reach is the OR of the incoming edges' conditions; in the same
+            // pass build the per-pred materialized `Val` that phis reconcile over.
+            let mut f = Reach::FALSE;
             let mut edges: Vec<(BlockId, Val)> = Vec::new();
+            // Each edge's condition as a pc: the pred's pc plus the taken literal.
+            let mut edge_pcs: Vec<PathConds> = Vec::new();
+            let mut single_edge = None;
+            let mut edge_fs: Vec<(BlockId, ReachRef)> = Vec::new();
             for (p, side) in cfg_preds[bid].iter().filter(|(p, _)| reachable.contains(p)) {
-                let rv = reach_val[*p].clone();
-                let (lit, ev) = match side {
-                    EdgeSide::Goto => (None, rv),
-                    EdgeSide::Then => {
+                let lit = match side {
+                    EdgeSide::Goto => None,
+                    EdgeSide::Then | EdgeSide::Else => {
                         let c = cond_val[*p].clone().expect("branch pred has a condition");
-                        (
-                            Some((c.clone(), Polarity::Positive)),
-                            and_val(&mut sink, rv, c),
-                        )
-                    }
-                    EdgeSide::Else => {
-                        let c = cond_val[*p].clone().expect("branch pred has a condition");
-                        let nc = not_val(&mut sink, c.clone());
-                        (Some((c, Polarity::Negative)), and_val(&mut sink, rv, nc))
+                        let pol = if matches!(side, EdgeSide::Then) {
+                            Polarity::Positive
+                        } else {
+                            Polarity::Negative
+                        };
+                        Some((c, pol))
                     }
                 };
-                for cube in &reach_dnf[*p] {
-                    let mut cube = cube.clone();
-                    if let Some(l) = &lit {
-                        cube.conds.push(l.clone());
-                    }
-                    if !pool.contains(&cube) {
-                        pool.push(cube);
-                    }
+                let mut ef = reach_bdd[*p];
+                let mut epc = reach_pc[*p].clone();
+                if let Some((c, pol)) = &lit {
+                    let l = reach.lit(c, *pol);
+                    ef = reach.and(ef, l);
+                    epc.conds.push((c.clone(), *pol));
                 }
-                edges.push((*p, ev));
+                f = reach.or(f, ef);
+                edge_fs.push((*p, ef));
+                edge_pcs.push(epc);
+                single_edge = Some((*p, lit));
             }
-            let (dnf, pc, rval) = block_reach(&mut sink, &pool);
-            (pc, dnf, rval, edges)
+            reach_bdd[bid] = f;
+            // An edge's `Val` selects its pred's heap and values at this join,
+            // in the right fold `ite(e0, v0, ite(e1, v1, … v_last))` below, so it
+            // need only be exact where that level is reached: where one of edges
+            // `i..` is taken (an execution enters a join by exactly one edge).
+            // Simplified against that, a diamond's edge is its branch literal
+            // rather than the whole decision history above it.
+            let mut care = vec![Reach::FALSE; edge_fs.len() + 1];
+            for i in (0..edge_fs.len()).rev() {
+                care[i] = reach.or(edge_fs[i].1, care[i + 1]);
+            }
+            for (i, (p, ef)) in edge_fs.into_iter().enumerate() {
+                let g = reach.simplify(ef, care[i]);
+                edges.push((p, reach.val(&mut sink, g)));
+            }
+            let (pc, disjunctive) = reach.pc(&mut sink, f);
+            // A join splits into its incoming edges. A single edge adds its
+            // literal to each part of the pred's split: the disjunction came
+            // from the pred, and `(∨ᵢ eᵢ) ∧ l = ∨ᵢ (eᵢ ∧ l)`.
+            reach_split[bid] = match single_edge {
+                _ if !disjunctive => Vec::new(),
+                Some((p, lit)) if edge_pcs.len() == 1 => reach_split[p]
+                    .iter()
+                    .map(|part| {
+                        let mut part = part.clone();
+                        part.conds.extend(lit.clone());
+                        part
+                    })
+                    .collect(),
+                _ => edge_pcs,
+            };
+            (pc, edges)
         };
         reach_pc[bid] = pc.clone();
-        reach_dnf[bid] = dnf;
-        reach_val[bid] = rval;
         // Reach insts precede every phi; carried into the real block's join
         // (k ≤ 2) or the innermost synthetic block (n-ary), so all `ev` defs come
         // first in the flattened stream.
@@ -668,9 +691,41 @@ pub(crate) fn lower_method(
             Ok::<_, TranslationError>((heap, cond))
         })?;
         current_heap = new_heap;
+        if let Some(c) = &cond {
+            reach.declare(c);
+        }
         cond_val[bid] = cond;
         exit_env.insert(bid, env);
-        let body = sink.take_since(body_mark);
+        let mut body = sink.take_since(body_mark);
+        // Assert distribution. When this block's reach is a genuine
+        // disjunction, its pc ends in one opaque materialized literal, and a pure
+        // `Assert` under it is provable only by refuting the whole disjunction at
+        // once — case analysis the prover does not perform (the shape: the
+        // `assert false` of a `match`'s shared unreachable otherwise-target,
+        // reached by one impossible edge per match; or an obligation on a value
+        // merged by a match, which is constant per arm). For a pure obligation
+        // `(∨ᵢ eᵢ) ⇒ φ ⟺ ∧ᵢ (eᵢ ⇒ φ)`, so emit one copy per part of the reach's
+        // split (`reach_split`) under that part's pc. `Inst.pc` is a delta over
+        // the (elided) ambient cube, so the part's pc is *prepended*: a copy's
+        // effective pc is `reach ∧ eᵢ ∧ delta`, which equals `eᵢ ∧ delta`.
+        // Positionally safe: `Assert` produces no temp.
+        if reach_split[bid].len() > 1 {
+            let mut out: Vec<Inst> = Vec::with_capacity(body.len());
+            for inst in body {
+                if matches!(inst.kind, vmir::InstKind::Assert(_)) {
+                    for epc in &reach_split[bid] {
+                        let mut copy = inst.clone();
+                        let mut conds = epc.conds.clone();
+                        conds.extend(copy.pc.conds.iter().cloned());
+                        copy.pc.conds = conds;
+                        out.push(copy);
+                    }
+                } else {
+                    out.push(inst);
+                }
+            }
+            body = out;
+        }
 
         // Push the real block after its synthetic join blocks (if any), so preds
         // always precede successors in `blocks`.

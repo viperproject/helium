@@ -1,0 +1,76 @@
+// Regression: reach blowup in translation.
+//
+// Each stage branches twice on `x`; both hits rejoin at `jN`, the double miss
+// leaves the stage for `end`. `jN`'s reach is therefore a two-cube disjunction
+// that never telescopes (its complement left), and the next stage multiplies
+// it: as a cube set (DNF) the reach doubles per stage — 2^16 cubes here, and
+// translation hung (N = 10 already took minutes). As a BDD it grows by a
+// constant per stage.
+method m(x: Int)
+{
+  if (x == 2) { goto j1 } else { goto n1 }
+  label n1
+  if (x == 3) { goto j1 } else { goto end }
+  label j1
+  if (x == 4) { goto j2 } else { goto n2 }
+  label n2
+  if (x == 5) { goto j2 } else { goto end }
+  label j2
+  if (x == 6) { goto j3 } else { goto n3 }
+  label n3
+  if (x == 7) { goto j3 } else { goto end }
+  label j3
+  if (x == 8) { goto j4 } else { goto n4 }
+  label n4
+  if (x == 9) { goto j4 } else { goto end }
+  label j4
+  if (x == 10) { goto j5 } else { goto n5 }
+  label n5
+  if (x == 11) { goto j5 } else { goto end }
+  label j5
+  if (x == 12) { goto j6 } else { goto n6 }
+  label n6
+  if (x == 13) { goto j6 } else { goto end }
+  label j6
+  if (x == 14) { goto j7 } else { goto n7 }
+  label n7
+  if (x == 15) { goto j7 } else { goto end }
+  label j7
+  if (x == 16) { goto j8 } else { goto n8 }
+  label n8
+  if (x == 17) { goto j8 } else { goto end }
+  label j8
+  if (x == 18) { goto j9 } else { goto n9 }
+  label n9
+  if (x == 19) { goto j9 } else { goto end }
+  label j9
+  if (x == 20) { goto j10 } else { goto n10 }
+  label n10
+  if (x == 21) { goto j10 } else { goto end }
+  label j10
+  if (x == 22) { goto j11 } else { goto n11 }
+  label n11
+  if (x == 23) { goto j11 } else { goto end }
+  label j11
+  if (x == 24) { goto j12 } else { goto n12 }
+  label n12
+  if (x == 25) { goto j12 } else { goto end }
+  label j12
+  if (x == 26) { goto j13 } else { goto n13 }
+  label n13
+  if (x == 27) { goto j13 } else { goto end }
+  label j13
+  if (x == 28) { goto j14 } else { goto n14 }
+  label n14
+  if (x == 29) { goto j14 } else { goto end }
+  label j14
+  if (x == 30) { goto j15 } else { goto n15 }
+  label n15
+  if (x == 31) { goto j15 } else { goto end }
+  label j15
+  if (x == 32) { goto j16 } else { goto n16 }
+  label n16
+  if (x == 33) { goto j16 } else { goto end }
+  label j16
+  label end
+}
