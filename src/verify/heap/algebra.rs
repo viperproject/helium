@@ -1546,13 +1546,29 @@ pub(crate) fn subtract_miss_trace(
     }
 }
 
+/// A chunk's amount as it counts under `pc`: bare when the pc already entails the
+/// chunk's presence guard (the common case, and it keeps the term small), gated
+/// `guard ? perm : 0` otherwise.
+fn present_amount(
+    ctx: &mut VerifyContext<'_>,
+    c: &Chunk,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> ChunkPerm {
+    if c.guard().is_empty() || c.pc_entails_guard(ctx, pc_lits) {
+        c.ungated_perm().clone()
+    } else {
+        c.gated_perm(ctx)
+    }
+}
+
 /// Build the pc-alias flavour of a [`heap_subtract_summarized`] set: `existing` (when
 /// a chunk did match on ground) followed by the pc-alias `partners`, every member
 /// gated by the *same* cube — the pc.
 ///
-/// The returned total is the plain **ungated** sum, as it has always been: the
-/// sufficiency proof runs under the pc anyway ([`VerifyContext::prove_under_pc`]), so
-/// gating each addend would only grow the term.
+/// The returned total is not gated by the pc: the sufficiency proof runs under the
+/// pc anyway ([`VerifyContext::prove_under_pc`]), so gating each addend would only
+/// grow the term. Each addend is gated by its own presence guard, though (see
+/// [`present_amount`]).
 pub(crate) fn pc_alias_set(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
@@ -1575,11 +1591,16 @@ pub(crate) fn pc_alias_set(
     // Structural, like the Σ-ite summary's: a member whose perm carries join
     // structure keeps it, so sufficiency is decided per leaf rather than over a
     // flattened `ite`.
+    // A member contributes only where it is PRESENT. The pc gate is implicit (the
+    // proof runs under the pc), but a member's own presence guard is a different
+    // condition — a chunk held on one join arm only — and summing it ungated
+    // counted permission on the arm where the chunk does not exist.
     let mut total: Option<ChunkPerm> = None;
     for c in &members {
+        let amount = present_amount(ctx, c, pc_lits);
         total = Some(match total {
-            None => c.ungated_perm().clone(),
-            Some(t) => perm_add(ctx, &t, c.ungated_perm()),
+            None => amount,
+            Some(t) => perm_add(ctx, &t, &amount),
         });
     }
     let cube: crate::verify::heap::HeapPc = std::rc::Rc::from(pc_lits.to_vec());
@@ -1662,7 +1683,11 @@ pub(crate) fn heap_subtract_summarized(
     let mut out = out;
     let mut remaining = chunk2_perm;
     for (chunk, cube) in set.to_vec() {
-        let hold = chunk.ungated_perm().to_id(ctx);
+        // What the chunk can give up is what it holds where it is present: an
+        // absent member (its guard false) must neither be debited nor retire any
+        // of the demand, or a present member is left holding permission it had
+        // in fact given away.
+        let hold = present_amount(ctx, &chunk, pc_lits).to_id(ctx);
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
         // fractions fold it away.
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
