@@ -1,7 +1,7 @@
 /target
 /test
 /log
-
+/.idea
 # Working notes and design docs: kept on disk, deliberately not tracked.
 # Root-level .md only -- README.md and the per-corpus READMEs stay.
 /*.md

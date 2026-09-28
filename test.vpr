@@ -1,9 +1,0 @@
-domain D[T] {
-    function mk(): D[T]
-    function tag(): Int
-    axiom { mk() == mk() && tag() == 7 }
-}
-
-method client() {
-    assert tag() == 7
-}
