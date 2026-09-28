@@ -48,12 +48,20 @@ struct EvalState {
     /// slice a [`PermRecipe`], and a `ChunkPerm` has already lost which operands
     /// it came from.
     perm_defs: Vec<vmir::PermInst>,
-    /// Heap temps produced on a **provably unreachable** path (a block whose
-    /// cube is refuted in the ground graph — e.g. after `bb_unreach`'s `inhale
-    /// false`). The Stage-4 join merge drops such an arm outright instead of
-    /// selecting a `0`-leaf against it (which would need an exhaustiveness
-    /// split). Keyed by `HeapVal::Temp` index.
-    dead_heaps: std::collections::HashSet<usize>,
+    /// Blocks proven **unreachable** (method bodies): the block's cube is
+    /// refuted in the ground graph — e.g. after `bb_unreach`'s `inhale false` —
+    /// or every predecessor is. The Stage-4 join merge drops such an arm outright
+    /// instead of selecting a `0`-leaf against it (which would need an
+    /// exhaustiveness split).
+    ///
+    /// Deadness is a property of a BLOCK, not of its exit heap temp: an empty
+    /// block's exit heap is its predecessor's temp, so tagging the temp also
+    /// tagged every live block that passes the same heap through, and a later
+    /// join dropped a live arm.
+    dead_blocks: std::collections::HashSet<usize>,
+    /// For the join block being evaluated: whether its (then, else) predecessor
+    /// blocks are dead. The `Merge` reads this; `None` outside a method join.
+    join_arms_dead: Option<(bool, bool)>,
 }
 
 impl EvalState {
@@ -65,7 +73,8 @@ impl EvalState {
             heaps: Vec::new(),
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_heaps: std::collections::HashSet::new(),
+            dead_blocks: std::collections::HashSet::new(),
+            join_arms_dead: None,
         }
     }
 
@@ -80,7 +89,8 @@ impl EvalState {
             heaps: Vec::new(),
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_heaps: std::collections::HashSet::new(),
+            dead_blocks: std::collections::HashSet::new(),
+            join_arms_dead: None,
         }
     }
 
@@ -141,7 +151,8 @@ impl EvalState {
             // A quantifier body is permission-free, like it is heap-free.
             perms: Vec::new(),
             perm_defs: Vec::new(),
-            dead_heaps: std::collections::HashSet::new(),
+            dead_blocks: std::collections::HashSet::new(),
+            join_arms_dead: None,
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
@@ -206,12 +217,6 @@ fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
         HeapVal::Empty => Heap::empty(),
         HeapVal::Temp(n) => state.heaps[*n].clone(),
     }
-}
-
-/// Whether a heap operand was produced on a provably-unreachable path (see
-/// [`EvalState::dead_heaps`]).
-fn heapval_dead(state: &EvalState, hv: &HeapVal) -> bool {
-    matches!(hv, HeapVal::Temp(n) if state.dead_heaps.contains(n))
 }
 
 /// Heaps to visualize for an instruction, labeled as in VMIR (`h0`, `h1`, …).
@@ -952,7 +957,7 @@ fn eval_heap_inst(
             // An unreachable predecessor arm (its cube refuted, e.g. the enum
             // `bb_unreach` after `inhale false`) is dropped outright — selecting
             // a `0`-leaf against it would need an exhaustiveness case split.
-            match (heapval_dead(state, then_h), heapval_dead(state, els_h)) {
+            match state.join_arms_dead.unwrap_or((false, false)) {
                 (false, true) => return Ok(get_heap(state, then_h)),
                 (true, false) => return Ok(get_heap(state, els_h)),
                 _ => {}
@@ -2376,6 +2381,13 @@ pub(crate) fn verify_method(
         // No scratch during the join phase: the cube's reach boolean is
         // materialized *by* the join, so it isn't resolvable until join runs.
         ctx.end_block();
+        state.join_arms_dead = match &block.preds {
+            vmir::Preds::Join { then_, els, .. } => Some((
+                state.dead_blocks.contains(&then_.0),
+                state.dead_blocks.contains(&els.0),
+            )),
+            _ => None,
+        };
         walk_body(
             &mut ctx,
             program,
@@ -2402,22 +2414,28 @@ pub(crate) fn verify_method(
         )?;
         // Dead-arm tagging: if the block's cube is now refuted in the ground
         // graph (an unreachable arm — e.g. after `inhale false` unioned a reach
-        // flag with `false`), tag its exit heap so a downstream join merge drops
-        // it instead of forming a `0`-leaf that would need a case split. Cheap:
-        // just consults folded literals, no clone.
-        if let vmir::HeapVal::Temp(n) = block.h_out {
-            // Raw: this runs *inside* the block, so `collect_pc_lits` would
-            // prepend the very cube being lowered.
-            let lits = pc_lits_raw(&mut ctx, &state, &block.cube);
-            let refuted = lits.iter().any(|(id, pol)| {
+        // flag with `false`), tag the block so a downstream join merge drops its
+        // heap instead of forming a `0`-leaf that would need a case split. Cheap:
+        // just consults folded literals, no clone. Reachability propagates too: a
+        // block whose only predecessor is dead, or whose join has both arms dead,
+        // is dead.
+        let unreached = match &block.preds {
+            vmir::Preds::From(p) => state.dead_blocks.contains(&p.0),
+            vmir::Preds::Join { .. } => state.join_arms_dead == Some((true, true)),
+            vmir::Preds::Entry => false,
+        };
+        // Raw: this runs *inside* the block, so `collect_pc_lits` would
+        // prepend the very cube being lowered.
+        let lits = pc_lits_raw(&mut ctx, &state, &block.cube);
+        let refuted = unreached
+            || lits.iter().any(|(id, pol)| {
                 matches!(
                     ctx.egraph[ctx.egraph.find(*id)].data.known(),
                     Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
                 )
             });
-            if refuted {
-                state.dead_heaps.insert(n);
-            }
+        if refuted {
+            state.dead_blocks.insert(bid.0);
         }
     }
     ctx.end_block();
