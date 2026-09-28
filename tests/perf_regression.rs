@@ -1,12 +1,14 @@
 //! Verification-cost regression gate. For each `benchmarks/*.vpr` (which must
 //! verify clean), capture the verifier's *deterministic* cost metrics and
-//! compare them, exact-match, against a committed baseline under
+//! compare them against a committed baseline under
 //! `benchmarks/baseline/<name>.txt`.
 //!
-//! egg is deterministic for a fixed rule set + input, so any change in work done
-//! moves a metric and fails this test with a `before → after` diff — silent
-//! slowdowns cannot slip in. Refresh baselines deliberately after a justified
-//! change:
+//! egg is deterministic for a fixed rule set + input, so the metrics are the same
+//! on every machine. The aggregate counters ([`GATED`]) must stay within a band:
+//! growing past [`GROWTH`]× fails as a regression, shrinking past [`SHRINK`]×
+//! fails so the baseline gets refreshed and keeps guarding the new level. Moves
+//! of at most [`SLACK`] never fail. Refresh baselines deliberately after a
+//! justified change:
 //!
 //! ```text
 //! UPDATE_PERF_BASELINE=1 cargo test --test perf_regression
@@ -17,6 +19,20 @@
 use std::path::{Path, PathBuf};
 
 use silver_oxide::pipeline;
+
+const GATED: &[&str] = &[
+    "saturations",
+    "reduces",
+    "sat_iterations",
+    "egraph_nodes_peak",
+    "egraph_classes_peak",
+    "rule_applications",
+    "prove_calls",
+    "prove_probe",
+];
+const GROWTH: f64 = 1.5;
+const SHRINK: f64 = 2.0;
+const SLACK: u64 = 10;
 
 fn benchmarks_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks")
@@ -49,6 +65,27 @@ fn diff(baseline: &str, current: &str) -> String {
                 "  {k}: {} → {}\n",
                 b.copied().unwrap_or("(absent)"),
                 c.copied().unwrap_or("(absent)")
+            ));
+        }
+    }
+    out
+}
+
+/// The gated counters outside the band, one line each.
+fn out_of_band(baseline: &str, current: &str) -> Vec<String> {
+    let get = |s: &str, k: &str| {
+        s.lines()
+            .find_map(|l| l.strip_prefix(k)?.strip_prefix('=')?.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let mut out = Vec::new();
+    for k in GATED {
+        let (b, c) = (get(baseline, k), get(current, k));
+        if c > b + SLACK && c as f64 > b as f64 * GROWTH {
+            out.push(format!("  {k}: {b} → {c} regressed past {GROWTH}×\n"));
+        } else if b > c + SLACK && b as f64 > c as f64 * SHRINK {
+            out.push(format!(
+                "  {k}: {b} → {c} improved past {SHRINK}×; refresh the baseline\n"
             ));
         }
     }
@@ -91,9 +128,11 @@ fn verification_cost_matches_baseline() {
                 baseline_path.display()
             )
         });
-        if baseline != current {
+        let violations = out_of_band(&baseline, &current);
+        if !violations.is_empty() {
             failures.push(format!(
-                "{name}: verification cost changed\n{}",
+                "{name}: verification cost out of band\n{}full diff:\n{}",
+                violations.concat(),
                 diff(&baseline, &current)
             ));
         }

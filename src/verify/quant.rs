@@ -175,7 +175,7 @@ fn intern(
 
     let insts: Vec<AxiomInst> = prepare_body(alloc, table, names, &q.body.insts)?
         .iter()
-        .map(|i| crate::verify::cert::map_operands(i, &rename))
+        .map(|i| crate::verify::cert::map_operands(i, rename))
         .collect();
     let groups: Vec<Vec<PreparedTerm>> = q
         .triggers

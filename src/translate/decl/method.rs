@@ -799,9 +799,11 @@ fn lower_invariant(
     old: &pure_exp::OldHeaps<'_>,
 ) -> Result<HeapVal, TranslationError> {
     // Balanced, like `combine_spatial`'s contract clauses.
-    let Some(conj) = invs.iter().cloned().tree_reduce(|l, r| {
-        typed::SpatialExp(Box::new(typed::SpatialExpKind::Conj(l, r)))
-    }) else {
+    let Some(conj) = invs
+        .iter()
+        .cloned()
+        .tree_reduce(|l, r| typed::SpatialExp(Box::new(typed::SpatialExpKind::Conj(l, r))))
+    else {
         return Ok(heap);
     };
     let mode = if exhale {

@@ -1,6 +1,4 @@
-#![feature(trait_alias)]
 #![feature(never_type)]
-#![feature(associated_type_defaults)]
 pub mod pipeline;
 /// Deterministic hash maps and sets for the whole crate. `std`'s default hasher
 /// is seeded per process, so iterating a map (candidate chunks, rule matches,

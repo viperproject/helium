@@ -1,7 +1,7 @@
+use crate::dhash::{HashMap, HashSet};
 use itertools::Itertools;
 use lasso::Spur;
 use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
-use crate::dhash::{HashMap, HashSet};
 
 use crate::viper::{
     self,

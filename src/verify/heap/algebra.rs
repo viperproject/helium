@@ -1682,7 +1682,7 @@ pub(crate) fn heap_subtract_summarized(
     // Greedy distribution over the set, demanded chunk first.
     let mut out = out;
     let mut remaining = chunk2_perm;
-    for (chunk, cube) in set.to_vec() {
+    for (chunk, cube) in set.iter().cloned() {
         // What the chunk can give up is what it holds where it is present: an
         // absent member (its guard false) must neither be debited nor retire any
         // of the demand, or a present member is left holding permission it had
@@ -2379,8 +2379,7 @@ mod tests {
             &[],
             Demand::Concrete,
         )
-        .err()
-        .expect("symbolic-perm exhale must fail without a proof");
+        .expect_err("symbolic-perm exhale must fail without a proof");
         assert!(matches!(
             err.root_cause(),
             VerifyError::InsufficientPermission
@@ -2474,8 +2473,7 @@ mod tests {
             &[],
             Demand::Concrete,
         )
-        .err()
-        .expect("over-consumption must fail");
+        .expect_err("over-consumption must fail");
         assert!(matches!(
             err.root_cause(),
             VerifyError::InsufficientPermission
@@ -2501,8 +2499,7 @@ mod tests {
             &[],
             Demand::Concrete,
         )
-        .err()
-        .expect("subtract from empty must fail");
+        .expect_err("subtract from empty must fail");
         assert!(matches!(
             err.root_cause(),
             VerifyError::InsufficientPermission

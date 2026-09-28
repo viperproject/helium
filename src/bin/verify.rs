@@ -49,7 +49,7 @@ fn main() -> ExitCode {
             eprintln!("[TIMING]\n{timings}");
             if breakdown {
                 let mut rows = member_times.clone();
-                rows.sort_by(|a, b| b.1.cmp(&a.1));
+                rows.sort_by_key(|r| std::cmp::Reverse(r.1));
                 eprintln!("[VERIFY-BREAKDOWN] (slowest first)");
                 for (name, dur) in &rows {
                     eprintln!("  {name:<24} {dur:>10.3?}");
