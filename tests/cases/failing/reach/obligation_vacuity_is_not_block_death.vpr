@@ -1,0 +1,19 @@
+// SOUNDNESS CANARY for the per-cube assert distribution (lower_method).
+//
+// The first assert sits under the extra guard `x == 5`, which contradicts both
+// reach cubes (`x == 1`, `x == 2`): its copies legitimately discharge
+// vacuously, but only relative to THAT obligation's guard. The block itself is
+// live, and the second, unguarded `assert false` must still fail. Accepting
+// this means an obligation-scoped vacuity leaked into the block's context.
+method m(x: Int)
+{
+  if (x == 1) { goto tgt } else { goto next1 }
+  label next1
+  if (x == 2) { goto tgt } else { goto fin0 }
+  label fin0
+  goto fin
+  label tgt
+  if (x == 5) { assert false }
+  assert false
+  label fin
+}
