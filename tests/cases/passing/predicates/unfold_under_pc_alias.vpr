@@ -1,0 +1,28 @@
+// `unfold` recovers the predicate's snapshot from the held chunk. That lookup
+// matched addresses by canonical equality only, so a chunk held at an address
+// equal to the demanded one only under the path condition failed the unfold
+// with "insufficient permission" -- while `exhale P(y)` at the same point, whose
+// subtraction also matches pc-aliased chunks, verified.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method alias_in_branch(x: Ref, y: Ref)
+  requires P(x) && (unfolding P(x) in x.f == 5)
+{
+  if (x == y) {
+    unfold P(y)
+    assert y.f == 5
+    y.f := 1
+  }
+}
+
+method alias_implied(x: Ref, y: Ref, b: Bool)
+  requires P(x) && (b ==> x == y)
+{
+  if (b) {
+    unfold P(y)
+    y.f := 1
+  }
+}

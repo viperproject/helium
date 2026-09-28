@@ -1610,15 +1610,27 @@ fn eval_sub_yield(
         .map(|(v, p)| (state.get_val(ctx, v), *p))
         .collect();
 
-    // The held value, and (certificate walks) its provenance. A miss is an
-    // outright failure, which is what makes the `Option` below concretely
-    // `Some` on every path that continues: `None` is reachable only at a
+    // The held value, and (certificate walks) its provenance. The `Option` below
+    // is concretely `Some` on every path that continues: `heap_subtract` fails
+    // unless the permission is held, so `None` is reachable only at a
     // provably-non-positive permission.
+    //
+    // A miss of this canonical-address scan is not yet a missing permission: the
+    // subtraction below also matches a chunk whose address equals the demand only
+    // under the path condition, and owes nothing on a dead path -- a plain
+    // `exhale` of the same location succeeds in both cases. So stand in a fresh
+    // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
+    // consumes. A certificate walk needs the held chunk's recipe, so there a miss
+    // stays a failure.
     let a = ctx.egraph.find(addr);
-    let (held, held_recipe) = base_h
+    let hit = base_h
         .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())))
-        .ok_or(VerifyError::InsufficientPermission)?;
+        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
+    let (held, held_recipe) = match hit {
+        Some(x) => x,
+        None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
+        None => return Err(VerifyError::InsufficientPermission),
+    };
     if ctx.recipe.is_some() && held_recipe.is_none() {
         return Err(VerifyError::Unimplemented(
             "purify: consume of an unheld location",

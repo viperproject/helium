@@ -1,0 +1,14 @@
+// Counterpart of passing/predicates/unfold_under_pc_alias.vpr: where the
+// addresses are NOT equal under the path condition the unfold must still fail.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method no_alias(x: Ref, y: Ref)
+  requires P(x)
+{
+  if (x != y) {
+    unfold P(y)
+  }
+}
