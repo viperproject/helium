@@ -1,0 +1,8 @@
+{
+  "description": "Realistic spec-less Rust, no loops (see README.md); depth_* and enum_* are generated families",
+  "tags": ["corpus", "no-loops"],
+  "families": [
+    {"name": "depth", "pattern": "depth_d(?P<depth>\\d+)_m(?P<stmts>\\d+)", "knobs": ["depth", "stmts"]},
+    {"name": "enum", "pattern": "enum_v(?P<variants>\\d+)_p(?P<payload>\\d+)", "knobs": ["variants", "payload"]}
+  ]
+}

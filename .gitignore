@@ -9,3 +9,5 @@
 /design/
 /memory/
 /.githooks/
+/tools/bench/config.local.json
+__pycache__/
