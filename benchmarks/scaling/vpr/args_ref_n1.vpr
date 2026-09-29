@@ -1,0 +1,263 @@
+domain s_Int_i32  {
+  
+  function s_Int_i32_cons(arg0: Int): s_Int_i32 
+  
+  function s_Int_i32_value(arg0: s_Int_i32): Int 
+  
+  axiom s_Int_i32_ax_cons {
+    (forall s: s_Int_i32 ::
+      { s_Int_i32_value(s) }
+      s_Int_i32_cons(s_Int_i32_value(s)) == s)
+  }
+  
+  axiom s_Int_i32_ax_bounds {
+    (forall s: s_Int_i32 ::
+      { s_Int_i32_value(s) }
+      -2147483648 <= s_Int_i32_value(s) && s_Int_i32_value(s) <= 2147483647)
+  }
+  
+  axiom s_Int_i32_ax_value {
+    (forall value: Int ::
+      { s_Int_i32_cons(value) }
+      -2147483648 <= value && value <= 2147483647 ==>
+      s_Int_i32_value(s_Int_i32_cons(value)) == value)
+  }
+}
+
+domain s_Param  {
+  
+  
+}
+
+domain s_Bool  {
+  
+  function s_Bool_cons(arg0: Bool): s_Bool 
+  
+  function s_Bool_value(arg0: s_Bool): Bool 
+  
+  axiom s_Bool_ax_cons {
+    (forall s: s_Bool ::
+      { s_Bool_value(s) }
+      s_Bool_cons(s_Bool_value(s)) == s)
+  }
+  
+  axiom s_Bool_ax_value {
+    (forall value: Bool ::
+      { s_Bool_cons(value) }
+      s_Bool_value(s_Bool_cons(value)) == value)
+  }
+}
+
+domain TypeOf  {
+  
+  function s_Cell_typeof(arg0: s_Cell): Type 
+  
+  function s_Param_typeof(arg0: s_Param): Type 
+  
+  function s_0_Tuple_typeof(arg0: s_0_Tuple): Type 
+}
+
+domain trait_Pointee  {
+  
+  function Pointee_assoc_type_Metadata(arg0: Type): Type 
+  
+  function impl_Pointee(arg0: Type): Bool 
+}
+
+field p_Int_i32_val: s_Int_i32
+
+field p_Ref_immutable_val: s_Ref_immutable
+
+function make_generic_s_Cell(self: s_Cell): s_Param
+  ensures s_Param_typeof(result) == s_Cell_type()
+  ensures make_concrete_s_Cell(result) == self
+
+
+function make_concrete_s_Cell(snap: s_Param): s_Cell
+  ensures make_generic_s_Cell(result) == snap
+
+
+function make_generic_s_0_Tuple(self: s_0_Tuple): s_Param
+  ensures s_Param_typeof(result) == s_0_Tuple_type()
+  ensures make_concrete_s_0_Tuple(result) == self
+
+
+function make_concrete_s_0_Tuple(snap: s_Param): s_0_Tuple
+  ensures make_generic_s_0_Tuple(result) == snap
+
+
+function s_Int_i32_unreachable(): s_Int_i32
+  ensures false
+
+
+function s_Param_unreachable(T$0: Type): s_Param
+  ensures false
+
+
+function s_Ref_immutable_unreachable(U$1: Type): s_Ref_immutable
+  ensures false
+
+
+function s_Cell_unreachable(): s_Cell
+  ensures false
+
+
+function s_Cell_field_0(self: Ref): Ref
+  ensures (self == null) == (result == null)
+
+
+function s_Cell_field_1(self: Ref): Ref
+  ensures (self == null) == (result == null)
+
+
+function s_0_Tuple_unreachable(): s_0_Tuple
+  ensures false
+
+
+function s_Bool_unreachable(): s_Bool
+  ensures false
+
+
+function p_Int_i32_snap(self: Ref): s_Int_i32
+  requires acc(p_Int_i32(self), write)
+{
+  (unfolding acc(p_Int_i32(self), write) in self.p_Int_i32_val)
+}
+
+function p_Param_snap(self: Ref, T$0: Type): s_Param
+  requires acc(p_Param(self, T$0), write)
+
+
+function p_Ref_immutable_snap(self: Ref, U$1: Type): s_Ref_immutable
+  requires acc(p_Ref_immutable(self, U$1), write)
+{
+  (unfolding acc(p_Ref_immutable(self, U$1), write) in
+    self.p_Ref_immutable_val)
+}
+
+function p_Cell_snap(self: Ref): s_Cell
+  requires acc(p_Cell(self), write)
+{
+  (unfolding acc(p_Cell(self), write) in
+    s_Cell_cons(p_Int_i32_snap(s_Cell_field_0(self)), p_Int_i32_snap(s_Cell_field_1(self))))
+}
+
+predicate p_Int_i32(self: Ref) {
+  acc(self.p_Int_i32_val, write)
+}
+
+predicate p_Param(self: Ref, T$0: Type) 
+
+predicate p_Ref_immutable(self: Ref, U$1: Type) {
+  acc(self.p_Ref_immutable_val, write)
+}
+
+predicate p_Cell(self: Ref) {
+  acc(p_Int_i32(s_Cell_field_0(self)), write) &&
+  acc(p_Int_i32(s_Cell_field_1(self)), write)
+}
+
+method m_run(_0p: Ref, _1p: Ref)
+  requires acc(p_Ref_immutable(_1p, s_Cell_type()), write)
+  ensures acc(p_Int_i32(_0p), write)
+{
+  var _2p: Ref
+  label start
+  // var _2p
+  goto bb_0
+  label bb_0
+  label _before_0_0
+  // [MIR] bb0[0]: StorageLive(_2)
+  label _before_0_1
+  // [MIR] bb0[1]: _2 = copy ((*_1).0: i32)
+  // (PCG) handled edge Add: {a0} -> {*a0}
+  // (PCG) handled edge Add: {*a0} -> {(*a0).v, (*a0).w}
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _2, location: Before(AnalysisLocation { location: bb0[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_2), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_2p, make_concrete_s_Cell(p_Ref_immutable_snap(_1p, s_Cell_type()).s_Ref_immutable_2).s_Cell_0)
+  label _before_0_2
+  // [MIR] bb0[2]: FakeRead(ForLet(None), _2)
+  // (PCG) handled edge Remove: {*a0} -> {(*a0).v, (*a0).w}
+  // (PCG) handled edge Remove: {a0} -> {*a0}
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> })), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: (*_1), location: Before(AnalysisLocation { location: bb0[2], eval_stmt_phase: PreOperands }), reason: Collapse, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: Some(Future), phantom: PhantomData<&()> })), label: None })
+  // (ignoring) Remove BorrowFlow(BorrowFlowEdge { source: LifetimeProjection { base: Place(Remote(RemotePlace { local: _1 })), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> }, target: LifetimeProjection { base: Current(_1), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> }, kind: InitialBorrows })
+  // (PCG) handled edge Remove: Remote(_1)↓'?3 -> a0↓'?3
+  label _before_0_3
+  // [MIR] bb0[3]: _0 = copy _2
+  // [PCG] RegainLoanedCapability(RegainedCapability { place: _1, capability: E })
+  // ignored repack op: RegainLoanedCapability(RegainedCapability { place: _1, capability: E })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _0, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_0), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_0p, p_Int_i32_snap(_2p))
+  label _before_0_4
+  // [MIR] bb0[4]: StorageDead(_2)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _2, location: Before(AnalysisLocation { location: bb0[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_2), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // [PCG] Weaken(Weaken { place: _2, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
+  // Weaken(E, W) for _2 (skipped exhale: StorageDead)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _2, location: Before(AnalysisLocation { location: bb0[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_0_5
+  // [MIR] bb0[5]: return
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label package_post0
+  goto end
+  label end
+  // return
+}
+
+method make_generic_Cell(self: Ref)
+  requires acc(p_Cell(self), write)
+  ensures acc(p_Param(self, s_Cell_type()), write)
+  ensures old(make_generic_s_Cell(p_Cell_snap(self))) ==
+    p_Param_snap(self, s_Cell_type())
+
+
+method make_concrete_Cell(self: Ref)
+  requires acc(p_Param(self, s_Cell_type()), write)
+  ensures acc(p_Cell(self), write)
+  ensures old(p_Param_snap(self, s_Cell_type())) ==
+    make_generic_s_Cell(p_Cell_snap(self))
+
+
+method p_Int_i32_assign(self: Ref, value: s_Int_i32)
+  ensures acc(p_Int_i32(self), write)
+  ensures p_Int_i32_snap(self) == value
+
+
+method p_Param_assign(self: Ref, T$0: Type, value: s_Param)
+  ensures acc(p_Param(self, T$0), write)
+  ensures p_Param_snap(self, T$0) == value
+
+
+method p_Ref_immutable_assign(self: Ref, U$1: Type, value: s_Ref_immutable)
+  ensures acc(p_Ref_immutable(self, U$1), write)
+  ensures p_Ref_immutable_snap(self, U$1) == value
+
+
+method p_Cell_assign(self: Ref, value: s_Cell)
+  ensures acc(p_Cell(self), write)
+  ensures p_Cell_snap(self) == value
+
+
+adt s_Ref_immutable {
+  s_Ref_immutable_cons(s_Ref_immutable_0: Ref, s_Ref_immutable_1: s_Param, s_Ref_immutable_2: s_Param)
+}
+
+adt s_Cell {
+  s_Cell_cons(s_Cell_0: s_Int_i32, s_Cell_1: s_Int_i32)
+}
+
+adt s_0_Tuple {
+  s_0_Tuple_cons()
+}
+
+adt Type {
+  s_Cell_type()
+  s_0_Tuple_type()
+  Unknown_type(non_unit: Int)
+}
