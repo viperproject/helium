@@ -1,0 +1,17 @@
+{
+  "description": "Generated scaling families: one knob varies, everything else is held fixed (gen_*.py)",
+  "tags": ["generated", "scaling"],
+  "exhaustive": true,
+  "families": [
+    {"name": "loops", "pattern": "loops_n(?P<nesting>\\d+)_b(?P<body>\\d+)", "knobs": ["nesting", "body"]},
+    {"name": "seq_if", "pattern": "seqif_k(?P<branches>\\d+)", "knobs": ["branches"]},
+    {"name": "args_value", "pattern": "args_val_n(?P<args>\\d+)", "knobs": ["args"]},
+    {"name": "args_ref", "pattern": "args_ref_n(?P<args>\\d+)", "knobs": ["args"]},
+    {"name": "args_mut", "pattern": "args_mut_n(?P<args>\\d+)", "knobs": ["args"]},
+    {"name": "call_depth", "pattern": "calls_depth(?P<depth>\\d+)", "knobs": ["depth"]},
+    {"name": "call_fanout", "pattern": "calls_fanout(?P<fanout>\\d+)", "knobs": ["fanout"]},
+    {"name": "mut_writes", "pattern": "mut_w(?P<writes>\\d+)_p(?P<path>\\d+)", "knobs": ["writes", "path"]},
+    {"name": "arith", "pattern": "arith_k(?P<ops>\\d+)", "knobs": ["ops"]},
+    {"name": "struct_depth", "pattern": "struct_d(?P<depth>\\d+)", "knobs": ["depth"]}
+  ]
+}
