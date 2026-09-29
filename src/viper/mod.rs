@@ -1,5 +1,6 @@
 pub mod cfg;
 pub mod loops;
+pub mod metrics;
 pub mod parsed;
 pub mod typed;
 pub mod units;

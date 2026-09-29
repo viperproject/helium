@@ -237,3 +237,100 @@ impl VerifyStats {
         }
     }
 }
+
+impl VerifyStats {
+    /// Every field, deterministic counters and timing alike, as JSON for
+    /// `verify --json`. Destructured exhaustively so a new counter cannot be
+    /// added without deciding how it is reported.
+    pub fn to_json(&self) -> crate::json::Json {
+        use crate::json::Json;
+        let VerifyStats {
+            saturations,
+            reduces,
+            probe_saturations,
+            probe_iterations,
+            probe_reduces,
+            probe_early_stops,
+            block_scratch_clones,
+            block_scratch_saturations,
+            block_scratch_iterations,
+            block_scratch_freehits,
+            sat_iterations,
+            egraph_nodes_peak,
+            egraph_classes_peak,
+            insts_processed,
+            rule_applications,
+            per_rule,
+            prove_calls,
+            prove_inconsistent,
+            prove_dead_block,
+            prove_goal_true,
+            prove_memo,
+            prove_saturate,
+            prove_probe,
+            prove_ite_decompose,
+            timing,
+            graph_timing,
+            rule_timing,
+        } = self;
+        let n = |v: &u64| Json::from(*v);
+        Json::obj([
+            ("saturations", n(saturations)),
+            ("reduces", n(reduces)),
+            ("probe_saturations", n(probe_saturations)),
+            ("probe_iterations", n(probe_iterations)),
+            ("probe_reduces", n(probe_reduces)),
+            ("probe_early_stops", n(probe_early_stops)),
+            ("block_scratch_clones", n(block_scratch_clones)),
+            ("block_scratch_saturations", n(block_scratch_saturations)),
+            ("block_scratch_iterations", n(block_scratch_iterations)),
+            ("block_scratch_freehits", n(block_scratch_freehits)),
+            ("sat_iterations", n(sat_iterations)),
+            ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
+            ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
+            ("insts_processed", n(insts_processed)),
+            ("rule_applications", n(rule_applications)),
+            ("prove_calls", n(prove_calls)),
+            ("prove_inconsistent", n(prove_inconsistent)),
+            ("prove_dead_block", n(prove_dead_block)),
+            ("prove_goal_true", n(prove_goal_true)),
+            ("prove_memo", n(prove_memo)),
+            ("prove_saturate", n(prove_saturate)),
+            ("prove_probe", n(prove_probe)),
+            ("prove_ite_decompose", n(prove_ite_decompose)),
+            (
+                "per_rule",
+                Json::obj(per_rule.iter().map(|(k, v)| (k.clone(), n(v)))),
+            ),
+            (
+                "timing",
+                Json::obj([
+                    ("search", Json::from(timing.0.search)),
+                    ("apply", Json::from(timing.0.apply)),
+                    ("rebuild", Json::from(timing.0.rebuild)),
+                ]),
+            ),
+            (
+                "graph_timing",
+                Json::obj([
+                    ("ground", Json::from(graph_timing.0.ground)),
+                    ("scratch", Json::from(graph_timing.0.scratch)),
+                    ("probe", Json::from(graph_timing.0.probe)),
+                    ("scratch_clone", Json::from(graph_timing.0.scratch_clone)),
+                ]),
+            ),
+            (
+                "rule_timing",
+                Json::obj(rule_timing.0.iter().map(|(k, t)| {
+                    (
+                        k.clone(),
+                        Json::obj([
+                            ("search", Json::from(t.search)),
+                            ("apply", Json::from(t.apply)),
+                        ]),
+                    )
+                })),
+            ),
+        ])
+    }
+}

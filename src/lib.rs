@@ -1,4 +1,6 @@
 #![feature(never_type)]
+pub mod json;
+pub mod peak_memory;
 pub mod pipeline;
 /// Deterministic hash maps and sets for the whole crate. `std`'s default hasher
 /// is seeded per process, so iterating a map (candidate chunks, rule matches,

@@ -28,3 +28,9 @@ items_after_test_module = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"
 unnecessary_unwrap = "allow"
+
+# `bench` (the benchmark runner) is a separate member so its dependencies
+# (syn, serde, ...) never reach the verifier. Commands run from the repository
+# root still build and test only `silver-oxide` unless `-p bench` is given.
+[workspace]
+members = [".", "bench"]

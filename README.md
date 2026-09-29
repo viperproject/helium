@@ -36,7 +36,9 @@ Helium was initially developed by Jakub Adam Trzykowski.
     - `failing/` – cases that are expected to be rejected
     - `known_limitations/` – tracked incompletenesses
     - `unsupported/` – unsupported constructs that must be reported cleanly
-- `benchmarks/` – performance benchmark files and baseline snapshots
+- `benchmarks/` – benchmark suites and baseline snapshots (see `benchmarks/README.md`)
+- `bench/` – the benchmark runner (a separate workspace member): times rustc, Helium and Silicon per file, extracts Rust and Viper shape metrics, writes one JSON per run
+- `tools/bench/` – `run.py` / `backfill.py` record runs on the `benchmarks` branch; `site/` is the GitHub Pages site that plots them
 - `Cargo.toml` – Rust project configuration
 - `rust-toolchain.toml` – pins the nightly toolchain
 
@@ -83,6 +85,17 @@ cargo run --bin verify -- --breakdown tests/cases/passing/field.vpr
 ```
 
 This prints the verification status of each member and, with `--breakdown`, the slowest verification steps and rule timings.
+
+For tools, `--json` prints one JSON object instead (statuses, phase timings, per-member times, all verifier counters, peak memory, the build's git commit), and `--viper-metrics` prints shape metrics of the parsed program without verifying:
+
+```bash
+cargo run --release --bin verify -- --json tests/cases/passing/field.vpr
+cargo run --release --bin verify -- --viper-metrics tests/cases/passing/field.vpr
+```
+
+## Benchmark pipeline
+
+Per commit, `tools/bench/run.py` records how long Helium takes on every benchmark file next to `rustc` and Viper's Silicon, the verifier's cost counters, and each program's shape, on the `benchmarks` branch; its GitHub Pages site shows trends, commit-against-commit comparisons, scaling fits and metric correlations. See `benchmarks/README.md`.
 
 ## Typical workflow
 

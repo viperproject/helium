@@ -1,0 +1,17 @@
+{
+  "host": null,
+  "repo_url": null,
+  "results_branch": "benchmarks",
+  "results_worktree": "../helium-bench-results",
+  "remote": "origin",
+  "rustc_toolchain": null,
+  "silicon_jar": null,
+  "java": "java",
+  "jvm_args": ["-Xss128m"],
+  "silicon_args": [],
+  "warmup": 1,
+  "runs": 5,
+  "timeout_s": null,
+  "slowdown_warn": 0.15,
+  "backfill_target_dir": "target/backfill"
+}

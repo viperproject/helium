@@ -1,0 +1,4 @@
+{
+  "description": "Loops with Prusti-inferred permission invariants (see README.md)",
+  "tags": ["loops"]
+}

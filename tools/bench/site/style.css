@@ -1,0 +1,126 @@
+/* Tokens: the reference data-viz palette (light and dark are each selected,
+   not flipped). Charts read these at render time. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --accent: #2a78d6;
+  --good: #006300;
+  --bad: #d03b3b;
+  --wash: rgba(42, 120, 214, 0.08);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+  --other: #c3c2b7;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --text: #ffffff;
+    --text-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --accent: #3987e5;
+    --good: #0ca30c;
+    --bad: #e66767;
+    --wash: rgba(57, 135, 229, 0.12);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --other: #4a4a47;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --text: #ffffff;
+  --text-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --accent: #3987e5;
+  --good: #0ca30c;
+  --bad: #e66767;
+  --wash: rgba(57, 135, 229, 0.12);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --other: #4a4a47;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+code { font-size: 0.92em; }
+a { color: var(--accent); }
+.muted { color: var(--muted); }
+.good { color: var(--good); }
+.bad { color: var(--bad); }
+
+header.top {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+  position: sticky; top: 0; z-index: 10;
+}
+.brand { font-weight: 600; }
+nav { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; }
+nav a {
+  color: var(--text-2); text-decoration: none; padding: 4px 10px; border-radius: 6px;
+}
+nav a:hover { background: var(--wash); }
+nav a.active { color: var(--text); background: var(--wash); font-weight: 600; }
+button, select, input {
+  font: inherit; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+}
+button.ghost { background: transparent; cursor: pointer; }
+select[multiple] { min-height: 6em; }
+
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+footer { max-width: 1200px; margin: 0 auto; padding: 16px; font-size: 12px; }
+h1 { font-size: 20px; margin: 4px 0 12px; }
+h2 { font-size: 15px; margin: 24px 0 8px; }
+
+.controls {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px;
+}
+.controls label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-2); }
+.controls select, .controls input { min-width: 12em; max-width: 100%; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px; margin-bottom: 12px;
+}
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.tile .label { font-size: 12px; color: var(--text-2); }
+.tile .value { font-size: 24px; font-weight: 600; margin: 2px 0; }
+.tile .delta { font-size: 12px; color: var(--text-2); }
+.chart { width: 100%; min-height: 360px; }
+
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { color: var(--text-2); font-weight: 600; cursor: default; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:hover td { background: var(--wash); }
+details summary { cursor: pointer; color: var(--text-2); margin: 6px 0; }
+.pill {
+  display: inline-block; padding: 0 6px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--border); color: var(--text-2);
+}
+.warn-list li { color: var(--text-2); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 800px) { .two { grid-template-columns: 1fr; } }
