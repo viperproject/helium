@@ -197,6 +197,7 @@ benchmarks branch
     index.json                one entry per run: commit, date, subject, totals, coverage
     runs/<date>_<sha>.json    one file per run (full data)
     silicon_cache.json        Silicon results keyed by (.vpr hash, Silicon version)
+    rustc_cache.json          rustc_check timings keyed by (.rs hash, rustc version, arguments)
   docs/                       the GitHub Pages site, served from this branch
 ```
 
@@ -293,6 +294,7 @@ Decisions made while implementing:
 
 - **Several families per suite.** `suite.json` also accepts `"families": [...]` (each with a `name`), since `scaling/` holds seven generators and `rust/` has two families next to hand-written files. A single `family` still requires every stem to match; with `families`, each must match some stem, and `"exhaustive": true` restores the every-stem rule.
 - **`helium_verify` is `verify`'s own pipeline total** (no process startup), the fair counterpart of `silicon_verify`; the process wall time is kept as `helium_wall`.
+- **rustc is cached like Silicon.** `rustc_check` depends only on the `.rs`, the compiler and its arguments, never on the Helium commit, so each successful timing is measured once and reused (`rustc_cache.json`, marked `cached` in the run file). The Rust and Viper metrics are not cached: they take seconds for the whole corpus, and a cache would go stale whenever their extractors change.
 - **rustc is timed without the rustup proxy.** The runner resolves the toolchain's own `rustc` from its sysroot once (the proxy added ~80 ms to a ~100 ms `rustc_check`). The toolchain is `rust-toolchain.toml`'s unless `rustc_toolchain` pins one in `tools/bench/config.json`; the version is recorded either way.
 - **Per-member metrics go on the member for the declaration** (`m_f`), not on its `m_f#requires` / `m_f#ensures` contract checks, so each Rust function is one data point.
 - **Silicon's times are parsed in all of its formats**: `12.34s` under a minute, `01m:05s` under an hour, `1h:02m:03s` above (silver's `formatMillisReadably`). Reading only the first had recorded every run over a minute as an error.

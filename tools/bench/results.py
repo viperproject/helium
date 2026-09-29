@@ -109,13 +109,17 @@ def check_suites(benchmarks: Path, cfg: dict) -> None:
         die("check-suites found errors; fix them before measuring")
 
 
-def bench_run(cfg: dict, out: Path, extra: list, silicon_cache: Path | None) -> dict:
-    """Run `bench run` with the configured tools; return the run JSON."""
+def bench_run(cfg: dict, out: Path, extra: list, caches: Path | None) -> dict:
+    """Run `bench run` with the configured tools; return the run JSON. `caches`
+    is the directory holding the rustc and Silicon caches (reused across runs:
+    neither tool's result depends on the commit being measured)."""
     cmd = [bench_exe(), "run", "--out", out, "--warmup", cfg.get("warmup", 1), "--runs", cfg.get("runs", 5)]
     if cfg.get("rustc_toolchain"):
         cmd += ["--rustc-toolchain", cfg["rustc_toolchain"]]
     else:
         log("warning: rustc_toolchain is not pinned in config.json; rust-toolchain.toml decides")
+    if caches:
+        cmd += ["--rustc-cache", caches / "rustc_cache.json"]
     if cfg.get("timeout_s"):
         cmd += ["--timeout", cfg["timeout_s"]]
     if cfg.get("silicon_jar"):
@@ -124,8 +128,8 @@ def bench_run(cfg: dict, out: Path, extra: list, silicon_cache: Path | None) -> 
             cmd += ["--jvm-arg", a]
         for a in cfg.get("silicon_args", []):
             cmd += ["--silicon-arg", a]
-        if silicon_cache:
-            cmd += ["--silicon-cache", silicon_cache]
+        if caches:
+            cmd += ["--silicon-cache", caches / "silicon_cache.json"]
     cmd += extra
     run(cmd, cwd=REPO)
     return json.loads(out.read_text(encoding="utf-8"))

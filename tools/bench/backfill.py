@@ -93,7 +93,7 @@ def main() -> None:
                 for s in args.suite:
                     extra += ["--suite", s]
                 run_data = R.bench_run(
-                    cfg, Path(tmp) / "run.json", extra + args.bench_args, store.results / "silicon_cache.json"
+                    cfg, Path(tmp) / "run.json", extra + args.bench_args, store.results
                 )
             finally:
                 R.git("worktree", "remove", "--force", str(wt), check=False)

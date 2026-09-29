@@ -167,16 +167,19 @@ pub enum Status {
 }
 
 /// Summary of the timed runs of one command.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Timing {
     pub status: Status,
     pub median: Option<f64>,
     pub mad: Option<f64>,
     pub runs: Vec<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_rss_mb: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Taken from a cache rather than measured in this run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cached: bool,
 }
 
 impl Timing {
@@ -199,6 +202,7 @@ impl Timing {
             runs,
             peak_rss_mb: (!peaks.is_empty()).then(|| self::median(peaks)),
             message,
+            cached: false,
         }
     }
 }

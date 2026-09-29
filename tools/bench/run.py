@@ -59,7 +59,7 @@ def main() -> None:
             cfg,
             out,
             ["--verify", verify, "--repo", R.REPO] + args.bench_args,
-            store.results / "silicon_cache.json",
+            store.results,
         )
 
     index = store.load_index()

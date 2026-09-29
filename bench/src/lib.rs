@@ -3,10 +3,12 @@
 //! - [`suites`]: discovering suites under `benchmarks/` by directory layout;
 //! - [`measure`]: timing one process (wall time, peak memory, timeout);
 //! - [`helium`], [`silicon`]: running and reading the two verifiers;
+//! - [`cache`]: rustc and Silicon results reused across runs;
 //! - [`rust_metrics`]: per-function shape metrics from a `syn` parse;
 //! - [`run`]: measuring every file and joining it all into one run JSON;
 //! - [`check`]: `bench check-suites`.
 
+pub mod cache;
 pub mod check;
 pub mod helium;
 pub mod measure;

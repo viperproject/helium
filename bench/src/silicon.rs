@@ -243,35 +243,11 @@ pub fn measure(
 }
 
 /// Silicon results keyed by `"<vpr sha256>|<jar sha256>"`.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Cache {
-    pub schema: u32,
-    pub entries: BTreeMap<String, SiliconResult>,
-}
+pub type Cache = crate::cache::Cache<SiliconResult>;
 
 impl Cache {
     pub fn key(vpr_sha256: &str, jar_sha256: &str) -> String {
         format!("{vpr_sha256}|{jar_sha256}")
-    }
-
-    pub fn load(path: &Path) -> std::io::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).map_err(std::io::Error::other),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Cache {
-                schema: 1,
-                ..Default::default()
-            }),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(tmp, path)
     }
 }
 

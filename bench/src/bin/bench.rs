@@ -24,6 +24,7 @@
 //! --rustc PATH            rustc to time (default: rustc)
 //! --rustc-toolchain TC    pinned toolchain, passed as +TC
 //! --no-rustc              skip the rustc columns
+//! --rustc-cache FILE      rustc timings cache (read and updated)
 //! --silicon-jar PATH      Silicon fat jar (no jar: no Silicon columns)
 //! --java PATH             java binary (default: java)
 //! --jvm-arg ARG           extra JVM argument (repeatable; default -Xss128m)
@@ -168,6 +169,7 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             rustc: "rustc".into(),
             toolchain: None,
         }),
+        rustc_cache: None,
         silicon: None,
         silicon_cache: None,
         scratch: default_scratch(),
@@ -213,6 +215,7 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             "--java" => java = args.value(&a)?.into(),
             "--jvm-arg" => jvm_args.push(args.value(&a)?),
             "--silicon-arg" => silicon_args.push(args.value(&a)?),
+            "--rustc-cache" => opts.rustc_cache = Some(args.value(&a)?.into()),
             "--silicon-cache" => opts.silicon_cache = Some(args.value(&a)?.into()),
             "--scratch" => opts.scratch = args.value(&a)?.into(),
             "--out" => out = Some(args.value(&a)?.into()),

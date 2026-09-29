@@ -42,6 +42,8 @@ pub struct Options {
     pub runs: usize,
     pub timeout: Option<f64>,
     pub rustc: Option<RustcOptions>,
+    /// rustc timings reused across runs (read and updated).
+    pub rustc_cache: Option<PathBuf>,
     pub silicon: Option<Silicon>,
     pub silicon_cache: Option<PathBuf>,
     pub scratch: PathBuf,
@@ -95,6 +97,18 @@ impl RustcOptions {
         let out = self.command().arg("-vV").output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         text.lines().next().map(|l| l.trim().to_string())
+    }
+}
+
+/// `rustc_check` timings. Like Silicon's, they depend only on the `.rs`, the
+/// compiler and its arguments, never on the Helium commit, so each is measured
+/// once and reused. Keyed by `"<rs sha256>|<rustc -vV>|<args>"`; the version
+/// line carries the compiler's commit hash.
+pub type RustcCache = crate::cache::Cache<Timing>;
+
+impl RustcCache {
+    pub fn key(rs_sha256: &str, rustc_version: &str, args: &[String]) -> String {
+        format!("{rs_sha256}|{rustc_version}|{}", args.join(" "))
     }
 }
 
@@ -303,7 +317,10 @@ struct Ctx<'a> {
     opts: &'a Options,
     /// `opts.rustc`, resolved past the rustup proxy.
     rustc: Option<RustcOptions>,
-    cache: Option<silicon::Cache>,
+    /// Its `rustc -vV` line, part of the rustc cache key.
+    rustc_version: Option<String>,
+    rustc_cache: Option<RustcCache>,
+    silicon_cache: Option<silicon::Cache>,
     silicon: Option<Silicon>,
     verify_commit: Option<String>,
     verify_json: bool,
@@ -339,16 +356,24 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         ));
     }
 
-    let cache = match &opts.silicon_cache {
+    let load_err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let silicon_cache = match &opts.silicon_cache {
         Some(p) if opts.silicon.is_some() => {
-            Some(silicon::Cache::load(p).map_err(|e| format!("{}: {e}", p.display()))?)
+            Some(silicon::Cache::load(p).map_err(|e| load_err(p, e))?)
         }
         _ => None,
     };
+    let rustc_cache = match &opts.rustc_cache {
+        Some(p) if opts.rustc.is_some() => Some(RustcCache::load(p).map_err(|e| load_err(p, e))?),
+        _ => None,
+    };
+    let rustc = opts.rustc.as_ref().map(RustcOptions::resolve);
     let mut ctx = Ctx {
         opts,
-        rustc: opts.rustc.as_ref().map(RustcOptions::resolve),
-        cache,
+        rustc_version: rustc.as_ref().and_then(RustcOptions::version),
+        rustc,
+        rustc_cache,
+        silicon_cache,
         silicon: opts.silicon.clone(),
         verify_commit: None,
         verify_json: true,
@@ -384,12 +409,13 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
             }
             let result = measure_file(&mut ctx, suite, file).map_err(|e| format!("{key}: {e}"))?;
             files.push(result);
-            // Save the Silicon cache as we go: a crash an hour in keeps what
-            // was measured.
-            if let (Some(cache), Some(path)) = (&ctx.cache, &opts.silicon_cache) {
-                cache
-                    .save(path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+            // Save the caches as we go: a crash an hour in keeps what was
+            // measured.
+            if let (Some(cache), Some(path)) = (&ctx.silicon_cache, &opts.silicon_cache) {
+                cache.save(path).map_err(|e| load_err(path, e))?;
+            }
+            if let (Some(cache), Some(path)) = (&ctx.rustc_cache, &opts.rustc_cache) {
+                cache.save(path).map_err(|e| load_err(path, e))?;
             }
         }
     }
@@ -403,7 +429,7 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         subject,
         host: opts.host.clone(),
         tools: Tools {
-            rustc: ctx.rustc.as_ref().and_then(RustcOptions::version),
+            rustc: ctx.rustc_version.clone(),
             rustc_toolchain: opts.rustc.as_ref().and_then(|r| r.toolchain.clone()),
             silicon: ctx.silicon.as_ref().map(Silicon::id),
             verify_commit: ctx.verify_commit,
@@ -498,21 +524,27 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
 
     // ── rustc ──
     if let (Some(rustc), Some(rs)) = (ctx.rustc.clone(), &file.rs) {
-        let out_dir = scratch.join("rustc-out");
-        std::fs::create_dir_all(&out_dir).map_err(io)?;
-        let base = suite.rustc_args();
-        let make = || {
-            let mut c = rustc.command();
-            c.args(&base)
-                .args(["--emit=metadata", "--cap-lints", "allow", "--out-dir"])
-                .arg(&out_dir)
-                .arg(rs);
-            c
+        let args = suite.rustc_args();
+        // Only successful timings are cached; a failure is measured again.
+        let key = rs_sha
+            .as_deref()
+            .zip(ctx.rustc_version.as_deref())
+            .map(|(sha, version)| RustcCache::key(sha, version, &args));
+        let hit = key
+            .as_ref()
+            .and_then(|k| ctx.rustc_cache.as_ref()?.entries.get(k).cloned());
+        let t = match hit {
+            Some(t) => Timing { cached: true, ..t },
+            None => {
+                let t = time_rustc(&rustc, &args, rs, opts, timeout, &scratch).map_err(io)?;
+                if let (Some(k), Some(cache)) = (key, ctx.rustc_cache.as_mut()) {
+                    if t.status == Status::Ok {
+                        cache.entries.insert(k, t.clone());
+                    }
+                }
+                t
+            }
         };
-        let succeeded = |s: &Sample| s.code == Some(0);
-        let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, &scratch, succeeded)
-            .map_err(io)?;
-        let t = measure::wall_timing(&samples, succeeded);
         if let Some(p) = t.peak_rss_mb {
             peaks.insert("rustc_check".to_string(), p);
         }
@@ -617,7 +649,7 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     if suite.silicon() {
         if let Some(sil) = ctx.silicon.as_mut() {
             let key = silicon::Cache::key(&vpr_sha, &sil.jar_sha256);
-            match ctx.cache.as_ref().and_then(|c| c.entries.get(&key)) {
+            match ctx.silicon_cache.as_ref().and_then(|c| c.entries.get(&key)) {
                 Some(hit) => {
                     if sil.version.is_none() {
                         sil.version = hit
@@ -638,7 +670,7 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
                         &scratch,
                     )
                     .map_err(|e| format!("silicon: {e}"))?;
-                    if let Some(cache) = ctx.cache.as_mut() {
+                    if let Some(cache) = ctx.silicon_cache.as_mut() {
                         cache.entries.insert(key, r.clone());
                     }
                     silicon_result = Some((r, false));
@@ -730,16 +762,14 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     }
 
     let t = &times;
+    let cached = |c: bool| if c { " (cached)" } else { "" };
     progress(format!(
-        "  helium {} | rustc_check {} | silicon_verify {}{}",
+        "  helium {} | rustc_check {}{} | silicon_verify {}{}",
         fmt_time(t.helium_verify.as_ref().and_then(|h| h.timing.median)),
         fmt_time(t.rustc_check.as_ref().and_then(|x| x.median)),
+        cached(t.rustc_check.as_ref().is_some_and(|x| x.cached)),
         fmt_time(t.silicon_verify.as_ref().and_then(|x| x.median)),
-        if t.silicon_verify.as_ref().is_some_and(|s| s.cached) {
-            " (cached)"
-        } else {
-            ""
-        }
+        cached(t.silicon_verify.as_ref().is_some_and(|s| s.cached)),
     ));
 
     let family = suite.family_of(&file.stem);
@@ -775,6 +805,31 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
         }),
         members,
     })
+}
+
+/// Time `rustc --emit=metadata` (type and borrow checking only, like
+/// `cargo check`) on `rs`: warm-up runs, then the timed ones.
+fn time_rustc(
+    rustc: &RustcOptions,
+    args: &[String],
+    rs: &Path,
+    opts: &Options,
+    timeout: Duration,
+    scratch: &Path,
+) -> std::io::Result<Timing> {
+    let out_dir = scratch.join("rustc-out");
+    std::fs::create_dir_all(&out_dir)?;
+    let make = || {
+        let mut c = rustc.command();
+        c.args(args)
+            .args(["--emit=metadata", "--cap-lints", "allow", "--out-dir"])
+            .arg(&out_dir)
+            .arg(rs);
+        c
+    };
+    let succeeded = |s: &Sample| s.code == Some(0);
+    let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, scratch, succeeded)?;
+    Ok(measure::wall_timing(&samples, succeeded))
 }
 
 /// Keep the 20 slowest rules of `stats.rule_timing`: the full map is a few
