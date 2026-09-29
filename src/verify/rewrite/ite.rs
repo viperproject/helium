@@ -238,5 +238,8 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
 /// structurally at construction by [`ChunkPerm::collapse_same_cond`], with no scan
 /// and no budget.
 pub(super) fn terminating_ite_rules() -> Vec<Rule> {
-    vec![Rewrite::new("ite-reduce", IteBucketSearcher, IteReduceApplier).expect("ite rule")]
+    vec![
+        Rewrite::new("ite-reduce", IteBucketSearcher, PerClass(IteReduceApplier))
+            .expect("ite rule"),
+    ]
 }
