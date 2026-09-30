@@ -721,11 +721,17 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             }
             let sil = silicon_result.as_ref().and_then(|(r, _)| {
                 r.verified?;
-                Some(if r.failed_members.contains(base) {
-                    "FAIL"
+                if r.failed_members.contains(base) {
+                    // Silicon reports per declaration: a failure in `m_f` does
+                    // not say whether `m_f#requires` / `#ensures` (its contract
+                    // checks) fail, so those rows stay unknown.
+                    (base == name).then_some("FAIL")
+                } else if silicon_unattributed(r) {
+                    // A rejection we could not place: no member is known OK.
+                    None
                 } else {
-                    "OK"
-                })
+                    Some("OK")
+                }
             });
             let disagreement = match (status.as_str(), sil) {
                 ("FAIL", Some("OK")) => Some("incompleteness"),
@@ -752,6 +758,15 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             }
         })
         .collect::<Vec<_>>();
+    if let Some((r, _)) = &silicon_result
+        && silicon_unattributed(r)
+    {
+        ctx.warnings.push(format!(
+            "{}/{}: Silicon rejects the file but not every error could be placed in a member; \
+             per-member Silicon verdicts left unknown",
+            suite.name, file.stem
+        ));
+    }
     for m in &members {
         if m.disagreement == Some("soundness") {
             ctx.warnings.push(format!(
@@ -805,6 +820,14 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
         }),
         members,
     })
+}
+
+/// Silicon rejected the file, but some of its errors are not placed in a
+/// member (none parsed, or a line outside every declaration). Then no member
+/// can be called OK: that would report Helium incomplete where Silicon failed.
+fn silicon_unattributed(r: &SiliconResult) -> bool {
+    r.verified == Some(false)
+        && (r.errors.is_empty() || r.errors.iter().any(|e| e.member.is_none()))
 }
 
 /// Time `rustc --emit=metadata` (type and borrow checking only, like

@@ -12,7 +12,7 @@
 //! commit, so results are cached by `(vpr sha256, jar sha256)` and Silicon is
 //! rerun only when an encoding or the jar changes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -125,8 +125,10 @@ static FINISHED: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+/// One error line: `  [0] <message> (<file>@<line>.<col>)`. The position is
+/// often a range, `@320.11--321.30`; the error belongs to its start line.
 static ERROR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*\[\d+\]\s+(.*?)\s*\(([^()@]*)@(\d+)\.(\d+)\)\s*$").unwrap()
+    Regex::new(r"(?m)^\s*\[\d+\]\s+(.*?)\s*\(([^()@]*)@(\d+)\.(\d+)(?:--\d+\.\d+)?\)\s*$").unwrap()
 });
 static DECL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(method|function|predicate|domain|field|adt|define|import)\s+([A-Za-z_$][\w$']*)")
@@ -310,6 +312,25 @@ mod tests {
                 member: Some("m_a".into()),
                 line: Some(5),
                 message: "Assert might fail. Assertion false might not hold.".into()
+            }]
+        );
+    }
+
+    /// Silicon usually reports a range (`@9.5--10.12`), with parentheses in
+    /// the message and Windows line endings; the error goes to the member
+    /// holding the range's start line.
+    #[test]
+    fn parses_error_ranges() {
+        let d = declaration_lines(SRC);
+        let out = "Silicon found 1 error in 18.56s:\r\n  [0] Postcondition of m_b might not hold. There might be insufficient permission to access p(get(old(x))) (x.vpr@9.5--10.12)\r\n";
+        let p = parse_output(out, &d);
+        assert_eq!(p.verified, Some(false));
+        assert_eq!(
+            p.errors,
+            [SiliconError {
+                member: Some("m_b".into()),
+                line: Some(9),
+                message: "Postcondition of m_b might not hold. There might be insufficient permission to access p(get(old(x)))".into()
             }]
         );
     }
