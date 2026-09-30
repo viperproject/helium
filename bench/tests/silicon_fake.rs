@@ -77,13 +77,16 @@ fn measures_attributes_errors_and_caches() {
     assert!(!r.failed_members.contains("m_b"));
 
     let cache_path = dir.join("cache.json");
+    let key = Cache::key("vprhash", &sil.jar_sha256, &sil.config_id());
     let mut cache = Cache::load(&cache_path).unwrap();
-    cache
-        .entries
-        .insert(Cache::key("vprhash", &sil.jar_sha256), r);
+    assert!(Cache::keeps(&r));
+    cache.entries.insert(key.clone(), r);
     cache.save(&cache_path).unwrap();
     let back = Cache::load(&cache_path).unwrap();
-    let hit = &back.entries[&Cache::key("vprhash", &sil.jar_sha256)];
+    let hit = &back.entries[&key];
     assert_eq!(hit.errors[0].member.as_deref(), Some("m_a"));
+    assert_eq!(hit.timeout_s, Some(60.0));
+    assert!(Cache::reusable(hit, 3, Duration::from_secs(60)));
+    assert!(!Cache::reusable(hit, 5, Duration::from_secs(60)));
     let _ = std::fs::remove_dir_all(&dir);
 }

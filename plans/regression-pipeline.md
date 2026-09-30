@@ -37,7 +37,7 @@ The headline numbers, tracked per file and as a geometric mean over the corpus:
   - `silicon_wall`: the whole process, including JVM startup. This is what a user waits for.
   - `silicon_verify`: the time Silicon reports for verification itself, without JVM startup. This is the fair comparison with `helium_verify`.
 - Record Silicon's verdict per member as well as Helium's. A member where the two disagree is flagged in the results: a Helium FAIL where Silicon verifies is incompleteness, and a Helium OK where Silicon fails needs a soundness look.
-- Silicon's result depends only on the `.vpr` and the Silicon version, not on our commit. Cache it by (`.vpr` hash, Silicon version) so the runner only reruns Silicon when an encoding or the Silicon build changes.
+- Silicon's result depends only on the `.vpr` and the Silicon version, not on our commit. Cache it by (`.vpr` hash, Silicon version and arguments) so the runner only reruns Silicon when an encoding, the Silicon build or its arguments change.
 
 ### How to measure
 
@@ -196,7 +196,7 @@ benchmarks branch
   benchmarks/results/
     index.json                one entry per run: commit, date, subject, totals, coverage
     runs/<date>_<sha>.json    one file per run (full data)
-    silicon_cache.json        Silicon results keyed by (.vpr hash, Silicon version)
+    silicon_cache.json        Silicon results keyed by (.vpr hash, jar hash, arguments)
     rustc_cache.json          rustc_check timings keyed by (.rs hash, rustc version, arguments)
   docs/                       the GitHub Pages site, served from this branch
 ```
@@ -299,6 +299,9 @@ Decisions made while implementing:
 - **Per-member metrics go on the member for the declaration** (`m_f`), not on its `m_f#requires` / `m_f#ensures` contract checks, so each Rust function is one data point.
 - **Silicon's times are parsed in all of its formats**: `12.34s` under a minute, `01m:05s` under an hour, `1h:02m:03s` above (silver's `formatMillisReadably`). Reading only the first had recorded every run over a minute as an error.
 - **Silicon errors are placed by the start of their location**, which is usually a range (`@320.11--321.30`); reading only single positions (`@5.3`) had dropped those errors and reported the failing member as OK, i.e. as a Helium incompleteness. Silicon's verdict is per declaration, so a failing `m_f` leaves the verdict of its contract rows (`m_f#requires`, `m_f#ensures`) unknown rather than FAIL, and a rejection that cannot be placed in a member leaves every member unknown (with a warning) rather than OK.
+- **Every Silicon error is read, or none is trusted.** From ten errors on, Silicon pads the index (`[ 0]`); reading only `[0]` had dropped all but `[10]` of `must_fail`'s eleven errors and reported ten failing members as OK (false incompleteness, and a Helium OK there would have hidden a soundness disagreement). The parser now also checks the count on Silicon's summary line: errors it could not read stand in as one error outside every member, so no member is called OK.
+- **A timeout kills the whole process tree.** `java` on Windows is often the `javapath` launcher, which starts the real JVM, which starts z3s; killing only the launcher left them running, stealing CPU from later measurements and writing their summary into the next file's output (a timed-out Silicon run was recorded as verified, in more time than the timeout). Each command now runs in a job object (Windows: created suspended, assigned, then resumed, so nothing escapes) or its own process group (Unix), killed on a timeout and cleaned up after exit; a timed-out sample's output is never parsed as a verdict.
+- **What the caches keep.** rustc: successful timings, reused only for runs asking no more timed runs than they hold. Silicon: finished results (same run-count rule) and timeouts with the limit they hit, reused only while the timeout is no longer; errors (a crash, an out-of-memory JVM) are measured again. The Silicon key also covers the JVM and Silicon arguments (`-Xss` decides whether Silicon crashes).
 - **Pages serves the branch root**, not `/docs`: the site reads `../benchmarks/results/`, and a root `index.html` redirects to `docs/`.
 - **Only `rustc_check`, Helium and Silicon are timed.** Prusti's encode time and the rustc debug/release build times were dropped: none of them is a cost of checking the file.
 - **Host.** `host` in `tools/bench/config.json` is unset: `run.py` refuses to write results until it names the benchmark machine (`--dry-run DIR` works anywhere). Machine-local settings (the Silicon jar) go in the untracked `config.local.json`.

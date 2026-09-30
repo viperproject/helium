@@ -525,14 +525,16 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     // ── rustc ──
     if let (Some(rustc), Some(rs)) = (ctx.rustc.clone(), &file.rs) {
         let args = suite.rustc_args();
-        // Only successful timings are cached; a failure is measured again.
+        // Only successful timings are cached; a failure is measured again, and
+        // so is a timing of fewer runs than this run asks for.
         let key = rs_sha
             .as_deref()
             .zip(ctx.rustc_version.as_deref())
             .map(|(sha, version)| RustcCache::key(sha, version, &args));
         let hit = key
             .as_ref()
-            .and_then(|k| ctx.rustc_cache.as_ref()?.entries.get(k).cloned());
+            .and_then(|k| ctx.rustc_cache.as_ref()?.entries.get(k).cloned())
+            .filter(|t| t.status == Status::Ok && t.runs.len() >= opts.runs);
         let t = match hit {
             Some(t) => Timing { cached: true, ..t },
             None => {
@@ -648,8 +650,13 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     let mut silicon_result: Option<(SiliconResult, bool)> = None;
     if suite.silicon() {
         if let Some(sil) = ctx.silicon.as_mut() {
-            let key = silicon::Cache::key(&vpr_sha, &sil.jar_sha256);
-            match ctx.silicon_cache.as_ref().and_then(|c| c.entries.get(&key)) {
+            let key = silicon::Cache::key(&vpr_sha, &sil.jar_sha256, &sil.config_id());
+            let hit = ctx
+                .silicon_cache
+                .as_ref()
+                .and_then(|c| c.entries.get(&key))
+                .filter(|hit| silicon::Cache::reusable(hit, opts.runs, timeout));
+            match hit {
                 Some(hit) => {
                     if sil.version.is_none() {
                         sil.version = hit
@@ -671,7 +678,12 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
                     )
                     .map_err(|e| format!("silicon: {e}"))?;
                     if let Some(cache) = ctx.silicon_cache.as_mut() {
-                        cache.entries.insert(key, r.clone());
+                        if silicon::Cache::keeps(&r) {
+                            cache.entries.insert(key, r.clone());
+                        } else {
+                            // Not a stale answer for the next run either.
+                            cache.entries.remove(&key);
+                        }
                     }
                     silicon_result = Some((r, false));
                 }

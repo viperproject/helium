@@ -106,8 +106,9 @@ What one run measures, per file: rustc (`--emit=metadata`; cached by `.rs` hash,
 rustc version and arguments),
 Helium (`verify --json`: total, phases, per-member times, all `VerifyStats`
 counters, peak memory), Silicon (process wall time and its own reported time,
-per-member verdicts; cached by `.vpr` hash and jar hash), one warm-up and five
-timed runs each (median and MAD), a 300 s timeout recorded as a timeout, plus the
+per-member verdicts; cached by `.vpr` hash, jar hash and arguments), one warm-up
+and five timed runs each (median and MAD), a 300 s timeout recorded as a timeout
+(killing the command's whole process tree, JVM and z3s included), plus the
 Rust metrics (`bench rust-metrics FILE.rs`) and Viper metrics
 (`verify --viper-metrics FILE.vpr`) joined per member (`m_f` ↔ `f`).
 
