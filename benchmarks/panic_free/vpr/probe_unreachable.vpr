@@ -136,11 +136,11 @@ field p_Int_isize_val: s_Int_isize
 field p_Bool_val: s_Bool
 
 function cf_core$col$$col$panicking$col$$col$panic(_1s: s_Ref_immutable): s_Never
-  requires s_Bool_value((let _0_2s_bb0_s1_i1 ==
+  requires s_Bool_value((let _0_2s_1 ==
       (s_Bool_cons(false)) in
-      (let _0_0s_bb0_s4_i1 ==
-        (_0_2s_bb0_s1_i1) in
-        _0_0s_bb0_s4_i1)))
+      (let _0_0s_1 ==
+        (_0_2s_1) in
+        _0_0s_1)))
 {
   f_core$col$$col$panicking$col$$col$panic(_1s)
 }

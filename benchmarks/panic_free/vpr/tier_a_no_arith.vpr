@@ -3178,28 +3178,6 @@ method p_Slice_assign(self: Ref, T$0: Type, value: s_Slice)
   ensures p_Slice_snap(self, T$0) == value
 
 
-method p_Slice_fold_index(index: Int, self: Ref, T$0: Type)
-  requires acc(p_Param(s_Slice_index_ref(self, index, T$0), T$0), write)
-  requires acc(p_Slice_index(self, index, T$0), write)
-  ensures acc(p_Slice(self, T$0), write)
-  ensures (forall idx: Int ::
-      { s_Slice_index(p_Slice_snap(self, T$0), idx) }
-      s_Slice_index(p_Slice_snap(self, T$0), idx) ==
-      (idx == index ?
-        old(p_Param_snap(s_Slice_index_ref(self, index, T$0), T$0)) :
-        old(s_Slice_index(p_Slice_index_frame(self, index, T$0), idx))))
-
-
-method p_Slice_unfold_index(index: Int, self: Ref, T$0: Type)
-  requires acc(p_Slice(self, T$0), write)
-  ensures acc(p_Param(s_Slice_index_ref(self, index, T$0), T$0), write)
-  ensures acc(p_Slice_index(self, index, T$0), write)
-  ensures p_Param_snap(s_Slice_index_ref(self, index, T$0), T$0) ==
-    old(s_Slice_index(p_Slice_snap(self, T$0), index))
-  ensures p_Slice_index_frame(self, index, T$0) ==
-    old(p_Slice_snap(self, T$0))
-
-
 method p_Option_assign(self: Ref, T$0: Type, value: s_Option)
   ensures acc(p_Option(self, T$0), write)
   ensures p_Option_snap(self, T$0) == value
@@ -3213,28 +3191,6 @@ method p_Arguments_assign(self: Ref, value: s_Arguments)
 method p_Array_assign(self: Ref, U$1: Type, M$0: s_UInt_usize, value: s_Array)
   ensures acc(p_Array(self, U$1, M$0), write)
   ensures p_Array_snap(self, U$1, M$0) == value
-
-
-method p_Array_fold_index(index: Int, self: Ref, U$1: Type, M$0: s_UInt_usize)
-  requires acc(p_Param(s_Array_index_ref(self, index, U$1), U$1), write)
-  requires acc(p_Array_index(self, index, U$1, M$0), write)
-  ensures acc(p_Array(self, U$1, M$0), write)
-  ensures (forall idx: Int ::
-      { s_Array_index(p_Array_snap(self, U$1, M$0), idx) }
-      s_Array_index(p_Array_snap(self, U$1, M$0), idx) ==
-      (idx == index ?
-        old(p_Param_snap(s_Array_index_ref(self, index, U$1), U$1)) :
-        old(s_Array_index(p_Array_index_frame(self, index, U$1, M$0), idx))))
-
-
-method p_Array_unfold_index(index: Int, self: Ref, U$1: Type, M$0: s_UInt_usize)
-  requires acc(p_Array(self, U$1, M$0), write)
-  ensures acc(p_Param(s_Array_index_ref(self, index, U$1), U$1), write)
-  ensures acc(p_Array_index(self, index, U$1, M$0), write)
-  ensures p_Param_snap(s_Array_index_ref(self, index, U$1), U$1) ==
-    old(s_Array_index(p_Array_snap(self, U$1, M$0), index))
-  ensures p_Array_index_frame(self, index, U$1, M$0) ==
-    old(p_Array_snap(self, U$1, M$0))
 
 
 method p_Kind_assign(self: Ref, value: s_Kind)
