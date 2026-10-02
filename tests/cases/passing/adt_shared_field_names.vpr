@@ -1,0 +1,19 @@
+// Two ADTs may declare a field of the same name (legal Silver; Silicon
+// verifies this file). `e.f` is resolved through the type of `e`, both when
+// typechecking and when picking the projection to translate to.
+
+adt A { A1(f: Int) }
+adt B { B1(f: Bool, g: Int) }
+
+function af(a: A): Int { a.f }
+function bf(b: B): Bool { b.f }
+
+method shared_names() {
+  var a: A := A1(5)
+  var b: B := B1(true, 7)
+  assert a.f == 5
+  assert b.f
+  assert af(A1(3)) == 3
+  assert bf(B1(false, 0)) == false
+  assert (let c == (B1(true, 1)) in c.f && c.g == 1)
+}

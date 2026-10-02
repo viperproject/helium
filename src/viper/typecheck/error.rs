@@ -46,6 +46,9 @@ pub enum TypeError {
     NotAssignable(String),
     /// The same variable twice among a method call's targets.
     DuplicateTarget(String),
+    /// `e.f` where several ADTs declare `f` and `e`'s type is not known to
+    /// be one of them.
+    AmbiguousAdtField(String),
     /// An `exists` quantifier (only pure `forall` is supported so far).
     ExistsUnsupported,
     /// A Viper construct this verifier does not implement. Carries the
@@ -219,6 +222,10 @@ impl std::fmt::Display for TypeError {
             TypeError::NotAssignable(name) => {
                 write!(f, "`{name}` is a method parameter and cannot be assigned")
             }
+            TypeError::AmbiguousAdtField(name) => write!(
+                f,
+                "ambiguous ADT field `{name}`: several ADTs declare it and the receiver's type is not known"
+            ),
             TypeError::DuplicateTarget(name) => {
                 write!(f, "`{name}` occurs more than once among the call's targets")
             }
