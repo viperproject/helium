@@ -5,7 +5,7 @@ use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
 
 use crate::viper::{
     self,
-    globals::{GlobalSignature, Globals},
+    globals::{DtorInfo, GlobalSignature, Globals},
     interner::Interner,
     typed::{
         self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MethodBodyExt, MethodEnsuresExt,
@@ -172,6 +172,7 @@ impl<'g> LocalEnv<'g> {
         // type arguments) so a nested mismatch (e.g. `Option[Int]` vs
         // `Option[Bool]`) is caught at the root.
         c.impose_type(root, expected, &HashMap::default())?;
+        c.resolve_shared_destructors()?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
         LoweringCtx::new(self, &table).lower_pure::<Ext>(exp)
     }
@@ -191,6 +192,7 @@ impl<'g> LocalEnv<'g> {
         c.rigid_generics = rigid.iter().copied().collect();
         let root = c.constrain_pure(exp)?;
         c.impose_type(root, &Type::Bool, &HashMap::default())?;
+        c.resolve_shared_destructors()?;
         // Peek at the solved variants (preliminary pass on a clone; the real
         // checker stays open for the defaulting impositions below).
         let prelim =
@@ -224,6 +226,7 @@ impl<'g> LocalEnv<'g> {
     ) -> Result<SpatialExp<Ext>, TypeError> {
         let mut c = ConstraintCtx::new(self, None);
         c.constrain_spatial(exp)?;
+        c.resolve_shared_destructors()?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
         LoweringCtx::new(self, &table).lower_spatial::<Ext>(exp)
     }
@@ -237,6 +240,7 @@ impl<'g> LocalEnv<'g> {
         c.constrain_resource(&mut acc.loc)?;
         let pk = c.constrain_pure(&mut acc.perm)?;
         c.tc.impose(pk.concretizes_explicit(ViperTcType::Numeric))?;
+        c.resolve_shared_destructors()?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
 
         let lowerer = LoweringCtx::new(self, &table);
@@ -273,6 +277,10 @@ struct ConstraintCtx<'a, 'g> {
     /// with the type-parameter name it instantiates. Lets the axiom path apply
     /// Silver's `ground()` defaulting to the ones no argument pinned.
     generic_insts: Vec<(Spur, TcKey)>,
+    /// Destructors `e.f` whose name several ADTs declare, as (field, receiver
+    /// key, result key): the owner is picked by
+    /// `resolve_shared_destructors` once the receiver's type is known.
+    shared_dtors: Vec<(Spur, TcKey, TcKey)>,
 }
 
 impl<'a, 'g> ConstraintCtx<'a, 'g> {
@@ -284,6 +292,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             result_ty,
             rigid_generics: HashSet::default(),
             generic_insts: Vec::new(),
+            shared_dtors: Vec::new(),
         }
     }
 }
@@ -718,28 +727,21 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
             ExpKind::AdtDestructor(base, field) => {
                 // `e.f`: `e` must be the ADT owning destructor `f`; the result is
-                // the field's type.
+                // the field's type. A name several ADTs declare (legal Silver)
+                // waits for the receiver's type to pick its owner.
+                let fid = field.id();
                 let base_key = self.constrain_pure(base)?;
-                let (adt, field_ty) = self.resolve_destructor(field.id(), base_key)?;
-                let (arity, adt_params) = {
-                    let sig = self.env.globals.resolve(adt).and_then(|s| s.as_adt());
-                    match sig {
-                        Some(s) => (s.type_arity, s.params.clone()),
-                        None => (0, Vec::new()),
-                    }
-                };
-                self.tc.impose(
-                    base_key.concretizes_explicit(ViperTcType::Domain(Ident(adt), arity)),
-                )?;
-                // Map each of the ADT's type parameters to the scrutinee's
-                // corresponding type argument (its `i`-th child), so a generic
-                // field type `T` resolves to the concrete instantiation.
-                let mut subst = HashMap::default();
-                for (i, pname) in adt_params.iter().enumerate() {
-                    let child = self.tc.get_child_key(base_key, i)?;
-                    subst.insert(*pname, child);
+                let globals = self.env.globals;
+                let owners = globals.dtor_by_name.get(&fid).ok_or_else(|| {
+                    TypeError::Other(format!(
+                        "unknown ADT destructor: {}",
+                        self.env.interner.resolve(&fid)
+                    ))
+                })?;
+                match owners.as_slice() {
+                    [only] => self.impose_destructor(only, base_key, key)?,
+                    _ => self.shared_dtors.push((fid, base_key, key)),
                 }
-                self.impose_type(key, &field_ty, &subst)?;
             }
 
             ExpKind::AdtDiscriminator(base, variant) => {
@@ -832,34 +834,66 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         Ok(key)
     }
 
-    /// The owning ADT and field type of destructor `field`, read on a receiver
-    /// whose constraints are already in (`base_key`). A name declared by one
-    /// ADT is that ADT's. One shared by several ADTs (legal Silver) is
-    /// resolved through the receiver's type, which must be known by now — a
-    /// preliminary solve of this expression's constraints, paid only for such
-    /// names. A receiver of some other ADT gets the first owner, so the
-    /// receiver constraint then reports the mismatch.
-    fn resolve_destructor(&self, field: Spur, base_key: TcKey) -> Result<(Spur, Type), TypeError> {
-        let name = || self.env.interner.resolve(&field).to_string();
-        let owners = self
-            .env
-            .globals
-            .dtor_by_name
-            .get(&field)
-            .ok_or_else(|| TypeError::Other(format!("unknown ADT destructor: {}", name())))?;
-        let info = match owners.as_slice() {
-            [only] => only,
-            _ => {
-                let prelim = self.tc.clone().type_check_preliminary()?;
-                match prelim.get(&base_key).map(|p| &p.variant) {
-                    Some(ViperTcType::Domain(Ident(adt), _)) => {
-                        owners.iter().find(|d| d.adt == *adt).unwrap_or(&owners[0])
-                    }
-                    _ => return Err(TypeError::AmbiguousAdtField(name())),
-                }
-            }
+    /// `e.f` with `f` the destructor `info`: the receiver (`base_key`) is
+    /// `info`'s ADT and the result (`key`) has the field's type, a generic
+    /// field instantiated from the receiver's type arguments.
+    fn impose_destructor(
+        &mut self,
+        info: &DtorInfo,
+        base_key: TcKey,
+        key: TcKey,
+    ) -> Result<(), TypeError> {
+        let (arity, adt_params) = match self.env.globals.resolve(info.adt).and_then(|s| s.as_adt())
+        {
+            Some(s) => (s.type_arity, s.params.clone()),
+            None => (0, Vec::new()),
         };
-        Ok((info.adt, info.ty.clone()))
+        self.tc
+            .impose(base_key.concretizes_explicit(ViperTcType::Domain(Ident(info.adt), arity)))?;
+        // Map each of the ADT's type parameters to the scrutinee's
+        // corresponding type argument (its `i`-th child), so a generic
+        // field type `T` resolves to the concrete instantiation.
+        let mut subst = HashMap::default();
+        for (i, pname) in adt_params.iter().enumerate() {
+            let child = self.tc.get_child_key(base_key, i)?;
+            subst.insert(*pname, child);
+        }
+        self.impose_type(key, &info.ty, &subst)
+    }
+
+    /// Pick the owner of each destructor in `shared_dtors` by its receiver's
+    /// type, once the whole expression is constrained. One preliminary solve
+    /// settles every destructor whose receiver it determines, however many;
+    /// another round is needed only when a receiver is itself such a
+    /// destructor (`x.f.f`). A receiver of an ADT that does not declare the
+    /// field gets the first owner, so its receiver constraint reports the
+    /// mismatch; a receiver no round determines is ambiguous.
+    fn resolve_shared_destructors(&mut self) -> Result<(), TypeError> {
+        let globals = self.env.globals;
+        while !self.shared_dtors.is_empty() {
+            let prelim = self.tc.clone().type_check_preliminary()?;
+            let pending = std::mem::take(&mut self.shared_dtors);
+            let mut resolved = false;
+            for (field, base_key, key) in pending {
+                let Some(ViperTcType::Domain(Ident(adt), _)) =
+                    prelim.get(&base_key).map(|p| &p.variant)
+                else {
+                    self.shared_dtors.push((field, base_key, key));
+                    continue;
+                };
+                let owners = &globals.dtor_by_name[&field];
+                let info = owners.iter().find(|d| d.adt == *adt).unwrap_or(&owners[0]);
+                self.impose_destructor(info, base_key, key)?;
+                resolved = true;
+            }
+            if !resolved {
+                let (field, _, _) = self.shared_dtors[0];
+                return Err(TypeError::AmbiguousAdtField(
+                    self.env.interner.resolve(&field).to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// [`check_type`] for a type written inside an expression; in an axiom
@@ -3488,21 +3522,77 @@ method m() { var x: Int; x, x := n() }
     #[test]
     fn shared_adt_field_resolves_through_receiver_type() {
         // Legal Silver: two ADTs may declare `f`; each `e.f` is the receiver's.
+        let result = run_pipeline(
+            r#"
+adt A { A1(f: Int) }
+adt B { B1(f: Int) }
+function g(a: A): Int { a.f }
+function h(b: B): Int { b.f }
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        // Receivers of every kind: let binder, quantifier binder, call result,
+        // and a chain whose inner receiver is itself shared (`a.f.f`, resolved
+        // in a second round).
+        let result = run_pipeline(
+            r#"
+adt A { A1(f: B) }
+adt B { B1(f: Int) }
+function k(): B
+function chain(a: A): Int { a.f.f }
+method m() {
+  assert (let x == (k()) in x.f) == k().f
+  inhale forall b: B :: { b.f } b.f == 0
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn shared_adt_field_gets_receivers_field_type() {
         let program = run_pipeline(
             r#"
 adt A { A1(f: Int) }
 adt B { B1(f: Bool) }
-function g(a: A): Int { a.f }
 function h(b: B): Bool { b.f }
-function k(): B
-method m() { assert (let x == (k()) in x.f) }
 "#,
-        );
-        assert!(program.is_ok(), "expected Ok, got: {program:?}");
-        // The receiver's ADT fixes the field type: B's `f` is a Bool.
+        )
+        .expect("B's `f` is a Bool");
+        let Some(typed::Declaration::Function(h)) = program.decls.iter().find(|d| {
+            matches!(d, typed::Declaration::Function(f) if program.interner.resolve(&f.name.0) == "h")
+        }) else {
+            panic!("no function h");
+        };
+        let body = h.body.as_ref().expect("h has a body");
+        assert!(matches!(*body.exp, PureExpKind::AdtDestructor(..)));
+        assert_eq!(body.ty, Type::Bool);
+
+        // So reading it as an Int is a type error, naming both types.
         assert_rejected(
             "adt A { A1(f: Int) }\nadt B { B1(f: Bool) }\nfunction h(b: B): Int { b.f }",
-            |e| e.to_string() == "type mismatch: cannot unify `Bool` and `Int`",
+            |e| {
+                let msg = e.to_string();
+                matches!(e, TypeError::Mismatch(..))
+                    && msg.contains("`Bool`")
+                    && msg.contains("`Int`")
+            },
+        );
+    }
+
+    #[test]
+    fn shared_adt_field_on_undetermined_receiver_is_ambiguous() {
+        // Silicon: "found incompatible receiver type `T#2` when destructing
+        // adt field `f`".
+        assert_rejected(
+            r#"
+adt P[T] { P1(p: T) P0() }
+adt A { A1(f: Int) }
+adt B { B1(f: Int) }
+method m() { assume P0().p.f == 0 }
+"#,
+            |e| matches!(e, TypeError::AmbiguousAdtField(n) if n == "f"),
         );
     }
 
