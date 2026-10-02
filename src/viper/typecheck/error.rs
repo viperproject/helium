@@ -32,6 +32,19 @@ pub enum TypeError {
     },
     /// A `Generic` type parameter occurred outside a scope that binds it.
     UnboundTypeParam(String),
+    /// A type name that is no declared domain, ADT or type parameter in scope.
+    UndeclaredType(String),
+    /// A domain or ADT type applied to the wrong number of type arguments.
+    WrongTypeArgCount {
+        name: String,
+        expected: usize,
+        found: usize,
+    },
+    /// An assignment to a method parameter (only locals and return
+    /// variables are assignable).
+    NotAssignable(String),
+    /// The same variable twice among a method call's targets.
+    DuplicateTarget(String),
     /// An `exists` quantifier (only pure `forall` is supported so far).
     ExistsUnsupported,
     /// A Viper construct this verifier does not implement. Carries the
@@ -153,6 +166,21 @@ impl std::fmt::Display for TypeError {
             }
             TypeError::UnboundTypeParam(name) => {
                 write!(f, "unbound type parameter `{name}`")
+            }
+            TypeError::UndeclaredType(name) => write!(f, "undeclared type `{name}`"),
+            TypeError::WrongTypeArgCount {
+                name,
+                expected,
+                found,
+            } => write!(
+                f,
+                "type `{name}` expects {expected} type argument(s), got {found}"
+            ),
+            TypeError::NotAssignable(name) => {
+                write!(f, "`{name}` is a method parameter and cannot be assigned")
+            }
+            TypeError::DuplicateTarget(name) => {
+                write!(f, "`{name}` occurs more than once among the call's targets")
             }
             TypeError::ExistsUnsupported => {
                 write!(f, "`exists` quantifiers are not supported yet")
