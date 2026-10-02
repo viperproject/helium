@@ -1,6 +1,7 @@
 use rusttyc::TcErr;
 
-use super::lattice::ViperTcType;
+use super::lattice::{TcTypeErr, ViperTcType};
+use crate::viper::interner::Interner;
 
 #[derive(Debug, Clone)]
 pub enum TypeError {
@@ -80,6 +81,9 @@ pub enum TypeError {
     /// itself, Silver's `ground()` rule).
     UnconstrainedTypeParamInAxiom(String),
     Tc(TcErr<ViperTcType>),
+    /// A solver mismatch ([`TcTypeErr::Mismatch`]) with both types spelled as
+    /// Viper types, made by [`TypeError::with_names`].
+    Mismatch(String, String),
     Other(String),
 }
 
@@ -109,6 +113,42 @@ impl TypeError {
                 | TypeError::PreconditionedFunctionInAxiom(_)
                 | TypeError::UnconstrainedTypeParamInAxiom(_)
         )
+    }
+}
+
+impl TypeError {
+    /// Replace a solver mismatch by a [`TypeError::Mismatch`] naming both
+    /// types. The solver's own error carries only interned identifiers, so
+    /// this runs where the interner is in scope. Anything else is unchanged.
+    pub(super) fn with_names(self, interner: &Interner) -> Self {
+        match self {
+            TypeError::Tc(
+                TcErr::Bound(_, _, TcTypeErr::Mismatch(t1, t2))
+                | TcErr::KeyEquation(_, _, TcTypeErr::Mismatch(t1, t2)),
+            ) => TypeError::Mismatch(viper_name(&t1, interner), viper_name(&t2, interner)),
+            other => other,
+        }
+    }
+}
+
+/// A solver type variant as Viper spells it, in backticks. Only the head is
+/// known (type arguments are separate solver keys), so a generic ADT or domain
+/// shows its arguments as `_`.
+fn viper_name(ty: &ViperTcType, interner: &Interner) -> String {
+    match ty {
+        ViperTcType::Bool => "`Bool`".to_string(),
+        ViperTcType::Int => "`Int`".to_string(),
+        ViperTcType::Real => "`Perm`".to_string(),
+        ViperTcType::Ref => "`Ref`".to_string(),
+        ViperTcType::Numeric => "a number (`Int` or `Perm`)".to_string(),
+        ViperTcType::Domain(id, 0) => format!("`{}`", interner.resolve(&id.0)),
+        ViperTcType::Domain(id, n) => format!(
+            "`{}[{}]`",
+            interner.resolve(&id.0),
+            vec!["_"; *n].join(", ")
+        ),
+        ViperTcType::Generic(id) => format!("`{}`", interner.resolve(&id.0)),
+        ViperTcType::Top => "`_`".to_string(),
     }
 }
 
@@ -229,6 +269,9 @@ impl std::fmt::Display for TypeError {
                 )
             }
             TypeError::Tc(e) => write!(f, "Constraint error: {e:?}"),
+            TypeError::Mismatch(t1, t2) => {
+                write!(f, "type mismatch: cannot unify {t1} and {t2}")
+            }
             TypeError::Other(msg) => write!(f, "{msg}"),
         }
     }
