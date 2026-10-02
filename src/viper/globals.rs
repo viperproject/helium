@@ -268,9 +268,10 @@ pub struct Globals {
     /// that only hold a `RodeoResolver` (no string lookup) resolve a
     /// discriminator `is<Ctor>` back to the constructor.
     pub ctor_by_name: HashMap<String, Spur>,
-    /// Destructor (constructor field) name `Spur` → its info. Lets `e.f` be
-    /// classified as an ADT destructor.
-    pub dtor_by_name: HashMap<Spur, DtorInfo>,
+    /// Destructor (constructor field) name `Spur` → one entry per ADT
+    /// declaring it. Lets `e.f` be classified as an ADT destructor. Different
+    /// ADTs may share a field name; the receiver's type picks the entry.
+    pub dtor_by_name: HashMap<Spur, Vec<DtorInfo>>,
 }
 
 /// A lightweight view into a successfully resolved global symbol.
@@ -336,13 +337,11 @@ pub struct GlobalsCollector<'i> {
     signatures: TiVec<MemberId, GlobalSignature>,
     symbol_table: HashMap<Spur, MemberId>,
     ctor_by_name: HashMap<String, Spur>,
-    dtor_by_name: HashMap<Spur, DtorInfo>,
+    /// ADT field names are global identifiers in Silver, with one exception:
+    /// different ADTs may share one (resolved through the receiver's type).
+    dtor_by_name: HashMap<Spur, Vec<DtorInfo>>,
     /// Running per-ADT constructor counter, for assigning tag indices.
     adt_ctor_count: HashMap<Spur, usize>,
-    /// Every ADT field name with the ADTs declaring it. Silver puts these in
-    /// the global namespace, with one exception: different ADTs may share a
-    /// field name (a destructor is resolved through its receiver's type).
-    adt_fields: HashMap<Spur, Vec<Spur>>,
     /// Named domain axioms. Global identifiers in Silver, unique program-wide.
     axiom_names: HashSet<Spur>,
     /// Every ADT's type parameters. Scoped to their ADT, but like a local they
@@ -360,7 +359,6 @@ impl<'i> GlobalsCollector<'i> {
             ctor_by_name: HashMap::default(),
             dtor_by_name: HashMap::default(),
             adt_ctor_count: HashMap::default(),
-            adt_fields: HashMap::default(),
             axiom_names: HashSet::default(),
             adt_type_params: Vec::new(),
             errors: Vec::new(),
@@ -371,7 +369,7 @@ impl<'i> GlobalsCollector<'i> {
         // The names outside `symbol_table` clash with any global declared
         // anywhere in the file, so they can only be checked once all are in.
         let mut late: Vec<(Spur, GlobalKind)> = Vec::new();
-        late.extend(self.adt_fields.keys().map(|&f| (f, GlobalKind::AdtField)));
+        late.extend(self.dtor_by_name.keys().map(|&f| (f, GlobalKind::AdtField)));
         late.extend(self.axiom_names.iter().map(|&a| (a, GlobalKind::Axiom)));
         late.extend(
             self.adt_type_params
@@ -381,7 +379,7 @@ impl<'i> GlobalsCollector<'i> {
         for (id, this) in late {
             let other = match self.symbol_table.get(&id) {
                 Some(&mid) => self.signatures[mid].kind(),
-                None if this == GlobalKind::Axiom && self.adt_fields.contains_key(&id) => {
+                None if this == GlobalKind::Axiom && self.dtor_by_name.contains_key(&id) => {
                     GlobalKind::AdtField
                 }
                 None => continue,
@@ -525,18 +523,15 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
         self.ctor_by_name
             .insert(self.interner.resolve(&name_spur).to_string(), name_spur);
         // Register each field as a destructor. A name repeated within one ADT
-        // is a duplicate; one shared with another ADT is legal Silver, and the
-        // first registration wins (overload resolution by receiver type is
-        // deferred).
+        // is a duplicate; one shared with another ADT is legal Silver.
         for (index, field) in adt_cons.destructors().enumerate() {
             let field_spur = field.idn.0.id();
-            let owners = self.adt_fields.entry(field_spur).or_default();
-            if owners.contains(&adt) {
+            let owners = self.dtor_by_name.entry(field_spur).or_default();
+            if owners.iter().any(|d| d.adt == adt) {
                 self.duplicate(field_spur, GlobalKind::AdtField, GlobalKind::AdtField);
-            } else {
-                owners.push(adt);
+                continue;
             }
-            self.dtor_by_name.entry(field_spur).or_insert(DtorInfo {
+            owners.push(DtorInfo {
                 adt,
                 ctor: name_spur,
                 index,

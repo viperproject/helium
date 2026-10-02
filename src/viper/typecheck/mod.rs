@@ -111,6 +111,11 @@ struct LocalEnv<'g> {
     all_labels: HashSet<Spur>,
     /// The method's parameters: in scope like any local, but not assignable.
     params: HashSet<Spur>,
+    /// Every local in declaration order, so a block can drop its own on exit.
+    declared_order: Vec<Spur>,
+    /// Locals of blocks already left: no longer visible, but their names stay
+    /// taken for the rest of the method.
+    retired: HashSet<Spur>,
 }
 
 impl<'g> LocalEnv<'g> {
@@ -122,6 +127,8 @@ impl<'g> LocalEnv<'g> {
             labels: HashSet::default(),
             all_labels: HashSet::default(),
             params: HashSet::default(),
+            declared_order: Vec::new(),
+            retired: HashSet::default(),
         }
     }
 
@@ -131,6 +138,7 @@ impl<'g> LocalEnv<'g> {
     fn declared(&self, name: Spur) -> bool {
         self.globals.resolve(name).is_some()
             || self.locals.contains_key(&name)
+            || self.retired.contains(&name)
             || self.all_labels.contains(&name)
     }
 
@@ -141,6 +149,7 @@ impl<'g> LocalEnv<'g> {
             ));
         }
         self.locals.insert(name, ty);
+        self.declared_order.push(name);
         Ok(())
     }
 
@@ -710,16 +719,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             ExpKind::AdtDestructor(base, field) => {
                 // `e.f`: `e` must be the ADT owning destructor `f`; the result is
                 // the field's type.
-                let fid = field.id();
-                let (adt, field_ty) = {
-                    let info = self.env.globals.dtor_by_name.get(&fid).ok_or_else(|| {
-                        TypeError::Other(format!(
-                            "unknown ADT destructor: {}",
-                            self.env.interner.resolve(&fid)
-                        ))
-                    })?;
-                    (info.adt, info.ty.clone())
-                };
+                let base_key = self.constrain_pure(base)?;
+                let (adt, field_ty) = self.resolve_destructor(field.id(), base_key)?;
                 let (arity, adt_params) = {
                     let sig = self.env.globals.resolve(adt).and_then(|s| s.as_adt());
                     match sig {
@@ -727,7 +728,6 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                         None => (0, Vec::new()),
                     }
                 };
-                let base_key = self.constrain_pure(base)?;
                 self.tc.impose(
                     base_key.concretizes_explicit(ViperTcType::Domain(Ident(adt), arity)),
                 )?;
@@ -830,6 +830,36 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         }
 
         Ok(key)
+    }
+
+    /// The owning ADT and field type of destructor `field`, read on a receiver
+    /// whose constraints are already in (`base_key`). A name declared by one
+    /// ADT is that ADT's. One shared by several ADTs (legal Silver) is
+    /// resolved through the receiver's type, which must be known by now — a
+    /// preliminary solve of this expression's constraints, paid only for such
+    /// names. A receiver of some other ADT gets the first owner, so the
+    /// receiver constraint then reports the mismatch.
+    fn resolve_destructor(&self, field: Spur, base_key: TcKey) -> Result<(Spur, Type), TypeError> {
+        let name = || self.env.interner.resolve(&field).to_string();
+        let owners = self
+            .env
+            .globals
+            .dtor_by_name
+            .get(&field)
+            .ok_or_else(|| TypeError::Other(format!("unknown ADT destructor: {}", name())))?;
+        let info = match owners.as_slice() {
+            [only] => only,
+            _ => {
+                let prelim = self.tc.clone().type_check_preliminary()?;
+                match prelim.get(&base_key).map(|p| &p.variant) {
+                    Some(ViperTcType::Domain(Ident(adt), _)) => {
+                        owners.iter().find(|d| d.adt == *adt).unwrap_or(&owners[0])
+                    }
+                    _ => return Err(TypeError::AmbiguousAdtField(name())),
+                }
+            }
+        };
+        Ok((info.adt, info.ty.clone()))
     }
 
     /// [`check_type`] for a type written inside an expression; in an axiom
@@ -1651,7 +1681,7 @@ fn lower_statement(
         }
 
         S::Block(block) => {
-            let stmts = lower_stmt_block(&mut block.0, ctx)?;
+            let stmts = lower_scoped_block(&mut block.0, ctx)?;
             Ok(typed::Statement::Block(typed::StmtBlock(stmts)))
         }
 
@@ -1675,10 +1705,10 @@ fn lower_statement(
         // resolved later by the CFG (`viper::cfg`).
         S::If(cond, then_blk, else_blk) => {
             let cond = ctx.typecheck_pure::<MethodBodyExt>(cond, &Type::Bool, None)?;
-            let then_s = lower_stmt_block(&mut then_blk.0, ctx)?;
+            let then_s = lower_scoped_block(&mut then_blk.0, ctx)?;
             let else_s = else_blk
                 .as_mut()
-                .map(|b| lower_stmt_block(&mut b.0, ctx))
+                .map(|b| lower_scoped_block(&mut b.0, ctx))
                 .transpose()?;
             Ok(typed::Statement::If(
                 cond,
@@ -1701,7 +1731,7 @@ fn lower_statement(
                 .iter_mut()
                 .map(|inv| ctx.typecheck_spatial::<MethodBodyExt>(&mut inv.0))
                 .collect::<Result<Vec<_>, _>>()?;
-            let body = lower_stmt_block(&mut body.0, ctx)?;
+            let body = lower_scoped_block(&mut body.0, ctx)?;
             Ok(typed::Statement::While(cond, invs, typed::StmtBlock(body)))
         }
     }
@@ -1833,6 +1863,23 @@ fn lower_rhs_against_lhs(
             }))
         }
     }
+}
+
+/// A nested block (`{ .. }`, an `if` arm, a loop body). As in Silver, a
+/// `var` it declares is visible only up to its end. Unlike Silver, the name
+/// stays taken for the rest of the method (`retired`): locals are flat
+/// downstream, so sibling blocks cannot each declare their own `x`.
+fn lower_scoped_block(
+    stmts: &mut [viper::Statement],
+    ctx: &mut LocalEnv,
+) -> Result<Vec<typed::Statement>, TypeError> {
+    let mark = ctx.declared_order.len();
+    let lowered = lower_stmt_block(stmts, ctx)?;
+    for name in ctx.declared_order.drain(mark..) {
+        ctx.locals.remove(&name);
+        ctx.retired.insert(name);
+    }
+    Ok(lowered)
 }
 
 fn lower_stmt_block(
@@ -3436,6 +3483,51 @@ method m() { var x: Int; x, x := n() }
         ] {
             assert_rejected(src, |e| matches!(e, TypeError::ShadowedName(_)));
         }
+    }
+
+    #[test]
+    fn shared_adt_field_resolves_through_receiver_type() {
+        // Legal Silver: two ADTs may declare `f`; each `e.f` is the receiver's.
+        let program = run_pipeline(
+            r#"
+adt A { A1(f: Int) }
+adt B { B1(f: Bool) }
+function g(a: A): Int { a.f }
+function h(b: B): Bool { b.f }
+function k(): B
+method m() { assert (let x == (k()) in x.f) }
+"#,
+        );
+        assert!(program.is_ok(), "expected Ok, got: {program:?}");
+        // The receiver's ADT fixes the field type: B's `f` is a Bool.
+        assert_rejected(
+            "adt A { A1(f: Int) }\nadt B { B1(f: Bool) }\nfunction h(b: B): Int { b.f }",
+            |e| e.to_string() == "type mismatch: cannot unify `Bool` and `Int`",
+        );
+    }
+
+    #[test]
+    fn block_local_not_visible_after_block() {
+        for body in [
+            "if (b) { var x: Int := 1 } assert x == 1",
+            "while (b) { var x: Int := 1 } assert x == 1",
+            "{ var x: Int := 1 } assert x == 1",
+        ] {
+            let src = format!("method m(b: Bool) {{ {body} }}");
+            assert_rejected(
+                &src,
+                |e| matches!(e, TypeError::UndefinedVariable(n) if n == "x"),
+            );
+        }
+        // Still visible inside its block, nested blocks included.
+        let result =
+            run_pipeline("method m(b: Bool) { if (b) { var x: Int := 1; if (b) { x := 2 } } }");
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        // Silicon also rejects reusing the name after the block.
+        assert_rejected(
+            "method m(b: Bool) { if (b) { var x: Int } var x: Int }",
+            |e| matches!(e, TypeError::ShadowedName(n) if n == "x"),
+        );
     }
 
     #[test]

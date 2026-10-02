@@ -45,13 +45,15 @@ impl<'a> AdtTranslator<'a, Declared> {
 
     /// Publish constructor/destructor metadata. A constructor/destructor is not
     /// itself a declaration: `ctor_tag` maps a constructor name to its
-    /// `(owning ADT, tag)`, `dtor_sem` maps a field name to its
+    /// `(owning ADT, tag)`, `dtor_sem` maps an `(ADT, field name)` pair to its
     /// `(adt id, variant, field)` projection.
     pub(crate) fn meta(self, ctx: &mut TranslationContext<'_>) -> AdtTranslator<'a, Metaed> {
         for (tag, v) in self.src.variants.iter().enumerate() {
             ctx.adt.ctor_tag.insert(v.name.0, (self.silver_name, tag));
             for (field, p) in v.params.iter().enumerate() {
-                ctx.adt.dtor_sem.insert(p.name.0, (self.id, tag, field));
+                ctx.adt
+                    .dtor_sem
+                    .insert((self.silver_name, p.name.0), (self.id, tag, field));
             }
         }
         AdtTranslator {
