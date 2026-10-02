@@ -2373,6 +2373,10 @@ pub fn typecheck_program_reporting(
         }
     }
 
+    let errors = errors
+        .into_iter()
+        .map(|(name, e)| (name, e.with_names(&interner)))
+        .collect();
     (typed::Program { decls, interner }, errors)
 }
 
@@ -3006,7 +3010,7 @@ function bad(a: Int, b: Bool): Int
         assert!(
             result
                 .as_ref()
-                .is_err_and(|errs| errs.iter().any(|e| matches!(e, TypeError::Tc(_)))),
+                .is_err_and(|errs| errs.iter().any(|e| matches!(e, TypeError::Mismatch(..)))),
             "expected type constraint error, got: {result:?}"
         );
     }
@@ -3263,8 +3267,36 @@ adt s_Ref { s_Ref_cons(s_Ref_0: Ref, s_Ref_1: s_Param) }
 function p_Dyn_snap(self: Ref): s_Dyn
 method m(x: Ref) { var r: s_Ref := s_Ref_cons(x, p_Dyn_snap(x)) }
 "#,
-            |e| matches!(e, TypeError::Tc(_)),
+            |e| {
+                matches!(e, TypeError::Mismatch(..))
+                    && e.to_string() == "type mismatch: cannot unify `s_Dyn` and `s_Param`"
+            },
         );
+    }
+
+    #[test]
+    fn type_mismatch_names_viper_types() {
+        for (src, msg) in [
+            (
+                "method m() { var p: Perm := 1/2; var i: Int := p }",
+                "type mismatch: cannot unify `Perm` and `Int`",
+            ),
+            (
+                "function f(b: Bool): Int { b + 1 }",
+                "type mismatch: cannot unify `Bool` and a number (`Int` or `Perm`)",
+            ),
+            (
+                "adt A[T] { A1(x: T) }\nmethod m(a: A[Int]) { var r: Ref := a }",
+                "type mismatch: cannot unify `A[_]` and `Ref`",
+            ),
+        ] {
+            let errs = run_pipeline(src).expect_err("expected a type error");
+            assert!(
+                errs.iter().any(|e| e.to_string() == msg),
+                "{src}: expected `{msg}`, got {:?}",
+                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
