@@ -101,27 +101,10 @@ def bench_exe() -> Path:
     return REPO / "target" / "release" / f"bench{EXE}"
 
 
-def suite_args(cfg: dict) -> list:
-    """`--external-suites` and `--max-vpr-mb` from the config. An external
-    suite whose directory does not exist on this machine is left out with a
-    note, so a checkout without the corpus can still run the rest."""
-    args = []
-    external = {}
-    for name, entry in (cfg.get("external_suites") or {}).items():
-        path = (REPO / entry.get("path", "")).resolve()
-        if not path.is_dir():
-            log(f"note: external suite `{name}` skipped: no directory {path}")
-            continue
-        external[name] = {**entry, "path": str(path)}
-    if external:
-        args += ["--external-suites", json.dumps(external)]
-    if cfg.get("max_vpr_mb") is not None:
-        args += ["--max-vpr-mb", cfg["max_vpr_mb"]]
-    return args
-
-
 def check_suites(benchmarks: Path, cfg: dict) -> None:
-    cmd = [bench_exe(), "check-suites", "--benchmarks", benchmarks] + suite_args(cfg)
+    # The external suites and `max_vpr_mb` are read by bench itself, from the
+    # same config.json / config.local.json.
+    cmd = [bench_exe(), "check-suites", "--benchmarks", benchmarks]
     if cfg.get("rustc_toolchain"):
         cmd += ["--rustc-toolchain", cfg["rustc_toolchain"]]
     if run(cmd, cwd=REPO, check=False) != 0:
@@ -133,7 +116,6 @@ def bench_run(cfg: dict, out: Path, extra: list, caches: Path | None) -> dict:
     is the directory holding the rustc and Silicon caches (reused across runs:
     neither tool's result depends on the commit being measured)."""
     cmd = [bench_exe(), "run", "--out", out, "--warmup", cfg.get("warmup", 1), "--runs", cfg.get("runs", 5)]
-    cmd += suite_args(cfg)
     if cfg.get("rustc_toolchain"):
         cmd += ["--rustc-toolchain", cfg["rustc_toolchain"]]
     else:

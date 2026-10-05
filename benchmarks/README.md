@@ -84,6 +84,14 @@ repository root) plus any `suite.json` field, which replace a `suite.json` in
 that directory. A directory that does not exist on the machine is skipped with
 a note, so a checkout without it still runs everything else.
 
+`bench` reads this itself (`tools/bench/config.json`, overlaid with
+`config.local.json`, from the directory it runs in), so `bench check-suites`,
+`bench run` and `tools/bench/run.py` all see the same suites. `--config FILE`
+reads another config, `--no-config` none, and `--external-suites JSON` adds a
+suite or replaces one of the same name. An external directory holding only
+`.vpr` files (directly, or in `vpr/`) is a Viper-only suite: Helium against
+Silicon, no rustc.
+
 ```json
 "external_suites": {
   "crates": {
