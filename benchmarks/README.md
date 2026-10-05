@@ -89,8 +89,11 @@ a note, so a checkout without it still runs everything else.
 `bench run` and `tools/bench/run.py` all see the same suites. `--config FILE`
 reads another config, `--no-config` none, and `--external-suites JSON` adds a
 suite or replaces one of the same name. An external directory holding only
-`.vpr` files (directly, or in `vpr/`) is a Viper-only suite: Helium against
-Silicon, no rustc.
+`.vpr` files is a Viper-only suite (Helium against Silicon, no rustc) that
+includes its subdirectories: each file is named by its path inside the
+directory, so `bench_sorted/arith/foo.vpr` is `CvsSi/arith/foo` (and
+`--only CvsSi/arith/foo` selects it). `expected_failures.txt` at its top uses
+the same names.
 
 ```json
 "external_suites": {

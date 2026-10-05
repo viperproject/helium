@@ -16,8 +16,11 @@
 //! `<suite>/<sub>`. There is no central list: adding a directory adds a suite.
 //!
 //! Suites can also live outside `benchmarks/` ([`External`], configured in
-//! `tools/bench/config.json`). Besides the layouts above, an external suite
-//! may be a **crate corpus**: one benchmark per whole crate,
+//! `tools/bench/config.json`). An external directory of `.vpr` files is one
+//! Viper-only suite with its subdirectories included: a file is named by its
+//! path inside the directory (`sorted/a/x.vpr` is the stem `a/x`). Besides
+//! the layouts above, an external suite may be a **crate corpus**: one
+//! benchmark per whole crate,
 //!
 //! ```text
 //! <dir>/
@@ -320,7 +323,7 @@ fn load_external(ext: &External) -> Suite {
     } else if dir.join("src").is_dir() || dir.join("vpr").is_dir() {
         load_structured(&ext.name, dir)
     } else {
-        load_flat(&ext.name, dir)
+        load_tree(&ext.name, dir)
     };
     if let Some(config) = &ext.config {
         // The settings from config.json replace the directory's suite.json.
@@ -435,6 +438,43 @@ fn load_flat(name: &str, dir: &Path) -> Suite {
             krate: None,
         })
         .collect();
+    check_families(&mut suite);
+    suite
+}
+
+/// A Viper-only suite of every `.vpr` under `dir`, at any depth, each named
+/// by its path inside `dir` without the extension (`a/x`). Hidden
+/// directories are skipped.
+fn load_tree(name: &str, dir: &Path) -> Suite {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        out.extend(files_with_ext(dir, "vpr"));
+        for sub in subdirs(dir) {
+            walk(&sub, out);
+        }
+    }
+    let mut suite = empty_suite(name, dir);
+    load_config(&mut suite);
+    let mut found = Vec::new();
+    walk(dir, &mut found);
+    suite.files = found
+        .into_iter()
+        .map(|vpr| {
+            let rel = vpr.strip_prefix(dir).unwrap_or(&vpr).with_extension("");
+            let stem = rel
+                .iter()
+                .map(|c| c.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            SuiteFile {
+                stem,
+                rs: None,
+                vpr: Some(vpr),
+                krate: None,
+            }
+        })
+        .collect();
+    suite.files.sort_by(|a, b| a.stem.cmp(&b.stem));
+    load_expected_failures(&mut suite);
     check_families(&mut suite);
     suite
 }
@@ -719,6 +759,33 @@ mod tests {
         assert!(c.warnings.iter().any(|w| w.contains("orphan")));
 
         assert!(suites[2].errors[0].contains("no directory"));
+
+        // An external directory of .vpr files includes its subdirectories.
+        let tree = scratch("tree");
+        write(&tree.join("top.vpr"), "");
+        write(&tree.join("a/x.vpr"), "");
+        write(&tree.join("a/b/y.vpr"), "");
+        write(&tree.join(".git/z.vpr"), "");
+        write(&tree.join("a/notes.txt"), "");
+        let ext = External::parse_all(
+            &format!(r#"{{"t": {{"path": {:?}}}}}"#, tree.to_string_lossy()),
+            Path::new("."),
+        )
+        .unwrap();
+        let t = discover_with(
+            &root,
+            &Discovery {
+                external: ext,
+                max_vpr_mb: None,
+            },
+        )
+        .into_iter()
+        .find(|s| s.name == "t")
+        .unwrap();
+        let stems: Vec<&str> = t.files.iter().map(|f| f.stem.as_str()).collect();
+        assert_eq!(stems, ["a/b/y", "a/x", "top"]);
+        assert!(t.files.iter().all(|f| f.rs.is_none() && f.vpr.is_some()));
+        let _ = std::fs::remove_dir_all(&tree);
         assert!(
             External::parse_all(r#"{"x": {"path": ".", "max_vpr": 1}}"#, Path::new("."))
                 .unwrap_err()
