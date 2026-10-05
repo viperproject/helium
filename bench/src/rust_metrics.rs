@@ -9,8 +9,13 @@
 //! structs and enums declared in the same file, which is what the benchmark
 //! corpora use; a type the file does not declare counts as one opaque leaf.
 //! Macro bodies are token streams to `syn` and are not looked into.
+//!
+//! A whole crate ([`crate_metrics`]) is every `.rs` file under its `src/`,
+//! each read on its own as above, with its functions named by the module path
+//! its location gives (`src/a/b.rs` holds `a::b::f`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use proc_macro2::Span;
 use serde::Serialize;
@@ -126,6 +131,12 @@ pub struct FileMetrics {
 }
 
 pub fn file_metrics(source: &str) -> Result<FileMetrics, String> {
+    file_metrics_in(source, "")
+}
+
+/// [`file_metrics`] of a file holding the module `prefix` (`a::b::`, or
+/// empty for the crate root).
+fn file_metrics_in(source: &str, prefix: &str) -> Result<FileMetrics, String> {
     let file = syn::parse_file(source).map_err(|e| {
         let at = e.span().start();
         format!("{}:{}: {e}", at.line, at.column)
@@ -134,7 +145,7 @@ pub fn file_metrics(source: &str) -> Result<FileMetrics, String> {
 
     let mut types = TypeTable::default();
     let mut fns: Vec<(String, &syn::Signature, &syn::Block, Span)> = Vec::new();
-    collect_items(&file.items, "", &mut types, &mut fns);
+    collect_items(&file.items, prefix, &mut types, &mut fns);
 
     let local_fns: HashSet<String> = fns
         .iter()
@@ -168,6 +179,90 @@ pub fn file_metrics(source: &str) -> Result<FileMetrics, String> {
         functions.get_mut(q).unwrap().max_call_depth = depth;
     }
 
+    Ok(FileMetrics {
+        loc: code_lines(&lines, 1, lines.len()),
+        fns: functions.len() as u64,
+        structs: types.structs.len() as u64,
+        enums: types.enums.len() as u64,
+        totals: totals_of(&functions),
+        functions,
+    })
+}
+
+/// Metrics of a whole crate: every `.rs` file under `src/`, merged. Files
+/// `syn` cannot parse are left out and named in the second result.
+pub fn crate_metrics(krate: &Path) -> Result<(FileMetrics, Vec<String>), String> {
+    let src = krate.join("src");
+    let mut files = Vec::new();
+    rs_files(&src, &mut files);
+    if files.is_empty() {
+        return Err(format!("no .rs files under {}", src.display()));
+    }
+    files.sort();
+    let mut merged = FileMetrics {
+        loc: 0,
+        fns: 0,
+        structs: 0,
+        enums: 0,
+        totals: serde_json::Map::new(),
+        functions: BTreeMap::new(),
+    };
+    let mut failed = Vec::new();
+    for path in &files {
+        let rel = path.strip_prefix(&src).unwrap_or(path);
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                failed.push(format!("{}: {e}", rel.display()));
+                continue;
+            }
+        };
+        match file_metrics_in(&source, &module_prefix(rel)) {
+            Ok(m) => {
+                merged.loc += m.loc;
+                merged.structs += m.structs;
+                merged.enums += m.enums;
+                merged.functions.extend(m.functions);
+            }
+            Err(e) => failed.push(format!("{}: {e}", rel.display())),
+        }
+    }
+    merged.fns = merged.functions.len() as u64;
+    merged.totals = totals_of(&merged.functions);
+    Ok((merged, failed))
+}
+
+fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            rs_files(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// The module a file under `src/` holds, as a name prefix: `lib.rs`,
+/// `main.rs` -> ``; `a.rs`, `a/mod.rs` -> `a::`; `a/b.rs` -> `a::b::`.
+fn module_prefix(rel: &Path) -> String {
+    let mut parts: Vec<String> = rel
+        .iter()
+        .map(|c| c.to_string_lossy().into_owned())
+        .collect();
+    let file = parts.pop().unwrap_or_default();
+    let stem = file.strip_suffix(".rs").unwrap_or(&file);
+    let root = parts.is_empty() && (stem == "lib" || stem == "main");
+    if stem != "mod" && !root {
+        parts.push(stem.to_string());
+    }
+    parts.iter().map(|p| format!("{p}::")).collect()
+}
+
+/// The per-function metrics aggregated: sum, or max for `max_` keys.
+fn totals_of(
+    functions: &BTreeMap<String, FnMetrics>,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut totals = serde_json::Map::new();
     for m in functions.values() {
         let serde_json::Value::Object(obj) = serde_json::to_value(m).unwrap() else {
@@ -189,15 +284,7 @@ pub fn file_metrics(source: &str) -> Result<FileMetrics, String> {
             };
         }
     }
-
-    Ok(FileMetrics {
-        loc: code_lines(&lines, 1, lines.len()),
-        fns: functions.len() as u64,
-        structs: types.structs.len() as u64,
-        enums: types.enums.len() as u64,
-        totals,
-        functions,
-    })
+    totals
 }
 
 fn last_segment(q: &str) -> &str {
@@ -869,6 +956,39 @@ fn paths_expr(e: &Expr) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn module_prefixes_follow_file_locations() {
+        let p = |s: &str| module_prefix(Path::new(s));
+        assert_eq!(p("lib.rs"), "");
+        assert_eq!(p("main.rs"), "");
+        assert_eq!(p("display.rs"), "display::");
+        assert_eq!(p("a/mod.rs"), "a::");
+        assert_eq!(p("a/b.rs"), "a::b::");
+        assert_eq!(p("a/lib.rs"), "a::lib::");
+    }
+
+    #[test]
+    fn crate_metrics_merges_files_under_their_modules() {
+        let dir = std::env::temp_dir().join(format!("bench-crate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/a")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "mod a;\npub fn top() {}\n").unwrap();
+        std::fs::write(
+            dir.join("src/a/mod.rs"),
+            "pub struct S;\nimpl S { fn f(&self) {} }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/a/broken.rs"), "fn (").unwrap();
+        let (m, failed) = crate_metrics(&dir).unwrap();
+        let names: Vec<&str> = m.functions.keys().map(|k| k.as_str()).collect();
+        assert_eq!(names, ["a::S::f", "top"]);
+        assert_eq!(m.fns, 2);
+        assert_eq!(m.structs, 1);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].contains("broken.rs"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const SRC: &str = r#"
 pub struct Cell { pub v: i32, pub w: i32 }

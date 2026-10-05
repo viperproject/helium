@@ -12,6 +12,19 @@
   "warmup": 1,
   "runs": 5,
   "timeout_s": null,
+  "max_vpr_mb": null,
   "slowdown_warn": 0.15,
-  "backfill_target_dir": "target/backfill"
+  "backfill_target_dir": "target/backfill",
+  "external_suites": {
+    "crates": {
+      "path": "../prusti-viper-corpus",
+      "description": "Top-100 crates.io crates, each encoded by Prusti (core proof) into one .vpr",
+      "tags": ["crates", "external"],
+      "rustc_target": "aarch64-apple-darwin",
+      "max_vpr_mb": 3,
+      "runs": 1,
+      "warmup": 0,
+      "timeout_s": 600
+    }
+  }
 }

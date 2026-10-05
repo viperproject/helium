@@ -31,6 +31,42 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(sha256_bytes(&std::fs::read(path)?))
 }
 
+/// SHA-256 over every file under `dir` (its relative path and content, in
+/// path order), skipping `target/` and hidden entries: a crate's fingerprint.
+pub fn sha256_dir(dir: &Path) -> std::io::Result<String> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let p = e?.path();
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            if name.starts_with('.') || name == "target" {
+                continue;
+            }
+            if p.is_dir() {
+                walk(&p, out)?;
+            } else {
+                out.push(p);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files)?;
+    files.sort();
+    let mut h = Sha256::new();
+    for f in &files {
+        let rel = f
+            .strip_prefix(dir)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .replace('\\', "/");
+        h.update(rel.as_bytes());
+        h.update([0]);
+        h.update(std::fs::read(f)?);
+        h.update([0]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
 /// Run `git` in `repo`, returning trimmed stdout on success.
 pub fn git(repo: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")

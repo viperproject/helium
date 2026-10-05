@@ -2,7 +2,8 @@
 //! `plans/regression-pipeline.md`.
 //!
 //! ```text
-//! bench check-suites [--benchmarks DIR] [--no-rustc] [--rustc PATH] [--rustc-toolchain TC]
+//! bench check-suites [--benchmarks DIR] [--external-suites JSON] [--max-vpr-mb MB]
+//!                    [--no-rustc] [--rustc PATH] [--rustc-toolchain TC]
 //! bench run [--out FILE] [options]
 //! bench rust-metrics FILE.rs
 //! ```
@@ -11,6 +12,9 @@
 //!
 //! ```text
 //! --benchmarks DIR        suites root (default: benchmarks)
+//! --external-suites JSON  suites outside it: {"name": {"path": DIR, <suite.json fields>}}
+//!                         (`external_suites` in tools/bench/config.json)
+//! --max-vpr-mb MB         skip .vpr files larger than this (a suite's own max_vpr_mb wins)
 //! --verify PATH           the verify binary to measure (default: target/release/verify)
 //! --metrics-verify PATH   verify used for --viper-metrics (default: --verify)
 //! --repo DIR              repository whose commit is recorded (default: .)
@@ -42,7 +46,8 @@ use bench::silicon::Silicon;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: bench check-suites [--benchmarks DIR] [--no-rustc] [--rustc PATH] [--rustc-toolchain TC]\n       \
+        "usage: bench check-suites [--benchmarks DIR] [--external-suites JSON] [--max-vpr-mb MB]\n                          \
+         [--no-rustc] [--rustc PATH] [--rustc-toolchain TC]\n       \
          bench run [--out FILE] [options]   (see the source header or benchmarks/README.md)\n       \
          bench rust-metrics FILE.rs"
     );
@@ -104,8 +109,31 @@ fn main() -> ExitCode {
     }
 }
 
+/// `--external-suites JSON` and `--max-vpr-mb MB`, shared by both commands.
+fn discovery_arg(
+    flag: &str,
+    args: &mut Args,
+    discovery: &mut bench::suites::Discovery,
+) -> Result<bool, String> {
+    match flag {
+        "--external-suites" => {
+            let json = args.value(flag)?;
+            discovery
+                .external
+                .extend(bench::suites::External::parse_all(
+                    &json,
+                    std::path::Path::new("."),
+                )?);
+        }
+        "--max-vpr-mb" => discovery.max_vpr_mb = Some(args.number(flag)?),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn check_suites(args: &mut Args) -> Result<ExitCode, String> {
     let mut benchmarks = PathBuf::from("benchmarks");
+    let mut discovery = bench::suites::Discovery::default();
     let mut rustc = Some(RustcOptions {
         rustc: "rustc".into(),
         toolchain: None,
@@ -124,11 +152,12 @@ fn check_suites(args: &mut Args) -> Result<ExitCode, String> {
                     r.toolchain = Some(args.value(&a)?);
                 }
             }
+            _ if discovery_arg(&a, args, &mut discovery)? => {}
             _ => return Err(format!("check-suites: unknown argument `{a}`")),
         }
     }
     let scratch = default_scratch();
-    let report = bench::check::check(&benchmarks, rustc.as_ref(), &scratch);
+    let report = bench::check::check(&benchmarks, &discovery, rustc.as_ref(), &scratch);
     let _ = std::fs::remove_dir_all(&scratch);
     for s in &report.suites {
         println!("suite    {s}");
@@ -155,6 +184,7 @@ fn check_suites(args: &mut Args) -> Result<ExitCode, String> {
 fn run(args: &mut Args) -> Result<ExitCode, String> {
     let mut opts = Options {
         benchmarks: "benchmarks".into(),
+        discovery: Default::default(),
         verify: default_verify(),
         metrics_verify: PathBuf::new(),
         repo: ".".into(),
@@ -219,6 +249,7 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             "--silicon-cache" => opts.silicon_cache = Some(args.value(&a)?.into()),
             "--scratch" => opts.scratch = args.value(&a)?.into(),
             "--out" => out = Some(args.value(&a)?.into()),
+            _ if discovery_arg(&a, args, &mut opts.discovery)? => {}
             _ => return Err(format!("run: unknown argument `{a}`")),
         }
     }

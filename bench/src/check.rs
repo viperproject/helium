@@ -3,15 +3,20 @@
 //!
 //! Errors (a run refuses to start): a `suite.json` that does not parse, a
 //! family pattern that does not match its stems, a malformed
-//! `expected_failures.txt`, a `.rs` rustc rejects. Warnings (reported, never
-//! fatal): a `.rs` with no `.vpr` yet, a `.vpr` older than its `.rs`.
+//! `expected_failures.txt`, a `.rs` rustc rejects, a missing external suite
+//! directory, a crate corpus `rustc_target` whose standard library is not
+//! installed. Warnings (reported, never fatal): a `.rs` with no `.vpr` yet, a
+//! `.vpr` older than its `.rs`, files over the `.vpr` size limit.
+//!
+//! The crates of a crate corpus are not compiled here: that needs their
+//! dependencies, which `bench run` fetches and checks.
 
 use std::path::Path;
 use std::time::Duration;
 
 use crate::measure;
 use crate::run::RustcOptions;
-use crate::suites::{self, Suite};
+use crate::suites::{self, Discovery, Suite};
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -20,11 +25,16 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
-pub fn check(benchmarks: &Path, rustc: Option<&RustcOptions>, scratch: &Path) -> Report {
+pub fn check(
+    benchmarks: &Path,
+    discovery: &Discovery,
+    rustc: Option<&RustcOptions>,
+    scratch: &Path,
+) -> Report {
     let mut report = Report::default();
     let rustc = rustc.map(RustcOptions::resolve);
     let rustc = rustc.as_ref();
-    for suite in suites::discover(benchmarks) {
+    for suite in suites::discover_with(benchmarks, discovery) {
         report.suites.push(format!(
             "{} ({} files, {} measurable{})",
             suite.name,
@@ -49,6 +59,7 @@ pub fn check(benchmarks: &Path, rustc: Option<&RustcOptions>, scratch: &Path) ->
         check_staleness(&suite, &mut report);
         if let Some(rustc) = rustc {
             check_rustc(&suite, rustc, scratch, &mut report);
+            check_target(&suite, rustc, &mut report);
         }
     }
     report
@@ -70,6 +81,37 @@ fn check_staleness(suite: &Suite, report: &mut Report) {
                 ));
             }
         }
+    }
+}
+
+/// A crate corpus is checked for its `rustc_target`, whose standard library
+/// must be installed (`rustup target add`).
+fn check_target(suite: &Suite, rustc: &RustcOptions, report: &mut Report) {
+    let Some(target) = &suite.config.rustc_target else {
+        return;
+    };
+    if !suite.files.iter().any(|f| f.krate.is_some()) {
+        return;
+    }
+    let libdir = rustc
+        .command()
+        .args(["--print", "target-libdir", "--target", target])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+    let installed = libdir.is_some_and(|d| {
+        std::fs::read_dir(d)
+            .map(|mut it| {
+                it.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with("libcore")))
+            })
+            .unwrap_or(false)
+    });
+    if !installed {
+        report.errors.push(format!(
+            "{}: rustc_target `{target}` is not installed (rustup target add {target})",
+            suite.name
+        ));
     }
 }
 

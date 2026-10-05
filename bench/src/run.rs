@@ -10,8 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::time::Duration;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,6 +29,8 @@ pub const SCHEMA: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct Options {
     pub benchmarks: PathBuf,
+    /// Suites outside `benchmarks`, and the run-wide `.vpr` size limit.
+    pub discovery: suites::Discovery,
     /// The `verify` binary being measured.
     pub verify: PathBuf,
     /// The `verify` used for `--viper-metrics` (defaults to `verify`; differs
@@ -90,6 +94,24 @@ impl RustcOptions {
                 toolchain: None,
             },
             None => self.clone(),
+        }
+    }
+
+    /// `cargo` for the same toolchain: next to a resolved `rustc` (which it
+    /// is told to use), else the rustup proxy with the same `+toolchain`.
+    pub fn cargo(&self) -> Command {
+        let exe = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let sibling = self.rustc.with_file_name(exe);
+        if self.toolchain.is_none() && self.rustc.parent().is_some() && sibling.is_file() {
+            let mut c = Command::new(sibling);
+            c.env("RUSTC", &self.rustc);
+            c
+        } else {
+            let mut c = Command::new("cargo");
+            if let Some(tc) = &self.toolchain {
+                c.arg(format!("+{tc}"));
+            }
+            c
         }
     }
 
@@ -173,6 +195,20 @@ pub struct SuiteInfo {
     pub rustc_args: Vec<String>,
     pub silicon: bool,
     pub files: usize,
+    /// This suite's run counts (its settings may lower the run's).
+    pub warmup: usize,
+    pub runs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_vpr_mb: Option<f64>,
+    /// Files left out for a `.vpr` over `max_vpr_mb`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_large: Vec<SkippedFile>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedFile {
+    pub stem: String,
+    pub vpr_mb: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -283,6 +319,128 @@ pub struct Member {
 
 // ── Joining Viper members to Rust functions ──
 
+/// The path of the Rust function an escaped Prusti member name encodes, as
+/// the segments [`rust_metrics`] names functions by: `$col$$col$` is `::`,
+/// `<impl Trait for T>` and `<T as Trait>` stand for `T`, generic arguments
+/// are dropped. `None` for what the crate does not define: a closure, or an
+/// item of `std`, `core` or `alloc`.
+pub fn prusti_path(escaped: &str) -> Option<Vec<String>> {
+    static ESCAPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$([a-z]+)\$").unwrap());
+    let name = ESCAPE.replace_all(escaped, |c: &regex::Captures| {
+        match &c[1] {
+            "col" => ":",
+            "sp" => " ",
+            "lt" => "<",
+            "gt" => ">",
+            "lc" => "{",
+            "rc" => "}",
+            "oc" => "#",
+            "amp" => "&",
+            "com" => ",",
+            "sq" => "'",
+            "lb" => "[",
+            "rb" => "]",
+            "lp" => "(",
+            "rp" => ")",
+            "sc" => ";",
+            "hyp" => "-",
+            "as" => "*",
+            "pl" => "+",
+            "ex" => "!",
+            _ => return c[0].to_string(),
+        }
+        .to_string()
+    });
+    let mut segments = Vec::new();
+    for seg in split_top(&name, "::") {
+        let seg = seg.trim();
+        if seg.starts_with('{') {
+            return None; // a closure or other anonymous item
+        }
+        if let Some(inner) = seg.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            let ty = if let Some(imp) = inner.strip_prefix("impl ") {
+                split_top(imp, " for ").last().copied().unwrap_or(imp)
+            } else if inner.contains(" as ") {
+                split_top(inner, " as ")[0]
+            } else {
+                continue; // `::<T>`: generic arguments
+            };
+            segments.push(type_name(ty)?);
+        } else {
+            segments.push(seg.split('<').next().unwrap_or(seg).to_string());
+        }
+    }
+    let first = segments.first()?;
+    (!matches!(first.as_str(), "std" | "core" | "alloc")).then_some(segments)
+}
+
+/// `s` split at `sep` where it is not inside `<..>`, `(..)` or `[..]`.
+fn split_top<'s>(s: &'s str, sep: &str) -> Vec<&'s str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut i) = (0i32, 0, 0);
+    let bytes = s.as_bytes();
+    while i < s.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'[' => depth += 1,
+            b'>' | b')' | b']' => depth -= 1,
+            _ if depth == 0 && s[i..].starts_with(sep) => {
+                parts.push(&s[start..i]);
+                i += sep.len();
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// The name a type's methods are filed under: the last path segment of
+/// `&mut a::B<T>`, i.e. `B`. `None` for a type with no such name (`[T]`).
+fn type_name(ty: &str) -> Option<String> {
+    let ty = ty
+        .trim()
+        .trim_start_matches(['&', '*'])
+        .trim_start_matches("mut ")
+        .trim_start_matches("const ")
+        .trim_start_matches("dyn ")
+        .trim();
+    let path = ty.split('<').next()?;
+    let last = path.rsplit("::").next()?.trim();
+    (!last.is_empty() && last.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .then(|| last.to_string())
+}
+
+/// The function `path` names among `fns`: exactly, else the one whose last
+/// two segments (`Type::f`, `module::f`) match, if unique (`fuzzy`; an
+/// inherent impl may sit in another module than its type, and Prusti names it
+/// after the type). The last segment alone is not enough: a derived
+/// `<T as Debug>::fmt` has no source, and must not join to another `fmt`.
+fn path_fn_for<'a>(
+    path: &[String],
+    fns: &'a BTreeMap<String, FnMetrics>,
+) -> Option<(&'a String, &'static str)> {
+    let joined = path.join("::");
+    if let Some((k, _)) = fns.get_key_value(&joined) {
+        return Some((k, "exact"));
+    }
+    let unique = |tail: &str| {
+        let mut it = fns
+            .keys()
+            .filter(|k| *k == tail || k.ends_with(&format!("::{tail}")));
+        match (it.next(), it.next()) {
+            (Some(k), None) => Some((k, "fuzzy")),
+            _ => None,
+        }
+    };
+    let n = path.len();
+    (n >= 2)
+        .then(|| unique(&path[n - 2..].join("::")))
+        .flatten()
+}
+
 fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -295,12 +453,18 @@ fn normalize(s: &str) -> String {
 /// file's functions). Failing that — `impl` methods and module paths — the
 /// qualified name is compared with separators removed, then as a unique
 /// suffix. Those are reported as `fuzzy` so the caller can log them.
+///
+/// Names in the escaped form of the crate corpus (`m_display$col$$col$pad`)
+/// are read as a path instead; see [`prusti_path`].
 pub fn rust_fn_for<'a>(
     member: &str,
     fns: &'a BTreeMap<String, FnMetrics>,
 ) -> Option<(&'a String, &'static str)> {
     let base = member.strip_prefix("m_")?;
     let base = base.split('#').next().unwrap_or(base);
+    if base.contains("$col$") {
+        return path_fn_for(&prusti_path(base)?, fns);
+    }
     let exact: Vec<&String> = fns
         .keys()
         .filter(|q| q.rsplit("::").next() == Some(base))
@@ -352,7 +516,7 @@ struct Ctx<'a> {
 }
 
 pub fn run(opts: &Options) -> Result<RunFile, String> {
-    let mut suites_found = suites::discover(&opts.benchmarks);
+    let mut suites_found = suites::discover_with(&opts.benchmarks, &opts.discovery);
     if suites_found.is_empty() {
         return Err(format!("no suites under {}", opts.benchmarks.display()));
     }
@@ -481,9 +645,28 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
                                 knobs: f.knobs.clone(),
                             })
                             .collect(),
-                        rustc_args: s.rustc_args(),
+                        rustc_args: if s.files.iter().any(|f| f.krate.is_some()) {
+                            let mut a = vec!["cargo".to_string()];
+                            if let Some(t) = &s.config.rustc_target {
+                                a.extend(["--target".to_string(), t.clone()]);
+                            }
+                            a
+                        } else {
+                            s.rustc_args()
+                        },
                         silicon: s.silicon(),
                         files: s.measurable().count(),
+                        warmup: s.warmup(opts.warmup),
+                        runs: s.runs(opts.runs),
+                        max_vpr_mb: s.config.max_vpr_mb.or(opts.discovery.max_vpr_mb),
+                        skipped_large: s
+                            .skipped_large
+                            .iter()
+                            .map(|(stem, mb)| SkippedFile {
+                                stem: stem.clone(),
+                                vpr_mb: (mb * 100.0).round() / 100.0,
+                            })
+                            .collect(),
                     },
                 )
             })
@@ -494,7 +677,13 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
 }
 
 fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileResult, String> {
-    let opts = ctx.opts;
+    // This suite's run counts: its settings may lower the run's.
+    let suite_opts = Options {
+        warmup: suite.warmup(ctx.opts.warmup),
+        runs: suite.runs(ctx.opts.runs),
+        ..ctx.opts.clone()
+    };
+    let opts = &suite_opts;
     let vpr = file.vpr.as_ref().expect("measurable");
     let timeout = Duration::from_secs_f64(opts.timeout.unwrap_or_else(|| suite.timeout_s()));
     let scratch = opts.scratch.join("work");
@@ -508,17 +697,36 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
         .map(std::fs::read_to_string)
         .transpose()
         .map_err(io)?;
-    let rs_sha = rs_source
-        .as_ref()
-        .map(|s| crate::sha256_bytes(s.as_bytes()));
+    // A crate is fingerprinted by all its files (sources, Cargo.toml,
+    // Cargo.lock), a single source by its content.
+    let rs_sha = match (&rs_source, &file.krate) {
+        (Some(src), _) => Some(crate::sha256_bytes(src.as_bytes())),
+        (None, Some(k)) => Some(crate::sha256_dir(k).map_err(io)?),
+        (None, None) => None,
+    };
 
     // ── Rust metrics ──
-    let (rust, rust_error) = match &rs_source {
-        Some(src) => match rust_metrics::file_metrics(src) {
+    let (rust, rust_error) = match (&rs_source, &file.krate) {
+        (Some(src), _) => match rust_metrics::file_metrics(src) {
             Ok(m) => (Some(m), None),
             Err(e) => (None, Some(e)),
         },
-        None => (None, None),
+        (None, Some(k)) => match rust_metrics::crate_metrics(k) {
+            Ok((m, failed)) => {
+                if !failed.is_empty() {
+                    ctx.warnings.push(format!(
+                        "{}/{}: Rust metrics: {} files not parsed (first: {})",
+                        suite.name,
+                        file.stem,
+                        failed.len(),
+                        failed[0]
+                    ));
+                }
+                (Some(m), None)
+            }
+            Err(e) => (None, Some(e)),
+        },
+        (None, None) => (None, None),
     };
     if let Some(e) = rust_error {
         ctx.warnings
@@ -547,8 +755,24 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     let mut peaks = BTreeMap::new();
 
     // ── rustc ──
-    if let (Some(rustc), Some(rs)) = (ctx.rustc.clone(), &file.rs) {
-        let mut args = suite.rustc_args();
+    let source = match (&file.rs, &file.krate) {
+        (Some(rs), _) => Some(RustSource::File(rs)),
+        (None, Some(k)) => Some(RustSource::Crate(k)),
+        (None, None) => None,
+    };
+    if let (Some(rustc), Some(source)) = (ctx.rustc.clone(), source) {
+        // A crate is checked with cargo; its arguments say so, and which
+        // platform, so they are part of the cache key.
+        let mut args = match source {
+            RustSource::File(_) => suite.rustc_args(),
+            RustSource::Crate(_) => {
+                let mut a = vec!["cargo".to_string()];
+                if let Some(t) = &suite.config.rustc_target {
+                    a.extend(["--target".to_string(), t.clone()]);
+                }
+                a
+            }
+        };
         // A nightly rustc also reports its own time, from the same runs.
         let time_passes = ctx.rustc_version.as_deref().is_some_and(rustc_is_nightly);
         if time_passes {
@@ -579,7 +803,19 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
                 }),
             },
             None => {
-                let t = time_rustc(&rustc, &args, rs, opts, timeout, &scratch).map_err(io)?;
+                let t = match source {
+                    RustSource::File(rs) => time_rustc(&rustc, &args, rs, opts, timeout, &scratch),
+                    RustSource::Crate(k) => time_cargo(
+                        &rustc,
+                        k,
+                        suite.config.rustc_target.as_deref(),
+                        time_passes,
+                        opts,
+                        timeout,
+                        &scratch,
+                    ),
+                }
+                .map_err(io)?;
                 if let (Some(k), Some(cache)) = (key, ctx.rustc_cache.as_mut()) {
                     if t.check.status == Status::Ok {
                         cache.entries.insert(k, t.clone());
@@ -907,8 +1143,122 @@ fn time_rustc(
     };
     let succeeded = |s: &Sample| s.code == Some(0);
     let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, scratch, succeeded)?;
-    let check = measure::wall_timing(&samples, succeeded);
-    let own = args.iter().any(|a| a == "time-passes").then(|| {
+    let time_passes = args.iter().any(|a| a == "time-passes");
+    Ok(rustc_timing(&samples, time_passes))
+}
+
+/// What [`time_rustc`] and [`time_cargo`] are given to time.
+#[derive(Clone, Copy)]
+enum RustSource<'a> {
+    File(&'a Path),
+    Crate(&'a Path),
+}
+
+/// Check a whole crate with cargo (`--lib`), timing only the crate itself.
+/// Its dependencies are checked first, once and untimed (the first time,
+/// cargo downloads them as `Cargo.lock` pins them); before each run the
+/// crate's own output is removed (`cargo clean -p`), so every run makes rustc
+/// check exactly the crate again. `rustc_self` is that rustc's own total.
+fn time_cargo(
+    rustc: &RustcOptions,
+    krate: &Path,
+    target: Option<&str>,
+    time_passes: bool,
+    opts: &Options,
+    timeout: Duration,
+    scratch: &Path,
+) -> std::io::Result<RustcTiming> {
+    let manifest = krate.join("Cargo.toml");
+    let spec = package_spec(&std::fs::read_to_string(&manifest)?).ok_or_else(|| {
+        std::io::Error::other(format!("{}: no [package] name", manifest.display()))
+    })?;
+    // Shared by the crates of a run, so a dependency is checked once.
+    let target_dir = opts.scratch.join("cargo-target");
+    let cargo = |sub: &str| {
+        let mut c = rustc.cargo();
+        c.arg(sub)
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .arg("--locked")
+            .env("CARGO_TERM_COLOR", "never");
+        if let Some(t) = target {
+            c.args(["--target", t]);
+        }
+        c
+    };
+
+    let mut deps = cargo("check");
+    deps.arg("--lib");
+    let prep = measure::run_once(&mut deps, timeout.max(Duration::from_secs(1800)), scratch)?;
+    if prep.timed_out || prep.code != Some(0) {
+        let status = if prep.timed_out {
+            Status::Timeout
+        } else {
+            Status::Error
+        };
+        let message = format!(
+            "cargo check: {}",
+            measure::tail(&format!("{}{}", prep.stderr, prep.stdout), 400)
+        );
+        return Ok(RustcTiming {
+            check: Timing::from_runs(status, Vec::new(), &[], Some(message)),
+            own: None,
+        });
+    }
+
+    let make = || {
+        let _ = cargo("clean").arg("-p").arg(&spec).output();
+        let mut c = cargo("rustc");
+        c.args(["--lib", "--profile", "check", "--", "--cap-lints", "allow"]);
+        if time_passes {
+            c.args(["-Z", "time-passes"]);
+        }
+        c
+    };
+    let succeeded = |s: &Sample| s.code == Some(0);
+    let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, scratch, succeeded)?;
+    Ok(rustc_timing(&samples, time_passes))
+}
+
+/// `name@version` of the `[package]` in a `Cargo.toml`, for `cargo clean -p`
+/// (the version tells it apart from a dependency of the same name).
+fn package_spec(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    let (mut name, mut version) = (None, None);
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"').to_string();
+        match k.trim() {
+            "name" => name = Some(v),
+            "version" => version = Some(v),
+            _ => {}
+        }
+    }
+    let name = name?;
+    Some(match version {
+        Some(v) if !v.contains('{') => format!("{name}@{v}"),
+        _ => name,
+    })
+}
+
+/// The wall times of rustc runs (`rustc_check`), and with `-Z time-passes`
+/// rustc's own totals and passes from the same runs (`rustc_self`).
+fn rustc_timing(samples: &[Sample], time_passes: bool) -> RustcTiming {
+    let succeeded = |s: &Sample| s.code == Some(0);
+    let check = measure::wall_timing(samples, succeeded);
+    let own = time_passes.then(|| {
         let reports: Vec<TimePasses> = samples
             .iter()
             .filter(|s| !s.timed_out && succeeded(s))
@@ -933,7 +1283,7 @@ fn time_rustc(
                 .collect(),
         }
     });
-    Ok(RustcTiming { check, own })
+    RustcTiming { check, own }
 }
 
 /// What one `rustc -Z time-passes` run reported about itself.
@@ -1030,6 +1380,80 @@ mod tests {
             .iter()
             .map(|n| (n.to_string(), FnMetrics::default()))
             .collect()
+    }
+
+    #[test]
+    fn reads_the_package_spec() {
+        let m = "[package]\nedition = \"2021\"\nname = \"semver\"\nversion = \"1.0.27\"\n\n[dependencies.serde]\nversion = \"1.0\"\n";
+        assert_eq!(package_spec(m), Some("semver@1.0.27".into()));
+        assert_eq!(
+            package_spec("[package]\nname = \"x\"\nversion.workspace = true\n"),
+            Some("x".into())
+        );
+        assert_eq!(package_spec("[dependencies]\nname = \"x\"\n"), None);
+    }
+
+    #[test]
+    fn reads_escaped_prusti_paths() {
+        let p = |s: &str| prusti_path(s).map(|v| v.join("::"));
+        assert_eq!(
+            p(
+                "display$col$$col$$lt$impl$sp$std$col$$col$fmt$col$$col$Display$sp$for$sp$Version$gt$$col$$col$fmt"
+            ),
+            Some("display::Version::fmt".into())
+        );
+        assert_eq!(
+            p("identifier$col$$col$Identifier$col$$col$is_empty"),
+            Some("identifier::Identifier::is_empty".into())
+        );
+        assert_eq!(
+            p("$lt$impl$sp$private$col$$col$Sealed$sp$for$sp$u8$gt$$col$$col$write"),
+            Some("u8::write".into())
+        );
+        assert_eq!(
+            p("Buffer$col$$col$$lt$$sq$a$gt$$col$$col$format"),
+            Some("Buffer::format".into())
+        );
+        assert_eq!(
+            p("$lt$Q$sp$as$sp$Equivalent$lt$K$gt$$gt$$col$$col$equivalent"),
+            Some("Q::equivalent".into())
+        );
+        assert_eq!(p("std$col$$col$mem$col$$col$forget"), None);
+        assert_eq!(
+            p("display$col$$col$pad$col$$col$$lc$closure$oc$0$rc$"),
+            None
+        );
+    }
+
+    #[test]
+    fn joins_escaped_members_by_path() {
+        let f = fns(&[
+            "display::Version::fmt",
+            "display::pad",
+            "impls::Prerelease::is_empty",
+            "a::new",
+            "b::new",
+        ]);
+        let j = |m: &str| rust_fn_for(m, &f).map(|(q, k)| (q.as_str(), k));
+        let fmt = "m_display$col$$col$$lt$impl$sp$std$col$$col$fmt$col$$col$Display$sp$for$sp$Version$gt$$col$$col$fmt";
+        assert_eq!(j(fmt), Some(("display::Version::fmt", "exact")));
+        assert_eq!(
+            j("m_display$col$$col$pad#requires"),
+            Some(("display::pad", "exact"))
+        );
+        assert_eq!(
+            j("m_Prerelease$col$$col$is_empty"),
+            Some(("impls::Prerelease::is_empty", "fuzzy"))
+        );
+        assert_eq!(j("m_c$col$$col$new"), None, "no `c::new`");
+        let derived = "m_$lt$OnSuccess$sp$as$sp$std$col$$col$fmt$col$$col$Debug$gt$$col$$col$fmt";
+        let f2 = fns(&["ScopeGuard::fmt"]);
+        assert_eq!(
+            rust_fn_for(derived, &f2),
+            None,
+            "a derived impl has no source"
+        );
+        assert_eq!(j("m_std$col$$col$mem$col$$col$forget"), None);
     }
 
     #[test]

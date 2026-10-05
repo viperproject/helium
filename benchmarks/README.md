@@ -37,6 +37,7 @@ benchmarks/<suite>/
 | `panic_free/` | panic-freedom tiers (`isolate/`: hand-reduced Viper) |
 | `scaling/` | generated families, one knob each (`gen_*.py`) |
 | `viper` (this dir) | hand-written Viper, also the `perf_regression` gate |
+| `crates` (external) | the top-100 crates.io crates, one `.vpr` per crate; see [External suites](#external-suites) |
 
 ### `suite.json`
 
@@ -53,9 +54,19 @@ default silently).
   "family": {
     "pattern": "loops_n(?P<nesting>\\d+)_b(?P<body>\\d+)",
     "knobs": ["nesting", "body"]
-  }
+  },
+  "max_vpr_mb": 3,
+  "runs": 1,
+  "warmup": 0
 }
 ```
+
+- `max_vpr_mb`: files whose `.vpr` is larger (in 10^6 bytes) are skipped; the
+  run file lists them under the suite's `skipped_large`. Without it, the
+  run-wide `max_vpr_mb` of `tools/bench/config.json` applies (`null`: no limit).
+- `runs`, `warmup`: at most this many timed and warm-up runs per tool for this
+  suite; the run's own counts (`config.json`, `--runs`) are the ceiling.
+- `rustc_target`: only for a crate corpus, see below.
 
 `family` marks a generated suite: every stem must match the pattern, and the
 knob values are read from the stem, so a new generator gets scaling charts on the
@@ -64,6 +75,54 @@ site with no site change. A suite holding several families gives
 must match at least one stem, and with `"exhaustive": true` every stem must match
 one (see `scaling/suite.json`, and `rust/suite.json` for families mixed with
 hand-written files).
+
+## External suites
+
+A suite can live outside this directory: `external_suites` in
+`tools/bench/config.json` maps a suite name to its directory (relative to the
+repository root) plus any `suite.json` field, which replace a `suite.json` in
+that directory. A directory that does not exist on the machine is skipped with
+a note, so a checkout without it still runs everything else.
+
+```json
+"external_suites": {
+  "crates": {
+    "path": "../prusti-viper-corpus",
+    "rustc_target": "aarch64-apple-darwin",
+    "max_vpr_mb": 3, "runs": 1, "warmup": 0, "timeout_s": 600
+  }
+}
+```
+
+Besides the layouts above, an external directory may be a **crate corpus**, one
+benchmark per whole crate (the layout of `prusti-viper-corpus`):
+
+```
+<dir>/
+  crates/<stem>/Cargo.toml   the crate, with the Cargo.lock that pins its dependencies
+  viper/<stem>.vpr           Prusti's encoding of the whole crate, in one file
+```
+
+For a crate, the runner
+
+- checks it with cargo instead of a lone `rustc`: once untimed with its
+  dependencies (the first run downloads them, as `Cargo.lock` pins them), then
+  each timed run removes the crate's own output and checks only the crate
+  (`cargo rustc --lib --profile check`), so `rustc_self` is rustc's own time on
+  the crate alone. `rustc_target` is passed as `--target`: the platform the
+  encodings were generated on, so rustc compiles the same `cfg`-selected code.
+  Install its standard library first (`rustup target add aarch64-apple-darwin`;
+  checking needs no linker), `check-suites` reports it missing;
+- takes the Rust metrics of every `.rs` under `src/`, each function named by the
+  module path of its file (`src/a/b.rs` holds `a::b::f`);
+- joins Viper members to Rust functions by the path in Prusti's escaped names
+  (`m_display$col$$col$$lt$impl$sp$...$gt$$col$$col$fmt` is
+  `display::<impl .. for Version>::fmt`, i.e. `display::Version::fmt`); members
+  of `std`/`core`/`alloc` and closures join to nothing;
+- fingerprints the whole crate directory for the rustc cache.
+
+One file is one data point: a timeout or crash loses the crate's measurement,
+which is what `max_vpr_mb`, `runs` and `timeout_s` are for.
 
 ## Adding a suite
 
