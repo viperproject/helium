@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::helium::{self, HeliumRun};
@@ -100,11 +100,29 @@ impl RustcOptions {
     }
 }
 
-/// `rustc_check` timings. Like Silicon's, they depend only on the `.rs`, the
+/// Whether this compiler takes `-Z` flags: nightly and locally built ones do.
+pub fn rustc_is_nightly(version: &str) -> bool {
+    version.contains("-nightly") || version.contains("-dev")
+}
+
+/// One file's rustc measurement: the cached unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustcTiming {
+    /// The `rustc` process, end to end (`rustc_check`).
+    #[serde(flatten)]
+    pub check: Timing,
+    /// rustc's own `-Z time-passes` total and passes, from the same runs
+    /// (`rustc_self`); `None` for a compiler that is not nightly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<PhasedTiming>,
+}
+
+/// rustc timings. Like Silicon's, they depend only on the `.rs`, the
 /// compiler and its arguments, never on the Helium commit, so each is measured
 /// once and reused. Keyed by `"<rs sha256>|<rustc -vV>|<args>"`; the version
-/// line carries the compiler's commit hash.
-pub type RustcCache = crate::cache::Cache<Timing>;
+/// line carries the compiler's commit hash, and the arguments include
+/// `-Z time-passes` when it is passed.
+pub type RustcCache = crate::cache::Cache<RustcTiming>;
 
 impl RustcCache {
     pub fn key(rs_sha256: &str, rustc_version: &str, args: &[String]) -> String {
@@ -205,17 +223,23 @@ pub struct FileRustMetrics {
 
 #[derive(Debug, Serialize, Default)]
 pub struct Times {
+    /// The `rustc` process, end to end.
     pub rustc_check: Option<Timing>,
+    /// rustc's own `-Z time-passes` total (no process startup), with the
+    /// median of each pass. Passes nest, so they do not add up to the total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rustc_self: Option<PhasedTiming>,
     /// `verify`'s own pipeline total (no process startup), with phase medians.
-    pub helium_verify: Option<HeliumTiming>,
+    pub helium_verify: Option<PhasedTiming>,
     /// The `verify` process, end to end.
     pub helium_wall: Option<Timing>,
     pub silicon_wall: Option<SiliconTiming>,
     pub silicon_verify: Option<SiliconTiming>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct HeliumTiming {
+/// A tool's self-reported total, with the median of each phase it reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhasedTiming {
     #[serde(flatten)]
     pub timing: Timing,
     pub phases: BTreeMap<String, f64>,
@@ -524,7 +548,12 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
 
     // ── rustc ──
     if let (Some(rustc), Some(rs)) = (ctx.rustc.clone(), &file.rs) {
-        let args = suite.rustc_args();
+        let mut args = suite.rustc_args();
+        // A nightly rustc also reports its own time, from the same runs.
+        let time_passes = ctx.rustc_version.as_deref().is_some_and(rustc_is_nightly);
+        if time_passes {
+            args.extend(["-Z".to_string(), "time-passes".to_string()]);
+        }
         // Only successful timings are cached; a failure is measured again, and
         // so is a timing of fewer runs than this run asks for.
         let key = rs_sha
@@ -534,13 +563,25 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
         let hit = key
             .as_ref()
             .and_then(|k| ctx.rustc_cache.as_ref()?.entries.get(k).cloned())
-            .filter(|t| t.status == Status::Ok && t.runs.len() >= opts.runs);
-        let t = match hit {
-            Some(t) => Timing { cached: true, ..t },
+            .filter(|t| t.check.status == Status::Ok && t.check.runs.len() >= opts.runs);
+        let RustcTiming { check: t, own } = match hit {
+            Some(t) => RustcTiming {
+                check: Timing {
+                    cached: true,
+                    ..t.check
+                },
+                own: t.own.map(|o| PhasedTiming {
+                    timing: Timing {
+                        cached: true,
+                        ..o.timing
+                    },
+                    ..o
+                }),
+            },
             None => {
                 let t = time_rustc(&rustc, &args, rs, opts, timeout, &scratch).map_err(io)?;
                 if let (Some(k), Some(cache)) = (key, ctx.rustc_cache.as_mut()) {
-                    if t.status == Status::Ok {
+                    if t.check.status == Status::Ok {
                         cache.entries.insert(k, t.clone());
                     }
                 }
@@ -563,6 +604,7 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             ));
         }
         times.rustc_check = Some(t);
+        times.rustc_self = own;
     }
 
     // ── Helium ──
@@ -624,7 +666,7 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             member_times.entry(k.clone()).or_default().push(*v);
         }
     }
-    times.helium_verify = Some(HeliumTiming {
+    times.helium_verify = Some(PhasedTiming {
         timing: Timing::from_runs(wall.status, totals, &[], None),
         phases: phases
             .iter()
@@ -843,7 +885,8 @@ fn silicon_unattributed(r: &SiliconResult) -> bool {
 }
 
 /// Time `rustc --emit=metadata` (type and borrow checking only, like
-/// `cargo check`) on `rs`: warm-up runs, then the timed ones.
+/// `cargo check`) on `rs`: warm-up runs, then the timed ones. When `args`
+/// carry `-Z time-passes`, rustc's own report of each run is kept too.
 fn time_rustc(
     rustc: &RustcOptions,
     args: &[String],
@@ -851,7 +894,7 @@ fn time_rustc(
     opts: &Options,
     timeout: Duration,
     scratch: &Path,
-) -> std::io::Result<Timing> {
+) -> std::io::Result<RustcTiming> {
     let out_dir = scratch.join("rustc-out");
     std::fs::create_dir_all(&out_dir)?;
     let make = || {
@@ -864,7 +907,70 @@ fn time_rustc(
     };
     let succeeded = |s: &Sample| s.code == Some(0);
     let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, scratch, succeeded)?;
-    Ok(measure::wall_timing(&samples, succeeded))
+    let check = measure::wall_timing(&samples, succeeded);
+    let own = args.iter().any(|a| a == "time-passes").then(|| {
+        let reports: Vec<TimePasses> = samples
+            .iter()
+            .filter(|s| !s.timed_out && succeeded(s))
+            .filter_map(|s| parse_time_passes(&s.stderr))
+            .collect();
+        let mut passes: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for r in &reports {
+            for (k, v) in &r.passes {
+                passes.entry(k.clone()).or_default().push(*v);
+            }
+        }
+        PhasedTiming {
+            timing: Timing::from_runs(
+                check.status,
+                reports.iter().map(|r| r.total).collect(),
+                &[],
+                None,
+            ),
+            phases: passes
+                .iter()
+                .map(|(k, v)| (k.clone(), measure::median(v)))
+                .collect(),
+        }
+    });
+    Ok(RustcTiming { check, own })
+}
+
+/// What one `rustc -Z time-passes` run reported about itself.
+#[derive(Debug, Clone, PartialEq)]
+struct TimePasses {
+    /// The `total` line: the compiler session, without process startup.
+    total: f64,
+    /// Seconds per pass; a pass reported more than once is summed.
+    passes: BTreeMap<String, f64>,
+}
+
+/// Read the `-Z time-passes` lines on stderr (`time:   0.130; rss:   29MB ->
+/// 36MB (  +7MB)`, a tab, the pass name); `None` without a `total` line.
+fn parse_time_passes(stderr: &str) -> Option<TimePasses> {
+    let mut total = None;
+    let mut passes = BTreeMap::new();
+    for line in stderr.lines() {
+        let Some(rest) = line.strip_prefix("time:") else {
+            continue;
+        };
+        let Some((secs, rest)) = rest.split_once(';') else {
+            continue;
+        };
+        let (Ok(secs), Some(name)) = (secs.trim().parse::<f64>(), rest.split_whitespace().last())
+        else {
+            continue;
+        };
+        if name == "total" {
+            total = Some(secs);
+        } else {
+            *passes.entry(name.to_string()).or_insert(0.0) += secs;
+        }
+    }
+    Some(TimePasses {
+        total: total?,
+        passes,
+    })
 }
 
 /// Keep the 20 slowest rules of `stats.rule_timing`: the full map is a few
@@ -893,6 +999,31 @@ fn viper_metrics(verify: &Path, vpr: &Path, scratch: &Path) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_time_passes() {
+        let err = "time:   0.033; rss:   18MB ->   19MB (   +1MB)\tparse_crate\n\
+                   time:   0.000; rss:   27MB ->   27MB (   +0MB)\tdrop_ast\n\
+                   time:   0.002; rss:   28MB ->   28MB (   +0MB)\tdrop_ast\n\
+                   warning: something else\n\
+                   time:   0.720; rss:   14MB ->   30MB (  +16MB)\ttotal\n";
+        let r = parse_time_passes(err).unwrap();
+        assert_eq!(r.total, 0.72);
+        assert_eq!(r.passes["parse_crate"], 0.033);
+        assert_eq!(r.passes["drop_ast"], 0.002);
+        assert!(!r.passes.contains_key("total"));
+        let no_total = "time:   0.1; rss: 1MB -> 1MB (+0MB)\tparse_crate\n";
+        assert_eq!(parse_time_passes(no_total), None);
+    }
+
+    #[test]
+    fn only_nightly_rustc_takes_z_flags() {
+        assert!(rustc_is_nightly(
+            "rustc 1.100.0-nightly (e71c0f1e3 2026-08-18)"
+        ));
+        assert!(rustc_is_nightly("rustc 1.100.0-dev"));
+        assert!(!rustc_is_nightly("rustc 1.92.0 (ded5c06cf 2025-12-08)"));
+    }
 
     fn fns(names: &[&str]) -> BTreeMap<String, FnMetrics> {
         names

@@ -102,8 +102,9 @@ over the files both share, and commits and pushes. Only the host named in
 Machine-specific settings (the Silicon jar, a pinned `rustc_toolchain`) go in the
 untracked `tools/bench/config.local.json`.
 
-What one run measures, per file: rustc (`--emit=metadata`; cached by `.rs` hash,
-rustc version and arguments),
+What one run measures, per file: rustc (`--emit=metadata`: process wall time, and
+on a nightly compiler its own `-Z time-passes` total and passes from the same runs;
+cached by `.rs` hash, rustc version and arguments),
 Helium (`verify --json`: total, phases, per-member times, all `VerifyStats`
 counters, peak memory), Silicon (process wall time and its own reported time,
 per-member verdicts; cached by `.vpr` hash, jar hash and arguments), one warm-up

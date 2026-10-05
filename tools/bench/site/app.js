@@ -165,7 +165,7 @@ function numericPaths(objs, prefix, skip = new Set()) {
   for (const o of objs) walk(prefix ? get(o, prefix) : o, prefix || "", 0);
   return [...out].sort();
 }
-const TIME_COLUMNS = ["helium_verify", "helium_wall", "rustc_check", "silicon_verify", "silicon_wall"];
+const TIME_COLUMNS = ["helium_verify", "helium_wall", "rustc_check", "rustc_self", "silicon_verify", "silicon_wall"];
 function fileMetricPaths(run) {
   const times = TIME_COLUMNS.filter((c) => run.files.some((f) => med(f.times?.[c]) != null)).map((c) => "times." + c);
   const rest = numericPaths(run.files, "").filter((p) => !p.startsWith("times.") && !p.startsWith("knobs."));
@@ -346,8 +346,10 @@ async function pageTrends(params) {
     ["summary.totals.helium_verify", "Helium verify, total (s)"],
     ["summary.totals.helium_wall", "Helium process wall, total (s)"],
     ["summary.totals.rustc_check", "rustc check, total (s)"],
+    ["summary.totals.rustc_self", "rustc self-reported, total (s)"],
     ["summary.totals.silicon_verify", "Silicon verify, total (s)"],
     ["summary.geomean_overhead", "Overhead vs rustc (geomean ×)"],
+    ["summary.geomean_overhead_self", "Overhead vs rustc self-reported (geomean ×)"],
     ["summary.geomean_speedup", "Speedup vs Silicon (geomean ×)"],
     ["summary.coverage.OK", "Members OK"],
     ["summary.coverage.FAIL", "Members FAIL"],
@@ -643,6 +645,7 @@ async function pageScaling(params) {
 
   const TOOLS = [
     ["times.rustc_check", "rustc"],
+    ["times.rustc_self", "rustc (self-reported)"],
     ["times.helium_verify", "Helium"],
     ["times.silicon_verify", "Silicon"],
   ];

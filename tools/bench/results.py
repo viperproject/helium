@@ -155,8 +155,15 @@ def summarize(run_data: dict) -> dict:
     files = run_data.get("files", [])
     coverage: dict = {}
     by_suite: dict = {}
-    totals = {"helium_verify": 0.0, "helium_wall": 0.0, "rustc_check": 0.0, "silicon_verify": 0.0, "silicon_wall": 0.0}
-    overhead, speedup = [], []
+    totals = {
+        "helium_verify": 0.0,
+        "helium_wall": 0.0,
+        "rustc_check": 0.0,
+        "rustc_self": 0.0,
+        "silicon_verify": 0.0,
+        "silicon_wall": 0.0,
+    }
+    overhead, overhead_self, speedup = [], [], []
     members = disagreements = timeouts = file_errors = 0
     for f in files:
         t = f.get("times", {})
@@ -173,9 +180,12 @@ def summarize(run_data: dict) -> dict:
         if h is not None:
             s["helium_verify"] += h
         r = median_of(t.get("rustc_check"))
+        rs = median_of(t.get("rustc_self"))
         sv = median_of(t.get("silicon_verify"))
         if h and r:
             overhead.append(h / r)
+        if h and rs:
+            overhead_self.append(h / rs)
         if h and sv:
             speedup.append(sv / h)
         members += len(f.get("members", []))
@@ -189,6 +199,7 @@ def summarize(run_data: dict) -> dict:
         "suites": by_suite,
         "totals": totals,
         "geomean_overhead": geomean(overhead),
+        "geomean_overhead_self": geomean(overhead_self),
         "geomean_speedup": geomean(speedup),
         "disagreements": disagreements,
         "timeouts": timeouts,

@@ -22,12 +22,13 @@ The comparison, per source file:
 | Column | Command | Why |
 |---|---|---|
 | `rustc_check` | `rustc --edition 2021 --crate-type lib --emit=metadata` | Same as `cargo check`: type and borrow checking only. This is the fairest match for "checking". |
+| `rustc_self` | the same runs, with `-Z time-passes` (nightly only) | rustc's own `total`, without process startup, plus each pass. The like-for-like match for `helium_verify`; the passes nest, so they do not add up to the total. |
 | `helium_verify` | `verify --json` | Total time plus the phases (parse, typecheck, translate, verify) |
 | `silicon_wall`, `silicon_verify` | Viper Silicon on the same `.vpr` | The reference verifier for the same input. See below. |
 
 The headline numbers, tracked per file and as a geometric mean over the corpus:
 
-- **overhead = helium_verify / rustc_check**: what verification costs on top of compiling.
+- **overhead = helium_verify / rustc_check**: what verification costs on top of compiling. `geomean_overhead_self` divides by `rustc_self` instead, so neither side counts process startup.
 - **speedup = silicon_verify / helium_verify**: how Helium compares with the standard Viper verifier.
 
 ### Silicon
@@ -197,7 +198,7 @@ benchmarks branch
     index.json                one entry per run: commit, date, subject, totals, coverage
     runs/<date>_<sha>.json    one file per run (full data)
     silicon_cache.json        Silicon results keyed by (.vpr hash, jar hash, arguments)
-    rustc_cache.json          rustc_check timings keyed by (.rs hash, rustc version, arguments)
+    rustc_cache.json          rustc_check and rustc_self timings keyed by (.rs hash, rustc version, arguments)
   docs/                       the GitHub Pages site, served from this branch
 ```
 
@@ -220,6 +221,7 @@ All data is JSON. A run file looks like:
       "viper_metrics": { "loc": 18231, "folds": 311, "…": "…" },
       "times": {
         "rustc_check":   { "median": 0.081, "mad": 0.002, "runs": [0.080, 0.081, …] },
+        "rustc_self":    { "median": 0.062, "mad": 0.001, "phases": { "type_check_crate": 0.02, "…": 0 } },
         "helium_verify": { "median": 3.12,  "mad": 0.04,  "phases": { "parse": 0.2, "…": 0 } },
         "silicon_wall":  { "median": 9.8 }, "silicon_verify": { "median": 6.1 }
       },
