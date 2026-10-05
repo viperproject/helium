@@ -107,10 +107,12 @@ on a nightly compiler its own `-Z time-passes` total and passes from the same ru
 cached by `.rs` hash, rustc version and arguments),
 Helium (`verify --json`: total, phases, per-member times, all `VerifyStats`
 counters, peak memory), Silicon (process wall time and its own reported time,
-per-member verdicts; cached by `.vpr` hash, jar hash and arguments), one warm-up
-and five timed runs each (median and MAD), a 300 s timeout recorded as a timeout
-(killing the command's whole process tree, JVM and z3s included), plus the
-Rust metrics (`bench rust-metrics FILE.rs`) and Viper metrics
+per-member verdicts; cached by `.vpr` hash, jar hash and arguments). The site and
+the summary use only the self-reported times (`rustc_self`, `helium_verify`,
+`silicon_verify`); the wall-clock ones stay in the run files. Each tool gets one
+warm-up and five timed runs (median and MAD) under a 300 s timeout, recorded as a
+timeout (killing the command's whole process tree, JVM and z3s included). The run
+also records the Rust metrics (`bench rust-metrics FILE.rs`) and Viper metrics
 (`verify --viper-metrics FILE.vpr`) joined per member (`m_f` ↔ `f`).
 
 To view results locally, serve the results checkout and open `docs/`:

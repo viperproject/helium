@@ -28,8 +28,10 @@ The comparison, per source file:
 
 The headline numbers, tracked per file and as a geometric mean over the corpus:
 
-- **overhead = helium_verify / rustc_check**: what verification costs on top of compiling. `geomean_overhead_self` divides by `rustc_self` instead, so neither side counts process startup.
+- **overhead = helium_verify / rustc_self**: what verification costs on top of compiling.
 - **speedup = silicon_verify / helium_verify**: how Helium compares with the standard Viper verifier.
+
+Both use the time each tool reports itself, so neither counts process or JVM startup. The site and the summary totals use only these three self-reported columns; the wall-clock columns (`rustc_check`, `helium_wall`, `silicon_wall`) stay in the run files.
 
 ### Silicon
 
@@ -244,7 +246,7 @@ All data is JSON. A run file looks like:
 
 ## GitHub Pages site
 
-A static site in `docs/` on the `benchmarks` branch, published with GitHub Pages from that branch. Plain HTML and JavaScript with a charting library from a CDN (Plotly), no build step. It reads `index.json` and the run files directly. (GitHub Pages on a private repository needs a paid plan.)
+A static site in `docs/` on the `benchmarks` branch, published with GitHub Pages from that branch. Plain HTML and JavaScript with a charting library from a CDN (Plotly), no build step. It reads `index.json` and the run files directly. (GitHub Pages on a private repository needs a paid plan.) Every time it shows is a tool's self-reported one: `rustc_self`, `helium_verify`, `silicon_verify`.
 
 Pages:
 
@@ -255,7 +257,7 @@ Pages:
    - a per-member table sorted by change, filterable by suite;
    - members whose verdict changed between the commits;
    - files added or removed between the commits.
-4. **Scaling.** For each generated family, time against the knob on log axes, with the fitted exponent. The lines are either commits (any number overlaid, one metric) or tools (rustc, Helium and Silicon at one commit, to see whether the verifiers scale differently). A baseline option subtracts each line's value at the smallest knob, so fixed costs such as Silicon's JVM startup drop out and only the growth is compared; the y-axis is then linear.
+4. **Scaling.** For each generated family, time against the knob on log axes, with the fitted exponent. The lines are either commits (any number overlaid, one metric) or tools (rustc, Helium and Silicon at one commit, to see whether the verifiers scale differently). A baseline option subtracts each line's value at the smallest knob, so fixed costs such as Prusti's prelude drop out and only the growth is compared; the y-axis is then linear.
 5. **Explore.** Choose any Rust or Viper metric for the x-axis and any time or counter for the y-axis. One point per member, coloured by suite, at a chosen commit. This also shows the Spearman correlation for the chosen pair.
 
 The selected commits and metrics go into the URL, so a comparison can be shared as a link.
