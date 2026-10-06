@@ -34,3 +34,8 @@ unnecessary_unwrap = "allow"
 # root still build and test only `silver-oxide` unless `-p bench` is given.
 [workspace]
 members = [".", "bench"]
+
+# egg is a fork (JonasAlaif/egg, branch `helium`) checked out as a submodule, so
+# general e-graph capabilities the verifier needs can land there first.
+[patch.crates-io]
+egg = { path = "vendor/egg" }

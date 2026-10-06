@@ -1,0 +1,4 @@
+[submodule "vendor/egg"]
+	path = vendor/egg
+	url = https://github.com/JonasAlaif/egg.git
+	branch = helium
