@@ -1,0 +1,5 @@
+// `x % m` is `x` only where `x` is below *every* `m` in its range: with `m` in
+// `[1, 20]` and `x = 7`, `m = 5` gives `2`.
+method not_identity(x: Int, m: Int)
+  requires 0 <= x && x <= 10 && 1 <= m && m <= 20
+{ assert x % m == x }

@@ -1,0 +1,5 @@
+// Euclidean division by a negative divisor: `9 \ -3 == -3`, so the quotient
+// reaches `-3`. Positive control: `tests/cases/passing/intervals/mod_div_range.vpr`.
+method bad_quotient(x: Int)
+  requires 0 <= x && x <= 10
+{ assert x \ -3 > -3 }
