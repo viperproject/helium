@@ -86,6 +86,12 @@ cargo run --bin verify -- --breakdown tests/cases/passing/field.vpr
 
 This prints the verification status of each member and, with `--breakdown`, the slowest verification steps and rule timings.
 
+To see where inside a run the work goes, `--trace=CATEGORIES` writes a structured trace (one JSON object per line, to stderr or `--trace-file=PATH`): per member and per CFG block work and e-graph growth, every rule run with its stop reason, per-rule and per-quantifier instantiation counts, scratch/probe activity, and the terms at a failed obligation. `--trace=help` lists the categories; without `time` the output is deterministic, so traces of two builds can be diffed:
+
+```bash
+cargo run --release --bin verify -- --trace=block,sat tests/cases/passing/field.vpr 2> trace.jsonl
+```
+
 For tools, `--json` prints one JSON object instead (statuses, phase timings, per-member times, all verifier counters, peak memory, the build's git commit), and `--viper-metrics` prints shape metrics of the parsed program without verifying:
 
 ```bash

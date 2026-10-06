@@ -1,4 +1,5 @@
 use crate::dhash::HashMap;
+use crate::trace::{self, trace_event};
 
 use crate::verify::cert::PermRecipe;
 use crate::vmir::display::VmirDisplay;
@@ -894,32 +895,31 @@ fn scale_perm(
 /// left to check is the *suffix* half, and that is a plain emptiness test on the
 /// delta — no e-graph, no `cube_eq`.
 ///
-/// Still gated on `SILVER_OXIDE_ASSERT_BLOCK_PC` rather than promoted to an
-/// always-on `debug_assert`, because the suffix half has a **known, deliberate
-/// counterexample**: `unfolding p in e` is a Viper *expression* that lowers to
-/// statement-level instructions, so under a ternary it legitimately carries a
+/// Reported as a `block`/`pc_suffix` trace event rather than asserted, because
+/// the suffix half has a **known, deliberate counterexample**: `unfolding p in e`
+/// is a Viper *expression* that lowers to statement-level instructions, so under
+/// a ternary it legitimately carries a
 /// suffix (`tests/cases/passing/predicates/unfolding_expr_scoped_read.vpr`, and
 /// `tests/cases/failing/functions/predicate_graft_token_guard.vpr`). Plan 82
 /// proposed rejecting that construct; measurement says the lowering re-folds and
 /// fabricates no permission, so it is the invariant that is too strong. Until
 /// `unfolding` becomes a scoped node, this stays an opt-in corpus check.
-fn assert_statement_pc_is_block_cube(ctx: &mut VerifyContext<'_>, inst: &Inst) {
-    if !ctx.in_block() || std::env::var_os("SILVER_OXIDE_ASSERT_BLOCK_PC").is_none() {
+fn trace_statement_pc_suffix(ctx: &VerifyContext<'_>, inst: &Inst, inst_idx: usize) {
+    if !ctx.in_block() || !trace::enabled(trace::Category::Block) || inst.pc.conds.is_empty() {
         return;
     }
-    let statement_level = matches!(
-        inst.kind,
-        InstKind::Heap(HeapInst::Inhale { .. } | HeapInst::Exhale { .. } | HeapInst::Assign(..))
-    );
-    if !statement_level {
-        return;
-    }
-    assert!(
-        inst.pc.conds.is_empty(),
-        "invariant 6: statement-level inst carries a pc suffix beyond the block cube \
-         ({} extra literals) — kind {:?}",
-        inst.pc.conds.len(),
-        std::mem::discriminant(&inst.kind),
+    let kind = match inst.kind {
+        InstKind::Heap(HeapInst::Inhale { .. }) => "inhale",
+        InstKind::Heap(HeapInst::Exhale { .. }) => "exhale",
+        InstKind::Heap(HeapInst::Assign(..)) => "assign",
+        _ => return,
+    };
+    trace_event!(
+        Block,
+        "pc_suffix",
+        inst = inst_idx,
+        kind = kind,
+        literals = inst.pc.conds.len()
     );
 }
 
@@ -1218,13 +1218,12 @@ fn eval_method_inst(
             // formula and releases the token (mirrors `eval_snap`); otherwise a
             // plain `prove_under_pc`.
             if !ctx.prove_under_pc(id, &pc_lits) {
-                if std::env::var_os("SILVER_OXIDE_TRACE_ASSERT").is_some() {
-                    eprintln!(
-                        "[assert-fail] Assert inst, pc={} lits:\n{}",
-                        pc_lits.len(),
-                        crate::verify::viz::dump_term(ctx, id, 40),
-                    );
-                }
+                trace_event!(
+                    Fail,
+                    "assert",
+                    pc = pc_lits.len(),
+                    goal = crate::verify::viz::dump_term(ctx, id, 40)
+                );
                 return Err(VerifyError::AssertionFailed);
             }
             // An assert in a body **publishes nothing**. `ensures` is a
@@ -1543,13 +1542,12 @@ fn walk_footprint(
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {
             if !ctx.prove_under_pc(bool_id, bool_guard) {
-                if std::env::var_os("SILVER_OXIDE_TRACE_ASSERT").is_some() {
-                    eprintln!(
-                        "[assert-fail] resource-bool consume, pc={} lits:\n{}",
-                        bool_guard.len(),
-                        crate::verify::viz::dump_term(ctx, bool_id, 40),
-                    );
-                }
+                trace_event!(
+                    Fail,
+                    "resource_body",
+                    pc = bool_guard.len(),
+                    goal = crate::verify::viz::dump_term(ctx, bool_id, 40)
+                );
                 return Err(VerifyError::AssertionFailed);
             }
         }
@@ -2306,7 +2304,7 @@ fn walk_body(
     mut footprint_ops: Option<&mut Vec<(Val, vmir::PermVal)>>,
 ) -> Result<(), VerifyError> {
     for (inst_idx, inst) in insts.iter().enumerate() {
-        assert_statement_pc_is_block_cube(ctx, inst);
+        trace_statement_pc_suffix(ctx, inst, inst_idx);
         if let (
             Some(ops),
             InstKind::Heap(HeapInst::Add { loc, perm, .. } | HeapInst::Sub { loc, perm, .. }),
@@ -2332,12 +2330,13 @@ fn walk_body(
         let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
         for (goal, err) in inst_obligations(ctx, state, &inst.kind, &pc_lits) {
             if !ctx.prove_under_pc(goal, &pc_lits) {
-                if crate::verify::viz::dump_perm_enabled() {
-                    eprintln!(
-                        "[perm-dump] failed obligation goal:\n{}",
-                        crate::verify::viz::dump_term(ctx, goal, 64),
-                    );
-                }
+                trace_event!(
+                    Fail,
+                    "obligation",
+                    inst = inst_idx,
+                    pc = pc_lits.len(),
+                    goal = crate::verify::viz::dump_term(ctx, goal, 64)
+                );
                 let inst_text = inst_text(program);
                 if snap.enabled() {
                     let heaps = display_heaps(state, &inst.kind, heaps_before);
@@ -2392,7 +2391,7 @@ pub(crate) fn verify_method(
     ctx.fn_certs = Some(fn_certs);
     assume_axioms(&mut ctx, program)?;
     let mut state = EvalState::new();
-    let mut snap = Snapshotter::from_env(method_name);
+    let mut snap = Snapshotter::new(method_name);
     snap.snapshot(&ctx, &[], "init", None);
 
     // Block walker (Stage 3): evaluate blocks in stored order — which is
@@ -2402,6 +2401,24 @@ pub(crate) fn verify_method(
     // the flat verifier used. The heap threads linearly via each inst's explicit
     // `base: HeapVal`; the per-predecessor structural merge is a later stage.
     for (bid, block) in method.blocks.iter_enumerated() {
+        let clock = trace::clock();
+        let start = trace::enabled(trace::Category::Block).then(|| {
+            (
+                stats::work_now(),
+                ctx.egraph.total_size(),
+                ctx.egraph.number_of_classes(),
+            )
+        });
+        trace_event!(
+            Block,
+            "begin",
+            block = bid.0,
+            preds = match &block.preds {
+                vmir::Preds::Entry => "entry",
+                vmir::Preds::From(_) => "from",
+                vmir::Preds::Join { .. } => "join",
+            }
+        );
         // Stored order is topological: a block's predecessors have smaller ids.
         // (A future lowering bug that broke this would corrupt positional eval.)
         debug_assert!(
@@ -2476,14 +2493,23 @@ pub(crate) fn verify_method(
         if refuted {
             state.dead_blocks.insert(bid.0);
         }
+        // Ground growth over the block (both phases), and the work it cost.
+        if let Some((work, nodes, classes)) = start {
+            let mut fields = vec![
+                ("block", bid.0.into()),
+                ("insts", (block.join.len() + block.body.len()).into()),
+                ("dead", refuted.into()),
+                ("nodes_before", nodes.into()),
+                ("classes_before", classes.into()),
+                ("nodes", ctx.egraph.total_size().into()),
+                ("classes", ctx.egraph.number_of_classes().into()),
+            ];
+            fields.extend(stats::work_since(&work));
+            fields.push(("secs", trace::secs(clock).into()));
+            trace::emit(trace::Category::Block, "end", fields);
+        }
     }
     ctx.end_block();
-    if let Some(t) = crate::verify::heap::MergeTrace::take() {
-        eprintln!(
-            "[merge-trace] {method_name}: selects_built={} zero_leaves={} max_depth={}",
-            t.selects_built, t.zero_leaves, t.max_depth
-        );
-    }
     Ok(())
 }
 
@@ -2524,7 +2550,7 @@ pub(crate) fn verify_resource(
     // heap, implicitly assuming the precondition resource's boolean.
     let mut state = EvalState::with_args(params, resource.params.clone());
 
-    let mut snap = Snapshotter::from_env(resource_name);
+    let mut snap = Snapshotter::new(resource_name);
     snap.snapshot(&ctx, &[], "init", None);
 
     walk_body(
@@ -2657,7 +2683,7 @@ pub(crate) fn verify_function(
     let param_types: Vec<Type> = function.params.iter().cloned().collect();
     let mut state = EvalState::with_args(params.clone(), param_types);
 
-    let mut snap = Snapshotter::from_env(function_name);
+    let mut snap = Snapshotter::new(function_name);
     snap.snapshot(&ctx, &[], "init", None);
     // The method-body eval path handles every inst a function body can contain
     // (pure ops, the entry `assume`, `Snap`/a bound `inhale`/`Unfold` for heap-dependent

@@ -212,15 +212,14 @@ fn build_dep_graph(program: &Program) -> DepGraph {
     graph
 }
 
-/// Env-gated (`SILVER_OXIDE_VIZ`) dump of the dependency graph to
+/// With a trace session's `viz_dir` (`verify --viz=DIR`), dump the dependency graph to
 /// `<dir>/callgraph.dot` for debugging. Node labels are member names;
 /// edges are unlabeled.
 fn dump_callgraph(graph: &DepGraph, program: &Program) {
     use petgraph::dot::{Config, Dot};
 
-    let dir = match crate::util::log_dir() {
-        Some(d) => d,
-        None => return,
+    let Some(dir) = crate::trace::viz_dir() else {
+        return;
     };
     let edge_attr = |_, _| String::new();
     let node_attr = |_, (id, _): (MemberId, &MemberId)| format!("label = \"{}\"", program.name(id));
@@ -230,11 +229,11 @@ fn dump_callgraph(graph: &DepGraph, program: &Program) {
         &edge_attr,
         &node_attr,
     );
-    let path = format!("{dir}/callgraph.dot");
+    let path = dir.join("callgraph.dot");
     if let Err(e) =
         std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, format!("{dot:?}")))
     {
-        eprintln!("failed to write {path}: {e}");
+        eprintln!("failed to write {}: {e}", path.display());
     }
 }
 

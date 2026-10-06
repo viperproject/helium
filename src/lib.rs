@@ -11,6 +11,7 @@ pub mod dhash {
     pub type HashMap<K, V> = std::collections::HashMap<K, V, rustc_hash::FxBuildHasher>;
     pub type HashSet<K> = std::collections::HashSet<K, rustc_hash::FxBuildHasher>;
 }
+pub mod trace;
 pub mod translate;
 mod util;
 pub mod verify;

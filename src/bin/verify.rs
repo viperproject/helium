@@ -1,6 +1,7 @@
 //! Parse + typecheck + translate + verify.
 //!
-//! Usage: `cargo run --bin verify -- [--breakdown] [--json] [--viper-metrics] cases/foo.vpr`
+//! Usage: `cargo run --bin verify -- [--breakdown] [--json] [--viper-metrics]
+//! [--trace=CATEGORIES] [--trace-file=PATH] [--viz=DIR] cases/foo.vpr`
 //!
 //! `--breakdown` (`-b`) prints per-member verify times, slowest first.
 //!
@@ -15,6 +16,13 @@
 //! calls; totals and per member) as JSON, without verifying. Combined with
 //! `--json` the metrics are included in the verification report instead.
 //!
+//! `--trace=CATEGORIES` writes a structured trace of the verifier's work, one JSON
+//! object per line, for the comma-separated categories (`--trace=help` lists them;
+//! see `silver_oxide::trace`). It goes to stderr, or to `--trace-file=PATH`.
+//!
+//! `--viz=DIR` writes Graphviz snapshots of the e-graph and heap after every
+//! instruction, one PDF per member, plus the dependency graph, into `DIR`.
+//!
 //! Exit status is 1 if any row is not `[OK]` — an unproved obligation, an
 //! unsupported construct, a declaration skipped because one it depends on was
 //! rejected, or a file that could not be parsed at all. 0 only when every unit
@@ -22,6 +30,7 @@
 
 use silver_oxide::json::Json;
 use silver_oxide::pipeline::{MemberResult, PhaseTimings, PipelineError};
+use silver_oxide::trace::{Categories, Category, TraceConfig};
 use silver_oxide::verify::VerifyStats;
 use silver_oxide::viper::metrics::ViperMetrics;
 use silver_oxide::{peak_memory, pipeline, viper_parser};
@@ -46,35 +55,86 @@ struct Args {
     breakdown: bool,
     json: bool,
     metrics: bool,
+    trace: Categories,
+    trace_file: String,
+    viz: Option<String>,
 }
 
-fn parse_args() -> Option<Args> {
+const USAGE: &str = "usage: verify [--breakdown] [--json] [--viper-metrics] \
+     [--trace=CATEGORIES] [--trace-file=PATH] [--viz=DIR] <file.vpr>";
+
+fn parse_args() -> Result<Args, String> {
     let (mut file, mut breakdown, mut json, mut metrics) = (None, false, false, false);
+    let (mut trace, mut trace_file, mut viz) = (Categories::NONE, "-".to_string(), None);
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--breakdown" | "-b" => breakdown = true,
             "--json" => json = true,
             "--viper-metrics" => metrics = true,
-            _ => file = Some(arg),
+            _ => {
+                if let Some(spec) = arg.strip_prefix("--trace=") {
+                    if spec == "help" {
+                        return Err(trace_help());
+                    }
+                    trace =
+                        Categories::parse(spec).map_err(|e| format!("{e}\n{}", trace_help()))?;
+                } else if let Some(path) = arg.strip_prefix("--trace-file=") {
+                    trace_file = path.to_string();
+                } else if let Some(dir) = arg.strip_prefix("--viz=") {
+                    viz = Some(dir.to_string());
+                } else if arg.starts_with("--") {
+                    return Err(format!("unknown option `{arg}`\n{USAGE}"));
+                } else {
+                    file = Some(arg);
+                }
+            }
         }
     }
-    Some(Args {
-        file: file?,
+    Ok(Args {
+        file: file.ok_or(USAGE)?,
         breakdown,
         json,
         metrics,
+        trace,
+        trace_file,
+        viz,
     })
 }
 
+/// The `--trace` categories, one per line.
+fn trace_help() -> String {
+    let mut s = String::from("trace categories (comma-separated; `all` = all but `time`):");
+    for (_, name, about) in Category::ALL {
+        s.push_str(&format!("\n  {name:<8} {about}"));
+    }
+    s
+}
+
 fn main() -> ExitCode {
-    let Some(args) = parse_args() else {
-        eprintln!("usage: verify [--breakdown] [--json] [--viper-metrics] <file.vpr>");
-        return ExitCode::FAILURE;
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(msg) => {
+            eprintln!("{msg}");
+            return ExitCode::FAILURE;
+        }
     };
     if args.metrics && !args.json {
         return report_metrics(&args.file);
     }
-    let outcome = pipeline::run_file_timed(Path::new(&args.file));
+    let out = match silver_oxide::trace::open_output(&args.trace_file) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("cannot write trace to {}: {e}", args.trace_file);
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = TraceConfig {
+        categories: args.trace,
+        out,
+        viz_dir: args.viz.as_ref().map(Into::into),
+    };
+    let outcome =
+        silver_oxide::trace::with_trace(config, || pipeline::run_file_timed(Path::new(&args.file)));
     if args.json {
         report_json(&args, &outcome)
     } else {
