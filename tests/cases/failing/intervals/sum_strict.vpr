@@ -1,0 +1,5 @@
+// `x, y <= 255` bounds the sum by 510, not below it. Positive control:
+// `tests/cases/passing/intervals/bounds.vpr`.
+method bad_sum(x: Int, y: Int)
+  requires 0 <= x && x <= 255 && 0 <= y && y <= 255
+{ assert x + y < 510 }

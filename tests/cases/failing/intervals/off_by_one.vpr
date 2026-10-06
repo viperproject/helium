@@ -1,0 +1,5 @@
+// `v <= 255` does not give `v < 255`. Positive control:
+// `tests/cases/passing/intervals/bounds.vpr`.
+method bad_lt255(v: Int)
+  requires 0 <= v && v <= 255
+{ assert v < 255 }

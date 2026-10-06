@@ -1,0 +1,18 @@
+// Verifies through integer ranges: at the exit `!(i < n)` narrows `i` by
+// `n`'s range, `n >= 0`. Silicon verifies it
+// (`tests/cases/known_limitations/loops/ORACLE.md`).
+
+// S12: back edge to a head carrying no invariant. The body heap is empty,
+// so nothing about the pre-loop state survives; the exit guard alone proves
+// the assertion.
+method no_invariant(n: Int) returns (i: Int)
+  requires n >= 0
+{
+    i := 0
+    label head
+    if (i < n) {
+        i := i + 1
+        goto head
+    }
+    assert i >= 0
+}

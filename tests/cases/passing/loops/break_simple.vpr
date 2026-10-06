@@ -1,0 +1,23 @@
+// Verifies through integer ranges: `box.f` is `10` across the loop (wildcard
+// framing), so `i < 10` bounds `i + 1` by `10`. Silicon verifies it
+// (`tests/cases/known_limitations/loops/ORACLE.md`).
+
+// S4: `break` — a goto out of the loop body.
+field f: Int
+
+method break_simple() returns (i: Int)
+{
+    var box: Ref
+    box := new(f)
+    box.f := 10
+    i := 0
+    while (i < box.f)
+        invariant acc(box.f, wildcard)
+        invariant i <= box.f
+    {
+        i := i + 1
+        if (i > 5) { goto brk }
+    }
+    label brk
+    assert box.f == 10
+}
