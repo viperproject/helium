@@ -211,7 +211,7 @@ impl<'a> VerifyContext<'a> {
     ///    built, because building it allocates nodes and const-folding
     ///    obligations (`0 < 1/1`) are the bulk of the stream.
     /// 4. `memo` — the implication itself is already `true` (a prior identical
-    ///    obligation merged it, or it is trivial), or sits in `proven_imps`.
+    ///    obligation merged it, or it is trivial).
     /// 5. `saturate` — saturate the live graph (only **unconditional** facts
     ///    live there) and re-check. No clone.
     /// 6. `probe` — the only tier that clones: the block scratch, or (functions
@@ -261,12 +261,8 @@ impl<'a> VerifyContext<'a> {
         }
         let imp = self.implication(goal, pc_lits.iter().rev().copied());
 
-        // `memo`: already true (memoized / trivial). Under `oob_memo` a proven
-        // *conditional* obligation lives in `proven_imps` rather than the `true`
-        // class, so consult it too.
-        if self.egraph.find(imp) == self.egraph.find(true_)
-            || (self.oob_memo && self.proven_imps.contains(&self.egraph.find(imp)))
-        {
+        // `memo`: already true (memoized / trivial).
+        if self.egraph.find(imp) == self.egraph.find(true_) {
             stats::bump(|s| s.prove_memo += 1);
             return true;
         }
@@ -298,14 +294,14 @@ impl<'a> VerifyContext<'a> {
                 // every later block. Guarded by the cube it is exactly the fact the
                 // arm licenses (`¬b ⇒ false`), true even where the cube is unsat.
                 let cube = std::mem::take(&mut self.current_cube);
-                let (full_imp, full_empty) = if cube.is_empty() {
-                    (imp, pc_lits.is_empty())
+                let full_imp = if cube.is_empty() {
+                    imp
                 } else {
                     let lits: Vec<_> = cube.iter().chain(pc_lits).rev().copied().collect();
-                    (self.implication(goal, lits.into_iter()), false)
+                    self.implication(goal, lits.into_iter())
                 };
                 self.current_cube = cube;
-                self.record_proven(full_imp, true_, full_empty);
+                self.record_proven(full_imp, true_);
             }
             return proven;
         }
@@ -324,7 +320,7 @@ impl<'a> VerifyContext<'a> {
             let probe = self.egraph.clone();
             let proven = self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated);
             if proven {
-                self.record_proven(imp, true_, pc_lits.is_empty());
+                self.record_proven(imp, true_);
             }
             return proven;
         }
@@ -362,7 +358,7 @@ impl<'a> VerifyContext<'a> {
 
         // Persist the result so future identical obligations hit the `memo` tier.
         if proven {
-            self.record_proven(imp, true_, pc_lits.is_empty());
+            self.record_proven(imp, true_);
         }
         proven
     }
@@ -658,26 +654,13 @@ impl<'a> VerifyContext<'a> {
         self.prove_by_ite_decomposition(&probe, imp, Rung::Saturated)
     }
 
-    /// Persist a proven obligation so future identical ones hit the `memo` tier.
-    ///
-    /// Default (and always for an **empty-pc** goal, where `imp == goal`): union
-    /// `imp` with `true`. That path is *productive* — a proven `Eq`/discriminator
-    /// goal must collapse its argument classes via `eq-true-union` /
-    /// `contra-congruence`.
-    ///
-    /// Under `oob_memo`, a **conditional** obligation (`imp` is an
-    /// `ite(pc.., goal, true)` chain) is instead recorded out of band: unioning it
-    /// drags the whole chain permanently into the `true` class (the measured #1
-    /// growth driver) when the verdict alone is what the memo needs. The cost is
-    /// losing auto-propagation of `goal` once its pc lands unconditionally.
-    fn record_proven(&mut self, imp: egg::Id, true_: egg::Id, pc_empty: bool) {
-        if self.oob_memo && !pc_empty {
-            let canon = self.egraph.find(imp);
-            self.proven_imps.insert(canon);
-        } else {
-            self.union(imp, true_);
-            self.egraph.rebuild();
-        }
+    /// Persist a proven obligation so future identical ones hit the `memo` tier:
+    /// union `imp` with `true`. This is also *productive* — a proven
+    /// `Eq`/discriminator goal collapses its argument classes via `eq-true-union`
+    /// / `contra-congruence`.
+    fn record_proven(&mut self, imp: egg::Id, true_: egg::Id) {
+        self.union(imp, true_);
+        self.egraph.rebuild();
     }
 
     /// Tier 3.5 — **non-forking `ite`-goal decomposition**. When the goal's
@@ -704,7 +687,7 @@ impl<'a> VerifyContext<'a> {
     ///
     /// Terminates without a depth cap: each iteration assumes one
     /// *previously-unknown* condition and the e-graph has finitely many, which the
-    /// `assumed` set makes explicit. `SILVER_OXIDE_NO_ITE_DECOMPOSE=1` disables it.
+    /// `assumed` set makes explicit.
     ///
     /// **Cost model.** A link only needs the *terminating* reductions: assuming
     /// `cᵢ` const-folds the `ite` and the next link is the surviving arm's own
@@ -725,9 +708,6 @@ impl<'a> VerifyContext<'a> {
         goal: egg::Id,
         entry: Rung,
     ) -> bool {
-        if std::env::var_os("SILVER_OXIDE_NO_ITE_DECOMPOSE").is_some() {
-            return false;
-        }
         // One working graph threaded across the chain, so its ids stay stable
         // and `assumed` (a set of condition classes) is a sound progress guard.
         let mut work = probe.clone();

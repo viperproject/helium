@@ -97,20 +97,6 @@ pub(crate) struct VerifyContext<'a> {
     /// program without wildcards skips the per-subtract `contains_wildcard` scan
     /// entirely, so non-wildcard verification pays nothing for the feature.
     pub(crate) has_wildcard: bool,
-    /// `SILVER_OXIDE_OOB_MEMO`: keep proven **conditional** obligations in an
-    /// out-of-band set instead of unioning `pc ⇒ goal` into the `true` e-class.
-    /// The union memoizes the proof but drags the whole `ite(pc.., goal, true)`
-    /// chain permanently into `true` (the #1 growth driver — the graph has no GC),
-    /// where the set memoizes the *verdict* alone. Empty-pc goals still union
-    /// (productive: `eq-true-union`/congruence off a proven `Eq`).
-    oob_memo: bool,
-    /// Canonical class ids of implications already proven `true`, consulted at
-    /// the `memo` tier when `oob_memo` is on. Keyed by `egraph.find(imp)`: two distinct
-    /// obligations only share a class via congruence — which means their goals
-    /// and pcs are pairwise equal, i.e. the *same* obligation — so a hit is
-    /// sound; a stale leader after an unrelated merge only causes a safe
-    /// re-prove.
-    proven_imps: crate::dhash::HashSet<egg::Id>,
     /// The current method block's control cube (the shared pc of all its insts),
     /// as live-graph literal ids. Set by [`Self::begin_block`]; the scratch
     /// assumes it. Empty outside a method block (functions/resources don't use
@@ -194,8 +180,6 @@ impl<'a> VerifyContext<'a> {
             recipe: None,
             clean: None,
             has_wildcard: decls_have_wildcard(decls),
-            oob_memo: std::env::var_os("SILVER_OXIDE_OOB_MEMO").is_some(),
-            proven_imps: crate::dhash::HashSet::default(),
             current_cube: Vec::new(),
             in_block: false,
             scratch: None,

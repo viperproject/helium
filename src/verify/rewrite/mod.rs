@@ -126,24 +126,7 @@ fn var(name: &str) -> Var {
 /// The static structural rule set. Per-ADT cons/proj/tag reductions are minted
 /// by the registry (`verify::mono`) and appended by `VerifyContext::new`.
 pub fn rules() -> Vec<Rule> {
-    static_rules().into_iter().filter(kept).map(timed).collect()
-}
-
-/// Ablation gate: `SILVER_OXIDE_DROP_RULES=name1,name2` removes those rules from
-/// the saturation and reduction sets. Dropping a rewrite is incomplete, never
-/// unsound.
-fn kept(rule: &Rule) -> bool {
-    use std::sync::OnceLock;
-    static DROP: OnceLock<HashSet<String>> = OnceLock::new();
-    let drop = DROP.get_or_init(|| {
-        std::env::var("SILVER_OXIDE_DROP_RULES")
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    drop.is_empty() || !drop.contains(rule.name.as_str())
+    static_rules().into_iter().map(timed).collect()
 }
 
 /// The terminating structural reductions used to **normalize** the e-graph after
@@ -151,9 +134,5 @@ fn kept(rule: &Rule) -> bool {
 /// appended by `VerifyContext::new`. Kept separate from [`rules`] so that
 /// *non-terminating* rules run only during full saturation.
 pub fn reduce_rules() -> Vec<Rule> {
-    terminating_ite_rules()
-        .into_iter()
-        .filter(kept)
-        .map(timed)
-        .collect()
+    terminating_ite_rules().into_iter().map(timed).collect()
 }
