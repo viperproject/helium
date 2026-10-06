@@ -1,0 +1,22 @@
+// `assert y > 0` does not follow from anything here, so this must fail.
+//
+// Guards against an e-class-id-keyed memo outliving the graph its ids came from.
+// `check_forall_wd` proves the division's `i != 0` (under `i > 0`) inside
+// `with_scratch_graph`, on a throwaway clone of the live e-graph, then restores
+// the live graph. A proof memo keyed by canonical ids and *not* restored with the
+// graph (the former opt-in out-of-band memo, `proven_imps`) kept the throwaway's
+// id; the live graph then re-minted it for `y > 0`'s implication, and the memo
+// tier reported the assertion proven. The two padding statements line the ids up
+// for that layout; the case is a weak guard for other layouts.
+//
+// Port of backend-blocks-perf 138642a's lesson.
+
+function g(i: Int): Int
+
+method stale_memo(y: Int, a: Int)
+{
+  inhale forall i: Int :: {g(i)} i > 0 ==> g(10 \ i) >= 0
+  var z0: Int := a + 1000
+  var z1: Int := a + 1001
+  assert y > 0
+}
