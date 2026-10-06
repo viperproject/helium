@@ -1,0 +1,106 @@
+// Positive controls for the `failing/permissions/zero_residue_*` cases: where a
+// consume (or frame check) draws its permission from a pc-alias partner, the
+// value it takes is the partner's, and members that do hold permission still
+// agree on the value.
+//
+// In each `*_holder` method, `set5(y)` under `y == x` leaves `x`'s chunk at zero
+// permission with its old value 4 and puts the permission and the value 5 at `y`.
+// The `halves_*` methods consume two positive halves that alias under the pc,
+// where value agreement is genuine.
+//
+// `frame_holder` and `wildcard_frame_holder` failed before the value was taken
+// from the permission's holder: the frame check read the stale 4.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method set5(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && r.f == 5
+
+method setP5(r: Ref)
+  requires P(r)
+  ensures P(r) && (unfolding P(r) in r.f == 5)
+
+method consume5(r: Ref)
+  requires acc(r.f) && r.f == 5
+
+function rd(r: Ref): Int
+  requires acc(r.f)
+{ r.f }
+
+function rdw(r: Ref): Int
+  requires acc(r.f, wildcard)
+{ r.f }
+
+method call_holder(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    consume5(x)
+  }
+}
+
+method unfold_holder(x: Ref, y: Ref, b: Bool)
+  requires P(x) && (unfolding P(x) in x.f == 4)
+{
+  if (b) {
+    assume y == x
+    setP5(y)
+    unfold P(x)
+    assert x.f == 5
+  }
+}
+
+method fold_holder(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    fold P(x)
+    assert (unfolding P(x) in x.f) == 5
+  }
+}
+
+method frame_holder(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    assert rd(x) == 5
+  }
+}
+
+method wildcard_frame_holder(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    assert rdw(x) == 5
+  }
+}
+
+method halves_fold(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && y.f == 4
+{
+  if (b) {
+    assume y == x
+    fold P(x)
+    assert (unfolding P(x) in x.f) == 4
+  }
+}
+
+method halves_unfold(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x), 1/2) && acc(P(y), 1/2) && (unfolding acc(P(x), 1/2) in x.f == 4)
+{
+  if (b) {
+    assume y == x
+    unfold P(y)
+    assert y.f == 4
+  }
+}
