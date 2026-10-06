@@ -1,0 +1,22 @@
+// REGRESSION GUARD (soundness). Deadness belongs to a BLOCK, not to its exit heap
+// temp: the second shape of `dead_block_shared_heap_temp.vpr`.
+//
+// The empty `else` of `if (true)` is dead, and its exit heap is its
+// predecessor's temp, which the empty then-arm of the later `if (c)` passes
+// through as well. Tagging the temp dead made that later join drop its LIVE
+// then-arm and record that the join is reached only through the else arm, i.e.
+// `!c`: `assert !c` verified.
+//
+// Ported from backend-blocks-perf ef6ca1b (seen on bytes `Bytes::truncate` and url
+// `quirks::set_pathname`, which Silicon rejects).
+//
+// Must FAIL.
+field f: Int
+
+method shared_temp(c: Bool, x: Ref)
+  requires acc(x.f)
+{
+  if (true) { } else { }
+  if (c) { } else { x.f := 1 }
+  assert !c
+}

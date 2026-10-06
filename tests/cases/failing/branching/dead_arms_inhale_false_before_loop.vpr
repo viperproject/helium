@@ -1,0 +1,24 @@
+// REGRESSION GUARD (soundness). `dead_arms_join_before_loop.vpr` with the two
+// arms of the inner join dead by `inhale false` each, rather than inheriting
+// deadness from their enclosing block.
+//
+// Must FAIL.
+field f: Int
+
+method both_arms_inhale_false(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f) && x.f == 0
+{
+  var i: Int := 0
+  if (b) {
+    if (c) { inhale false } else { inhale false }
+    goto done
+  }
+  while (i < 3)
+    invariant acc(x.f)
+  {
+    x.f := x.f + 1
+    i := i + 1
+  }
+  label done
+  assert x.f == 0
+}

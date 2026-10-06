@@ -1,0 +1,18 @@
+// REGRESSION GUARD (soundness). Prusti-style path flags: the third arm sets no
+// flag, so `a || b` is false on that path, the `else` arm of the guard is live,
+// and it gives `x.f` away. The postcondition must fail.
+//
+// Ported from backend-blocks-perf (path-flag disjunctions).
+//
+// Must FAIL.
+field f: Int
+
+method flags(c: Int, x: Ref)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var a: Bool := false
+  var b: Bool := false
+  if (c == 0) { a := true } elseif (c == 1) { b := true } else { }
+  if (a || b) { } else { exhale acc(x.f) }
+}
