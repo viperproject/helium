@@ -5,6 +5,7 @@ use prove::BlockScratch;
 use crate::dhash::HashMap;
 
 use crate::{
+    trace::{self, trace_event, trace_tally},
     verify::{
         analysis::ConstFold,
         cert::FunctionDefinition,
@@ -350,21 +351,7 @@ impl<'a> VerifyContext<'a> {
         }
         let t = std::time::Instant::now();
         let egraph = std::mem::take(&mut self.egraph);
-        let (n0, c0) = (egraph.total_number_of_nodes(), egraph.number_of_classes());
-        let it0 = stats::with_stats(|s| s.sat_iterations);
-        self.egraph = self.saturate_flat(egraph);
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            eprintln!(
-                "[ground-sat] {n0}n/{c0}c -> {}n/{}c true={} ({} iters)",
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-                {
-                    let t = self.egraph.find(self.true_id_cached());
-                    self.egraph[t].nodes.len()
-                },
-                stats::with_stats(|s| s.sat_iterations) - it0,
-            );
-        }
+        self.egraph = self.saturate_flat(egraph, RunKind::Ground);
         let secs = t.elapsed().as_secs_f64();
         stats::bump(|s| s.graph_timing.0.ground += secs);
         stats::bump(|s| s.saturations += 1);
@@ -377,6 +364,7 @@ impl<'a> VerifyContext<'a> {
     fn saturate_flat(
         &mut self,
         egraph: egg::EGraph<Symbolic, ConstFold>,
+        kind: RunKind,
     ) -> egg::EGraph<Symbolic, ConstFold> {
         let (egraph, iterations) = run_rules(
             egraph,
@@ -385,6 +373,7 @@ impl<'a> VerifyContext<'a> {
                 .chain(self.alloc.rules())
                 .chain(self.axiom_rules.iter()),
             None,
+            kind,
         );
         stats::bump(|s| s.record_run(&iterations));
         egraph
@@ -404,6 +393,7 @@ impl<'a> VerifyContext<'a> {
             egraph,
             self.static_reduce.iter().chain(self.alloc.rules()),
             None,
+            RunKind::GroundReduce,
         );
         self.egraph = egraph;
         stats::bump(|s| s.graph_timing.0.ground += t.elapsed().as_secs_f64());
@@ -412,29 +402,23 @@ impl<'a> VerifyContext<'a> {
         self.clean = Some(self.clean_tag(CleanLevel::Reduce));
     }
 
-    fn true_id_cached(&self) -> egg::Id {
-        self.egraph
-            .lookup(Symbolic::Lit(Literal::Bool(true)))
-            .expect("true present")
-    }
-
-    /// One `[probe]` line per `probe`-tier obligation: ground size when the tier was
-    /// reached versus the scratch size the obligation reasons over, and how far the
-    /// scratch had to be run (`reduce` = the cheap reductions sufficed).
-    fn trace_probe(&self, g0: (usize, usize, usize), fresh: bool, ran: &str) {
+    /// The `scratch`/`probe` event for one `probe`-tier obligation: the ground
+    /// size when the tier was reached (`g0`: nodes, classes, `true`-class nodes)
+    /// against the scratch the obligation reasons over, and how far the scratch
+    /// had to be run (`reduce` = the cheap reductions sufficed).
+    fn trace_probe(&self, g0: (usize, usize, usize), built: bool, ran: &'static str) {
         let sc = self.scratch.as_ref().expect("scratch live");
-        let st = sc.egraph.find(sc.true_id);
-        eprintln!(
-            "[probe] ground {}n/{}c true={} | scratch {}n/{}c true={} | ratio {:.2} | {} | {}",
-            g0.0,
-            g0.1,
-            g0.2,
-            sc.egraph.total_number_of_nodes(),
-            sc.egraph.number_of_classes(),
-            sc.egraph[st].nodes.len(),
-            sc.egraph.total_number_of_nodes() as f64 / g0.0.max(1) as f64,
-            ran,
-            if fresh { "built" } else { "warm" },
+        trace_event!(
+            Scratch,
+            "probe",
+            ground_nodes = g0.0,
+            ground_classes = g0.1,
+            ground_true_nodes = g0.2,
+            nodes = sc.egraph.total_size(),
+            classes = sc.egraph.number_of_classes(),
+            true_nodes = true_class_size(&sc.egraph),
+            ran = ran,
+            built = built,
         );
     }
 
@@ -620,8 +604,45 @@ pub(super) fn run_rules<'r>(
     egraph: egg::EGraph<Symbolic, ConstFold>,
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
     iter_limit: Option<usize>,
+    kind: RunKind,
 ) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
-    run_rules_until(egraph, rules, iter_limit, None)
+    run_rules_until(egraph, rules, iter_limit, None, kind)
+}
+
+/// Which graph a rule run works on, and with which rule set: the label of its
+/// `sat` trace event.
+#[derive(Clone, Copy)]
+pub(super) enum RunKind {
+    Ground,
+    GroundReduce,
+    Scratch,
+    ScratchReduce,
+    Probe,
+    ProbeReduce,
+}
+
+impl RunKind {
+    fn graph(self) -> &'static str {
+        match self {
+            RunKind::Ground | RunKind::GroundReduce => "ground",
+            RunKind::Scratch | RunKind::ScratchReduce => "scratch",
+            RunKind::Probe | RunKind::ProbeReduce => "probe",
+        }
+    }
+
+    fn rules(self) -> &'static str {
+        match self {
+            RunKind::Ground | RunKind::Scratch | RunKind::Probe => "full",
+            RunKind::GroundReduce | RunKind::ScratchReduce | RunKind::ProbeReduce => "reduce",
+        }
+    }
+}
+
+/// Nodes in the `true` class: the hub every proven fact is merged into.
+pub(super) fn true_class_size(egraph: &egg::EGraph<Symbolic, ConstFold>) -> usize {
+    egraph
+        .lookup(Symbolic::Lit(Literal::Bool(true)))
+        .map_or(0, |t| egraph[egraph.find(t)].nodes.len())
 }
 
 /// As [`run_rules`], but stopping as soon as `goal` is settled.
@@ -646,13 +667,33 @@ pub(super) fn run_rules_until<'r>(
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
     iter_limit: Option<usize>,
     goal: Option<egg::Id>,
+    kind: RunKind,
 ) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
+    let clock = trace::clock();
+    let before = (egraph.total_size(), egraph.number_of_classes());
+    let report = |egraph: &egg::EGraph<Symbolic, ConstFold>, iterations: usize, stop: &str| {
+        trace_event!(
+            Sat,
+            "run",
+            graph = kind.graph(),
+            rules = kind.rules(),
+            iterations = iterations,
+            stop = stop,
+            nodes_before = before.0,
+            classes_before = before.1,
+            nodes = egraph.total_size(),
+            classes = egraph.number_of_classes(),
+            true_nodes = true_class_size(egraph),
+            secs = trace::secs(clock),
+        );
+    };
     // A contradictory graph proves everything, so no rule can change any verdict
     // it yields — stop running them. This is the single choke point for every
     // graph (ground saturate/reduce, scratch saturate/reduce, every probe), and
     // it is per-graph: a deliberately contradictory probe short-circuits without
     // touching a consistent ground graph.
     if graph_inconsistent(&egraph) {
+        report(&egraph, 0, "inconsistent");
         return (egraph, Vec::new());
     }
     // The observation cache describes the graph this run walks; a run on a
@@ -702,5 +743,24 @@ pub(super) fn run_rules_until<'r>(
         });
     }
     let runner = runner.run(rules);
+    let stop = match &runner.stop_reason {
+        Some(egg::StopReason::Saturated) => "saturated",
+        Some(egg::StopReason::IterationLimit(_)) => "iter_limit",
+        Some(egg::StopReason::NodeLimit(_)) => "node_limit",
+        Some(egg::StopReason::TimeLimit(_)) => "time_limit",
+        Some(egg::StopReason::Other(why)) => why.as_str(),
+        None => "none",
+    };
+    if matches!(stop, "iter_limit" | "node_limit" | "time_limit") {
+        stats::bump(|s| s.sat_bound_stops += 1);
+    }
+    report(&runner.egraph, runner.iterations.len(), stop);
+    if trace::enabled(trace::Category::Rule) {
+        for it in &runner.iterations {
+            for (rule, n) in &it.applied {
+                trace_tally!(Rule, "rule", [rule = rule.as_str()], applied = *n);
+            }
+        }
+    }
     (runner.egraph, runner.iterations)
 }

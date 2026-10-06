@@ -7,12 +7,6 @@ pub type TiSlice<K, V> = typed_index_collections::TiSlice<K, V>;
 pub type HashMap<K, V> = indexmap::IndexMap<K, V>;
 pub type HashSet<K> = indexmap::IndexSet<K>;
 
-pub fn log_dir() -> Option<String> {
-    std::env::var("SILVER_OXIDE_VIZ")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
 // fmt
 
 pub struct Brackets<T, I: IntoIterator<Item = T> + Copy>(char, I, char);
