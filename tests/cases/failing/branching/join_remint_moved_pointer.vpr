@@ -1,0 +1,42 @@
+// REGRESSION GUARD (soundness). A predicate re-minted by a call on each arm may
+// move the pointer it holds: `step` promises nothing about `getf(x)`. The
+// pointee's permission stays at the old address, so the postcondition, which
+// demands it at the address built from the current snapshot, must fail.
+// Counterpart: `known_limitations/remint_pointer_preserved.vpr`.
+//
+// Ported from backend-blocks-perf (block-exit settling and relocation).
+//
+// Must FAIL.
+field f: Ref
+field h: Int
+field g: Int
+
+domain Id {
+  function id1(r: Ref): Ref
+  function id2(r: Ref): Ref
+}
+
+predicate P(x: Ref) { acc(x.f) && acc(x.h) }
+function getf(x: Ref): Ref requires acc(P(x)) { unfolding acc(P(x)) in x.f }
+predicate Q(r: Ref) { acc(r.g) }
+
+// Re-mints P(x), and may move the pointer.
+method step(x: Ref)
+  requires acc(P(x))
+  ensures acc(P(x))
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(P(x)) && acc(Q(id2(id1(getf(x)))))
+  ensures acc(P(x)) && acc(Q(id2(id1(getf(x)))))
+{
+  unfold acc(P(x))
+  x.h := x.h + 1
+  if (c) {
+    fold acc(P(x))
+    step(x)
+  } else {
+    fold acc(P(x))
+    step(x)
+    if (d) { step(x) }
+  }
+}

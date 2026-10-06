@@ -1,0 +1,12 @@
+// REGRESSION GUARD (soundness). Proving a conjunction part by part
+// (`prove_by_ite_decomposition`) must still need every part: here only the right
+// conjunct holds (`x == 0` is possible).
+//
+// Ported from backend-blocks-perf.
+//
+// Must FAIL.
+function pre(a: Int, b: Int): Bool { 0 != b && (a != -9223372036854775808 || -1 != b) }
+
+method left_open(x: Int, y: Int)
+  requires !(x == -1 && y == -9223372036854775808)
+{ assert pre(y, x) }
