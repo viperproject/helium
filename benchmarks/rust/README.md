@@ -56,8 +56,8 @@ Needs the local Prusti checkout (`../../tools/prusti_encode.sh`, override with
 ## Two `&mut`-into-a-call gaps this corpus uncovered
 
 Every program here that calls a helper taking `&mut` — most of them — failed with
-"insufficient permission" when the corpus was first built. `SILVER_OXIDE_TRACE_MISS`
-(demanded vs held addresses at a framing miss) showed two distinct causes:
+"insufficient permission" when the corpus was first built. The framing-miss trace
+(demanded vs held addresses, now `verify --trace=fail`) showed two distinct causes:
 
 1. **Unconditional call.** The reborrow's address term meets the held chunk's address
    only after a **full** saturation, while the miss retry ran the terminating reductions
