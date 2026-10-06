@@ -6,9 +6,11 @@ Helium takes on each file next to rustc and Silicon, how the verifier's counters
 move, and what shape each program has. Results live on the `benchmarks` branch
 (`benchmarks/results/`) and are browsable on its GitHub Pages site (`docs/`).
 
-`*.vpr` directly in this directory are also the exact-counter gate of
+`*.vpr` directly in this directory are also the counter gate of
 `tests/perf_regression.rs` (baselines in `baseline/`); the pipeline measures them
-as the Viper-only suite `viper`.
+as the Viper-only suite `viper`. The gate also covers two small points each of the
+scaling families whose counters grow non-linearly (`SCALING_POINTS` there,
+baselines in `baseline/scaling/`).
 
 ## Suites
 
@@ -35,7 +37,7 @@ benchmarks/<suite>/
 | `rust/` | realistic spec-less Rust, no loops; `depth_*`, `enum_*` generated families |
 | `loops/` | loops with Prusti-inferred permission invariants |
 | `panic_free/` | panic-freedom tiers (`isolate/`: hand-reduced Viper) |
-| `scaling/` | generated families, one knob each (`gen_*.py`) |
+| `scaling/` | generated families, one knob each (`gen_*.py`; `pcalias` is Viper-only) |
 | `viper` (this dir) | hand-written Viper, also the `perf_regression` gate |
 
 ### `suite.json`
