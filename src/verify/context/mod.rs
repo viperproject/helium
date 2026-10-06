@@ -672,9 +672,16 @@ pub(super) fn run_rules_until<'r>(
     // deterministic for a fixed rule set + input") for any program whose
     // saturation approaches it. Disabled outright — the node and iteration limits
     // are the real backstops, and unlike a clock they are reproducible.
+    //
+    // The node backstop bounds what one run may *add*, not the size of the graph it
+    // starts from. As an absolute size it is a limit on the program, not on the
+    // rules: a large enough method truncates every saturation after one iteration
+    // however tame its rules are, and a verdict then flips with a few hundred nodes
+    // of unrelated growth (`enum_v8_p3::m_e_guarded` sat within 4% of it).
+    let start_size = egraph.total_size();
     let mut runner = egg::Runner::default()
         .with_scheduler(egg::SimpleScheduler)
-        .with_node_limit(100_000)
+        .with_node_limit(start_size + 100_000)
         .with_iter_limit(iter_limit.unwrap_or(100))
         .with_time_limit(std::time::Duration::MAX)
         .with_egraph(egraph)
