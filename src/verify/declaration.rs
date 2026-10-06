@@ -1413,14 +1413,13 @@ fn walk_footprint(
         let addr = ctx.egraph.find(addr);
         let elem = slot.elem.clone();
         let (value, recipe) = match &source {
-            // Values are read from the *original* heap (aliased slots agree);
-            // the hit chunk's recipe provenance rides along.
+            // Values are read from the *original* heap (aliased slots agree), in
+            // the slot's own kind: a chunk of another resource at the same address
+            // class holds another value. The hit chunk's recipe provenance rides
+            // along.
             ValueSource::ReadHeap(h) => h
-                .entries()
-                .find_map(|(_, c)| {
-                    (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
-                        .then(|| (c.value, c.recipe.clone()))
-                })
+                .chunk_canon(ctx, &slot.kind, addr)
+                .map(|c| (c.value, c.recipe.clone()))
                 .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None)),
             // `proj_i(s)` recovers the optional member (collapsing to the `cons`
             // argument when `s` is concrete); `unwrap` peels to the field value.
@@ -1622,10 +1621,12 @@ fn eval_sub_yield(
     // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
     // consumes. A certificate walk needs the held chunk's recipe, so there a miss
     // stays a failure.
-    let a = ctx.egraph.find(addr);
+    //
+    // The scan is within `kind`, like the subtraction's own lookup: a chunk of
+    // another resource at the same address class holds another value.
     let hit = base_h
-        .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
+        .chunk_canon(ctx, &kind, addr)
+        .map(|c| (c.value, c.recipe.clone()));
     let (held, held_recipe) = match hit {
         Some(x) => x,
         None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
