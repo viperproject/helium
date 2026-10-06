@@ -1,0 +1,7 @@
+// The clamp reaches 10 (on the `level > 10` arm and at `level == 10`), so `r < 10`
+// must be rejected.
+method bad_clamp(level: Int)
+{
+  var r: Int := level > 10 ? 10 : (level >= 0 ? level : 6)
+  assert r < 10
+}

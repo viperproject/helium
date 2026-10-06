@@ -124,6 +124,9 @@ pub struct VerifyStats {
     /// Goals discharged by the last tier — non-forking `ite`-goal decomposition
     /// (a constant branch reduces the goal to its other branch, no case split).
     pub prove_ite_decompose: u64,
+    /// Integer ranges narrowed by a decided comparison (`analysis::ConstFold`),
+    /// one per class per step.
+    pub range_narrowings: u64,
     /// Non-deterministic timing (excluded from `Eq` / the gated snapshot).
     pub timing: TimingTrend,
     /// Per-e-graph wall clock (ground vs block scratch vs probes vs clones).
@@ -269,6 +272,7 @@ impl VerifyStats {
             prove_saturate,
             prove_probe,
             prove_ite_decompose,
+            range_narrowings,
             timing,
             graph_timing,
             rule_timing,
@@ -298,6 +302,7 @@ impl VerifyStats {
             ("prove_saturate", n(prove_saturate)),
             ("prove_probe", n(prove_probe)),
             ("prove_ite_decompose", n(prove_ite_decompose)),
+            ("range_narrowings", n(range_narrowings)),
             (
                 "per_rule",
                 Json::obj(per_rule.iter().map(|(k, v)| (k.clone(), n(v)))),

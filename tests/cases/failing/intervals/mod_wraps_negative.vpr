@@ -1,0 +1,5 @@
+// A negative value wraps: `-1 % 2^64` is `2^64 - 1`, so the bound on `x` does
+// not carry over (`tests/cases/passing/intervals/mod_div_range.vpr`).
+method may_wrap(x: Int)
+  requires -1 <= x && x <= 10
+{ assert x % 18446744073709551616 < 11 }

@@ -1,0 +1,7 @@
+// A bound learned on one path must not leak to its sibling: under `b` the value
+// is at most 5, under `!b` it is unconstrained.
+method leak(b: Bool, v: Int)
+{
+  if (b) { assume v <= 5 }
+  assert v <= 5
+}

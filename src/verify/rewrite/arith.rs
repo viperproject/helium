@@ -60,6 +60,11 @@ pub(super) fn static_rules() -> Vec<Rule> {
         // returned share is not the outer addend (`(p - p) + 1/1`).
         rw!("sub-self-int"; "(-i ?x ?x)" => "0"),
         rw!("sub-self-real"; "(-r ?x ?x)" => "0/1"),
+        // x % m => x where the ranges put x in [0, |m|): the remainder is the
+        // value itself. Prusti wraps every checked integer operation in this
+        // shape (`(v + 2^31) % 2^32 - 2^31`), so a bounded result reads back as
+        // the unwrapped one.
+        rw!("mod-in-range"; "(mod ?x ?m)" => "?x" if mod_is_identity(var("?x"), var("?m"))),
         // x < x => false   (irreflexivity)
         rw!("lt-irrefl-real"; "(<r ?x ?x)" => "false"),
         rw!("lt-irrefl-int"; "(<i ?x ?x)" => "false"),
@@ -113,6 +118,23 @@ pub(super) fn static_rules() -> Vec<Rule> {
     rules.extend(disequality_unit_prop_rules());
     rules.extend(lt_asymmetry_rules());
     rules
+}
+
+/// The condition of `mod-in-range`: `x`'s range lies in `[0, |m|)` for every
+/// `m` in `m`'s.
+fn mod_is_identity(
+    x: Var,
+    m: Var,
+) -> impl Fn(&mut EGraph<Symbolic, ConstFold>, Id, &Subst) -> bool {
+    move |egraph, _, subst| {
+        let (Some(xi), Some(mi)) = (
+            egraph[subst[x]].data.interval(),
+            egraph[subst[m]].data.interval(),
+        ) else {
+            return false;
+        };
+        xi.mod_is_identity(&mi)
+    }
 }
 
 /// Asymmetry of the strict orders: `a < b` proven true refutes `b < a`.
