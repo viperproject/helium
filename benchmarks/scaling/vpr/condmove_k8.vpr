@@ -1,0 +1,1858 @@
+domain ParamTyp  {
+  
+  function s_Param_typ(arg0: s_Param): Type 
+  
+  function s_Param_has_typ(arg0: s_Param, arg1: Type): Bool 
+  
+  axiom s_Param_has_typ_own {
+    (forall p: s_Param ::
+      { s_Param_typ(p) }
+      s_Param_has_typ(p, s_Param_typ(p)))
+  }
+}
+
+domain ParamTyp_make_generic_s_Int_i32  {
+  
+  axiom s_Param_typ_def_make_generic_s_Int_i32 {
+    (forall x: s_Int_i32 ::
+      { make_generic_s_Int_i32(x) }
+      s_Param_typ(make_generic_s_Int_i32(x)) == s_Int_i32_type())
+  }
+  
+  axiom s_Param_typ_variant_make_generic_s_Int_i32 {
+    (forall p: s_Param ::
+      { p.make_concrete_s_Int_i32, s_Param_typ(p) }
+      s_Param_typ(p) == s_Int_i32_type() ==>
+      make_generic_s_Int_i32(p.make_concrete_s_Int_i32) == p)
+  }
+}
+
+domain ParamTyp_make_generic_s_Bool  {
+  
+  axiom s_Param_typ_def_make_generic_s_Bool {
+    (forall x: Bool ::
+      { make_generic_s_Bool(x) }
+      s_Param_typ(make_generic_s_Bool(x)) == s_Bool_type())
+  }
+  
+  axiom s_Param_typ_variant_make_generic_s_Bool {
+    (forall p: s_Param ::
+      { p.make_concrete_s_Bool, s_Param_typ(p) }
+      s_Param_typ(p) == s_Bool_type() ==>
+      make_generic_s_Bool(p.make_concrete_s_Bool) == p)
+  }
+}
+
+domain s_Int_i32  {
+  
+  function s_Int_i32_cons(arg0: Int): s_Int_i32 
+  
+  function s_Int_i32_value(arg0: s_Int_i32): Int 
+  
+  axiom s_Int_i32_ax_cons {
+    (forall s: s_Int_i32 ::
+      { s_Int_i32_value(s) }
+      s_Int_i32_cons(s_Int_i32_value(s)) == s)
+  }
+  
+  axiom s_Int_i32_ax_bounds {
+    (forall s: s_Int_i32 ::
+      { s_Int_i32_value(s) }
+      -2147483648 <= s_Int_i32_value(s) && s_Int_i32_value(s) <= 2147483647)
+  }
+  
+  axiom s_Int_i32_ax_value {
+    (forall value: Int ::
+      { s_Int_i32_cons(value) }
+      -2147483648 <= value && value <= 2147483647 ==>
+      s_Int_i32_value(s_Int_i32_cons(value)) == value)
+  }
+}
+
+domain Inhabited  {
+  
+  function inhabited(arg0: Type): Bool 
+  
+  axiom inhabited_Int_i32 {
+    inhabited(s_Int_i32_type()) == true
+  }
+  
+  axiom inhabited_Cell {
+    inhabited(s_Cell_type()) ==
+    (inhabited(s_Int_i32_type()) && inhabited(s_Int_i32_type()))
+  }
+  
+  axiom inhabited_Bool {
+    inhabited(s_Bool_type()) == true
+  }
+  
+  axiom inhabited_2_Tuple {
+    (forall T$0: Type, U$1: Type ::
+      { inhabited(s_2_Tuple_type(T$0, U$1)) }
+      inhabited(s_2_Tuple_type(T$0, U$1)) ==
+      (inhabited(T$0) && inhabited(U$1)))
+  }
+}
+
+domain trait_std$col$$col$marker$col$$col$Sized  {
+  
+  function std$col$$col$marker$col$$col$Sized_impl(arg0: Type): Bool 
+}
+
+domain trait_std$col$$col$marker$col$$col$MetaSized  {
+  
+  function std$col$$col$marker$col$$col$MetaSized_impl(arg0: Type): Bool 
+}
+
+domain sizedness_Int_i32  {
+  
+  axiom s_Int_i32_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_Int_i32_type())
+  }
+  
+  axiom s_Int_i32_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_Int_i32_type())
+  }
+}
+
+domain sizedness_Cell  {
+  
+  axiom s_Cell_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_Cell_type())
+  }
+  
+  axiom s_Cell_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_Cell_type())
+  }
+}
+
+domain sizedness_Bool  {
+  
+  axiom s_Bool_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_Bool_type())
+  }
+  
+  axiom s_Bool_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_Bool_type())
+  }
+}
+
+domain sizedness_2_Tuple  {
+  
+  axiom s_2_Tuple_Sized {
+    (forall T$0: Type, U$1: Type ::
+      { std$col$$col$marker$col$$col$Sized_impl(s_2_Tuple_type(T$0, U$1)) }
+      std$col$$col$marker$col$$col$Sized_impl(U$1) ==>
+      std$col$$col$marker$col$$col$Sized_impl(s_2_Tuple_type(T$0, U$1)))
+  }
+  
+  axiom s_2_Tuple_MetaSized {
+    (forall T$0: Type, U$1: Type ::
+      { std$col$$col$marker$col$$col$MetaSized_impl(s_2_Tuple_type(T$0, U$1)) }
+      std$col$$col$marker$col$$col$MetaSized_impl(U$1) ==>
+      std$col$$col$marker$col$$col$MetaSized_impl(s_2_Tuple_type(T$0, U$1)))
+  }
+}
+
+field p_Int_i32_val: s_Int_i32
+
+field p_Bool_val: Bool
+
+function mir_binop_Gt_Int_i32_Int_i32(arg1: s_Int_i32, arg2: s_Int_i32): Bool
+{
+  s_Int_i32_value(arg1) > s_Int_i32_value(arg2)
+}
+
+function mir_binop_AddWithOverflow_Int_i32_Int_i32(arg1: s_Int_i32, arg2: s_Int_i32): s_2_Tuple
+{
+  (let val ==
+    (s_Int_i32_value(arg1) + s_Int_i32_value(arg2)) in
+    (let wrapped_val ==
+      ((val + 2147483648) % 4294967296 - 2147483648) in
+      s_2_Tuple_cons(make_generic_s_Int_i32(s_Int_i32_cons(wrapped_val)), make_generic_s_Bool(wrapped_val !=
+      val))))
+}
+
+function s_Int_i32_unreachable(): s_Int_i32
+  ensures false
+
+
+function s_Cell_unreachable(): s_Cell
+  ensures false
+
+
+function s_Cell_field_0(self: Ref): Ref
+  ensures (self == null) == (result == null)
+
+
+function s_Cell_field_1(self: Ref): Ref
+  ensures (self == null) == (result == null)
+
+
+function s_Bool_unreachable(): Bool
+  ensures false
+
+
+function s_2_Tuple_unreachable(T$0: Type, U$1: Type): s_2_Tuple
+  ensures false
+
+
+function s_2_Tuple_field_0(self: Ref, T$0: Type, U$1: Type): Ref
+  ensures (self == null) == (result == null)
+
+
+function s_2_Tuple_field_1(self: Ref, T$0: Type, U$1: Type): Ref
+  ensures (self == null) == (result == null)
+
+
+function s_Param_unreachable(T$0: Type): s_Param
+  ensures false
+
+
+function p_Int_i32_snap(self: Ref): s_Int_i32
+  requires acc(p_Int_i32(self), write)
+{
+  (unfolding acc(p_Int_i32(self), write) in self.p_Int_i32_val)
+}
+
+function p_Cell_snap(self: Ref): s_Cell
+  requires acc(p_Cell(self), write)
+{
+  (unfolding acc(p_Cell(self), write) in
+    s_Cell_cons(p_Int_i32_snap(s_Cell_field_0(self)), p_Int_i32_snap(s_Cell_field_1(self))))
+}
+
+function p_Bool_snap(self: Ref): Bool
+  requires acc(p_Bool(self), write)
+{
+  (unfolding acc(p_Bool(self), write) in self.p_Bool_val)
+}
+
+function p_2_Tuple_snap(self: Ref, T$0: Type, U$1: Type): s_2_Tuple
+  requires acc(p_2_Tuple(self, T$0, U$1), write)
+{
+  (unfolding acc(p_2_Tuple(self, T$0, U$1), write) in
+    s_2_Tuple_cons(p_Param_snap(s_2_Tuple_field_0(self, T$0, U$1), T$0), p_Param_snap(s_2_Tuple_field_1(self,
+    T$0, U$1), U$1)))
+}
+
+function p_Param_snap(self: Ref, T$0: Type): s_Param
+  requires acc(p_Param(self, T$0), write)
+  ensures s_Param_typ(result) == T$0
+
+
+predicate p_Int_i32(self: Ref) {
+  acc(self.p_Int_i32_val, write)
+}
+
+predicate p_Cell(self: Ref) {
+  inhabited(s_Int_i32_type()) &&
+  acc(p_Int_i32(s_Cell_field_0(self)), write) &&
+  (inhabited(s_Int_i32_type()) &&
+  acc(p_Int_i32(s_Cell_field_1(self)), write))
+}
+
+predicate p_Bool(self: Ref) {
+  acc(self.p_Bool_val, write)
+}
+
+predicate p_2_Tuple(self: Ref, T$0: Type, U$1: Type) {
+  inhabited(T$0) &&
+  acc(p_Param(s_2_Tuple_field_0(self, T$0, U$1), T$0), write) &&
+  (inhabited(U$1) &&
+  acc(p_Param(s_2_Tuple_field_1(self, T$0, U$1), U$1), write))
+}
+
+predicate p_Param(self: Ref, T$0: Type) 
+
+method m_run(_0p: Ref, _1p: Ref, _2p: Ref)
+  requires inhabited(s_Cell_type()) && acc(p_Cell(_1p), write)
+  requires inhabited(s_Int_i32_type()) && acc(p_Int_i32(_2p), write)
+  ensures inhabited(s_Int_i32_type()) && acc(p_Int_i32(_0p), write)
+{
+  var _3p: Ref
+  var _4p: Ref
+  var _5p: Ref
+  var _6p: Ref
+  var _7p: Ref
+  var _8p: Ref
+  var _9p: Ref
+  var _10p: Ref
+  var _11p: Ref
+  var _12p: Ref
+  var _13p: Ref
+  var _14p: Ref
+  var _15p: Ref
+  var _16p: Ref
+  var _17p: Ref
+  var _18p: Ref
+  var _19p: Ref
+  var _20p: Ref
+  var _21p: Ref
+  var _22p: Ref
+  var _23p: Ref
+  var _24p: Ref
+  var _25p: Ref
+  var _26p: Ref
+  var _27p: Ref
+  var _28p: Ref
+  var _29p: Ref
+  var _30p: Ref
+  var _31p: Ref
+  var _32p: Ref
+  var _33p: Ref
+  var _34p: Ref
+  var _35p: Ref
+  var _36p: Ref
+  var _37p: Ref
+  var _38p: Ref
+  var _39p: Ref
+  var _40p: Ref
+  var _41p: Ref
+  var _42p: Ref
+  var _43p: Ref
+  var _44p: Ref
+  var _45p: Ref
+  var _46p: Ref
+  var _from_bb3_to_bb4: Bool
+  var _from_bb5_to_bb6: Bool
+  var _from_bb9_to_bb10: Bool
+  var _from_bb7_to_bb9: Bool
+  var _from_bb13_to_bb15: Bool
+  var _from_bb15_to_bb16: Bool
+  var _from_bb19_to_bb21: Bool
+  var _from_bb21_to_bb23: Bool
+  var _from_bb16_to_bb18: Bool
+  var _from_bb24_to_bb25: Bool
+  var _from_bb18_to_bb19: Bool
+  var _from_bb0_to_bb1: Bool
+  var _from_bb14_to_bb15: Bool
+  var _from_bb3_to_bb5: Bool
+  var _from_bb23_to_bb24: Bool
+  var _from_bb1_to_bb3: Bool
+  var _from_bb15_to_bb17: Bool
+  var _from_bb21_to_bb22: Bool
+  var _from_bb6_to_bb7: Bool
+  var _from_bb2_to_bb3: Bool
+  var _from_bb12_to_bb14: Bool
+  var _from_bb12_to_bb13: Bool
+  var _from_bb4_to_bb6: Bool
+  var _from_bb0_to_bb2: Bool
+  var _from_bb17_to_bb18: Bool
+  var _from_bb11_to_bb12: Bool
+  var _from_bb9_to_bb11: Bool
+  var _from_bb20_to_bb21: Bool
+  var _from_bb8_to_bb9: Bool
+  var _from_bb6_to_bb8: Bool
+  var _from_bb22_to_bb24: Bool
+  var _from_bb10_to_bb12: Bool
+  var _from_bb18_to_bb20: Bool
+  var _tmp0: s_Cell
+  var _tmp1: s_Int_i32
+  var _tmp2: s_Int_i32
+  var _tmp3: Bool
+  var _tmp4: Bool
+  var _tmp5: s_Int_i32
+  var _tmp6: s_Int_i32
+  var _tmp7: s_Cell
+  var _tmp8: s_Cell
+  var _tmp9: s_Cell
+  var _tmp10: s_Int_i32
+  var _tmp11: s_Int_i32
+  var _tmp12: Bool
+  var _tmp13: Bool
+  var _tmp14: s_Int_i32
+  var _tmp15: s_Int_i32
+  var _tmp16: s_Cell
+  var _tmp17: s_Cell
+  var _tmp18: s_Cell
+  var _tmp19: s_Int_i32
+  var _tmp20: s_Int_i32
+  var _tmp21: Bool
+  var _tmp22: Bool
+  var _tmp23: s_Int_i32
+  var _tmp24: s_Int_i32
+  var _tmp25: s_Cell
+  var _tmp26: s_Cell
+  var _tmp27: s_Cell
+  var _tmp28: s_Int_i32
+  var _tmp29: s_Int_i32
+  var _tmp30: Bool
+  var _tmp31: Bool
+  var _tmp32: s_Int_i32
+  var _tmp33: s_Int_i32
+  var _tmp34: s_Cell
+  var _tmp35: s_Cell
+  var _tmp36: s_Cell
+  var _tmp37: s_Int_i32
+  var _tmp38: s_Int_i32
+  var _tmp39: Bool
+  var _tmp40: Bool
+  var _tmp41: s_Int_i32
+  var _tmp42: s_Int_i32
+  var _tmp43: s_Cell
+  var _tmp44: s_Cell
+  var _tmp45: s_Cell
+  var _tmp46: s_Int_i32
+  var _tmp47: s_Int_i32
+  var _tmp48: Bool
+  var _tmp49: Bool
+  var _tmp50: s_Int_i32
+  var _tmp51: s_Int_i32
+  var _tmp52: s_Cell
+  var _tmp53: s_Cell
+  var _tmp54: s_Cell
+  var _tmp55: s_Int_i32
+  var _tmp56: s_Int_i32
+  var _tmp57: Bool
+  var _tmp58: Bool
+  var _tmp59: s_Int_i32
+  var _tmp60: s_Int_i32
+  var _tmp61: s_Cell
+  var _tmp62: s_Cell
+  var _tmp63: s_Cell
+  var _tmp64: s_Int_i32
+  var _tmp65: s_Int_i32
+  var _tmp66: Bool
+  var _tmp67: Bool
+  var _tmp68: s_Int_i32
+  var _tmp69: s_Int_i32
+  var _tmp70: s_Cell
+  var _tmp71: s_Cell
+  var _tmp72: s_Cell
+  var _tmp73: s_Int_i32
+  var _tmp74: s_Int_i32
+  var _tmp75: s_Int_i32
+  var _tmp76: s_Int_i32
+  var _tmp77: Bool
+  var _tmp78: s_Int_i32
+  label start
+  // var _3p
+  // var _4p
+  // var _5p
+  // var _6p
+  // var _7p
+  // var _8p
+  // var _9p
+  // var _10p
+  // var _11p
+  // var _12p
+  // var _13p
+  // var _14p
+  // var _15p
+  // var _16p
+  // var _17p
+  // var _18p
+  // var _19p
+  // var _20p
+  // var _21p
+  // var _22p
+  // var _23p
+  // var _24p
+  // var _25p
+  // var _26p
+  // var _27p
+  // var _28p
+  // var _29p
+  // var _30p
+  // var _31p
+  // var _32p
+  // var _33p
+  // var _34p
+  // var _35p
+  // var _36p
+  // var _37p
+  // var _38p
+  // var _39p
+  // var _40p
+  // var _41p
+  // var _42p
+  // var _43p
+  // var _44p
+  // var _45p
+  // var _46p
+  _from_bb3_to_bb4 := false
+  _from_bb5_to_bb6 := false
+  _from_bb9_to_bb10 := false
+  _from_bb7_to_bb9 := false
+  _from_bb13_to_bb15 := false
+  _from_bb15_to_bb16 := false
+  _from_bb19_to_bb21 := false
+  _from_bb21_to_bb23 := false
+  _from_bb16_to_bb18 := false
+  _from_bb24_to_bb25 := false
+  _from_bb18_to_bb19 := false
+  _from_bb0_to_bb1 := false
+  _from_bb14_to_bb15 := false
+  _from_bb3_to_bb5 := false
+  _from_bb23_to_bb24 := false
+  _from_bb1_to_bb3 := false
+  _from_bb15_to_bb17 := false
+  _from_bb21_to_bb22 := false
+  _from_bb6_to_bb7 := false
+  _from_bb2_to_bb3 := false
+  _from_bb12_to_bb14 := false
+  _from_bb12_to_bb13 := false
+  _from_bb4_to_bb6 := false
+  _from_bb0_to_bb2 := false
+  _from_bb17_to_bb18 := false
+  _from_bb11_to_bb12 := false
+  _from_bb9_to_bb11 := false
+  _from_bb20_to_bb21 := false
+  _from_bb8_to_bb9 := false
+  _from_bb6_to_bb8 := false
+  _from_bb22_to_bb24 := false
+  _from_bb10_to_bb12 := false
+  _from_bb18_to_bb20 := false
+  goto bb_0
+  label bb_0
+  label _before_0_0
+  // [MIR] bb0[0]: StorageLive(_3)
+  label _before_0_1
+  // [MIR] bb0[1]: _3 = move _1
+  // var _tmp0
+  _tmp0 := p_Cell_snap(_1p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_1p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _1, location: Before(AnalysisLocation { location: bb0[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp0)
+  label _before_0_2
+  // [MIR] bb0[2]: FakeRead(ForLet(None), _3)
+  label _before_0_3
+  // [MIR] bb0[3]: StorageLive(_4)
+  label _before_0_4
+  // [MIR] bb0[4]: StorageLive(_5)
+  label _before_0_5
+  // [MIR] bb0[5]: StorageLive(_6)
+  label _before_0_6
+  // [MIR] bb0[6]: _6 = copy _2
+  // var _tmp1
+  _tmp1 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb0[6], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_6), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_6p, _tmp1)
+  label _before_0_7
+  // [MIR] bb0[7]: _5 = Gt(move _6, const 0_i32)
+  // var _tmp2
+  _tmp2 := p_Int_i32_snap(_6p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_6p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb0[7], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb0[7], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_5), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_5p, mir_binop_Gt_Int_i32_Int_i32(_tmp2, s_Int_i32_cons(0)))
+  label _before_0_8
+  // [MIR] bb0[8]: switchInt(move _5) -> [0: bb2, otherwise: bb1]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb0[8], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp3
+  _tmp3 := p_Bool_snap(_5p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_5p), write)
+  // var _tmp4
+  _tmp4 := _tmp3
+  // PCG (T) post_main
+  label _after_0
+  if (_tmp4 == false) {
+    _from_bb0_to_bb2 := true
+    goto bb_2
+  } else {
+    _from_bb0_to_bb1 := true
+    goto bb_1
+  }
+  label bb_2
+  label _before_2_0
+  // [MIR] bb2[0]: StorageDead(_6)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb2[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_6), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb2[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_2_1
+  // [MIR] bb2[1]: StorageLive(_7)
+  label _before_2_2
+  // [MIR] bb2[2]: _7 = copy _2
+  // var _tmp5
+  _tmp5 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _7, location: Before(AnalysisLocation { location: bb2[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_7), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_7p, _tmp5)
+  label _before_2_3
+  // [MIR] bb2[3]: _4 = Cell { v: const 0_i32, w: move _7 }
+  // var _tmp6
+  _tmp6 := p_Int_i32_snap(_7p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_7p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _7, location: Before(AnalysisLocation { location: bb2[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb2[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_4), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_4p, s_Cell_cons(s_Int_i32_cons(0), _tmp6))
+  label _before_2_4
+  // [MIR] bb2[4]: StorageDead(_7)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _7, location: Before(AnalysisLocation { location: bb2[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_7), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _7, location: Before(AnalysisLocation { location: bb2[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_2_5
+  // [MIR] bb2[5]: goto -> bb3
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_2
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb2_to_bb3 := true
+  goto bb_3
+  label bb_1
+  label _before_1_0
+  // [MIR] bb1[0]: StorageDead(_6)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb1[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_6), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb1[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_1_1
+  // [MIR] bb1[1]: _4 = move _3
+  // var _tmp7
+  _tmp7 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb1[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb1[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_4), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_4p, _tmp7)
+  label _before_1_2
+  // [MIR] bb1[2]: goto -> bb3
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_1
+  _from_bb1_to_bb3 := true
+  goto bb_3
+  label bb_3
+  label _before_3_0
+  // [MIR] bb3[0]: StorageDead(_5)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb3[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_5), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb3[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_3_1
+  // [MIR] bb3[1]: FakeRead(ForLet(None), _4)
+  label _before_3_2
+  // [MIR] bb3[2]: StorageLive(_8)
+  label _before_3_3
+  // [MIR] bb3[3]: _8 = move _4
+  // var _tmp8
+  _tmp8 := p_Cell_snap(_4p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_4p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb3[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _8, location: Before(AnalysisLocation { location: bb3[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_8), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_8p, _tmp8)
+  label _before_3_4
+  // [MIR] bb3[4]: _3 = move _8
+  // var _tmp9
+  _tmp9 := p_Cell_snap(_8p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_8p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _8, location: Before(AnalysisLocation { location: bb3[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb3[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp9)
+  label _before_3_5
+  // [MIR] bb3[5]: StorageDead(_8)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _8, location: Before(AnalysisLocation { location: bb3[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_8), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _8, location: Before(AnalysisLocation { location: bb3[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_3_6
+  // [MIR] bb3[6]: StorageLive(_9)
+  label _before_3_7
+  // [MIR] bb3[7]: StorageLive(_10)
+  label _before_3_8
+  // [MIR] bb3[8]: StorageLive(_11)
+  label _before_3_9
+  // [MIR] bb3[9]: _11 = copy _2
+  // var _tmp10
+  _tmp10 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _11, location: Before(AnalysisLocation { location: bb3[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_11), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_11p, _tmp10)
+  label _before_3_10
+  // [MIR] bb3[10]: _10 = Gt(move _11, const 1_i32)
+  // var _tmp11
+  _tmp11 := p_Int_i32_snap(_11p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_11p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _11, location: Before(AnalysisLocation { location: bb3[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _10, location: Before(AnalysisLocation { location: bb3[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_10), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_10p, mir_binop_Gt_Int_i32_Int_i32(_tmp11, s_Int_i32_cons(1)))
+  label _before_3_11
+  // [MIR] bb3[11]: switchInt(move _10) -> [0: bb5, otherwise: bb4]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _10, location: Before(AnalysisLocation { location: bb3[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp12
+  _tmp12 := p_Bool_snap(_10p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_10p), write)
+  // var _tmp13
+  _tmp13 := _tmp12
+  // PCG (T) post_main
+  label _after_3
+  if (_tmp13 == false) {
+    _from_bb3_to_bb5 := true
+    goto bb_5
+  } else {
+    _from_bb3_to_bb4 := true
+    goto bb_4
+  }
+  label bb_5
+  label _before_5_0
+  // [MIR] bb5[0]: StorageDead(_11)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _11, location: Before(AnalysisLocation { location: bb5[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_11), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _11, location: Before(AnalysisLocation { location: bb5[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_5_1
+  // [MIR] bb5[1]: StorageLive(_12)
+  label _before_5_2
+  // [MIR] bb5[2]: _12 = copy _2
+  // var _tmp14
+  _tmp14 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _12, location: Before(AnalysisLocation { location: bb5[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_12), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_12p, _tmp14)
+  label _before_5_3
+  // [MIR] bb5[3]: _9 = Cell { v: const 1_i32, w: move _12 }
+  // var _tmp15
+  _tmp15 := p_Int_i32_snap(_12p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_12p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _12, location: Before(AnalysisLocation { location: bb5[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _9, location: Before(AnalysisLocation { location: bb5[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_9), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_9p, s_Cell_cons(s_Int_i32_cons(1), _tmp15))
+  label _before_5_4
+  // [MIR] bb5[4]: StorageDead(_12)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _12, location: Before(AnalysisLocation { location: bb5[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_12), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _12, location: Before(AnalysisLocation { location: bb5[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_5_5
+  // [MIR] bb5[5]: goto -> bb6
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_5
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb5_to_bb6 := true
+  goto bb_6
+  label bb_4
+  label _before_4_0
+  // [MIR] bb4[0]: StorageDead(_11)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _11, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_11), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _11, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_4_1
+  // [MIR] bb4[1]: _9 = move _3
+  // var _tmp16
+  _tmp16 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _9, location: Before(AnalysisLocation { location: bb4[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_9), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_9p, _tmp16)
+  label _before_4_2
+  // [MIR] bb4[2]: goto -> bb6
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_4
+  _from_bb4_to_bb6 := true
+  goto bb_6
+  label bb_6
+  label _before_6_0
+  // [MIR] bb6[0]: StorageDead(_10)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _10, location: Before(AnalysisLocation { location: bb6[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_10), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _10, location: Before(AnalysisLocation { location: bb6[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_6_1
+  // [MIR] bb6[1]: FakeRead(ForLet(None), _9)
+  label _before_6_2
+  // [MIR] bb6[2]: StorageLive(_13)
+  label _before_6_3
+  // [MIR] bb6[3]: _13 = move _9
+  // var _tmp17
+  _tmp17 := p_Cell_snap(_9p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_9p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _9, location: Before(AnalysisLocation { location: bb6[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _13, location: Before(AnalysisLocation { location: bb6[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_13), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_13p, _tmp17)
+  label _before_6_4
+  // [MIR] bb6[4]: _3 = move _13
+  // var _tmp18
+  _tmp18 := p_Cell_snap(_13p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_13p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _13, location: Before(AnalysisLocation { location: bb6[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb6[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp18)
+  label _before_6_5
+  // [MIR] bb6[5]: StorageDead(_13)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _13, location: Before(AnalysisLocation { location: bb6[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_13), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _13, location: Before(AnalysisLocation { location: bb6[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_6_6
+  // [MIR] bb6[6]: StorageLive(_14)
+  label _before_6_7
+  // [MIR] bb6[7]: StorageLive(_15)
+  label _before_6_8
+  // [MIR] bb6[8]: StorageLive(_16)
+  label _before_6_9
+  // [MIR] bb6[9]: _16 = copy _2
+  // var _tmp19
+  _tmp19 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _16, location: Before(AnalysisLocation { location: bb6[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_16), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_16p, _tmp19)
+  label _before_6_10
+  // [MIR] bb6[10]: _15 = Gt(move _16, const 2_i32)
+  // var _tmp20
+  _tmp20 := p_Int_i32_snap(_16p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_16p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _16, location: Before(AnalysisLocation { location: bb6[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _15, location: Before(AnalysisLocation { location: bb6[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_15), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_15p, mir_binop_Gt_Int_i32_Int_i32(_tmp20, s_Int_i32_cons(2)))
+  label _before_6_11
+  // [MIR] bb6[11]: switchInt(move _15) -> [0: bb8, otherwise: bb7]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _15, location: Before(AnalysisLocation { location: bb6[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp21
+  _tmp21 := p_Bool_snap(_15p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_15p), write)
+  // var _tmp22
+  _tmp22 := _tmp21
+  // PCG (T) post_main
+  label _after_6
+  if (_tmp22 == false) {
+    _from_bb6_to_bb8 := true
+    goto bb_8
+  } else {
+    _from_bb6_to_bb7 := true
+    goto bb_7
+  }
+  label bb_8
+  label _before_8_0
+  // [MIR] bb8[0]: StorageDead(_16)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _16, location: Before(AnalysisLocation { location: bb8[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_16), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _16, location: Before(AnalysisLocation { location: bb8[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_8_1
+  // [MIR] bb8[1]: StorageLive(_17)
+  label _before_8_2
+  // [MIR] bb8[2]: _17 = copy _2
+  // var _tmp23
+  _tmp23 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _17, location: Before(AnalysisLocation { location: bb8[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_17), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_17p, _tmp23)
+  label _before_8_3
+  // [MIR] bb8[3]: _14 = Cell { v: const 2_i32, w: move _17 }
+  // var _tmp24
+  _tmp24 := p_Int_i32_snap(_17p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_17p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _17, location: Before(AnalysisLocation { location: bb8[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _14, location: Before(AnalysisLocation { location: bb8[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_14), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_14p, s_Cell_cons(s_Int_i32_cons(2), _tmp24))
+  label _before_8_4
+  // [MIR] bb8[4]: StorageDead(_17)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _17, location: Before(AnalysisLocation { location: bb8[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_17), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _17, location: Before(AnalysisLocation { location: bb8[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_8_5
+  // [MIR] bb8[5]: goto -> bb9
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_8
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb8_to_bb9 := true
+  goto bb_9
+  label bb_7
+  label _before_7_0
+  // [MIR] bb7[0]: StorageDead(_16)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _16, location: Before(AnalysisLocation { location: bb7[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_16), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _16, location: Before(AnalysisLocation { location: bb7[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_7_1
+  // [MIR] bb7[1]: _14 = move _3
+  // var _tmp25
+  _tmp25 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb7[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _14, location: Before(AnalysisLocation { location: bb7[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_14), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_14p, _tmp25)
+  label _before_7_2
+  // [MIR] bb7[2]: goto -> bb9
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_7
+  _from_bb7_to_bb9 := true
+  goto bb_9
+  label bb_9
+  label _before_9_0
+  // [MIR] bb9[0]: StorageDead(_15)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _15, location: Before(AnalysisLocation { location: bb9[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_15), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _15, location: Before(AnalysisLocation { location: bb9[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_9_1
+  // [MIR] bb9[1]: FakeRead(ForLet(None), _14)
+  label _before_9_2
+  // [MIR] bb9[2]: StorageLive(_18)
+  label _before_9_3
+  // [MIR] bb9[3]: _18 = move _14
+  // var _tmp26
+  _tmp26 := p_Cell_snap(_14p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_14p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _14, location: Before(AnalysisLocation { location: bb9[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _18, location: Before(AnalysisLocation { location: bb9[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_18), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_18p, _tmp26)
+  label _before_9_4
+  // [MIR] bb9[4]: _3 = move _18
+  // var _tmp27
+  _tmp27 := p_Cell_snap(_18p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_18p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _18, location: Before(AnalysisLocation { location: bb9[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb9[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp27)
+  label _before_9_5
+  // [MIR] bb9[5]: StorageDead(_18)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _18, location: Before(AnalysisLocation { location: bb9[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_18), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _18, location: Before(AnalysisLocation { location: bb9[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_9_6
+  // [MIR] bb9[6]: StorageLive(_19)
+  label _before_9_7
+  // [MIR] bb9[7]: StorageLive(_20)
+  label _before_9_8
+  // [MIR] bb9[8]: StorageLive(_21)
+  label _before_9_9
+  // [MIR] bb9[9]: _21 = copy _2
+  // var _tmp28
+  _tmp28 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _21, location: Before(AnalysisLocation { location: bb9[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_21), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_21p, _tmp28)
+  label _before_9_10
+  // [MIR] bb9[10]: _20 = Gt(move _21, const 3_i32)
+  // var _tmp29
+  _tmp29 := p_Int_i32_snap(_21p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_21p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _21, location: Before(AnalysisLocation { location: bb9[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _20, location: Before(AnalysisLocation { location: bb9[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_20), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_20p, mir_binop_Gt_Int_i32_Int_i32(_tmp29, s_Int_i32_cons(3)))
+  label _before_9_11
+  // [MIR] bb9[11]: switchInt(move _20) -> [0: bb11, otherwise: bb10]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _20, location: Before(AnalysisLocation { location: bb9[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp30
+  _tmp30 := p_Bool_snap(_20p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_20p), write)
+  // var _tmp31
+  _tmp31 := _tmp30
+  // PCG (T) post_main
+  label _after_9
+  if (_tmp31 == false) {
+    _from_bb9_to_bb11 := true
+    goto bb_11
+  } else {
+    _from_bb9_to_bb10 := true
+    goto bb_10
+  }
+  label bb_11
+  label _before_11_0
+  // [MIR] bb11[0]: StorageDead(_21)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _21, location: Before(AnalysisLocation { location: bb11[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_21), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _21, location: Before(AnalysisLocation { location: bb11[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_11_1
+  // [MIR] bb11[1]: StorageLive(_22)
+  label _before_11_2
+  // [MIR] bb11[2]: _22 = copy _2
+  // var _tmp32
+  _tmp32 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _22, location: Before(AnalysisLocation { location: bb11[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_22), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_22p, _tmp32)
+  label _before_11_3
+  // [MIR] bb11[3]: _19 = Cell { v: const 3_i32, w: move _22 }
+  // var _tmp33
+  _tmp33 := p_Int_i32_snap(_22p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_22p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _22, location: Before(AnalysisLocation { location: bb11[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _19, location: Before(AnalysisLocation { location: bb11[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_19), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_19p, s_Cell_cons(s_Int_i32_cons(3), _tmp33))
+  label _before_11_4
+  // [MIR] bb11[4]: StorageDead(_22)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _22, location: Before(AnalysisLocation { location: bb11[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_22), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _22, location: Before(AnalysisLocation { location: bb11[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_11_5
+  // [MIR] bb11[5]: goto -> bb12
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_11
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb11_to_bb12 := true
+  goto bb_12
+  label bb_10
+  label _before_10_0
+  // [MIR] bb10[0]: StorageDead(_21)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _21, location: Before(AnalysisLocation { location: bb10[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_21), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _21, location: Before(AnalysisLocation { location: bb10[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_10_1
+  // [MIR] bb10[1]: _19 = move _3
+  // var _tmp34
+  _tmp34 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb10[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _19, location: Before(AnalysisLocation { location: bb10[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_19), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_19p, _tmp34)
+  label _before_10_2
+  // [MIR] bb10[2]: goto -> bb12
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_10
+  _from_bb10_to_bb12 := true
+  goto bb_12
+  label bb_12
+  label _before_12_0
+  // [MIR] bb12[0]: StorageDead(_20)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _20, location: Before(AnalysisLocation { location: bb12[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_20), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _20, location: Before(AnalysisLocation { location: bb12[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_12_1
+  // [MIR] bb12[1]: FakeRead(ForLet(None), _19)
+  label _before_12_2
+  // [MIR] bb12[2]: StorageLive(_23)
+  label _before_12_3
+  // [MIR] bb12[3]: _23 = move _19
+  // var _tmp35
+  _tmp35 := p_Cell_snap(_19p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_19p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _19, location: Before(AnalysisLocation { location: bb12[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _23, location: Before(AnalysisLocation { location: bb12[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_23), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_23p, _tmp35)
+  label _before_12_4
+  // [MIR] bb12[4]: _3 = move _23
+  // var _tmp36
+  _tmp36 := p_Cell_snap(_23p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_23p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _23, location: Before(AnalysisLocation { location: bb12[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb12[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp36)
+  label _before_12_5
+  // [MIR] bb12[5]: StorageDead(_23)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _23, location: Before(AnalysisLocation { location: bb12[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_23), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _23, location: Before(AnalysisLocation { location: bb12[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_12_6
+  // [MIR] bb12[6]: StorageLive(_24)
+  label _before_12_7
+  // [MIR] bb12[7]: StorageLive(_25)
+  label _before_12_8
+  // [MIR] bb12[8]: StorageLive(_26)
+  label _before_12_9
+  // [MIR] bb12[9]: _26 = copy _2
+  // var _tmp37
+  _tmp37 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _26, location: Before(AnalysisLocation { location: bb12[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_26), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_26p, _tmp37)
+  label _before_12_10
+  // [MIR] bb12[10]: _25 = Gt(move _26, const 4_i32)
+  // var _tmp38
+  _tmp38 := p_Int_i32_snap(_26p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_26p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _26, location: Before(AnalysisLocation { location: bb12[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _25, location: Before(AnalysisLocation { location: bb12[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_25), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_25p, mir_binop_Gt_Int_i32_Int_i32(_tmp38, s_Int_i32_cons(4)))
+  label _before_12_11
+  // [MIR] bb12[11]: switchInt(move _25) -> [0: bb14, otherwise: bb13]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _25, location: Before(AnalysisLocation { location: bb12[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp39
+  _tmp39 := p_Bool_snap(_25p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_25p), write)
+  // var _tmp40
+  _tmp40 := _tmp39
+  // PCG (T) post_main
+  label _after_12
+  if (_tmp40 == false) {
+    _from_bb12_to_bb14 := true
+    goto bb_14
+  } else {
+    _from_bb12_to_bb13 := true
+    goto bb_13
+  }
+  label bb_14
+  label _before_14_0
+  // [MIR] bb14[0]: StorageDead(_26)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _26, location: Before(AnalysisLocation { location: bb14[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_26), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _26, location: Before(AnalysisLocation { location: bb14[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_14_1
+  // [MIR] bb14[1]: StorageLive(_27)
+  label _before_14_2
+  // [MIR] bb14[2]: _27 = copy _2
+  // var _tmp41
+  _tmp41 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _27, location: Before(AnalysisLocation { location: bb14[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_27), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_27p, _tmp41)
+  label _before_14_3
+  // [MIR] bb14[3]: _24 = Cell { v: const 4_i32, w: move _27 }
+  // var _tmp42
+  _tmp42 := p_Int_i32_snap(_27p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_27p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _27, location: Before(AnalysisLocation { location: bb14[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _24, location: Before(AnalysisLocation { location: bb14[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_24), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_24p, s_Cell_cons(s_Int_i32_cons(4), _tmp42))
+  label _before_14_4
+  // [MIR] bb14[4]: StorageDead(_27)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _27, location: Before(AnalysisLocation { location: bb14[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_27), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _27, location: Before(AnalysisLocation { location: bb14[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_14_5
+  // [MIR] bb14[5]: goto -> bb15
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_14
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb14_to_bb15 := true
+  goto bb_15
+  label bb_13
+  label _before_13_0
+  // [MIR] bb13[0]: StorageDead(_26)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _26, location: Before(AnalysisLocation { location: bb13[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_26), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _26, location: Before(AnalysisLocation { location: bb13[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_13_1
+  // [MIR] bb13[1]: _24 = move _3
+  // var _tmp43
+  _tmp43 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb13[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _24, location: Before(AnalysisLocation { location: bb13[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_24), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_24p, _tmp43)
+  label _before_13_2
+  // [MIR] bb13[2]: goto -> bb15
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_13
+  _from_bb13_to_bb15 := true
+  goto bb_15
+  label bb_15
+  label _before_15_0
+  // [MIR] bb15[0]: StorageDead(_25)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _25, location: Before(AnalysisLocation { location: bb15[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_25), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _25, location: Before(AnalysisLocation { location: bb15[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_15_1
+  // [MIR] bb15[1]: FakeRead(ForLet(None), _24)
+  label _before_15_2
+  // [MIR] bb15[2]: StorageLive(_28)
+  label _before_15_3
+  // [MIR] bb15[3]: _28 = move _24
+  // var _tmp44
+  _tmp44 := p_Cell_snap(_24p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_24p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _24, location: Before(AnalysisLocation { location: bb15[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _28, location: Before(AnalysisLocation { location: bb15[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_28), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_28p, _tmp44)
+  label _before_15_4
+  // [MIR] bb15[4]: _3 = move _28
+  // var _tmp45
+  _tmp45 := p_Cell_snap(_28p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_28p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _28, location: Before(AnalysisLocation { location: bb15[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb15[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp45)
+  label _before_15_5
+  // [MIR] bb15[5]: StorageDead(_28)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _28, location: Before(AnalysisLocation { location: bb15[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_28), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _28, location: Before(AnalysisLocation { location: bb15[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_15_6
+  // [MIR] bb15[6]: StorageLive(_29)
+  label _before_15_7
+  // [MIR] bb15[7]: StorageLive(_30)
+  label _before_15_8
+  // [MIR] bb15[8]: StorageLive(_31)
+  label _before_15_9
+  // [MIR] bb15[9]: _31 = copy _2
+  // var _tmp46
+  _tmp46 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _31, location: Before(AnalysisLocation { location: bb15[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_31), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_31p, _tmp46)
+  label _before_15_10
+  // [MIR] bb15[10]: _30 = Gt(move _31, const 5_i32)
+  // var _tmp47
+  _tmp47 := p_Int_i32_snap(_31p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_31p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _31, location: Before(AnalysisLocation { location: bb15[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _30, location: Before(AnalysisLocation { location: bb15[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_30), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_30p, mir_binop_Gt_Int_i32_Int_i32(_tmp47, s_Int_i32_cons(5)))
+  label _before_15_11
+  // [MIR] bb15[11]: switchInt(move _30) -> [0: bb17, otherwise: bb16]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _30, location: Before(AnalysisLocation { location: bb15[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp48
+  _tmp48 := p_Bool_snap(_30p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_30p), write)
+  // var _tmp49
+  _tmp49 := _tmp48
+  // PCG (T) post_main
+  label _after_15
+  if (_tmp49 == false) {
+    _from_bb15_to_bb17 := true
+    goto bb_17
+  } else {
+    _from_bb15_to_bb16 := true
+    goto bb_16
+  }
+  label bb_17
+  label _before_17_0
+  // [MIR] bb17[0]: StorageDead(_31)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _31, location: Before(AnalysisLocation { location: bb17[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_31), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _31, location: Before(AnalysisLocation { location: bb17[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_17_1
+  // [MIR] bb17[1]: StorageLive(_32)
+  label _before_17_2
+  // [MIR] bb17[2]: _32 = copy _2
+  // var _tmp50
+  _tmp50 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _32, location: Before(AnalysisLocation { location: bb17[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_32), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_32p, _tmp50)
+  label _before_17_3
+  // [MIR] bb17[3]: _29 = Cell { v: const 5_i32, w: move _32 }
+  // var _tmp51
+  _tmp51 := p_Int_i32_snap(_32p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_32p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _32, location: Before(AnalysisLocation { location: bb17[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _29, location: Before(AnalysisLocation { location: bb17[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_29), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_29p, s_Cell_cons(s_Int_i32_cons(5), _tmp51))
+  label _before_17_4
+  // [MIR] bb17[4]: StorageDead(_32)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _32, location: Before(AnalysisLocation { location: bb17[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_32), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _32, location: Before(AnalysisLocation { location: bb17[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_17_5
+  // [MIR] bb17[5]: goto -> bb18
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_17
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb17_to_bb18 := true
+  goto bb_18
+  label bb_16
+  label _before_16_0
+  // [MIR] bb16[0]: StorageDead(_31)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _31, location: Before(AnalysisLocation { location: bb16[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_31), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _31, location: Before(AnalysisLocation { location: bb16[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_16_1
+  // [MIR] bb16[1]: _29 = move _3
+  // var _tmp52
+  _tmp52 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb16[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _29, location: Before(AnalysisLocation { location: bb16[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_29), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_29p, _tmp52)
+  label _before_16_2
+  // [MIR] bb16[2]: goto -> bb18
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_16
+  _from_bb16_to_bb18 := true
+  goto bb_18
+  label bb_18
+  label _before_18_0
+  // [MIR] bb18[0]: StorageDead(_30)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _30, location: Before(AnalysisLocation { location: bb18[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_30), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _30, location: Before(AnalysisLocation { location: bb18[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_18_1
+  // [MIR] bb18[1]: FakeRead(ForLet(None), _29)
+  label _before_18_2
+  // [MIR] bb18[2]: StorageLive(_33)
+  label _before_18_3
+  // [MIR] bb18[3]: _33 = move _29
+  // var _tmp53
+  _tmp53 := p_Cell_snap(_29p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_29p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _29, location: Before(AnalysisLocation { location: bb18[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _33, location: Before(AnalysisLocation { location: bb18[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_33), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_33p, _tmp53)
+  label _before_18_4
+  // [MIR] bb18[4]: _3 = move _33
+  // var _tmp54
+  _tmp54 := p_Cell_snap(_33p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_33p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _33, location: Before(AnalysisLocation { location: bb18[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb18[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp54)
+  label _before_18_5
+  // [MIR] bb18[5]: StorageDead(_33)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _33, location: Before(AnalysisLocation { location: bb18[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_33), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _33, location: Before(AnalysisLocation { location: bb18[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_18_6
+  // [MIR] bb18[6]: StorageLive(_34)
+  label _before_18_7
+  // [MIR] bb18[7]: StorageLive(_35)
+  label _before_18_8
+  // [MIR] bb18[8]: StorageLive(_36)
+  label _before_18_9
+  // [MIR] bb18[9]: _36 = copy _2
+  // var _tmp55
+  _tmp55 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _36, location: Before(AnalysisLocation { location: bb18[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_36), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_36p, _tmp55)
+  label _before_18_10
+  // [MIR] bb18[10]: _35 = Gt(move _36, const 6_i32)
+  // var _tmp56
+  _tmp56 := p_Int_i32_snap(_36p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_36p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _36, location: Before(AnalysisLocation { location: bb18[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _35, location: Before(AnalysisLocation { location: bb18[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_35), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_35p, mir_binop_Gt_Int_i32_Int_i32(_tmp56, s_Int_i32_cons(6)))
+  label _before_18_11
+  // [MIR] bb18[11]: switchInt(move _35) -> [0: bb20, otherwise: bb19]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _35, location: Before(AnalysisLocation { location: bb18[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp57
+  _tmp57 := p_Bool_snap(_35p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_35p), write)
+  // var _tmp58
+  _tmp58 := _tmp57
+  // PCG (T) post_main
+  label _after_18
+  if (_tmp58 == false) {
+    _from_bb18_to_bb20 := true
+    goto bb_20
+  } else {
+    _from_bb18_to_bb19 := true
+    goto bb_19
+  }
+  label bb_20
+  label _before_20_0
+  // [MIR] bb20[0]: StorageDead(_36)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _36, location: Before(AnalysisLocation { location: bb20[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_36), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _36, location: Before(AnalysisLocation { location: bb20[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_20_1
+  // [MIR] bb20[1]: StorageLive(_37)
+  label _before_20_2
+  // [MIR] bb20[2]: _37 = copy _2
+  // var _tmp59
+  _tmp59 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _37, location: Before(AnalysisLocation { location: bb20[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_37), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_37p, _tmp59)
+  label _before_20_3
+  // [MIR] bb20[3]: _34 = Cell { v: const 6_i32, w: move _37 }
+  // var _tmp60
+  _tmp60 := p_Int_i32_snap(_37p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_37p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _37, location: Before(AnalysisLocation { location: bb20[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _34, location: Before(AnalysisLocation { location: bb20[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_34), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_34p, s_Cell_cons(s_Int_i32_cons(6), _tmp60))
+  label _before_20_4
+  // [MIR] bb20[4]: StorageDead(_37)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _37, location: Before(AnalysisLocation { location: bb20[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_37), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _37, location: Before(AnalysisLocation { location: bb20[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_20_5
+  // [MIR] bb20[5]: goto -> bb21
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_20
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb20_to_bb21 := true
+  goto bb_21
+  label bb_19
+  label _before_19_0
+  // [MIR] bb19[0]: StorageDead(_36)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _36, location: Before(AnalysisLocation { location: bb19[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_36), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _36, location: Before(AnalysisLocation { location: bb19[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_19_1
+  // [MIR] bb19[1]: _34 = move _3
+  // var _tmp61
+  _tmp61 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb19[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _34, location: Before(AnalysisLocation { location: bb19[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_34), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_34p, _tmp61)
+  label _before_19_2
+  // [MIR] bb19[2]: goto -> bb21
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_19
+  _from_bb19_to_bb21 := true
+  goto bb_21
+  label bb_21
+  label _before_21_0
+  // [MIR] bb21[0]: StorageDead(_35)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _35, location: Before(AnalysisLocation { location: bb21[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_35), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _35, location: Before(AnalysisLocation { location: bb21[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_21_1
+  // [MIR] bb21[1]: FakeRead(ForLet(None), _34)
+  label _before_21_2
+  // [MIR] bb21[2]: StorageLive(_38)
+  label _before_21_3
+  // [MIR] bb21[3]: _38 = move _34
+  // var _tmp62
+  _tmp62 := p_Cell_snap(_34p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_34p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _34, location: Before(AnalysisLocation { location: bb21[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _38, location: Before(AnalysisLocation { location: bb21[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_38), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_38p, _tmp62)
+  label _before_21_4
+  // [MIR] bb21[4]: _3 = move _38
+  // var _tmp63
+  _tmp63 := p_Cell_snap(_38p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_38p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _38, location: Before(AnalysisLocation { location: bb21[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb21[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp63)
+  label _before_21_5
+  // [MIR] bb21[5]: StorageDead(_38)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _38, location: Before(AnalysisLocation { location: bb21[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_38), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _38, location: Before(AnalysisLocation { location: bb21[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_21_6
+  // [MIR] bb21[6]: StorageLive(_39)
+  label _before_21_7
+  // [MIR] bb21[7]: StorageLive(_40)
+  label _before_21_8
+  // [MIR] bb21[8]: StorageLive(_41)
+  label _before_21_9
+  // [MIR] bb21[9]: _41 = copy _2
+  // var _tmp64
+  _tmp64 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _41, location: Before(AnalysisLocation { location: bb21[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_41), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_41p, _tmp64)
+  label _before_21_10
+  // [MIR] bb21[10]: _40 = Gt(move _41, const 7_i32)
+  // var _tmp65
+  _tmp65 := p_Int_i32_snap(_41p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_41p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _41, location: Before(AnalysisLocation { location: bb21[10], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _40, location: Before(AnalysisLocation { location: bb21[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_40), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Bool_assign(_40p, mir_binop_Gt_Int_i32_Int_i32(_tmp65, s_Int_i32_cons(7)))
+  label _before_21_11
+  // [MIR] bb21[11]: switchInt(move _40) -> [0: bb23, otherwise: bb22]
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _40, location: Before(AnalysisLocation { location: bb21[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp66
+  _tmp66 := p_Bool_snap(_40p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_40p), write)
+  // var _tmp67
+  _tmp67 := _tmp66
+  // PCG (T) post_main
+  label _after_21
+  if (_tmp67 == false) {
+    _from_bb21_to_bb23 := true
+    goto bb_23
+  } else {
+    _from_bb21_to_bb22 := true
+    goto bb_22
+  }
+  label bb_23
+  label _before_23_0
+  // [MIR] bb23[0]: StorageDead(_41)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _41, location: Before(AnalysisLocation { location: bb23[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_41), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _41, location: Before(AnalysisLocation { location: bb23[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_23_1
+  // [MIR] bb23[1]: StorageLive(_42)
+  label _before_23_2
+  // [MIR] bb23[2]: _42 = copy _2
+  // var _tmp68
+  _tmp68 := p_Int_i32_snap(_2p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _42, location: Before(AnalysisLocation { location: bb23[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_42), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_42p, _tmp68)
+  label _before_23_3
+  // [MIR] bb23[3]: _39 = Cell { v: const 7_i32, w: move _42 }
+  // var _tmp69
+  _tmp69 := p_Int_i32_snap(_42p)
+  exhale inhabited(s_Int_i32_type()) && acc(p_Int_i32(_42p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _42, location: Before(AnalysisLocation { location: bb23[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _39, location: Before(AnalysisLocation { location: bb23[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_39), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_39p, s_Cell_cons(s_Int_i32_cons(7), _tmp69))
+  label _before_23_4
+  // [MIR] bb23[4]: StorageDead(_42)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _42, location: Before(AnalysisLocation { location: bb23[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_42), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _42, location: Before(AnalysisLocation { location: bb23[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_23_5
+  // [MIR] bb23[5]: goto -> bb24
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_23
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: false, _marker: PhantomData<&()> })
+  // exhale due to weaken to Write
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  _from_bb23_to_bb24 := true
+  goto bb_24
+  label bb_22
+  label _before_22_0
+  // [MIR] bb22[0]: StorageDead(_41)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _41, location: Before(AnalysisLocation { location: bb22[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_41), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _41, location: Before(AnalysisLocation { location: bb22[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_22_1
+  // [MIR] bb22[1]: _39 = move _3
+  // var _tmp70
+  _tmp70 := p_Cell_snap(_3p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_3p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb22[1], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _39, location: Before(AnalysisLocation { location: bb22[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_39), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_39p, _tmp70)
+  label _before_22_2
+  // [MIR] bb22[2]: goto -> bb24
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  // PCG (T) post_main
+  label _after_22
+  _from_bb22_to_bb24 := true
+  goto bb_24
+  label bb_24
+  label _before_24_0
+  // [MIR] bb24[0]: StorageDead(_40)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _40, location: Before(AnalysisLocation { location: bb24[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_40), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _40, location: Before(AnalysisLocation { location: bb24[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_24_1
+  // [MIR] bb24[1]: FakeRead(ForLet(None), _39)
+  label _before_24_2
+  // [MIR] bb24[2]: StorageLive(_43)
+  label _before_24_3
+  // [MIR] bb24[3]: _43 = move _39
+  // var _tmp71
+  _tmp71 := p_Cell_snap(_39p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_39p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _39, location: Before(AnalysisLocation { location: bb24[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _43, location: Before(AnalysisLocation { location: bb24[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_43), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_43p, _tmp71)
+  label _before_24_4
+  // [MIR] bb24[4]: _3 = move _43
+  // var _tmp72
+  _tmp72 := p_Cell_snap(_43p)
+  exhale inhabited(s_Cell_type()) && acc(p_Cell(_43p), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _43, location: Before(AnalysisLocation { location: bb24[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb24[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Cell_assign(_3p, _tmp72)
+  label _before_24_5
+  // [MIR] bb24[5]: StorageDead(_43)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _43, location: Before(AnalysisLocation { location: bb24[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_43), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _43, location: Before(AnalysisLocation { location: bb24[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_24_6
+  // [MIR] bb24[6]: StorageLive(_44)
+  label _before_24_7
+  // [MIR] bb24[7]: _44 = copy (_3.0: i32)
+  // [PCG] Expand(RepackExpand { from: _3, guide: None, capability: R, _marker: PhantomData<&()> })
+  unfold acc(p_Cell(_3p), write)
+  // var _tmp73
+  _tmp73 := p_Int_i32_snap(s_Cell_field_0(_3p))
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _44, location: Before(AnalysisLocation { location: bb24[7], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_44), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_44p, _tmp73)
+  label _before_24_8
+  // [MIR] bb24[8]: StorageLive(_45)
+  // [PCG] Collapse(RepackCollapse { to: _3, capability: R, guide: None, _marker: PhantomData<&()> })
+  fold acc(p_Cell(_3p), write)
+  label _before_24_9
+  // [MIR] bb24[9]: _45 = copy (_3.1: i32)
+  // [PCG] Expand(RepackExpand { from: _3, guide: None, capability: R, _marker: PhantomData<&()> })
+  unfold acc(p_Cell(_3p), write)
+  // var _tmp74
+  _tmp74 := p_Int_i32_snap(s_Cell_field_1(_3p))
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _45, location: Before(AnalysisLocation { location: bb24[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_45), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_45p, _tmp74)
+  label _before_24_10
+  // [MIR] bb24[10]: _46 = AddWithOverflow(copy _44, copy _45)
+  // [PCG] Collapse(RepackCollapse { to: _3, capability: R, guide: None, _marker: PhantomData<&()> })
+  fold acc(p_Cell(_3p), write)
+  // var _tmp75
+  _tmp75 := p_Int_i32_snap(_44p)
+  // var _tmp76
+  _tmp76 := p_Int_i32_snap(_45p)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _46, location: Before(AnalysisLocation { location: bb24[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_46), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_2_Tuple_assign(_46p, s_Int_i32_type(), s_Bool_type(), mir_binop_AddWithOverflow_Int_i32_Int_i32(_tmp75,
+    _tmp76))
+  label _before_24_11
+  // [MIR] bb24[11]: assert(!move (_46.1: bool), "attempt to compute `{} + {}`, which would overflow", move _44, move _45) -> [success: bb25, unwind: bb26]
+  // PCG (T) pre_operands
+  // [PCG] Expand(RepackExpand { from: _46, guide: None, capability: E, _marker: PhantomData<&()> })
+  unfold acc(p_2_Tuple(_46p, s_Int_i32_type(), s_Bool_type()), write)
+  make_concrete_Int_i32(s_2_Tuple_field_0(_46p, s_Int_i32_type(), s_Bool_type()))
+  make_concrete_Bool(s_2_Tuple_field_1(_46p, s_Int_i32_type(), s_Bool_type()))
+  // PCG (T) post_operands
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _46.1, location: Before(AnalysisLocation { location: bb24[11], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // PCG (T) pre_main
+  // var _tmp77
+  _tmp77 := p_Bool_snap(s_2_Tuple_field_1(_46p, s_Int_i32_type(), s_Bool_type()))
+  exhale inhabited(s_Bool_type()) &&
+    acc(p_Bool(s_2_Tuple_field_1(_46p, s_Int_i32_type(), s_Bool_type())), write)
+  inhale _tmp77 == false
+  // PCG (T) post_main
+  label _after_24
+  _from_bb24_to_bb25 := true
+  goto bb_25
+  label bb_25
+  label _before_25_0
+  // [MIR] bb25[0]: _0 = move (_46.0: i32)
+  // var _tmp78
+  _tmp78 := p_Int_i32_snap(s_2_Tuple_field_0(_46p, s_Int_i32_type(), s_Bool_type()))
+  exhale inhabited(s_Int_i32_type()) &&
+    acc(p_Int_i32(s_2_Tuple_field_0(_46p, s_Int_i32_type(), s_Bool_type())), write)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _46.0, location: Before(AnalysisLocation { location: bb25[0], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _0, location: Before(AnalysisLocation { location: bb25[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_0), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  p_Int_i32_assign(_0p, _tmp78)
+  label _before_25_1
+  // [MIR] bb25[1]: StorageDead(_45)
+  // [PCG] Collapse(RepackCollapse { to: _46, capability: W, guide: None, _marker: PhantomData<&()> })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _45, location: Before(AnalysisLocation { location: bb25[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_45), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // [PCG] Weaken(Weaken { place: _45, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
+  // Weaken to Write for _45 (skipped exhale: StorageDead)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _45, location: Before(AnalysisLocation { location: bb25[1], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_2
+  // [MIR] bb25[2]: StorageDead(_44)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _44, location: Before(AnalysisLocation { location: bb25[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_44), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // [PCG] Weaken(Weaken { place: _44, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
+  // Weaken to Write for _44 (skipped exhale: StorageDead)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _44, location: Before(AnalysisLocation { location: bb25[2], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_3
+  // [MIR] bb25[3]: StorageDead(_39)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _39, location: Before(AnalysisLocation { location: bb25[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_39), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _39, location: Before(AnalysisLocation { location: bb25[3], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_4
+  // [MIR] bb25[4]: StorageDead(_34)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _34, location: Before(AnalysisLocation { location: bb25[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_34), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _34, location: Before(AnalysisLocation { location: bb25[4], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_5
+  // [MIR] bb25[5]: StorageDead(_29)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _29, location: Before(AnalysisLocation { location: bb25[5], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_29), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _29, location: Before(AnalysisLocation { location: bb25[5], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_6
+  // [MIR] bb25[6]: StorageDead(_24)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _24, location: Before(AnalysisLocation { location: bb25[6], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_24), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _24, location: Before(AnalysisLocation { location: bb25[6], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_7
+  // [MIR] bb25[7]: StorageDead(_19)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _19, location: Before(AnalysisLocation { location: bb25[7], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_19), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _19, location: Before(AnalysisLocation { location: bb25[7], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_8
+  // [MIR] bb25[8]: StorageDead(_14)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _14, location: Before(AnalysisLocation { location: bb25[8], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_14), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _14, location: Before(AnalysisLocation { location: bb25[8], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_9
+  // [MIR] bb25[9]: StorageDead(_9)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _9, location: Before(AnalysisLocation { location: bb25[9], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_9), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _9, location: Before(AnalysisLocation { location: bb25[9], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_10
+  // [MIR] bb25[10]: StorageDead(_4)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb25[10], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_4), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb25[10], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_11
+  // [MIR] bb25[11]: StorageDead(_3)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb25[11], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
+  // Weaken to Write for _3 (skipped exhale: StorageDead)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb25[11], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_25_12
+  // [MIR] bb25[12]: return
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  label package_post0
+  goto end
+  label bb_26
+  // cleanup block
+  assert false
+  goto end
+  label end
+  // return
+}
+
+method make_generic_Int_i32(self: Ref)
+  requires acc(p_Int_i32(self), write)
+  ensures acc(p_Param(self, s_Int_i32_type()), write)
+  ensures old(make_generic_s_Int_i32(p_Int_i32_snap(self))) ==
+    p_Param_snap(self, s_Int_i32_type())
+
+
+method make_concrete_Int_i32(self: Ref)
+  requires acc(p_Param(self, s_Int_i32_type()), write)
+  ensures acc(p_Int_i32(self), write)
+  ensures old(p_Param_snap(self, s_Int_i32_type())) ==
+    make_generic_s_Int_i32(p_Int_i32_snap(self))
+
+
+method make_generic_Bool(self: Ref)
+  requires acc(p_Bool(self), write)
+  ensures acc(p_Param(self, s_Bool_type()), write)
+  ensures old(make_generic_s_Bool(p_Bool_snap(self))) ==
+    p_Param_snap(self, s_Bool_type())
+
+
+method make_concrete_Bool(self: Ref)
+  requires acc(p_Param(self, s_Bool_type()), write)
+  ensures acc(p_Bool(self), write)
+  ensures old(p_Param_snap(self, s_Bool_type())) ==
+    make_generic_s_Bool(p_Bool_snap(self))
+
+
+method p_Int_i32_assign(self: Ref, value: s_Int_i32)
+  ensures acc(p_Int_i32(self), write)
+  ensures p_Int_i32_snap(self) == value
+
+
+method p_Cell_assign(self: Ref, value: s_Cell)
+  ensures acc(p_Cell(self), write)
+  ensures p_Cell_snap(self) == value
+
+
+method p_Bool_assign(self: Ref, value: Bool)
+  ensures acc(p_Bool(self), write)
+  ensures p_Bool_snap(self) == value
+
+
+method p_2_Tuple_assign(self: Ref, T$0: Type, U$1: Type, value: s_2_Tuple)
+  ensures acc(p_2_Tuple(self, T$0, U$1), write)
+  ensures p_2_Tuple_snap(self, T$0, U$1) == value
+
+
+method p_Param_assign(self: Ref, T$0: Type, value: s_Param)
+  ensures acc(p_Param(self, T$0), write)
+  ensures p_Param_snap(self, T$0) == value
+
+
+adt s_Param {
+  make_generic_s_Int_i32(make_concrete_s_Int_i32: s_Int_i32)
+  make_generic_s_Bool(make_concrete_s_Bool: Bool)
+  s_Param_Unknown(s_Param_Unknown_id: Int)
+}
+
+adt s_Cell {
+  s_Cell_cons(s_Cell_0: s_Int_i32, s_Cell_1: s_Int_i32)
+}
+
+adt s_2_Tuple {
+  s_2_Tuple_cons(s_2_Tuple_0: s_Param, s_2_Tuple_1: s_Param)
+}
+
+adt Type {
+  s_Int_i32_type()
+  s_Cell_type()
+  s_Bool_type()
+  s_2_Tuple_type(s_2_Tuple_typaram_T$0: Type, s_2_Tuple_typaram_U$1: Type)
+  Unknown_type(id: Int)
+}
