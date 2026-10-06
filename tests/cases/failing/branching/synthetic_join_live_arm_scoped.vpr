@@ -1,0 +1,19 @@
+// REGRESSION GUARD (soundness). A three-way join (three gotos into one label) is
+// lowered as binary joins. When one of the arms merged first is dead, the join
+// must still count the third arm: `l` is also reached from `k == 0`, where
+// `x == 2` is not known. (The dead arm is dead only semantically: the lowering
+// drops a syntactic `assume false` arm before any join forms.)
+//
+// Ported from backend-blocks-perf 0d040b5.
+//
+// Must FAIL.
+method three_way(k: Int, x: Int)
+{
+  if (k == 0) { goto l }
+  if (k == 1) { assume x == 2; goto l }
+  assume k == 0
+  assert false
+  goto l
+  label l
+  assert x == 2
+}

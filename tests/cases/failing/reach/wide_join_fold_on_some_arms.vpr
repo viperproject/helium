@@ -1,0 +1,41 @@
+// SOUNDNESS CANARY for framing across a wide join. Same shape as
+// `wide_join_assert_false_live.vpr` (seven arms, cubes of length 1..7). Six arms
+// fold `cell(r)`; the `x == 7` arm does not. The `unfold` at the join must fail:
+// the predicate is held only conditionally, so its presence guard must not be
+// decided true, and the missing arm's contribution must not be lost.
+//
+// Ported from backend-blocks-perf 38b84da (also rejected by Silicon 3.1.0).
+//
+// Must FAIL.
+field f: Int
+
+predicate cell(r: Ref) { acc(r.f) }
+
+method m(r: Ref, x: Int)
+{
+  inhale acc(r.f)
+  if (x == 1) { fold cell(r)
+                goto tgt } else { goto next1 }
+  label next1
+  if (x == 2) { fold cell(r)
+                goto tgt } else { goto next2 }
+  label next2
+  if (x == 3) { fold cell(r)
+                goto tgt } else { goto next3 }
+  label next3
+  if (x == 4) { fold cell(r)
+                goto tgt } else { goto next4 }
+  label next4
+  if (x == 5) { fold cell(r)
+                goto tgt } else { goto next5 }
+  label next5
+  if (x == 6) { fold cell(r)
+                goto tgt } else { goto next6 }
+  label next6
+  if (x == 7) { goto tgt } else { goto fin0 }
+  label fin0
+  goto fin
+  label tgt
+  unfold cell(r)
+  label fin
+}

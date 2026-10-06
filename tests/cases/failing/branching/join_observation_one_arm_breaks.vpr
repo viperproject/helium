@@ -1,0 +1,22 @@
+// REGRESSION GUARD (soundness). A value observed through a location survives a
+// join only if BOTH arms preserve it. The then arm preserves `obs(r.f)`, the else
+// arm changes `r.f`, so on that path `obs(r.f)` is unrelated to the location the
+// precondition gave permission to: the postcondition must be rejected.
+//
+// Ported from backend-blocks-perf (join observation anchors).
+//
+// Must FAIL.
+field f: Int
+field g: Int
+domain D { function obs(x: Int): Ref }
+
+method reset(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && obs(r.f) == old(obs(r.f))
+
+method one_arm_breaks(c: Bool, r: Ref)
+  requires acc(r.f) && acc(obs(r.f).g)
+  ensures acc(r.f) && acc(obs(r.f).g)
+{
+  if (c) { reset(r) } else { r.f := r.f + 1 }
+}

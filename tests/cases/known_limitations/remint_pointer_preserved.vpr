@@ -1,0 +1,44 @@
+// KNOWN LIMITATION — should verify, currently rejected: facts lost across a join.
+//
+// The pointer is preserved on every arm (`step` keeps `getf(x)`), but `P(x)` was
+// UNFOLDED before the branch, so the join has no pre-branch chunk to relate the
+// merged snapshot to, and `getf(merged) == x.f` is not recovered. The static fix:
+// let the join relate a field of a value re-folded on each arm to a pre-branch TERM
+// (not only to a pre-branch chunk's value) when both arms agree on it.
+//
+// Counterpart (must fail): `failing/branching/join_remint_moved_pointer.vpr`.
+// Ported from backend-blocks-perf, where it was closed by a case split on the
+// path flags (since removed: no prove-time case splitting).
+field f: Ref
+field h: Int
+field g: Int
+
+domain Id {
+  function id1(r: Ref): Ref
+  function id2(r: Ref): Ref
+}
+
+predicate P(x: Ref) { acc(x.f) && acc(x.h) }
+function getf(x: Ref): Ref requires acc(P(x)) { unfolding acc(P(x)) in x.f }
+predicate Q(r: Ref) { acc(r.g) }
+
+// Re-mints P(x): the counter changes, the pointer does not.
+method step(x: Ref)
+  requires acc(P(x))
+  ensures acc(P(x)) && getf(x) == old(getf(x))
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(P(x)) && acc(Q(id2(id1(getf(x)))))
+  ensures acc(P(x)) && acc(Q(id2(id1(getf(x)))))
+{
+  unfold acc(P(x))
+  x.h := x.h + 1
+  if (c) {
+    fold acc(P(x))
+    step(x)
+  } else {
+    fold acc(P(x))
+    step(x)
+    if (d) { step(x) }
+  }
+}

@@ -1,0 +1,33 @@
+// REGRESSION GUARD (soundness). A join whose arms are BOTH dead is itself dead,
+// and its heap must never re-enter the live flow.
+//
+// Here the dead join flows (via `goto done`) into the join after the loop. Had
+// its heap been treated as live, it would skip the loop head's havoc and carry
+// the entry chunk (x.f == 0) into the final heap, proving `x.f == 0` on the path
+// through the loop. Deadness is recorded per block (`dead_blocks`), and a join
+// with both arms dead is dead.
+//
+// Ported from backend-blocks-perf 34c2150, where the shape was seen on
+// linux-raw-sys `__BindgenBitfieldUnit::<Storage>::set`.
+//
+// Must FAIL.
+field f: Int
+
+method both_dead_arms_join(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f) && x.f == 0
+{
+  var i: Int := 0
+  if (b) {
+    inhale false
+    if (c) { } else { }
+    goto done
+  }
+  while (i < 3)
+    invariant acc(x.f)
+  {
+    x.f := x.f + 1
+    i := i + 1
+  }
+  label done
+  assert x.f == 0
+}

@@ -1,0 +1,14 @@
+// REGRESSION GUARD (soundness). Two predicate instances are distinct locations
+// only for a *provably* distinct argument: here `x == y` and `k == j` are
+// possible, and then the two instances are one location holding two.
+//
+// Ported from backend-blocks-perf (location identity).
+//
+// Must FAIL.
+predicate P(x: Ref, k: Int)
+
+method may_alias(x: Ref, y: Ref, k: Int, j: Int)
+  requires acc(P(x, k)) && acc(P(y, j))
+{
+  assert perm(P(x, k)) == write
+}
