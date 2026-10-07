@@ -5,7 +5,7 @@
 //! Independent of quantifiers — `forall` triggering (see `super::forall`) is one
 //! consumer of `build_instance`, and function unfolding is another.
 
-use egg::{EGraph, Id, SearchMatches, Searcher, Subst, Var};
+use egg::{Changes, EGraph, Id, Language, SearchMatches, Searcher, Subst, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
@@ -68,6 +68,10 @@ pub(crate) enum AxiomInst {
 /// types).
 pub(super) struct AxiomTriggerSearcher {
     pub(super) func: FuncId,
+    /// The presence token the applier looks up for each application (a function's
+    /// `f%pre`, see `FunctionUnfoldApplier::pre_token`): a token minted later must
+    /// bring the application's class back.
+    pub(super) token: Option<FuncId>,
 }
 
 impl Searcher<Symbolic, ConstFold> for AxiomTriggerSearcher {
@@ -91,6 +95,40 @@ impl Searcher<Symbolic, ConstFold> for AxiomTriggerSearcher {
             }
         }
         ms
+    }
+
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        _limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let mut found: Vec<(Id, Subst)> = changes
+            .nodes(&Discriminant::FuncApp(self.func))
+            .map(|(class, _)| (*class, Subst::default()))
+            .collect();
+        if let Some(token) = self.token {
+            for (_, node) in changes.nodes(&Discriminant::FuncApp(token)) {
+                // The applications this token belongs to: same arguments.
+                let calls = |n: &Symbolic| matches!(n, Symbolic::FuncApp(f, ..) if *f == self.func);
+                match node.children().first() {
+                    Some(&arg) => found.extend(
+                        parents_where(egraph, arg, calls)
+                            .into_iter()
+                            .filter(|(_, call)| call.children() == node.children())
+                            .map(|(class, _)| (class, Subst::default())),
+                    ),
+                    None => found.extend(
+                        egraph
+                            .classes_for_op(&Discriminant::FuncApp(self.func))
+                            .into_iter()
+                            .flatten()
+                            .map(|class| (class, Subst::default())),
+                    ),
+                }
+            }
+        }
+        group_matches(found)
     }
 
     fn search_eclass_with_limit(

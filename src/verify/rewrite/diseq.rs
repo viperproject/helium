@@ -5,7 +5,9 @@
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, Changes, EGraph, Id, Pattern, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var,
+};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
@@ -15,73 +17,153 @@ use super::*;
 
 /// Unit propagation from a **disproven** `==` through `ite` towers — NOT
 /// eq-over-ite distribution (see the applier doc). Split by which arm the other
-/// operand matches; nested towers unwind one level per saturation iteration (the
-/// derived disequality re-enters the `Eq` bucket).
+/// operand matches; nested towers unwind one level per pass (the derived
+/// disequality is a new `Eq` match).
 pub(super) fn disequality_unit_prop_rules() -> Vec<Rule> {
-    vec![
-        bucket_rule(
-            "eq-false-then",
-            EqBucketSearcher,
-            EqFalseUnitApplier {
-                then_side: true,
-                memo: Memo::new(),
-            },
-        ),
-        bucket_rule(
-            "eq-false-else",
-            EqBucketSearcher,
-            EqFalseUnitApplier {
-                then_side: false,
-                memo: Memo::new(),
-            },
-        ),
-    ]
+    let rule = |name: &str, then_side: bool| {
+        let applier = EqFalseUnitApplier {
+            then_side,
+            memo: Memo::new(),
+        };
+        let searcher = EqSearcher::new(EqReads::OperandItes, EqGate::Disproven);
+        local_fixpoint_rule(name, searcher, applier)
+    };
+    vec![rule("eq-false-then", true), rule("eq-false-else", false)]
 }
 
-/// Searcher for the guarded eq-over-ite distribution: every e-class holding an
-/// `Eq` node, via the `classes_by_op` bucket (no whole-graph scan). One empty
-/// subst per class; the applier re-reads the nodes.
-#[derive(Clone)]
-pub(super) struct EqBucketSearcher;
+/// What a disequality rule's match reads besides its `Eq` node, the node's class
+/// data and its operands' identities — so what else must make it search again.
+#[derive(Clone, Copy)]
+pub(super) enum EqReads {
+    Node,
+    /// The `ite` nodes in the operands' classes ([`EqFalseUnitApplier`]).
+    OperandItes,
+    /// The function applications in the operands' classes ([`ContraCongruenceApplier`]).
+    OperandApps,
+    /// The unary applications over the operands and their classes' data
+    /// ([`DistinguishingObsApplier`]).
+    Observations,
+}
 
-impl Searcher<Symbolic, ConstFold> for EqBucketSearcher {
+/// Which `Eq` classes a disequality rule derives from, by their known boolean.
+#[derive(Clone, Copy)]
+pub(super) enum EqGate {
+    Disproven,
+    Undecided,
+}
+
+impl EqGate {
+    fn admits(self, egraph: &EGraph<Symbolic, ConstFold>, class: Id) -> bool {
+        match self {
+            EqGate::Disproven => known_bool(egraph, class) == Some(false),
+            EqGate::Undecided => known_bool(egraph, class).is_none(),
+        }
+    }
+}
+
+/// Searcher for the disequality rules: each `Eq` node, as `(== ?l ?r)`, in a class
+/// the [`EqGate`] admits. Searching changes, it also finds the `Eq` nodes whose
+/// match reads something else that changed (see [`EqReads`]).
+#[derive(Clone)]
+pub(super) struct EqSearcher {
+    reads: EqReads,
+    gate: EqGate,
+    pattern: Pattern<Symbolic>,
+}
+
+impl EqSearcher {
+    pub(super) fn new(reads: EqReads, gate: EqGate) -> Self {
+        EqSearcher {
+            reads,
+            gate,
+            // the appliers read the data of the `Eq` node's class only
+            pattern: "(== ?l ?r)"
+                .parse::<Pattern<Symbolic>>()
+                .expect("eq pattern")
+                .with_data_reads(true, &[]),
+        }
+    }
+
+    /// The `Eq` nodes with an operand in `class`, as matches.
+    fn eq_parents(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        class: Id,
+        out: &mut Vec<(Id, Subst)>,
+    ) {
+        let vars = [var("?l"), var("?r")];
+        let is_eq = |n: &Symbolic| matches!(n, Symbolic::Binary(BinOp::Eq, _));
+        for (eq, node) in parents_where(egraph, class, is_eq) {
+            out.push((eq, flat_subst(&vars, &node)));
+        }
+    }
+}
+
+impl Searcher<Symbolic, ConstFold> for EqSearcher {
     fn search_with_limit(
         &self,
         egraph: &EGraph<Symbolic, ConstFold>,
         limit: usize,
     ) -> Vec<SearchMatches<'_, Symbolic>> {
-        let Some(classes) = egraph.classes_for_op(&Discriminant::Binary(BinOp::Eq)) else {
-            return vec![];
-        };
-        classes
-            .take(limit)
-            .map(|eclass| SearchMatches {
-                eclass,
-                substs: vec![Subst::default()],
-                ast: None,
-            })
-            .collect()
+        let mut found = self.pattern.search_with_limit(egraph, limit);
+        found.retain(|m| self.gate.admits(egraph, m.eclass));
+        found
+    }
+
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let mut found: Vec<(Id, Subst)> =
+            ungroup(self.pattern.search_changes(egraph, changes, limit)).collect();
+        // The operand classes whose reads changed; each walked once.
+        let mut operands: Vec<Id> = Vec::new();
+        match self.reads {
+            EqReads::Node => {}
+            EqReads::OperandItes => {
+                operands.extend(changes.nodes(&Discriminant::Ite).map(|(class, _)| *class))
+            }
+            EqReads::OperandApps => operands.extend(
+                changes
+                    .iter()
+                    .filter(|(_, n)| matches!(n, Symbolic::FuncApp(..)))
+                    .map(|(class, _)| *class),
+            ),
+            EqReads::Observations => {
+                let unary_arg = |n: &Symbolic| match n {
+                    Symbolic::FuncApp(_, _, args) if args.len() == 1 => Some(egraph.find(args[0])),
+                    _ => None,
+                };
+                // a new observation `f(x)`, or one whose class's data changed
+                operands.extend(changes.iter().filter_map(|(_, n)| unary_arg(n)));
+                for &class in changes.data() {
+                    operands.extend(egraph[class].nodes.iter().filter_map(unary_arg));
+                }
+            }
+        }
+        operands.sort_unstable();
+        operands.dedup();
+        for class in operands {
+            self.eq_parents(egraph, class, &mut found);
+        }
+        found.retain(|(class, _)| self.gate.admits(egraph, *class));
+        group_matches(found)
     }
 
     fn search_eclass_with_limit(
         &self,
         egraph: &EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _limit: usize,
+        limit: usize,
     ) -> Option<SearchMatches<'_, Symbolic>> {
-        egraph[eclass]
-            .nodes
-            .iter()
-            .any(|n| matches!(n, Symbolic::Binary(BinOp::Eq, _)))
-            .then(|| SearchMatches {
-                eclass,
-                substs: vec![Subst::default()],
-                ast: None,
-            })
+        let found = self.pattern.search_eclass_with_limit(egraph, eclass, limit);
+        found.filter(|m| self.gate.admits(egraph, m.eclass))
     }
 
     fn vars(&self) -> Vec<Var> {
-        vec![]
+        self.pattern.vars()
     }
 }
 
@@ -97,29 +179,23 @@ impl Applier<Symbolic, ConstFold> for EqFalseMirrorApplier {
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
+        subst: &Subst,
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
         if known_bool(egraph, eclass) != Some(false) {
             return vec![];
         }
-        let mirrors: Vec<[Id; 2]> = egraph[eclass]
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Symbolic::Binary(BinOp::Eq, [l, r]) if l != r => Some([*r, *l]),
-                _ => None,
-            })
-            .collect();
-        let mut changed = Vec::new();
-        for [r, l] in mirrors {
-            let mirrored = egraph.add(Symbolic::Binary(BinOp::Eq, [r, l]));
-            if egraph.union(eclass, mirrored) {
-                changed.push(egraph.find(eclass));
-            }
+        let (l, r) = (egraph.find(subst[var("?l")]), egraph.find(subst[var("?r")]));
+        if l == r {
+            return vec![];
         }
-        changed
+        let mirrored = egraph.add(Symbolic::Binary(BinOp::Eq, [r, l]));
+        if egraph.union(eclass, mirrored) {
+            vec![egraph.find(eclass)]
+        } else {
+            vec![]
+        }
     }
 
     fn vars(&self) -> Vec<Var> {
@@ -153,7 +229,7 @@ impl Applier<Symbolic, ConstFold> for ContraCongruenceApplier {
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
+        subst: &Subst,
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
@@ -161,11 +237,8 @@ impl Applier<Symbolic, ConstFold> for ContraCongruenceApplier {
             return vec![];
         }
         let mut contras: Vec<[Id; 2]> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::Binary(BinOp::Eq, [l, r]) = node else {
-                continue;
-            };
-            let (l, r) = (egraph.find(*l), egraph.find(*r));
+        {
+            let (l, r) = (egraph.find(subst[var("?l")]), egraph.find(subst[var("?r")]));
             for lapp in &egraph[l].nodes {
                 let Symbolic::FuncApp(lf, ltys, largs) = lapp else {
                     continue;
@@ -241,26 +314,13 @@ impl Applier<Symbolic, ConstFold> for ContraCongruenceApplier {
 /// already pays for; the retraction pairs this exists for are all unary, so the
 /// extra generality would be cost with no measured benefit.
 ///
-/// Success pins the class to `false`, and the `known_bool` gate below then skips
-/// it forever. A **failed** scan is the hot path: it finds nothing, and without a
-/// memo it repeats in full on every saturation iteration, for every undecided
-/// `Eq` class. On a payload enum that dominates everything else — an N=5 grid file
-/// spent 11.9s here for 266 unions (45ms per union), and ablating the rule took
-/// the file from 18.4s to 0.3s.
-///
-/// So a failed scan is memoized on `(l, r, |parents(l)|, |parents(r)|)`. Parent
-/// lists only grow, so the lengths are a free monotone version stamp: the same
-/// pair is re-scanned exactly when either side has gained a parent since the last
-/// failure, which is when a new observation can have appeared.
-///
-/// **This trades completeness, not soundness.** A fingerprint can sharpen without
-/// either class gaining a parent (the application's class merges with a literal),
-/// and that refinement is not re-scanned. Missing a disproof only fails to prove
-/// something — the safe direction — and the corpora pin that nothing regressed.
-pub(super) struct DistinguishingObsApplier {
-    /// Failed scans, keyed by the pair and its parent-count stamp.
-    pub(super) memo: Memo<(Id, Id, usize, usize)>,
-}
+/// A **failed** scan is the common case. Matching is semi-naive, so an undecided
+/// `Eq` node is scanned again only when something its scan reads changed: the node
+/// itself, a unary application over either operand (a new observation), or the
+/// data of such an application's class (a sharper fingerprint); see
+/// [`EqReads::Observations`]. (Scanned every iteration instead, the rule once
+/// took an N=5 payload-enum file from 0.3s to 18.4s.)
+pub(super) struct DistinguishingObsApplier;
 
 thread_local! {
     /// Observation maps built during the current saturation run, keyed by the
@@ -323,7 +383,7 @@ impl Applier<Symbolic, ConstFold> for DistinguishingObsApplier {
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
+        subst: &Subst,
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
@@ -332,39 +392,12 @@ impl Applier<Symbolic, ConstFold> for DistinguishingObsApplier {
         if known_bool(egraph, eclass).is_some() {
             return vec![];
         }
-        // Canonical operand pairs of this class, deduplicated: several `Eq` nodes
-        // in one class routinely name the same pair, and each used to pay for its
-        // own pair of observation scans.
-        let mut pairs: Vec<(Id, Id)> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::Binary(BinOp::Eq, [l, r]) = node else {
-                continue;
-            };
-            let (l, r) = (egraph.find(*l), egraph.find(*r));
-            if l != r && !pairs.contains(&(l, r)) {
-                pairs.push((l, r));
-            }
-        }
-
+        let (l, r) = (egraph.find(subst[var("?l")]), egraph.find(subst[var("?r")]));
         let mut disprove = false;
-        'outer: for (l, r) in pairs {
-            // Version stamp: parent lists only grow, so equal lengths mean no new
-            // observation can have shown up on either side since the last failure.
-            let stamp = (
-                l,
-                r,
-                egraph[l].parents().count(),
-                egraph[r].parents().count(),
-            );
-            if !self.memo.insert(stamp) {
-                continue;
-            }
-            let obs_l = unary_observations(egraph, l);
-            if obs_l.is_empty() {
-                continue;
-            }
+        let obs_l = unary_observations(egraph, l);
+        if l != r && !obs_l.is_empty() {
             let obs_r = unary_observations(egraph, r);
-            // Hash join on the observation key instead of the old nested loop.
+            // Hash join on the observation key.
             for (key, app_r) in obs_r.iter() {
                 let Some(app_l) = obs_l.get(key) else {
                     continue;
@@ -380,7 +413,7 @@ impl Applier<Symbolic, ConstFold> for DistinguishingObsApplier {
                 };
                 if fp_l.differs_from(&fp_r) {
                     disprove = true;
-                    break 'outer;
+                    break;
                 }
             }
         }
@@ -410,8 +443,8 @@ impl Applier<Symbolic, ConstFold> for DistinguishingObsApplier {
 /// - else side (`y ≡ z`) ⟹ `c = true ∧ (x == z) = false` (mirrored)
 ///
 /// The second consequence recurses down a nested ite tower (a 3+-variant enum
-/// discriminator): the derived disequality lands back in the `Eq` bucket, so the
-/// next saturation iteration picks it up, one level per iteration. Two assumed
+/// discriminator): the derived disequality is a new `Eq` match, so the rule's
+/// next pass picks it up, one level per pass. Two assumed
 /// disequalities pinning `c` both ways make the graph inconsistent — which is
 /// enum-match exhaustiveness.
 ///
@@ -432,7 +465,7 @@ impl Applier<Symbolic, ConstFold> for EqFalseUnitApplier {
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
+        subst: &Subst,
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
@@ -441,28 +474,24 @@ impl Applier<Symbolic, ConstFold> for EqFalseUnitApplier {
         }
         // Each derivation: pin `cond` to `cond_val`, and disprove the other
         // arm's comparison `other == z`.
+        let (l, r) = (subst[var("?l")], subst[var("?r")]);
         let mut derivs: Vec<(Id, bool, Id, Id)> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::Binary(BinOp::Eq, [l, r]) = node else {
-                continue;
-            };
-            for (ite_side, z) in [(*l, *r), (*r, *l)] {
-                let (ite_side, z) = (egraph.find(ite_side), egraph.find(z));
-                for inner in &egraph[ite_side].nodes {
-                    let Symbolic::Ite([c, x, y]) = inner else {
-                        continue;
-                    };
-                    let (c, x, y) = (egraph.find(*c), egraph.find(*x), egraph.find(*y));
-                    let (matched, cond_val, other) = if self.then_side {
-                        (x == z, false, y)
-                    } else {
-                        (y == z, true, x)
-                    };
-                    if !matched || !self.memo.insert([c, x, y, z]) {
-                        continue;
-                    }
-                    derivs.push((c, cond_val, other, z));
+        for (ite_side, z) in [(l, r), (r, l)] {
+            let (ite_side, z) = (egraph.find(ite_side), egraph.find(z));
+            for inner in &egraph[ite_side].nodes {
+                let Symbolic::Ite([c, x, y]) = inner else {
+                    continue;
+                };
+                let (c, x, y) = (egraph.find(*c), egraph.find(*x), egraph.find(*y));
+                let (matched, cond_val, other) = if self.then_side {
+                    (x == z, false, y)
+                } else {
+                    (y == z, true, x)
+                };
+                if !matched || !self.memo.insert([c, x, y, z]) {
+                    continue;
                 }
+                derivs.push((c, cond_val, other, z));
             }
         }
         let mut changed = Vec::new();

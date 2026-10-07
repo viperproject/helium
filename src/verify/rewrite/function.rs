@@ -319,7 +319,10 @@ pub(crate) fn function_rule(
     def: Arc<FunctionDefinition>,
     pre_token: Option<FuncId>,
 ) -> Rule {
-    let searcher = AxiomTriggerSearcher { func };
+    let searcher = AxiomTriggerSearcher {
+        func,
+        token: pre_token,
+    };
     let applier = FunctionUnfoldApplier {
         func,
         def,
@@ -338,7 +341,7 @@ pub(crate) fn function_rule(
 ///   recursive batch's own verification, which is what makes induction over a
 ///   recursive call work (Silicon's phase-1 `post` axiom).
 pub(crate) fn post_rule(name: &str, func: FuncId, def: Arc<FunctionDefinition>) -> Rule {
-    let searcher = AxiomTriggerSearcher { func };
+    let searcher = AxiomTriggerSearcher { func, token: None };
     let applier = FunctionUnfoldApplier {
         func,
         def,

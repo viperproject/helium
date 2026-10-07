@@ -620,15 +620,46 @@ pub(super) fn run_rules<'r>(
     egraph: egg::EGraph<Symbolic, ConstFold>,
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
     iter_limit: Option<usize>,
-) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
+) -> (egg::EGraph<Symbolic, ConstFold>, Vec<RunIteration>) {
     run_rules_until(egraph, rules, iter_limit, None)
 }
 
-/// As [`run_rules`], but stopping as soon as `goal` is settled.
+/// One iteration of [`run_rules_until`]: what it applied and what it cost.
+pub(crate) struct RunIteration {
+    /// Graph size when the iteration started.
+    pub(crate) egraph_nodes: usize,
+    pub(crate) egraph_classes: usize,
+    /// Per rule, the e-classes its application changed.
+    pub(crate) applied: Vec<(egg::Symbol, usize)>,
+    /// The e-classes the rules were searched at and their matches applied to.
+    pub(crate) matched_classes: usize,
+    pub(crate) search_time: f64,
+    pub(crate) apply_time: f64,
+    pub(crate) rebuild_time: f64,
+}
+
+/// Nodes one run may add before it stops after the current rule: the backstop that
+/// makes a run of non-terminating rules (quantifier matching loops) terminate.
+/// It bounds what the run adds, not the size of the graph, so a large graph does
+/// not stop every run after its first iteration.
+const NODE_GROWTH_LIMIT: usize = 100_000;
+
+/// Saturates `egraph` under `rules`, stopping as soon as `goal` is settled.
 ///
-/// egg checks a `Runner`'s hooks at the start of every iteration and treats an
-/// `Err` as a stop, so this costs one class lookup per iteration and saves every
-/// iteration after the answer exists.
+/// **Semi-naive.** The e-graph logs its changes (`EGraph::track_changes`), and
+/// each rule remembers, in the e-graph, how far it has consumed them (keyed by its
+/// name). An iteration searches each rule only for the matches that involve
+/// something changed since that rule last ran (`Searcher::search_changes`), so its
+/// cost follows what changed rather than the size of the graph. A rule that never
+/// ran on this graph searches all of it. A rule's position advances only once its
+/// matches have been applied, so a run cut short leaves the rest pending for the
+/// next run. Clones carry the positions, so a clone continues where its source
+/// left off; a checkpoint rollback restores them.
+///
+/// An iteration finds exactly the new matches a full search would (the old ones
+/// were applied already, and applying a match again changes nothing), so the
+/// fixpoint is the one full matching reaches: debug builds check that a full
+/// search of every rule at the fixpoint changes nothing.
 ///
 /// **`goal` is only sound on a throwaway graph.** The returned e-graph is *not*
 /// saturated, so a caller that records it as clean — `VerifyContext::saturate`
@@ -642,11 +673,11 @@ pub(super) fn run_rules<'r>(
 /// `run_rules` refuses to start on one, so abandoning its saturation cannot change
 /// a verdict either.
 pub(super) fn run_rules_until<'r>(
-    egraph: egg::EGraph<Symbolic, ConstFold>,
+    mut egraph: egg::EGraph<Symbolic, ConstFold>,
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
     iter_limit: Option<usize>,
     goal: Option<egg::Id>,
-) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
+) -> (egg::EGraph<Symbolic, ConstFold>, Vec<RunIteration>) {
     // A contradictory graph proves everything, so no rule can change any verdict
     // it yields — stop running them. This is the single choke point for every
     // graph (ground saturate/reduce, scratch saturate/reduce, every probe), and
@@ -658,49 +689,122 @@ pub(super) fn run_rules_until<'r>(
     // The observation cache describes the graph this run walks; a run on a
     // different graph must not read it (ground and its clones share ids).
     crate::verify::rewrite::diseq::new_scan_generation();
-    // Explicit limits: egg's defaults (30 iterations, 10k nodes, **5 seconds**)
-    // are SILENT truncation points — a run that hits one simply stops
-    // mid-saturation and the caller sees an ordinary "not proven", which surfaced
-    // as a false insufficient-permission at ~20 match arms (one tower level
+    let rules: Vec<&egg::Rewrite<Symbolic, ConstFold>> = rules.into_iter().collect();
+    // The limits are explicit and reproducible: iterations (one tower level
     // collapses per iteration, so deep-but-terminating collapses need iterations
-    // ∝ depth).
-    //
-    // The time limit is the worst of the three, because it makes a *verdict*
-    // depend on wall clock: `enum_v8_p2::m_e_guarded` was measured failing on a
-    // 119s run and verifying on a 149s one, same binary and input. That also
-    // silently falsifies the premise `perf_regression` rests on ("egg is
-    // deterministic for a fixed rule set + input") for any program whose
-    // saturation approaches it. Disabled outright — the node and iteration limits
-    // are the real backstops, and unlike a clock they are reproducible.
-    let mut runner = egg::Runner::default()
-        .with_scheduler(egg::SimpleScheduler)
-        .with_node_limit(100_000)
-        .with_iter_limit(iter_limit.unwrap_or(100))
-        .with_time_limit(std::time::Duration::MAX)
-        .with_egraph(egraph)
+    // ∝ depth) and nodes added. There is deliberately no time limit, which would
+    // make a *verdict* depend on wall clock.
+    let iter_limit = iter_limit.unwrap_or(100);
+    egraph.track_changes();
+    egraph.rebuild();
+    let node_limit = egraph.total_size() + NODE_GROWTH_LIMIT;
+    let mut iterations = Vec::new();
+    while iterations.len() < iter_limit && egraph.total_size() <= node_limit {
         // Contradiction reached mid-run: every remaining iteration is spent
         // elaborating a graph that already proves everything.
-        .with_hook(|r| {
-            if graph_inconsistent(&r.egraph) {
-                stats::bump(|s| s.probe_early_stops += 1);
-                return Err("inconsistent".to_owned());
+        //
+        // `ConstFold` settles a goal class without merging it into `true`, so ask
+        // the analysis rather than comparing canonical ids.
+        if graph_inconsistent(&egraph)
+            || goal.is_some_and(|goal| {
+                matches!(
+                    egraph[egraph.find(goal)].data.known(),
+                    Some(Literal::Bool(true))
+                )
+            })
+        {
+            stats::bump(|s| s.probe_early_stops += 1);
+            break;
+        }
+        let (nodes, classes) = (egraph.total_size(), egraph.number_of_classes());
+        let search = std::time::Instant::now();
+        let now = egraph.change_pos().expect("changes are tracked");
+        // The rules usually share a position (they ran together last time), so
+        // the changes are read once per distinct position.
+        let mut changes: Vec<(egg::ChangePos, egg::Changes<Symbolic>)> = Vec::new();
+        let mut matches = Vec::with_capacity(rules.len());
+        for rule in &rules {
+            let found = match egraph.seen(rule.name) {
+                Some(seen) => {
+                    let i = match changes.iter().position(|(pos, _)| *pos == seen) {
+                        Some(i) => i,
+                        None => {
+                            let delta =
+                                egraph.changes_since(seen).expect("unseen changes are kept");
+                            changes.push((seen, delta));
+                            changes.len() - 1
+                        }
+                    };
+                    rule.search_changes(&egraph, &changes[i].1)
+                }
+                None => rule.search(&egraph),
+            };
+            matches.push(found);
+        }
+        drop(changes);
+        let search_time = search.elapsed().as_secs_f64();
+        let apply = std::time::Instant::now();
+        let mut applied = Vec::new();
+        let mut matched_classes = 0;
+        for (rule, found) in rules.iter().zip(matches) {
+            matched_classes += found.len();
+            // Seen before its matches are applied, so the log keeps the changes
+            // the application makes for the rule's next search.
+            egraph.mark_seen(rule.name, now);
+            let n = rule.apply(&mut egraph, &found).len();
+            if n > 0 {
+                applied.push((rule.name, n));
             }
-            Ok(())
-        });
-    if let Some(goal) = goal {
-        runner = runner.with_hook(move |r| {
-            // `ConstFold` settles a class without merging it into `true`, so ask
-            // the analysis rather than comparing canonical ids.
-            if matches!(
-                r.egraph[r.egraph.find(goal)].data.known(),
-                Some(Literal::Bool(true))
-            ) {
-                stats::bump(|s| s.probe_early_stops += 1);
-                return Err("goal proven".to_owned());
+            if egraph.total_size() > node_limit {
+                break;
             }
-            Ok(())
+        }
+        let apply_time = apply.elapsed().as_secs_f64();
+        let rebuild = std::time::Instant::now();
+        egraph.rebuild();
+        let saturated = applied.is_empty()
+            && nodes == egraph.total_size()
+            && classes == egraph.number_of_classes();
+        iterations.push(RunIteration {
+            egraph_nodes: nodes,
+            egraph_classes: classes,
+            applied,
+            matched_classes,
+            search_time,
+            apply_time,
+            rebuild_time: rebuild.elapsed().as_secs_f64(),
         });
+        if saturated {
+            debug_assert!(full_search_changes_nothing(&egraph, &rules));
+            break;
+        }
     }
-    let runner = runner.run(rules);
-    (runner.egraph, runner.iterations)
+    (egraph, iterations)
+}
+
+/// Whether searching every rule over the whole of `egraph` and applying the
+/// matches changes nothing — on a clone, in a scratch memo scope. At a semi-naive
+/// fixpoint it must not: a change would be a match the incremental search missed.
+fn full_search_changes_nothing(
+    egraph: &egg::EGraph<Symbolic, ConstFold>,
+    rules: &[&egg::Rewrite<Symbolic, ConstFold>],
+) -> bool {
+    let _scope = rewrite::ScratchScope::enter();
+    let mut full = egraph.clone();
+    let size = |g: &egg::EGraph<Symbolic, ConstFold>| (g.total_size(), g.number_of_classes());
+    let before = size(&full);
+    let matches: Vec<_> = rules.iter().map(|rule| rule.search(&full)).collect();
+    let mut missed = Vec::new();
+    for (rule, found) in rules.iter().zip(matches) {
+        let at = size(&full);
+        if !rule.apply(&mut full, &found).is_empty() || size(&full) != at {
+            missed.push(rule.name);
+        }
+    }
+    full.rebuild();
+    assert!(
+        missed.is_empty() && size(&full) == before,
+        "semi-naive matching missed matches of {missed:?}"
+    );
+    true
 }

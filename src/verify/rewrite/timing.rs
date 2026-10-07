@@ -7,7 +7,9 @@
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, Changes, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var,
+};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::Symbolic;
@@ -65,6 +67,18 @@ impl Searcher<Symbolic, ConstFold> for TimedSearcher {
     ) -> Vec<SearchMatches<'_, Symbolic>> {
         let start = std::time::Instant::now();
         let out = self.inner.search_with_limit(egraph, limit);
+        note_time(self.name, start.elapsed().as_secs_f64(), 0.0);
+        out
+    }
+
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let start = std::time::Instant::now();
+        let out = self.inner.search_changes(egraph, changes, limit);
         note_time(self.name, start.elapsed().as_secs_f64(), 0.0);
         out
     }

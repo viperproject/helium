@@ -2,7 +2,7 @@
 
 use crate::dhash::HashSet;
 
-use egg::{Rewrite, Var};
+use egg::{Language, Rewrite, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::Symbolic;
@@ -35,68 +35,37 @@ pub(in crate::verify::rewrite) use timing::*;
 
 type Rule = Rewrite<Symbolic, ConstFold>;
 
-/// Runs a **bucket** rule — an op-bucket searcher yielding one empty subst per
-/// class, whose applier re-reads the class's nodes — over one iteration's
-/// matches without walking a class once per match.
-///
-/// Matches go stale within an iteration: once many matched classes merge into
-/// one (thousands of clauses all proven `true`), every later match resolves to
-/// that class, and walking the whole class per match is quadratic. Instead each
-/// matched root is walked once, and then exactly the classes whose nodes read
-/// differently since — as the unions of the walks report them through
-/// `ConstFold::union_log` — are walked again, pass by pass, until a pass makes
-/// no union. So derivations still chain within the iteration (an `ite(c, x, y)`
-/// reduces once a walk pins `c`), at a cost proportional to what changed.
-///
-/// **Invariant: the applier only ever sees a class its searcher matches.** The
-/// logged classes were never matched — they include the parents of an absorbed
-/// class, whatever their op, and classes whose known value just changed — so
-/// every walk first re-asks the searcher (`search_eclass`) about the class, and
-/// an applier may rely on the searcher's filter exactly as under a plain egg
-/// rule. The searcher is the single source of truth for that filter: build bucket
-/// rules with [`bucket_rule`], which hands the same searcher to the rule and to
-/// the wrapper.
+/// Applies a rule's matches, then — within the same iteration — the matches its
+/// own changes create: rebuild, search only what this rule's last pass changed
+/// (semi-naive), apply, until a pass changes nothing. So derivations chain within
+/// the iteration (an `ite(c, x, y)` reduces once a pass pins `c`, a disequality
+/// unwinds a whole `ite` tower) at a cost proportional to what changed.
 ///
 /// Only for rules whose derivations terminate on their own (unions of existing
 /// classes, a bounded set of new terms): the passes run to this rule's local
 /// fixpoint inside one iteration, beyond the runner's per-iteration limits.
-pub(super) struct PerClass<S, A> {
-    searcher: S,
-    applier: A,
+pub(super) struct LocalFixpoint<S, A> {
+    pub(super) searcher: S,
+    pub(super) applier: A,
 }
 
-/// A bucket rule: `searcher` picks the classes (one empty subst each) and
-/// `applier` re-reads a picked class's nodes, run under [`PerClass`].
-pub(super) fn bucket_rule<S, A>(name: &str, searcher: S, applier: A) -> Rule
+/// A rule whose application runs to its own fixpoint (see [`LocalFixpoint`]).
+pub(super) fn local_fixpoint_rule<S, A>(name: &str, searcher: S, applier: A) -> Rule
 where
     S: egg::Searcher<Symbolic, ConstFold> + Clone + Send + Sync + 'static,
     A: egg::Applier<Symbolic, ConstFold> + Send + Sync + 'static,
 {
-    let applier = PerClass {
+    let applier = LocalFixpoint {
         searcher: searcher.clone(),
         applier,
     };
-    Rewrite::new(name, searcher, applier).expect("bucket rule")
+    Rewrite::new(name, searcher, applier).expect("local fixpoint rule")
 }
 
-impl<S: egg::Searcher<Symbolic, ConstFold>, A: egg::Applier<Symbolic, ConstFold>> PerClass<S, A> {
-    /// Applies the rule to `class` if the searcher matches it now.
-    fn walk(
-        &self,
-        egraph: &mut egg::EGraph<Symbolic, ConstFold>,
-        class: egg::Id,
-        rule_name: egg::Symbol,
-    ) -> Vec<egg::Id> {
-        if self.searcher.search_eclass(egraph, class).is_none() {
-            return Vec::new();
-        }
-        self.applier
-            .apply_one(egraph, class, &egg::Subst::default(), None, rule_name)
-    }
-}
-
-impl<S: egg::Searcher<Symbolic, ConstFold>, A: egg::Applier<Symbolic, ConstFold>>
-    egg::Applier<Symbolic, ConstFold> for PerClass<S, A>
+impl<S, A> egg::Applier<Symbolic, ConstFold> for LocalFixpoint<S, A>
+where
+    S: egg::Searcher<Symbolic, ConstFold>,
+    A: egg::Applier<Symbolic, ConstFold>,
 {
     fn apply_matches(
         &self,
@@ -105,41 +74,40 @@ impl<S: egg::Searcher<Symbolic, ConstFold>, A: egg::Applier<Symbolic, ConstFold>
         rule_name: egg::Symbol,
     ) -> Vec<egg::Id> {
         let mut changed = Vec::new();
-        let mut walk = |egraph: &mut egg::EGraph<Symbolic, ConstFold>, root| {
-            changed.extend(self.walk(egraph, root, rule_name));
-        };
-        // Matches an earlier rule of this iteration merged share a root: take
-        // each such root once. The rest are distinct roots already.
-        let mut merged_before = HashSet::default();
-        let first_pass: Vec<egg::Id> = matches
-            .iter()
-            .filter_map(|m| {
-                let root = egraph.find(m.eclass);
-                (root == m.eclass || merged_before.insert(root)).then_some(root)
-            })
-            .collect();
-        *egraph.analysis.union_log.borrow_mut() = Some(Vec::new());
-        for root in first_pass {
-            // One merged away during this pass is covered by the log, which
-            // recorded the root it merged into.
-            if egraph.find(root) == root {
-                walk(egraph, root);
-            }
-        }
-        loop {
-            let logged = std::mem::take(egraph.analysis.union_log.borrow_mut().as_mut().unwrap());
-            if logged.is_empty() {
-                break;
-            }
-            let mut this_pass = HashSet::default();
-            for id in logged {
-                let root = egraph.find(id);
-                if this_pass.insert(root) {
-                    walk(egraph, root);
+        let mut apply = |egraph: &mut egg::EGraph<Symbolic, ConstFold>,
+                         matches: &[egg::SearchMatches<Symbolic>]| {
+            for m in matches {
+                for subst in &m.substs {
+                    let out = self
+                        .applier
+                        .apply_one(egraph, m.eclass, subst, None, rule_name);
+                    changed.extend(out);
                 }
             }
+        };
+        // A subscriber of its own keeps the log of each pass, whoever runs the rule.
+        let passes = egg::Symbol::from(format!("{rule_name} passes"));
+        egraph.track_changes();
+        let mut pass_start = egraph.change_pos().expect("changes are tracked");
+        egraph.mark_seen(passes, pass_start);
+        apply(egraph, matches);
+        loop {
+            egraph.rebuild();
+            let changes = egraph
+                .changes_since(pass_start)
+                .expect("a pass's changes are kept");
+            if changes.is_empty() {
+                break;
+            }
+            pass_start = egraph.change_pos().expect("changes are tracked");
+            egraph.mark_seen(passes, pass_start);
+            let found = self.searcher.search_changes(egraph, &changes, usize::MAX);
+            if found.is_empty() {
+                break;
+            }
+            apply(egraph, &found);
         }
-        *egraph.analysis.union_log.borrow_mut() = None;
+        egraph.unsubscribe(passes);
         changed
     }
 
@@ -147,16 +115,75 @@ impl<S: egg::Searcher<Symbolic, ConstFold>, A: egg::Applier<Symbolic, ConstFold>
         &self,
         egraph: &mut egg::EGraph<Symbolic, ConstFold>,
         eclass: egg::Id,
-        _subst: &egg::Subst,
-        _searcher_ast: Option<&egg::PatternAst<Symbolic>>,
+        subst: &egg::Subst,
+        searcher_ast: Option<&egg::PatternAst<Symbolic>>,
         rule_name: egg::Symbol,
     ) -> Vec<egg::Id> {
-        self.walk(egraph, eclass, rule_name)
+        self.applier
+            .apply_one(egraph, eclass, subst, searcher_ast, rule_name)
     }
 
     fn vars(&self) -> Vec<Var> {
         self.applier.vars()
     }
+}
+
+/// Groups `(class, subst)` matches by class, in id order and without duplicates.
+pub(super) fn group_matches(
+    mut found: Vec<(egg::Id, egg::Subst)>,
+) -> Vec<egg::SearchMatches<'static, Symbolic>> {
+    found.sort_unstable();
+    found.dedup();
+    let mut out: Vec<egg::SearchMatches<'static, Symbolic>> = Vec::new();
+    for (eclass, subst) in found {
+        match out.last_mut() {
+            Some(m) if m.eclass == eclass => m.substs.push(subst),
+            _ => out.push(egg::SearchMatches {
+                eclass,
+                substs: vec![subst],
+                ast: None,
+            }),
+        }
+    }
+    out
+}
+
+/// The matches in `found`, one `(class, subst)` per substitution.
+pub(super) fn ungroup(
+    found: Vec<egg::SearchMatches<'_, Symbolic>>,
+) -> impl Iterator<Item = (egg::Id, egg::Subst)> + '_ {
+    found
+        .into_iter()
+        .flat_map(|m| m.substs.into_iter().map(move |s| (m.eclass, s)))
+}
+
+/// The substitution binding `vars` to the children of `node`, in order: the match
+/// of a flat pattern `(op ?v0 ?v1 ..)` at `node`.
+pub(super) fn flat_subst(vars: &[Var], node: &Symbolic) -> egg::Subst {
+    let mut subst = egg::Subst::default();
+    for (v, &c) in vars.iter().zip(node.children()) {
+        subst.insert(*v, c);
+    }
+    subst
+}
+
+/// The parents of `class` whose node `keep` accepts, as `(class, node)` with the
+/// node canonical. `keep` sees the node as added (only its operator and payload
+/// are meaningful there; its children may be stale).
+pub(super) fn parents_where(
+    egraph: &egg::EGraph<Symbolic, ConstFold>,
+    class: egg::Id,
+    keep: impl Fn(&Symbolic) -> bool,
+) -> Vec<(egg::Id, Symbolic)> {
+    let class = egraph.find(class);
+    egraph[class]
+        .parents()
+        .filter(|&p| keep(egraph.id_to_node(p)))
+        .map(|p| {
+            let node = egraph.id_to_node(p).clone();
+            (egraph.find(p), node.map_children(|c| egraph.find(c)))
+        })
+        .collect()
 }
 
 fn var(name: &str) -> Var {
@@ -202,20 +229,8 @@ pub fn reduce_rules() -> Vec<Rule> {
 mod tests {
     use super::*;
     use crate::vmir::{BinOp, Literal};
-    use egg::{EGraph, Id, Runner, SearchMatches, Subst};
+    use egg::{EGraph, Id, Runner};
     use num::{BigInt, BigRational};
-
-    /// Every rule built by [`bucket_rule`].
-    const BUCKET_RULES: [&str; 8] = [
-        "ite-reduce",
-        "eq-false-mirror",
-        "eq-false-then",
-        "eq-false-else",
-        "contra-congruence",
-        "distinguishing-observation",
-        "lt-asymmetry-int",
-        "lt-asymmetry-real",
-    ];
 
     struct Order {
         /// `0 < a`, assumed true.
@@ -289,36 +304,19 @@ mod tests {
         }
     }
 
-    /// The [`PerClass`] invariant: a bucket rule applied to a class its searcher
-    /// does not match derives nothing. The union log hands the walk such classes
-    /// (parents of an absorbed class, a class just pinned `false`); lt-asymmetry
-    /// applied to the `false` class holding the refuted mirror `a < 0` used to
-    /// refute the assumption `0 < a` itself.
+    /// The invariant `PerClass` used to break: an applier runs only on what its
+    /// searcher matched. Every rule's matches on a graph holding a refuted mirror
+    /// `a < 0` (and a `false` class holding it) derive nothing unsound; the
+    /// asymmetry applied to that `false` class used to refute the assumption
+    /// `0 < a` itself.
     #[test]
-    fn bucket_rules_skip_classes_their_searcher_rejects() {
-        let rules = static_rules();
-        for name in BUCKET_RULES {
-            let rule = rules
-                .iter()
-                .find(|r| r.name.as_str() == name)
-                .unwrap_or_else(|| panic!("no bucket rule {name}"));
+    fn rules_apply_only_to_their_searchers_matches() {
+        for rule in static_rules() {
             let (mut g, orders) = graph(true);
-            let rejected: Vec<Id> = g
-                .classes()
-                .map(|c| c.id)
-                .filter(|&c| rule.searcher.search_eclass(&g, c).is_none())
-                .collect();
-            assert!(!rejected.is_empty());
-            for c in rejected {
-                let m = SearchMatches {
-                    eclass: c,
-                    substs: vec![Subst::default()],
-                    ast: None,
-                };
-                rule.applier.apply_matches(&mut g, &[m], rule.name);
-                g.rebuild();
-                assert_sound(&g, &orders, name);
-            }
+            let found = rule.search(&g);
+            rule.apply(&mut g, &found);
+            g.rebuild();
+            assert_sound(&g, &orders, rule.name.as_str());
         }
     }
 
