@@ -29,30 +29,30 @@
     "verify_json": true
    },
    "summary": {
-    "files": 111,
-    "members": 712,
+    "files": 61,
+    "members": 227,
     "coverage": {
-     "FAIL": 101,
-     "OK": 611
+     "FAIL": 18,
+     "OK": 209
     },
     "suites": {
      "CvsSi": {
-      "files": 111,
-      "helium_verify": 1.0085506349999998,
+      "files": 61,
+      "helium_verify": 0.33047142100000004,
       "coverage": {
-       "FAIL": 101,
-       "OK": 611
+       "FAIL": 18,
+       "OK": 209
       }
      }
     },
     "totals": {
-     "helium_verify": 1.0085506349999998,
+     "helium_verify": 0.33047142100000004,
      "rustc_self": 0.0,
-     "silicon_verify": 365.18
+     "silicon_verify": 65.70000000000002
     },
     "geomean_overhead": null,
-    "geomean_speedup": 128.12693459256803,
-    "disagreements": 81,
+    "geomean_speedup": 129.50220609372843,
+    "disagreements": 0,
     "timeouts": 0,
     "file_errors": 0
    },
