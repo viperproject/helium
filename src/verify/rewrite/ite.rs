@@ -5,7 +5,7 @@
 //! same node loop: **decomposition** (the class's known value constrains its
 //! parts) and **reduction** (the parts' known values collapse the class).
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, Symbolic};
@@ -16,6 +16,7 @@ use super::*;
 /// Searcher for the fused ite rule: every e-class holding an `Ite` node, via
 /// the `classes_by_op` bucket (no whole-graph scan). One empty subst per class;
 /// the applier re-reads the nodes.
+#[derive(Clone)]
 pub(super) struct IteBucketSearcher;
 
 impl Searcher<Symbolic, ConstFold> for IteBucketSearcher {
@@ -238,8 +239,9 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
 /// structurally at construction by [`ChunkPerm::collapse_same_cond`], with no scan
 /// and no budget.
 pub(super) fn terminating_ite_rules() -> Vec<Rule> {
-    vec![
-        Rewrite::new("ite-reduce", IteBucketSearcher, PerClass(IteReduceApplier))
-            .expect("ite rule"),
-    ]
+    vec![bucket_rule(
+        "ite-reduce",
+        IteBucketSearcher,
+        IteReduceApplier,
+    )]
 }

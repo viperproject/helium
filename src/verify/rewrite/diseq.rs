@@ -5,7 +5,7 @@
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
@@ -19,30 +19,29 @@ use super::*;
 /// derived disequality re-enters the `Eq` bucket).
 pub(super) fn disequality_unit_prop_rules() -> Vec<Rule> {
     vec![
-        Rewrite::new(
+        bucket_rule(
             "eq-false-then",
             EqBucketSearcher,
-            PerClass(EqFalseUnitApplier {
+            EqFalseUnitApplier {
                 then_side: true,
                 memo: Memo::new(),
-            }),
-        )
-        .expect("eq-false-then rule"),
-        Rewrite::new(
+            },
+        ),
+        bucket_rule(
             "eq-false-else",
             EqBucketSearcher,
-            PerClass(EqFalseUnitApplier {
+            EqFalseUnitApplier {
                 then_side: false,
                 memo: Memo::new(),
-            }),
-        )
-        .expect("eq-false-else rule"),
+            },
+        ),
     ]
 }
 
 /// Searcher for the guarded eq-over-ite distribution: every e-class holding an
 /// `Eq` node, via the `classes_by_op` bucket (no whole-graph scan). One empty
 /// subst per class; the applier re-reads the nodes.
+#[derive(Clone)]
 pub(super) struct EqBucketSearcher;
 
 impl Searcher<Symbolic, ConstFold> for EqBucketSearcher {
