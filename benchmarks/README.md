@@ -163,6 +163,20 @@ python3 tools/bench/run.py --dry-run /tmp/results                               
 python3 tools/bench/run.py                                                          # benchmark host only
 ```
 
+Part of the corpus: arguments after `--` go to `bench run`. `--suite NAME` keeps
+one suite (repeatable). `--only ENTRY` (repeatable) and `--only-file FILE` (one
+entry per line, `#` comments) keep single files, where an entry is a suite name,
+`suite/stem`, a stem (the file's path inside its suite directory), any path
+ending in a stem (`../bench_sorted/a/x.vpr`), or the path of the `.vpr` itself;
+`.vpr` and backslashes do not matter. Entries that match no file are reported.
+
+```bash
+python3 tools/bench/run.py --dry-run /tmp/subset -- --suite CvsSi --only-file conclusive_files.txt
+```
+
+Use `--dry-run` for a subset: a recorded run of part of the corpus would show as a
+drop in the trends.
+
 `run.py` builds, runs `check-suites` (errors stop it), runs `bench run`, writes
 `benchmarks/results/runs/<date>_<sha>.json` and `index.json` on the `benchmarks`
 branch (a worktree at `results_worktree` in `tools/bench/config.json`), refreshes

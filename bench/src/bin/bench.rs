@@ -30,7 +30,9 @@
 //! --commit SHA            record this commit instead of asking git
 //! --host NAME             host name to record (default: this machine's)
 //! --suite NAME            only this suite (repeatable)
-//! --only SUITE/STEM       only this file (repeatable)
+//! --only ENTRY            only these files (repeatable): a suite, SUITE/STEM, a stem (the path
+//!                         inside the suite directory), any path ending in one, or a .vpr's path
+//! --only-file FILE        --only for every line of FILE (blank lines and `#` comments skipped)
 //! --warmup N              untimed runs first (default 1)
 //! --runs N                timed runs (default 5)
 //! --timeout SECS          per-run timeout (default: suite.json, else 300)
@@ -315,6 +317,16 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             "--host" => opts.host = args.value(&a)?,
             "--suite" => opts.suites.push(args.value(&a)?),
             "--only" => opts.only.push(args.value(&a)?),
+            "--only-file" => {
+                let path = args.value(&a)?;
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+                opts.only.extend(
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        .map(String::from),
+                );
+            }
             "--warmup" => opts.warmup = args.number(&a)? as usize,
             "--runs" => opts.runs = (args.number(&a)? as usize).max(1),
             "--timeout" => opts.timeout = Some(args.number(&a)?),

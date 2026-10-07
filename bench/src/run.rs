@@ -621,12 +621,21 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
     let commit_date = crate::git(repo, &["show", "-s", "--format=%cI", &commit]);
     let subject = crate::git(repo, &["show", "-s", "--format=%s", &commit]);
 
+    let suite_names: Vec<&str> = suites_found.iter().map(|s| s.name.as_str()).collect();
+    let selection = Selection::new(&opts.only, &suite_names);
+    let mut matched = vec![false; selection.entries.len()];
     let mut files = Vec::new();
     for suite in &suites_found {
         for file in suite.measurable() {
             let key = format!("{}/{}", suite.name, file.stem);
-            if !opts.only.is_empty() && !opts.only.iter().any(|o| o == &key || o == &suite.name) {
-                continue;
+            if !opts.only.is_empty() {
+                let hits = selection.matches(&suite.name, file);
+                if hits.is_empty() {
+                    continue;
+                }
+                for i in hits {
+                    matched[i] = true;
+                }
             }
             let result = measure_file(&mut ctx, suite, file).map_err(|e| format!("{key}: {e}"))?;
             files.push(result);
@@ -639,6 +648,23 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
                 cache.save(path).map_err(|e| load_err(path, e))?;
             }
         }
+    }
+    let unmatched: Vec<&str> = selection
+        .entries
+        .iter()
+        .zip(&matched)
+        .filter(|(_, m)| !**m)
+        .map(|(e, _)| e.raw.as_str())
+        .collect();
+    if !unmatched.is_empty() {
+        let w = format!(
+            "{} --only entries match no measured file: {}{}",
+            unmatched.len(),
+            unmatched[..unmatched.len().min(5)].join(", "),
+            if unmatched.len() > 5 { ", ..." } else { "" }
+        );
+        progress(format!("warning: {w}"));
+        ctx.warnings.push(w);
     }
 
     Ok(RunFile {
@@ -1232,6 +1258,87 @@ fn time_rustc(
     Ok(rustc_timing(&samples, time_passes))
 }
 
+/// The `--only` entries. An entry selects a file when it is
+/// - the suite's name (the whole suite) or the file's `suite/stem`;
+/// - the stem, i.e. the file's path inside its suite directory, or any path
+///   ending in it (`../bench_sorted/a/x.vpr` selects the stem `a/x`);
+/// - the path of the `.vpr` itself (relative to the working directory, or
+///   absolute).
+///
+/// An entry that starts with a suite's name (`S/...`) is that suite's name
+/// for a file, never a path ending in another suite's stem.
+///
+/// Backslashes count as `/`, and a `.vpr` extension is ignored.
+pub struct Selection {
+    pub entries: Vec<SelectEntry>,
+}
+
+pub struct SelectEntry {
+    /// As given, for messages.
+    pub raw: String,
+    /// `/`-separated, without a leading `./` or a `.vpr`.
+    text: String,
+    /// The file it names, if it names an existing one.
+    path: Option<PathBuf>,
+    /// Starts with a suite's name: matched as `suite/stem` only.
+    named: bool,
+}
+
+impl Selection {
+    pub fn new(only: &[String], suites: &[&str]) -> Self {
+        let entries = only
+            .iter()
+            .map(|raw| {
+                let mut text = raw.trim().replace('\\', "/");
+                while let Some(rest) = text.strip_prefix("./") {
+                    text = rest.to_string();
+                }
+                let path = Path::new(raw.trim())
+                    .is_file()
+                    .then(|| std::fs::canonicalize(raw.trim()).ok())
+                    .flatten();
+                if let Some(t) = text.strip_suffix(".vpr") {
+                    text = t.to_string();
+                }
+                let named = suites
+                    .iter()
+                    .any(|s| text.strip_prefix(s).is_some_and(|r| r.starts_with('/')));
+                SelectEntry {
+                    raw: raw.clone(),
+                    text,
+                    path,
+                    named,
+                }
+            })
+            .collect();
+        Selection { entries }
+    }
+
+    /// The indices of the entries that select `file` of the suite `suite`.
+    pub fn matches(&self, suite: &str, file: &SuiteFile) -> Vec<usize> {
+        let canon = if self.entries.iter().any(|e| e.path.is_some()) {
+            file.vpr
+                .as_ref()
+                .and_then(|v| std::fs::canonicalize(v).ok())
+        } else {
+            None
+        };
+        let key = format!("{suite}/{}", file.stem);
+        let tail = format!("/{}", file.stem);
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.text == suite
+                    || e.text == key
+                    || (!e.named && (e.text == file.stem || e.text.ends_with(&tail)))
+                    || (e.path.is_some() && e.path == canon)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
 /// What [`time_rustc`] and [`time_cargo`] are given to time.
 #[derive(Clone, Copy)]
 enum RustSource<'a> {
@@ -1465,6 +1572,37 @@ mod tests {
             .iter()
             .map(|n| (n.to_string(), FnMetrics::default()))
             .collect()
+    }
+
+    #[test]
+    fn selects_files_by_name_stem_or_path() {
+        let dir = std::env::temp_dir().join(format!("bench-select-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let vpr = dir.join("a").join("x.vpr");
+        std::fs::write(&vpr, "").unwrap();
+        let file = SuiteFile {
+            stem: "a/x".into(),
+            rs: None,
+            vpr: Some(vpr.clone()),
+            krate: None,
+        };
+        let only = [
+            "S".to_string(),
+            "S/a/x".into(),
+            "a/x".into(),
+            "a/x.vpr".into(),
+            "../bench_sorted/a/x.vpr".into(),
+            "..\\bench_sorted\\a\\x.vpr".into(),
+            vpr.to_string_lossy().into_owned(),
+            "T/a/y".into(),
+            "x".into(),
+            "ba/x".into(),
+        ];
+        let sel = Selection::new(&only, &["S", "T"]);
+        assert_eq!(sel.matches("S", &file), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(sel.matches("T", &file), [2, 3, 4, 5, 6]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
