@@ -10,15 +10,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use serde::Serialize;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::helium::{self, HeliumRun};
 use crate::measure::{self, Sample, Status, Timing};
 use crate::rust_metrics::{self, FileMetrics, FnMetrics};
 use crate::silicon::{self, Silicon, SiliconResult};
+use crate::silicon_warm::{WarmInfo, WarmOptions, WarmSilicon};
 use crate::suites::{self, Suite, SuiteFile};
 
 pub const SCHEMA: u32 = 1;
@@ -27,6 +30,8 @@ pub const SCHEMA: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct Options {
     pub benchmarks: PathBuf,
+    /// Suites outside `benchmarks`, and the run-wide `.vpr` size limit.
+    pub discovery: suites::Discovery,
     /// The `verify` binary being measured.
     pub verify: PathBuf,
     /// The `verify` used for `--viper-metrics` (defaults to `verify`; differs
@@ -44,8 +49,12 @@ pub struct Options {
     pub rustc: Option<RustcOptions>,
     /// rustc timings reused across runs (read and updated).
     pub rustc_cache: Option<PathBuf>,
+    /// Silicon to compare with; it runs in one warmed-up JVM, so it needs
+    /// `silicon_warm` too ([`crate::silicon_warm`]).
     pub silicon: Option<Silicon>,
     pub silicon_cache: Option<PathBuf>,
+    /// How Silicon's JVM is warmed up.
+    pub silicon_warm: Option<WarmOptions>,
     pub scratch: PathBuf,
 }
 
@@ -93,6 +102,24 @@ impl RustcOptions {
         }
     }
 
+    /// `cargo` for the same toolchain: next to a resolved `rustc` (which it
+    /// is told to use), else the rustup proxy with the same `+toolchain`.
+    pub fn cargo(&self) -> Command {
+        let exe = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let sibling = self.rustc.with_file_name(exe);
+        if self.toolchain.is_none() && self.rustc.parent().is_some() && sibling.is_file() {
+            let mut c = Command::new(sibling);
+            c.env("RUSTC", &self.rustc);
+            c
+        } else {
+            let mut c = Command::new("cargo");
+            if let Some(tc) = &self.toolchain {
+                c.arg(format!("+{tc}"));
+            }
+            c
+        }
+    }
+
     pub fn version(&self) -> Option<String> {
         let out = self.command().arg("-vV").output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
@@ -100,11 +127,29 @@ impl RustcOptions {
     }
 }
 
-/// `rustc_check` timings. Like Silicon's, they depend only on the `.rs`, the
+/// Whether this compiler takes `-Z` flags: nightly and locally built ones do.
+pub fn rustc_is_nightly(version: &str) -> bool {
+    version.contains("-nightly") || version.contains("-dev")
+}
+
+/// One file's rustc measurement: the cached unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustcTiming {
+    /// The `rustc` process, end to end (`rustc_check`).
+    #[serde(flatten)]
+    pub check: Timing,
+    /// rustc's own `-Z time-passes` total and passes, from the same runs
+    /// (`rustc_self`); `None` for a compiler that is not nightly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<PhasedTiming>,
+}
+
+/// rustc timings. Like Silicon's, they depend only on the `.rs`, the
 /// compiler and its arguments, never on the Helium commit, so each is measured
 /// once and reused. Keyed by `"<rs sha256>|<rustc -vV>|<args>"`; the version
-/// line carries the compiler's commit hash.
-pub type RustcCache = crate::cache::Cache<Timing>;
+/// line carries the compiler's commit hash, and the arguments include
+/// `-Z time-passes` when it is passed.
+pub type RustcCache = crate::cache::Cache<RustcTiming>;
 
 impl RustcCache {
     pub fn key(rs_sha256: &str, rustc_version: &str, args: &[String]) -> String {
@@ -135,6 +180,9 @@ pub struct Tools {
     pub rustc: Option<String>,
     pub rustc_toolchain: Option<String>,
     pub silicon: Option<String>,
+    /// How Silicon's JVM was warmed up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silicon_warm: Option<WarmInfo>,
     /// The commit `verify` reports it was built from (JSON builds only).
     pub verify_commit: Option<String>,
     pub verify_json: bool,
@@ -155,6 +203,20 @@ pub struct SuiteInfo {
     pub rustc_args: Vec<String>,
     pub silicon: bool,
     pub files: usize,
+    /// This suite's run counts (its settings may lower the run's).
+    pub warmup: usize,
+    pub runs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_vpr_mb: Option<f64>,
+    /// Files left out for a `.vpr` over `max_vpr_mb`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_large: Vec<SkippedFile>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedFile {
+    pub stem: String,
+    pub vpr_mb: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,17 +267,26 @@ pub struct FileRustMetrics {
 
 #[derive(Debug, Serialize, Default)]
 pub struct Times {
+    /// The `rustc` process, end to end.
     pub rustc_check: Option<Timing>,
+    /// rustc's own `-Z time-passes` total (no process startup), with the
+    /// median of each pass. Passes nest, so they do not add up to the total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rustc_self: Option<PhasedTiming>,
     /// `verify`'s own pipeline total (no process startup), with phase medians.
-    pub helium_verify: Option<HeliumTiming>,
+    pub helium_verify: Option<PhasedTiming>,
     /// The `verify` process, end to end.
     pub helium_wall: Option<Timing>,
+    /// One file in Silicon's warm JVM, end to end (the driver's clock).
     pub silicon_wall: Option<SiliconTiming>,
+    /// The time Silicon reports, in a JVM warmed up on other files (see
+    /// [`crate::silicon_warm`]): no class loading or first JIT passes.
     pub silicon_verify: Option<SiliconTiming>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct HeliumTiming {
+/// A tool's self-reported total, with the median of each phase it reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhasedTiming {
     #[serde(flatten)]
     pub timing: Timing,
     pub phases: BTreeMap<String, f64>,
@@ -259,6 +330,128 @@ pub struct Member {
 
 // ── Joining Viper members to Rust functions ──
 
+/// The path of the Rust function an escaped Prusti member name encodes, as
+/// the segments [`rust_metrics`] names functions by: `$col$$col$` is `::`,
+/// `<impl Trait for T>` and `<T as Trait>` stand for `T`, generic arguments
+/// are dropped. `None` for what the crate does not define: a closure, or an
+/// item of `std`, `core` or `alloc`.
+pub fn prusti_path(escaped: &str) -> Option<Vec<String>> {
+    static ESCAPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$([a-z]+)\$").unwrap());
+    let name = ESCAPE.replace_all(escaped, |c: &regex::Captures| {
+        match &c[1] {
+            "col" => ":",
+            "sp" => " ",
+            "lt" => "<",
+            "gt" => ">",
+            "lc" => "{",
+            "rc" => "}",
+            "oc" => "#",
+            "amp" => "&",
+            "com" => ",",
+            "sq" => "'",
+            "lb" => "[",
+            "rb" => "]",
+            "lp" => "(",
+            "rp" => ")",
+            "sc" => ";",
+            "hyp" => "-",
+            "as" => "*",
+            "pl" => "+",
+            "ex" => "!",
+            _ => return c[0].to_string(),
+        }
+        .to_string()
+    });
+    let mut segments = Vec::new();
+    for seg in split_top(&name, "::") {
+        let seg = seg.trim();
+        if seg.starts_with('{') {
+            return None; // a closure or other anonymous item
+        }
+        if let Some(inner) = seg.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+            let ty = if let Some(imp) = inner.strip_prefix("impl ") {
+                split_top(imp, " for ").last().copied().unwrap_or(imp)
+            } else if inner.contains(" as ") {
+                split_top(inner, " as ")[0]
+            } else {
+                continue; // `::<T>`: generic arguments
+            };
+            segments.push(type_name(ty)?);
+        } else {
+            segments.push(seg.split('<').next().unwrap_or(seg).to_string());
+        }
+    }
+    let first = segments.first()?;
+    (!matches!(first.as_str(), "std" | "core" | "alloc")).then_some(segments)
+}
+
+/// `s` split at `sep` where it is not inside `<..>`, `(..)` or `[..]`.
+fn split_top<'s>(s: &'s str, sep: &str) -> Vec<&'s str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut i) = (0i32, 0, 0);
+    let bytes = s.as_bytes();
+    while i < s.len() {
+        match bytes[i] {
+            b'<' | b'(' | b'[' => depth += 1,
+            b'>' | b')' | b']' => depth -= 1,
+            _ if depth == 0 && s[i..].starts_with(sep) => {
+                parts.push(&s[start..i]);
+                i += sep.len();
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// The name a type's methods are filed under: the last path segment of
+/// `&mut a::B<T>`, i.e. `B`. `None` for a type with no such name (`[T]`).
+fn type_name(ty: &str) -> Option<String> {
+    let ty = ty
+        .trim()
+        .trim_start_matches(['&', '*'])
+        .trim_start_matches("mut ")
+        .trim_start_matches("const ")
+        .trim_start_matches("dyn ")
+        .trim();
+    let path = ty.split('<').next()?;
+    let last = path.rsplit("::").next()?.trim();
+    (!last.is_empty() && last.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .then(|| last.to_string())
+}
+
+/// The function `path` names among `fns`: exactly, else the one whose last
+/// two segments (`Type::f`, `module::f`) match, if unique (`fuzzy`; an
+/// inherent impl may sit in another module than its type, and Prusti names it
+/// after the type). The last segment alone is not enough: a derived
+/// `<T as Debug>::fmt` has no source, and must not join to another `fmt`.
+fn path_fn_for<'a>(
+    path: &[String],
+    fns: &'a BTreeMap<String, FnMetrics>,
+) -> Option<(&'a String, &'static str)> {
+    let joined = path.join("::");
+    if let Some((k, _)) = fns.get_key_value(&joined) {
+        return Some((k, "exact"));
+    }
+    let unique = |tail: &str| {
+        let mut it = fns
+            .keys()
+            .filter(|k| *k == tail || k.ends_with(&format!("::{tail}")));
+        match (it.next(), it.next()) {
+            (Some(k), None) => Some((k, "fuzzy")),
+            _ => None,
+        }
+    };
+    let n = path.len();
+    (n >= 2)
+        .then(|| unique(&path[n - 2..].join("::")))
+        .flatten()
+}
+
 fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -271,12 +464,18 @@ fn normalize(s: &str) -> String {
 /// file's functions). Failing that — `impl` methods and module paths — the
 /// qualified name is compared with separators removed, then as a unique
 /// suffix. Those are reported as `fuzzy` so the caller can log them.
+///
+/// Names in the escaped form of the crate corpus (`m_display$col$$col$pad`)
+/// are read as a path instead; see [`prusti_path`].
 pub fn rust_fn_for<'a>(
     member: &str,
     fns: &'a BTreeMap<String, FnMetrics>,
 ) -> Option<(&'a String, &'static str)> {
     let base = member.strip_prefix("m_")?;
     let base = base.split('#').next().unwrap_or(base);
+    if base.contains("$col$") {
+        return path_fn_for(&prusti_path(base)?, fns);
+    }
     let exact: Vec<&String> = fns
         .keys()
         .filter(|q| q.rsplit("::").next() == Some(base))
@@ -305,7 +504,7 @@ pub fn rust_fn_for<'a>(
 
 // ── Measuring ──
 
-fn progress(msg: impl AsRef<str>) {
+pub(crate) fn progress(msg: impl AsRef<str>) {
     eprintln!("[bench] {}", msg.as_ref());
 }
 
@@ -321,14 +520,14 @@ struct Ctx<'a> {
     rustc_version: Option<String>,
     rustc_cache: Option<RustcCache>,
     silicon_cache: Option<silicon::Cache>,
-    silicon: Option<Silicon>,
+    silicon_warm: Option<WarmSilicon>,
     verify_commit: Option<String>,
     verify_json: bool,
     warnings: Vec<String>,
 }
 
 pub fn run(opts: &Options) -> Result<RunFile, String> {
-    let mut suites_found = suites::discover(&opts.benchmarks);
+    let mut suites_found = suites::discover_with(&opts.benchmarks, &opts.discovery);
     if suites_found.is_empty() {
         return Err(format!("no suites under {}", opts.benchmarks.display()));
     }
@@ -344,6 +543,13 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         }
         suites_found.retain(|s| opts.suites.contains(&s.name));
     }
+    // Every suite's `.vpr` files, measured in this run or not: the warm-up
+    // corpus leaves them out (see `silicon_warm`).
+    let all_vprs: Vec<PathBuf> = suites_found
+        .iter()
+        .flat_map(|s| s.files.iter())
+        .filter_map(|f| f.vpr.clone())
+        .collect();
     let errors: Vec<&String> = suites_found.iter().flat_map(|s| &s.errors).collect();
     if !errors.is_empty() {
         return Err(format!(
@@ -374,7 +580,22 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         rustc,
         rustc_cache,
         silicon_cache,
-        silicon: opts.silicon.clone(),
+        silicon_warm: match (&opts.silicon, &opts.silicon_warm) {
+            (Some(sil), Some(warm)) => Some(WarmSilicon::new(
+                sil.clone(),
+                warm.clone(),
+                &all_vprs,
+                &opts.scratch,
+            )?),
+            (Some(_), None) => {
+                return Err(
+                    "Silicon runs only in a warmed-up JVM: give its warm-up corpus \
+                            (`silicon_warm` in config.json, `--silicon-warm DIR`)"
+                        .into(),
+                );
+            }
+            (None, _) => None,
+        },
         verify_commit: None,
         verify_json: true,
         warnings: suites_found
@@ -384,6 +605,12 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
     };
     for w in &ctx.warnings {
         progress(format!("warning: {w}"));
+    }
+    if let Some(w) = &ctx.silicon_warm {
+        progress(format!(
+            "silicon warm: {} warm-up files ({} left out as benchmarks)",
+            w.info.warmup_files, w.info.excluded
+        ));
     }
 
     // The commit is fixed before measuring: a commit made while a long run is
@@ -400,12 +627,21 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
     let commit_date = crate::git(repo, &["show", "-s", "--format=%cI", &commit]);
     let subject = crate::git(repo, &["show", "-s", "--format=%s", &commit]);
 
+    let suite_names: Vec<&str> = suites_found.iter().map(|s| s.name.as_str()).collect();
+    let selection = Selection::new(&opts.only, &suite_names);
+    let mut matched = vec![false; selection.entries.len()];
     let mut files = Vec::new();
     for suite in &suites_found {
         for file in suite.measurable() {
             let key = format!("{}/{}", suite.name, file.stem);
-            if !opts.only.is_empty() && !opts.only.iter().any(|o| o == &key || o == &suite.name) {
-                continue;
+            if !opts.only.is_empty() {
+                let hits = selection.matches(&suite.name, file);
+                if hits.is_empty() {
+                    continue;
+                }
+                for i in hits {
+                    matched[i] = true;
+                }
             }
             let result = measure_file(&mut ctx, suite, file).map_err(|e| format!("{key}: {e}"))?;
             files.push(result);
@@ -419,6 +655,23 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
             }
         }
     }
+    let unmatched: Vec<&str> = selection
+        .entries
+        .iter()
+        .zip(&matched)
+        .filter(|(_, m)| !**m)
+        .map(|(e, _)| e.raw.as_str())
+        .collect();
+    if !unmatched.is_empty() {
+        let w = format!(
+            "{} --only entries match no measured file: {}{}",
+            unmatched.len(),
+            unmatched[..unmatched.len().min(5)].join(", "),
+            if unmatched.len() > 5 { ", ..." } else { "" }
+        );
+        progress(format!("warning: {w}"));
+        ctx.warnings.push(w);
+    }
 
     Ok(RunFile {
         schema: SCHEMA,
@@ -431,7 +684,8 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         tools: Tools {
             rustc: ctx.rustc_version.clone(),
             rustc_toolchain: opts.rustc.as_ref().and_then(|r| r.toolchain.clone()),
-            silicon: ctx.silicon.as_ref().map(Silicon::id),
+            silicon: ctx.silicon_warm.as_ref().map(WarmSilicon::silicon_id),
+            silicon_warm: ctx.silicon_warm.as_ref().map(|w| w.info.clone()),
             verify_commit: ctx.verify_commit,
             verify_json: ctx.verify_json,
         },
@@ -457,9 +711,28 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
                                 knobs: f.knobs.clone(),
                             })
                             .collect(),
-                        rustc_args: s.rustc_args(),
+                        rustc_args: if s.files.iter().any(|f| f.krate.is_some()) {
+                            let mut a = vec!["cargo".to_string()];
+                            if let Some(t) = &s.config.rustc_target {
+                                a.extend(["--target".to_string(), t.clone()]);
+                            }
+                            a
+                        } else {
+                            s.rustc_args()
+                        },
                         silicon: s.silicon(),
                         files: s.measurable().count(),
+                        warmup: s.warmup(opts.warmup),
+                        runs: s.runs(opts.runs),
+                        max_vpr_mb: s.config.max_vpr_mb.or(opts.discovery.max_vpr_mb),
+                        skipped_large: s
+                            .skipped_large
+                            .iter()
+                            .map(|(stem, mb)| SkippedFile {
+                                stem: stem.clone(),
+                                vpr_mb: (mb * 100.0).round() / 100.0,
+                            })
+                            .collect(),
                     },
                 )
             })
@@ -470,7 +743,13 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
 }
 
 fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileResult, String> {
-    let opts = ctx.opts;
+    // This suite's run counts: its settings may lower the run's.
+    let suite_opts = Options {
+        warmup: suite.warmup(ctx.opts.warmup),
+        runs: suite.runs(ctx.opts.runs),
+        ..ctx.opts.clone()
+    };
+    let opts = &suite_opts;
     let vpr = file.vpr.as_ref().expect("measurable");
     let timeout = Duration::from_secs_f64(opts.timeout.unwrap_or_else(|| suite.timeout_s()));
     let scratch = opts.scratch.join("work");
@@ -484,17 +763,36 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
         .map(std::fs::read_to_string)
         .transpose()
         .map_err(io)?;
-    let rs_sha = rs_source
-        .as_ref()
-        .map(|s| crate::sha256_bytes(s.as_bytes()));
+    // A crate is fingerprinted by all its files (sources, Cargo.toml,
+    // Cargo.lock), a single source by its content.
+    let rs_sha = match (&rs_source, &file.krate) {
+        (Some(src), _) => Some(crate::sha256_bytes(src.as_bytes())),
+        (None, Some(k)) => Some(crate::sha256_dir(k).map_err(io)?),
+        (None, None) => None,
+    };
 
     // ── Rust metrics ──
-    let (rust, rust_error) = match &rs_source {
-        Some(src) => match rust_metrics::file_metrics(src) {
+    let (rust, rust_error) = match (&rs_source, &file.krate) {
+        (Some(src), _) => match rust_metrics::file_metrics(src) {
             Ok(m) => (Some(m), None),
             Err(e) => (None, Some(e)),
         },
-        None => (None, None),
+        (None, Some(k)) => match rust_metrics::crate_metrics(k) {
+            Ok((m, failed)) => {
+                if !failed.is_empty() {
+                    ctx.warnings.push(format!(
+                        "{}/{}: Rust metrics: {} files not parsed (first: {})",
+                        suite.name,
+                        file.stem,
+                        failed.len(),
+                        failed[0]
+                    ));
+                }
+                (Some(m), None)
+            }
+            Err(e) => (None, Some(e)),
+        },
+        (None, None) => (None, None),
     };
     if let Some(e) = rust_error {
         ctx.warnings
@@ -523,22 +821,69 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     let mut peaks = BTreeMap::new();
 
     // ── rustc ──
-    if let (Some(rustc), Some(rs)) = (ctx.rustc.clone(), &file.rs) {
-        let args = suite.rustc_args();
-        // Only successful timings are cached; a failure is measured again.
+    let source = match (&file.rs, &file.krate) {
+        (Some(rs), _) => Some(RustSource::File(rs)),
+        (None, Some(k)) => Some(RustSource::Crate(k)),
+        (None, None) => None,
+    };
+    if let (Some(rustc), Some(source)) = (ctx.rustc.clone(), source) {
+        // A crate is checked with cargo; its arguments say so, and which
+        // platform, so they are part of the cache key.
+        let mut args = match source {
+            RustSource::File(_) => suite.rustc_args(),
+            RustSource::Crate(_) => {
+                let mut a = vec!["cargo".to_string()];
+                if let Some(t) = &suite.config.rustc_target {
+                    a.extend(["--target".to_string(), t.clone()]);
+                }
+                a
+            }
+        };
+        // A nightly rustc also reports its own time, from the same runs.
+        let time_passes = ctx.rustc_version.as_deref().is_some_and(rustc_is_nightly);
+        if time_passes {
+            args.extend(["-Z".to_string(), "time-passes".to_string()]);
+        }
+        // Only successful timings are cached; a failure is measured again, and
+        // so is a timing of fewer runs than this run asks for.
         let key = rs_sha
             .as_deref()
             .zip(ctx.rustc_version.as_deref())
             .map(|(sha, version)| RustcCache::key(sha, version, &args));
         let hit = key
             .as_ref()
-            .and_then(|k| ctx.rustc_cache.as_ref()?.entries.get(k).cloned());
-        let t = match hit {
-            Some(t) => Timing { cached: true, ..t },
+            .and_then(|k| ctx.rustc_cache.as_ref()?.entries.get(k).cloned())
+            .filter(|t| t.check.status == Status::Ok && t.check.runs.len() >= opts.runs);
+        let RustcTiming { check: t, own } = match hit {
+            Some(t) => RustcTiming {
+                check: Timing {
+                    cached: true,
+                    ..t.check
+                },
+                own: t.own.map(|o| PhasedTiming {
+                    timing: Timing {
+                        cached: true,
+                        ..o.timing
+                    },
+                    ..o
+                }),
+            },
             None => {
-                let t = time_rustc(&rustc, &args, rs, opts, timeout, &scratch).map_err(io)?;
+                let t = match source {
+                    RustSource::File(rs) => time_rustc(&rustc, &args, rs, opts, timeout, &scratch),
+                    RustSource::Crate(k) => time_cargo(
+                        &rustc,
+                        k,
+                        suite.config.rustc_target.as_deref(),
+                        time_passes,
+                        opts,
+                        timeout,
+                        &scratch,
+                    ),
+                }
+                .map_err(io)?;
                 if let (Some(k), Some(cache)) = (key, ctx.rustc_cache.as_mut()) {
-                    if t.status == Status::Ok {
+                    if t.check.status == Status::Ok {
                         cache.entries.insert(k, t.clone());
                     }
                 }
@@ -561,6 +906,7 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             ));
         }
         times.rustc_check = Some(t);
+        times.rustc_self = own;
     }
 
     // ── Helium ──
@@ -622,7 +968,7 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             member_times.entry(k.clone()).or_default().push(*v);
         }
     }
-    times.helium_verify = Some(HeliumTiming {
+    times.helium_verify = Some(PhasedTiming {
         timing: Timing::from_runs(wall.status, totals, &[], None),
         phases: phases
             .iter()
@@ -644,53 +990,46 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     }
     times.helium_wall = Some(wall);
 
-    // ── Silicon ──
+    // ── Silicon (in its warm JVM) ──
     let mut silicon_result: Option<(SiliconResult, bool)> = None;
-    if suite.silicon() {
-        if let Some(sil) = ctx.silicon.as_mut() {
-            let key = silicon::Cache::key(&vpr_sha, &sil.jar_sha256);
-            match ctx.silicon_cache.as_ref().and_then(|c| c.entries.get(&key)) {
-                Some(hit) => {
-                    if sil.version.is_none() {
-                        sil.version = hit
-                            .silicon
-                            .rsplit_once("@sha256:")
-                            .map(|(v, _)| v.to_string());
-                    }
-                    silicon_result = Some((hit.clone(), true));
-                }
-                None => {
-                    let r = silicon::measure(
-                        sil,
-                        vpr,
-                        &vpr_sha,
-                        opts.warmup,
-                        opts.runs,
-                        timeout,
-                        &scratch,
-                    )
-                    .map_err(|e| format!("silicon: {e}"))?;
-                    if let Some(cache) = ctx.silicon_cache.as_mut() {
-                        cache.entries.insert(key, r.clone());
-                    }
-                    silicon_result = Some((r, false));
-                }
+    if suite.silicon()
+        && let Some(warm) = ctx.silicon_warm.as_mut()
+    {
+        let key = warm.cache_key(&vpr_sha);
+        let hit = ctx
+            .silicon_cache
+            .as_ref()
+            .and_then(|c| c.entries.get(&key))
+            .filter(|hit| silicon::Cache::reusable(hit, opts.runs, timeout))
+            .cloned();
+        let (r, cached) = match hit {
+            Some(hit) => {
+                warm.adopt_version(&hit.silicon);
+                (hit, true)
             }
-        }
-    }
-    if let Some((r, cached)) = &silicon_result {
+            None => {
+                let r = warm.measure(vpr, &vpr_sha, opts.runs, timeout)?;
+                if let Some(cache) = ctx.silicon_cache.as_mut() {
+                    if silicon::Cache::keeps(&r) {
+                        cache.entries.insert(key, r.clone());
+                    } else {
+                        // Not a stale answer for the next run either.
+                        cache.entries.remove(&key);
+                    }
+                }
+                (r, false)
+            }
+        };
         let t = |d: &silicon::TimingData| SiliconTiming {
             status: r.status,
             median: d.median,
             mad: d.mad,
             runs: d.runs.clone(),
-            cached: *cached,
+            cached,
         };
         times.silicon_wall = Some(t(&r.wall));
         times.silicon_verify = Some(t(&r.verify));
-        if let Some(p) = r.peak_rss_mb {
-            peaks.insert("silicon".into(), p);
-        }
+        silicon_result = Some((r, cached));
     }
 
     // ── Members ──
@@ -721,11 +1060,17 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             }
             let sil = silicon_result.as_ref().and_then(|(r, _)| {
                 r.verified?;
-                Some(if r.failed_members.contains(base) {
-                    "FAIL"
+                if r.failed_members.contains(base) {
+                    // Silicon reports per declaration: a failure in `m_f` does
+                    // not say whether `m_f#requires` / `#ensures` (its contract
+                    // checks) fail, so those rows stay unknown.
+                    (base == name).then_some("FAIL")
+                } else if silicon_unattributed(r) {
+                    // A rejection we could not place: no member is known OK.
+                    None
                 } else {
-                    "OK"
-                })
+                    Some("OK")
+                }
             });
             let disagreement = match (status.as_str(), sil) {
                 ("FAIL", Some("OK")) => Some("incompleteness"),
@@ -752,6 +1097,15 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             }
         })
         .collect::<Vec<_>>();
+    if let Some((r, _)) = &silicon_result
+        && silicon_unattributed(r)
+    {
+        ctx.warnings.push(format!(
+            "{}/{}: Silicon rejects the file but not every error could be placed in a member; \
+             per-member Silicon verdicts left unknown",
+            suite.name, file.stem
+        ));
+    }
     for m in &members {
         if m.disagreement == Some("soundness") {
             ctx.warnings.push(format!(
@@ -807,8 +1161,17 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     })
 }
 
+/// Silicon rejected the file, but some of its errors are not placed in a
+/// member (none parsed, or a line outside every declaration). Then no member
+/// can be called OK: that would report Helium incomplete where Silicon failed.
+fn silicon_unattributed(r: &SiliconResult) -> bool {
+    r.verified == Some(false)
+        && (r.errors.is_empty() || r.errors.iter().any(|e| e.member.is_none()))
+}
+
 /// Time `rustc --emit=metadata` (type and borrow checking only, like
-/// `cargo check`) on `rs`: warm-up runs, then the timed ones.
+/// `cargo check`) on `rs`: warm-up runs, then the timed ones. When `args`
+/// carry `-Z time-passes`, rustc's own report of each run is kept too.
 fn time_rustc(
     rustc: &RustcOptions,
     args: &[String],
@@ -816,7 +1179,7 @@ fn time_rustc(
     opts: &Options,
     timeout: Duration,
     scratch: &Path,
-) -> std::io::Result<Timing> {
+) -> std::io::Result<RustcTiming> {
     let out_dir = scratch.join("rustc-out");
     std::fs::create_dir_all(&out_dir)?;
     let make = || {
@@ -829,7 +1192,265 @@ fn time_rustc(
     };
     let succeeded = |s: &Sample| s.code == Some(0);
     let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, scratch, succeeded)?;
-    Ok(measure::wall_timing(&samples, succeeded))
+    let time_passes = args.iter().any(|a| a == "time-passes");
+    Ok(rustc_timing(&samples, time_passes))
+}
+
+/// The `--only` entries. An entry selects a file when it is
+/// - the suite's name (the whole suite) or the file's `suite/stem`;
+/// - the stem, i.e. the file's path inside its suite directory, or any path
+///   ending in it (`../bench_sorted/a/x.vpr` selects the stem `a/x`);
+/// - the path of the `.vpr` itself (relative to the working directory, or
+///   absolute).
+///
+/// An entry that starts with a suite's name (`S/...`) is that suite's name
+/// for a file, never a path ending in another suite's stem.
+///
+/// Backslashes count as `/`, and a `.vpr` extension is ignored.
+pub struct Selection {
+    pub entries: Vec<SelectEntry>,
+}
+
+pub struct SelectEntry {
+    /// As given, for messages.
+    pub raw: String,
+    /// `/`-separated, without a leading `./` or a `.vpr`.
+    text: String,
+    /// The file it names, if it names an existing one.
+    path: Option<PathBuf>,
+    /// Starts with a suite's name: matched as `suite/stem` only.
+    named: bool,
+}
+
+impl Selection {
+    pub fn new(only: &[String], suites: &[&str]) -> Self {
+        let entries = only
+            .iter()
+            .map(|raw| {
+                let mut text = raw.trim().replace('\\', "/");
+                while let Some(rest) = text.strip_prefix("./") {
+                    text = rest.to_string();
+                }
+                let path = Path::new(raw.trim())
+                    .is_file()
+                    .then(|| std::fs::canonicalize(raw.trim()).ok())
+                    .flatten();
+                if let Some(t) = text.strip_suffix(".vpr") {
+                    text = t.to_string();
+                }
+                let named = suites
+                    .iter()
+                    .any(|s| text.strip_prefix(s).is_some_and(|r| r.starts_with('/')));
+                SelectEntry {
+                    raw: raw.clone(),
+                    text,
+                    path,
+                    named,
+                }
+            })
+            .collect();
+        Selection { entries }
+    }
+
+    /// The indices of the entries that select `file` of the suite `suite`.
+    pub fn matches(&self, suite: &str, file: &SuiteFile) -> Vec<usize> {
+        let canon = if self.entries.iter().any(|e| e.path.is_some()) {
+            file.vpr
+                .as_ref()
+                .and_then(|v| std::fs::canonicalize(v).ok())
+        } else {
+            None
+        };
+        let key = format!("{suite}/{}", file.stem);
+        let tail = format!("/{}", file.stem);
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.text == suite
+                    || e.text == key
+                    || (!e.named && (e.text == file.stem || e.text.ends_with(&tail)))
+                    || (e.path.is_some() && e.path == canon)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+/// What [`time_rustc`] and [`time_cargo`] are given to time.
+#[derive(Clone, Copy)]
+enum RustSource<'a> {
+    File(&'a Path),
+    Crate(&'a Path),
+}
+
+/// Check a whole crate with cargo (`--lib`), timing only the crate itself.
+/// Its dependencies are checked first, once and untimed (the first time,
+/// cargo downloads them as `Cargo.lock` pins them); before each run the
+/// crate's own output is removed (`cargo clean -p`), so every run makes rustc
+/// check exactly the crate again. `rustc_self` is that rustc's own total.
+fn time_cargo(
+    rustc: &RustcOptions,
+    krate: &Path,
+    target: Option<&str>,
+    time_passes: bool,
+    opts: &Options,
+    timeout: Duration,
+    scratch: &Path,
+) -> std::io::Result<RustcTiming> {
+    let manifest = krate.join("Cargo.toml");
+    let spec = package_spec(&std::fs::read_to_string(&manifest)?).ok_or_else(|| {
+        std::io::Error::other(format!("{}: no [package] name", manifest.display()))
+    })?;
+    // Shared by the crates of a run, so a dependency is checked once.
+    let target_dir = opts.scratch.join("cargo-target");
+    let cargo = |sub: &str| {
+        let mut c = rustc.cargo();
+        c.arg(sub)
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .arg("--locked")
+            .env("CARGO_TERM_COLOR", "never");
+        if let Some(t) = target {
+            c.args(["--target", t]);
+        }
+        c
+    };
+
+    let mut deps = cargo("check");
+    deps.arg("--lib");
+    let prep = measure::run_once(&mut deps, timeout.max(Duration::from_secs(1800)), scratch)?;
+    if prep.timed_out || prep.code != Some(0) {
+        let status = if prep.timed_out {
+            Status::Timeout
+        } else {
+            Status::Error
+        };
+        let message = format!(
+            "cargo check: {}",
+            measure::tail(&format!("{}{}", prep.stderr, prep.stdout), 400)
+        );
+        return Ok(RustcTiming {
+            check: Timing::from_runs(status, Vec::new(), &[], Some(message)),
+            own: None,
+        });
+    }
+
+    let make = || {
+        let _ = cargo("clean").arg("-p").arg(&spec).output();
+        let mut c = cargo("rustc");
+        c.args(["--lib", "--profile", "check", "--", "--cap-lints", "allow"]);
+        if time_passes {
+            c.args(["-Z", "time-passes"]);
+        }
+        c
+    };
+    let succeeded = |s: &Sample| s.code == Some(0);
+    let samples = measure::repeat(make, opts.warmup, opts.runs, timeout, scratch, succeeded)?;
+    Ok(rustc_timing(&samples, time_passes))
+}
+
+/// `name@version` of the `[package]` in a `Cargo.toml`, for `cargo clean -p`
+/// (the version tells it apart from a dependency of the same name).
+fn package_spec(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    let (mut name, mut version) = (None, None);
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"').to_string();
+        match k.trim() {
+            "name" => name = Some(v),
+            "version" => version = Some(v),
+            _ => {}
+        }
+    }
+    let name = name?;
+    Some(match version {
+        Some(v) if !v.contains('{') => format!("{name}@{v}"),
+        _ => name,
+    })
+}
+
+/// The wall times of rustc runs (`rustc_check`), and with `-Z time-passes`
+/// rustc's own totals and passes from the same runs (`rustc_self`).
+fn rustc_timing(samples: &[Sample], time_passes: bool) -> RustcTiming {
+    let succeeded = |s: &Sample| s.code == Some(0);
+    let check = measure::wall_timing(samples, succeeded);
+    let own = time_passes.then(|| {
+        let reports: Vec<TimePasses> = samples
+            .iter()
+            .filter(|s| !s.timed_out && succeeded(s))
+            .filter_map(|s| parse_time_passes(&s.stderr))
+            .collect();
+        let mut passes: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for r in &reports {
+            for (k, v) in &r.passes {
+                passes.entry(k.clone()).or_default().push(*v);
+            }
+        }
+        PhasedTiming {
+            timing: Timing::from_runs(
+                check.status,
+                reports.iter().map(|r| r.total).collect(),
+                &[],
+                None,
+            ),
+            phases: passes
+                .iter()
+                .map(|(k, v)| (k.clone(), measure::median(v)))
+                .collect(),
+        }
+    });
+    RustcTiming { check, own }
+}
+
+/// What one `rustc -Z time-passes` run reported about itself.
+#[derive(Debug, Clone, PartialEq)]
+struct TimePasses {
+    /// The `total` line: the compiler session, without process startup.
+    total: f64,
+    /// Seconds per pass; a pass reported more than once is summed.
+    passes: BTreeMap<String, f64>,
+}
+
+/// Read the `-Z time-passes` lines on stderr (`time:   0.130; rss:   29MB ->
+/// 36MB (  +7MB)`, a tab, the pass name); `None` without a `total` line.
+fn parse_time_passes(stderr: &str) -> Option<TimePasses> {
+    let mut total = None;
+    let mut passes = BTreeMap::new();
+    for line in stderr.lines() {
+        let Some(rest) = line.strip_prefix("time:") else {
+            continue;
+        };
+        let Some((secs, rest)) = rest.split_once(';') else {
+            continue;
+        };
+        let (Ok(secs), Some(name)) = (secs.trim().parse::<f64>(), rest.split_whitespace().last())
+        else {
+            continue;
+        };
+        if name == "total" {
+            total = Some(secs);
+        } else {
+            *passes.entry(name.to_string()).or_insert(0.0) += secs;
+        }
+    }
+    Some(TimePasses {
+        total: total?,
+        passes,
+    })
 }
 
 /// Keep the 20 slowest rules of `stats.rule_timing`: the full map is a few
@@ -859,11 +1480,141 @@ fn viper_metrics(verify: &Path, vpr: &Path, scratch: &Path) -> Option<Value> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parses_time_passes() {
+        let err = "time:   0.033; rss:   18MB ->   19MB (   +1MB)\tparse_crate\n\
+                   time:   0.000; rss:   27MB ->   27MB (   +0MB)\tdrop_ast\n\
+                   time:   0.002; rss:   28MB ->   28MB (   +0MB)\tdrop_ast\n\
+                   warning: something else\n\
+                   time:   0.720; rss:   14MB ->   30MB (  +16MB)\ttotal\n";
+        let r = parse_time_passes(err).unwrap();
+        assert_eq!(r.total, 0.72);
+        assert_eq!(r.passes["parse_crate"], 0.033);
+        assert_eq!(r.passes["drop_ast"], 0.002);
+        assert!(!r.passes.contains_key("total"));
+        let no_total = "time:   0.1; rss: 1MB -> 1MB (+0MB)\tparse_crate\n";
+        assert_eq!(parse_time_passes(no_total), None);
+    }
+
+    #[test]
+    fn only_nightly_rustc_takes_z_flags() {
+        assert!(rustc_is_nightly(
+            "rustc 1.100.0-nightly (e71c0f1e3 2026-08-18)"
+        ));
+        assert!(rustc_is_nightly("rustc 1.100.0-dev"));
+        assert!(!rustc_is_nightly("rustc 1.92.0 (ded5c06cf 2025-12-08)"));
+    }
+
     fn fns(names: &[&str]) -> BTreeMap<String, FnMetrics> {
         names
             .iter()
             .map(|n| (n.to_string(), FnMetrics::default()))
             .collect()
+    }
+
+    #[test]
+    fn selects_files_by_name_stem_or_path() {
+        let dir = std::env::temp_dir().join(format!("bench-select-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        let vpr = dir.join("a").join("x.vpr");
+        std::fs::write(&vpr, "").unwrap();
+        let file = SuiteFile {
+            stem: "a/x".into(),
+            rs: None,
+            vpr: Some(vpr.clone()),
+            krate: None,
+        };
+        let only = [
+            "S".to_string(),
+            "S/a/x".into(),
+            "a/x".into(),
+            "a/x.vpr".into(),
+            "../bench_sorted/a/x.vpr".into(),
+            "..\\bench_sorted\\a\\x.vpr".into(),
+            vpr.to_string_lossy().into_owned(),
+            "T/a/y".into(),
+            "x".into(),
+            "ba/x".into(),
+        ];
+        let sel = Selection::new(&only, &["S", "T"]);
+        assert_eq!(sel.matches("S", &file), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(sel.matches("T", &file), [2, 3, 4, 5, 6]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_the_package_spec() {
+        let m = "[package]\nedition = \"2021\"\nname = \"semver\"\nversion = \"1.0.27\"\n\n[dependencies.serde]\nversion = \"1.0\"\n";
+        assert_eq!(package_spec(m), Some("semver@1.0.27".into()));
+        assert_eq!(
+            package_spec("[package]\nname = \"x\"\nversion.workspace = true\n"),
+            Some("x".into())
+        );
+        assert_eq!(package_spec("[dependencies]\nname = \"x\"\n"), None);
+    }
+
+    #[test]
+    fn reads_escaped_prusti_paths() {
+        let p = |s: &str| prusti_path(s).map(|v| v.join("::"));
+        assert_eq!(
+            p(
+                "display$col$$col$$lt$impl$sp$std$col$$col$fmt$col$$col$Display$sp$for$sp$Version$gt$$col$$col$fmt"
+            ),
+            Some("display::Version::fmt".into())
+        );
+        assert_eq!(
+            p("identifier$col$$col$Identifier$col$$col$is_empty"),
+            Some("identifier::Identifier::is_empty".into())
+        );
+        assert_eq!(
+            p("$lt$impl$sp$private$col$$col$Sealed$sp$for$sp$u8$gt$$col$$col$write"),
+            Some("u8::write".into())
+        );
+        assert_eq!(
+            p("Buffer$col$$col$$lt$$sq$a$gt$$col$$col$format"),
+            Some("Buffer::format".into())
+        );
+        assert_eq!(
+            p("$lt$Q$sp$as$sp$Equivalent$lt$K$gt$$gt$$col$$col$equivalent"),
+            Some("Q::equivalent".into())
+        );
+        assert_eq!(p("std$col$$col$mem$col$$col$forget"), None);
+        assert_eq!(
+            p("display$col$$col$pad$col$$col$$lc$closure$oc$0$rc$"),
+            None
+        );
+    }
+
+    #[test]
+    fn joins_escaped_members_by_path() {
+        let f = fns(&[
+            "display::Version::fmt",
+            "display::pad",
+            "impls::Prerelease::is_empty",
+            "a::new",
+            "b::new",
+        ]);
+        let j = |m: &str| rust_fn_for(m, &f).map(|(q, k)| (q.as_str(), k));
+        let fmt = "m_display$col$$col$$lt$impl$sp$std$col$$col$fmt$col$$col$Display$sp$for$sp$Version$gt$$col$$col$fmt";
+        assert_eq!(j(fmt), Some(("display::Version::fmt", "exact")));
+        assert_eq!(
+            j("m_display$col$$col$pad#requires"),
+            Some(("display::pad", "exact"))
+        );
+        assert_eq!(
+            j("m_Prerelease$col$$col$is_empty"),
+            Some(("impls::Prerelease::is_empty", "fuzzy"))
+        );
+        assert_eq!(j("m_c$col$$col$new"), None, "no `c::new`");
+        let derived = "m_$lt$OnSuccess$sp$as$sp$std$col$$col$fmt$col$$col$Debug$gt$$col$$col$fmt";
+        let f2 = fns(&["ScopeGuard::fmt"]);
+        assert_eq!(
+            rust_fn_for(derived, &f2),
+            None,
+            "a derived impl has no source"
+        );
+        assert_eq!(j("m_std$col$$col$mem$col$$col$forget"), None);
     }
 
     #[test]

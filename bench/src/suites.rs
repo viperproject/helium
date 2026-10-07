@@ -14,6 +14,19 @@
 //! `benchmarks/` form the suite `viper`, and a subdirectory of a suite that
 //! holds `.vpr` files directly (`panic_free/isolate/`) forms the suite
 //! `<suite>/<sub>`. There is no central list: adding a directory adds a suite.
+//!
+//! Suites can also live outside `benchmarks/` ([`External`], configured in
+//! `tools/bench/config.json`). An external directory of `.vpr` files is one
+//! Viper-only suite with its subdirectories included: a file is named by its
+//! path inside the directory (`sorted/a/x.vpr` is the stem `a/x`). Besides
+//! the layouts above, an external suite may be a **crate corpus**: one
+//! benchmark per whole crate,
+//!
+//! ```text
+//! <dir>/
+//!   crates/<stem>/Cargo.toml  the crate, with the Cargo.lock that pins its dependencies
+//!   viper/<stem>.vpr          its Viper encoding, the whole crate in one file
+//! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -68,6 +81,67 @@ pub struct SuiteConfig {
     pub families: Option<Vec<Family>>,
     #[serde(default)]
     pub exhaustive: Option<bool>,
+    /// Skip `.vpr` files larger than this many megabytes (10^6 bytes); they
+    /// are listed in the run file as skipped. Without it, the run-wide limit
+    /// applies (`max_vpr_mb` in config.json), if any.
+    #[serde(default)]
+    pub max_vpr_mb: Option<f64>,
+    /// At most this many timed runs per tool (the run's own count is the
+    /// ceiling), for suites too slow to measure five times.
+    #[serde(default)]
+    pub runs: Option<usize>,
+    /// At most this many untimed warm-up runs.
+    #[serde(default)]
+    pub warmup: Option<usize>,
+    /// `--target` for checking a crate corpus with cargo: the platform the
+    /// Viper encodings were generated on, so rustc compiles the same
+    /// `cfg`-selected code (`rustup target add <target>` first).
+    #[serde(default)]
+    pub rustc_target: Option<String>,
+}
+
+/// A suite outside `benchmarks/`: its directory and its settings (the
+/// `suite.json` fields, which replace a `suite.json` in the directory).
+#[derive(Debug, Clone)]
+pub struct External {
+    pub name: String,
+    pub path: PathBuf,
+    pub config: Option<SuiteConfig>,
+}
+
+impl External {
+    /// The `external_suites` object of config.json: `{name: {"path": ..,
+    /// <suite.json fields>}}`. Relative paths are taken from `base`.
+    pub fn parse_all(json: &str, base: &Path) -> Result<Vec<External>, String> {
+        let map: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(json).map_err(|e| format!("external suites: {e}"))?;
+        map.into_iter()
+            .map(|(name, mut v)| {
+                let path = v
+                    .as_object_mut()
+                    .and_then(|o| o.remove("path"))
+                    .and_then(|p| p.as_str().map(PathBuf::from))
+                    .ok_or_else(|| format!("external suite `{name}`: needs a `path`"))?;
+                let rest = v.as_object().is_some_and(|o| !o.is_empty());
+                let config = rest
+                    .then(|| serde_json::from_value::<SuiteConfig>(v))
+                    .transpose()
+                    .map_err(|e| format!("external suite `{name}`: {e}"))?;
+                Ok(External {
+                    path: base.join(path),
+                    name,
+                    config,
+                })
+            })
+            .collect()
+    }
+}
+
+/// What to discover besides `benchmarks/`, and the run-wide size limit.
+#[derive(Debug, Clone, Default)]
+pub struct Discovery {
+    pub external: Vec<External>,
+    pub max_vpr_mb: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +168,9 @@ pub struct SuiteFile {
     pub stem: String,
     pub rs: Option<PathBuf>,
     pub vpr: Option<PathBuf>,
+    /// A whole crate instead of one `.rs` (a crate corpus): its directory,
+    /// holding `Cargo.toml`.
+    pub krate: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +182,8 @@ pub struct Suite {
     pub files: Vec<SuiteFile>,
     /// `(stem, member)` pairs from `expected_failures.txt`.
     pub expected_failures: BTreeSet<(String, String)>,
+    /// Stems whose `.vpr` is over the size limit, with their size in MB.
+    pub skipped_large: Vec<(String, f64)>,
     /// Problems found while loading. Errors stop a run; warnings do not.
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
@@ -124,6 +203,16 @@ impl Suite {
 
     pub fn silicon(&self) -> bool {
         self.config.silicon.unwrap_or(true)
+    }
+
+    /// Timed runs for this suite: the run's count, capped by its settings.
+    pub fn runs(&self, run: usize) -> usize {
+        self.config.runs.map_or(run, |n| n.clamp(1, run.max(1)))
+    }
+
+    /// Warm-up runs for this suite: the run's count, capped by its settings.
+    pub fn warmup(&self, run: usize) -> usize {
+        self.config.warmup.map_or(run, |n| n.min(run))
     }
 
     /// The family `stem` belongs to and its knob values.
@@ -167,6 +256,32 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
 
 /// Every suite under `root` (normally `benchmarks/`), sorted by name.
 pub fn discover(root: &Path) -> Vec<Suite> {
+    discover_with(root, &Discovery::default())
+}
+
+/// [`discover`], plus the external suites, with the size limit applied.
+pub fn discover_with(root: &Path, extra: &Discovery) -> Vec<Suite> {
+    let mut suites = discover_root(root);
+    for ext in &extra.external {
+        let taken = suites.iter().any(|s| s.name == ext.name);
+        let mut suite = load_external(ext);
+        if taken {
+            suite.errors.push(format!(
+                "external suite `{}` has the name of a suite in {}",
+                ext.name,
+                root.display()
+            ));
+        }
+        suites.push(suite);
+    }
+    for suite in &mut suites {
+        apply_size_limit(suite, extra.max_vpr_mb);
+    }
+    suites.sort_by(|a, b| a.name.cmp(&b.name));
+    suites
+}
+
+fn discover_root(root: &Path) -> Vec<Suite> {
     let mut suites = Vec::new();
     if !files_with_ext(root, "vpr").is_empty() {
         suites.push(load_flat("viper", root));
@@ -189,8 +304,112 @@ pub fn discover(root: &Path) -> Vec<Suite> {
             suites.push(load_flat(&name, &dir));
         }
     }
-    suites.sort_by(|a, b| a.name.cmp(&b.name));
     suites
+}
+
+fn load_external(ext: &External) -> Suite {
+    let dir = &ext.path;
+    if !dir.is_dir() {
+        let mut s = empty_suite(&ext.name, dir);
+        s.errors.push(format!(
+            "external suite `{}`: no directory {}",
+            ext.name,
+            dir.display()
+        ));
+        return s;
+    }
+    let mut suite = if dir.join("crates").is_dir() && dir.join("viper").is_dir() {
+        load_crate_corpus(&ext.name, dir)
+    } else if dir.join("src").is_dir() || dir.join("vpr").is_dir() {
+        load_structured(&ext.name, dir)
+    } else {
+        load_tree(&ext.name, dir)
+    };
+    if let Some(config) = &ext.config {
+        // The settings from config.json replace the directory's suite.json.
+        suite.config = config.clone();
+        suite.errors.retain(|e| !e.contains("suite.json"));
+        suite.families.clear();
+        check_families(&mut suite);
+    }
+    suite
+}
+
+/// A crate corpus: `crates/<stem>/` paired with `viper/<stem>.vpr`.
+fn load_crate_corpus(name: &str, dir: &Path) -> Suite {
+    let mut suite = empty_suite(name, dir);
+    load_config(&mut suite);
+    let crates = dir.join("crates");
+    suite.files = files_with_ext(&dir.join("viper"), "vpr")
+        .into_iter()
+        .map(|vpr| {
+            let stem = stem_of(&vpr);
+            let krate = crates.join(&stem);
+            SuiteFile {
+                krate: krate.join("Cargo.toml").is_file().then_some(krate),
+                stem,
+                rs: None,
+                vpr: Some(vpr),
+            }
+        })
+        .collect();
+    let have: BTreeSet<&str> = suite.files.iter().map(|f| f.stem.as_str()).collect();
+    let unencoded: Vec<String> = subdirs(&crates)
+        .iter()
+        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
+        .filter(|c| !have.contains(c.as_str()))
+        .collect();
+    if !unencoded.is_empty() {
+        suite.warnings.push(format!(
+            "{name}: {} crates have no viper/<crate>.vpr (skipped): {}",
+            unencoded.len(),
+            unencoded.join(", ")
+        ));
+    }
+    let orphans: Vec<&str> = suite
+        .files
+        .iter()
+        .filter(|f| f.krate.is_none())
+        .map(|f| f.stem.as_str())
+        .collect();
+    if !orphans.is_empty() {
+        suite.warnings.push(format!(
+            "{name}: {} encodings have no crates/<crate>/Cargo.toml (measured without rustc): {}",
+            orphans.len(),
+            orphans.join(", ")
+        ));
+    }
+    load_expected_failures(&mut suite);
+    check_families(&mut suite);
+    suite
+}
+
+/// Drop the files whose `.vpr` is over the suite's limit (or the run-wide
+/// one), remembering them so the run file can say what was left out.
+fn apply_size_limit(suite: &mut Suite, default: Option<f64>) {
+    let Some(limit) = suite.config.max_vpr_mb.or(default) else {
+        return;
+    };
+    let mut kept = Vec::new();
+    for f in std::mem::take(&mut suite.files) {
+        let mb = f
+            .vpr
+            .as_ref()
+            .and_then(|v| std::fs::metadata(v).ok())
+            .map(|m| m.len() as f64 / 1e6);
+        match mb {
+            Some(mb) if mb > limit => suite.skipped_large.push((f.stem, mb)),
+            _ => kept.push(f),
+        }
+    }
+    suite.files = kept;
+    if !suite.skipped_large.is_empty() {
+        suite.warnings.push(format!(
+            "{}: {} files over the {limit} MB .vpr limit skipped",
+            suite.name,
+            suite.skipped_large.len()
+        ));
+    }
 }
 
 fn empty_suite(name: &str, dir: &Path) -> Suite {
@@ -201,6 +420,7 @@ fn empty_suite(name: &str, dir: &Path) -> Suite {
         families: Vec::new(),
         files: Vec::new(),
         expected_failures: BTreeSet::new(),
+        skipped_large: Vec::new(),
         errors: Vec::new(),
         warnings: Vec::new(),
     }
@@ -215,8 +435,46 @@ fn load_flat(name: &str, dir: &Path) -> Suite {
             stem: stem_of(&vpr),
             rs: None,
             vpr: Some(vpr),
+            krate: None,
         })
         .collect();
+    check_families(&mut suite);
+    suite
+}
+
+/// A Viper-only suite of every `.vpr` under `dir`, at any depth, each named
+/// by its path inside `dir` without the extension (`a/x`). Hidden
+/// directories are skipped.
+fn load_tree(name: &str, dir: &Path) -> Suite {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        out.extend(files_with_ext(dir, "vpr"));
+        for sub in subdirs(dir) {
+            walk(&sub, out);
+        }
+    }
+    let mut suite = empty_suite(name, dir);
+    load_config(&mut suite);
+    let mut found = Vec::new();
+    walk(dir, &mut found);
+    suite.files = found
+        .into_iter()
+        .map(|vpr| {
+            let rel = vpr.strip_prefix(dir).unwrap_or(&vpr).with_extension("");
+            let stem = rel
+                .iter()
+                .map(|c| c.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            SuiteFile {
+                stem,
+                rs: None,
+                vpr: Some(vpr),
+                krate: None,
+            }
+        })
+        .collect();
+    suite.files.sort_by(|a, b| a.stem.cmp(&b.stem));
+    load_expected_failures(&mut suite);
     check_families(&mut suite);
     suite
 }
@@ -233,6 +491,7 @@ fn load_structured(name: &str, dir: &Path) -> Suite {
                 stem,
                 rs: Some(rs),
                 vpr: None,
+                krate: None,
             },
         );
     }
@@ -242,6 +501,7 @@ fn load_structured(name: &str, dir: &Path) -> Suite {
             stem,
             rs: None,
             vpr: None,
+            krate: None,
         });
         entry.vpr = Some(vpr);
     }
@@ -264,7 +524,13 @@ fn load_structured(name: &str, dir: &Path) -> Suite {
         )),
     }
 
-    let expected = dir.join("expected_failures.txt");
+    load_expected_failures(&mut suite);
+    check_families(&mut suite);
+    suite
+}
+
+fn load_expected_failures(suite: &mut Suite) {
+    let expected = suite.dir.join("expected_failures.txt");
     if let Ok(text) = std::fs::read_to_string(&expected) {
         for line in text.lines() {
             let line = line.trim();
@@ -279,13 +545,12 @@ fn load_structured(name: &str, dir: &Path) -> Suite {
                         .insert((stem.to_string(), member.to_string()));
                 }
                 _ => suite.errors.push(format!(
-                    "{name}: expected_failures.txt: malformed line `{line}`"
+                    "{}: expected_failures.txt: malformed line `{line}`",
+                    suite.name
                 )),
             }
         }
     }
-    check_families(&mut suite);
-    suite
 }
 
 fn load_config(suite: &mut Suite) {
@@ -437,6 +702,97 @@ mod tests {
         assert!(a.expected_failures.contains(&("x".into(), "m_x".into())));
         assert_eq!(a.measurable().count(), 2);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn crate_corpus_and_size_limit() {
+        let root = scratch("crates");
+        let corpus = scratch("corpus");
+        write(&root.join("a/src/x.rs"), "");
+        write(&root.join("a/vpr/x.vpr"), &"x".repeat(2000));
+        write(
+            &corpus.join("crates/small/Cargo.toml"),
+            "[package]\nname = \"small\"\n",
+        );
+        write(&corpus.join("viper/small.vpr"), "x");
+        write(
+            &corpus.join("crates/big/Cargo.toml"),
+            "[package]\nname = \"big\"\n",
+        );
+        write(&corpus.join("viper/big.vpr"), &"x".repeat(3000));
+        write(&corpus.join("crates/unencoded/Cargo.toml"), "");
+        write(&corpus.join("viper/orphan.vpr"), "x");
+
+        let json = format!(
+            r#"{{"crates": {{"path": {:?}, "max_vpr_mb": 0.0025, "runs": 1, "rustc_target": "aarch64-apple-darwin"}},
+                "gone": {{"path": "no/such/dir"}}}}"#,
+            corpus.to_string_lossy()
+        );
+        let discovery = Discovery {
+            external: External::parse_all(&json, Path::new(".")).unwrap(),
+            max_vpr_mb: Some(0.001),
+        };
+        let suites = discover_with(&root, &discovery);
+        let names: Vec<&str> = suites.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "crates", "gone"]);
+
+        // The run-wide limit applies where a suite sets none.
+        assert_eq!(suites[0].files.len(), 0);
+        assert_eq!(suites[0].skipped_large[0].0, "x");
+
+        let c = &suites[1];
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        let files: Vec<_> = c
+            .files
+            .iter()
+            .map(|f| (f.stem.as_str(), f.krate.is_some(), f.rs.is_some()))
+            .collect();
+        assert_eq!(files, [("orphan", false, false), ("small", true, false)]);
+        assert_eq!(c.skipped_large.len(), 1, "its own limit wins");
+        assert_eq!(c.runs(5), 1);
+        assert_eq!(c.warmup(1), 1);
+        assert_eq!(
+            c.config.rustc_target.as_deref(),
+            Some("aarch64-apple-darwin")
+        );
+        assert!(c.warnings.iter().any(|w| w.contains("unencoded")));
+        assert!(c.warnings.iter().any(|w| w.contains("orphan")));
+
+        assert!(suites[2].errors[0].contains("no directory"));
+
+        // An external directory of .vpr files includes its subdirectories.
+        let tree = scratch("tree");
+        write(&tree.join("top.vpr"), "");
+        write(&tree.join("a/x.vpr"), "");
+        write(&tree.join("a/b/y.vpr"), "");
+        write(&tree.join(".git/z.vpr"), "");
+        write(&tree.join("a/notes.txt"), "");
+        let ext = External::parse_all(
+            &format!(r#"{{"t": {{"path": {:?}}}}}"#, tree.to_string_lossy()),
+            Path::new("."),
+        )
+        .unwrap();
+        let t = discover_with(
+            &root,
+            &Discovery {
+                external: ext,
+                max_vpr_mb: None,
+            },
+        )
+        .into_iter()
+        .find(|s| s.name == "t")
+        .unwrap();
+        let stems: Vec<&str> = t.files.iter().map(|f| f.stem.as_str()).collect();
+        assert_eq!(stems, ["a/b/y", "a/x", "top"]);
+        assert!(t.files.iter().all(|f| f.rs.is_none() && f.vpr.is_some()));
+        let _ = std::fs::remove_dir_all(&tree);
+        assert!(
+            External::parse_all(r#"{"x": {"path": ".", "max_vpr": 1}}"#, Path::new("."))
+                .unwrap_err()
+                .contains("unknown field")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&corpus);
     }
 
     #[test]

@@ -102,6 +102,8 @@ def bench_exe() -> Path:
 
 
 def check_suites(benchmarks: Path, cfg: dict) -> None:
+    # The external suites and `max_vpr_mb` are read by bench itself, from the
+    # same config.json / config.local.json.
     cmd = [bench_exe(), "check-suites", "--benchmarks", benchmarks]
     if cfg.get("rustc_toolchain"):
         cmd += ["--rustc-toolchain", cfg["rustc_toolchain"]]
@@ -130,6 +132,14 @@ def bench_run(cfg: dict, out: Path, extra: list, caches: Path | None) -> dict:
             cmd += ["--silicon-arg", a]
         if caches:
             cmd += ["--silicon-cache", caches / "silicon_cache.json"]
+        warm = cfg.get("silicon_warm")
+        if warm:
+            for d in warm.get("corpus", []):
+                cmd += ["--silicon-warm", REPO / d]
+            if warm.get("warmup_s") is not None:
+                cmd += ["--silicon-warmup-s", warm["warmup_s"]]
+            if warm.get("file_timeout_s") is not None:
+                cmd += ["--silicon-warmup-file-timeout", warm["file_timeout_s"]]
     cmd += extra
     run(cmd, cwd=REPO)
     return json.loads(out.read_text(encoding="utf-8"))
@@ -155,7 +165,8 @@ def summarize(run_data: dict) -> dict:
     files = run_data.get("files", [])
     coverage: dict = {}
     by_suite: dict = {}
-    totals = {"helium_verify": 0.0, "helium_wall": 0.0, "rustc_check": 0.0, "silicon_verify": 0.0, "silicon_wall": 0.0}
+    # Self-reported times only: no total counts process or JVM startup.
+    totals = {"helium_verify": 0.0, "rustc_self": 0.0, "silicon_verify": 0.0}
     overhead, speedup = [], []
     members = disagreements = timeouts = file_errors = 0
     for f in files:
@@ -172,7 +183,7 @@ def summarize(run_data: dict) -> dict:
         h = median_of(t.get("helium_verify"))
         if h is not None:
             s["helium_verify"] += h
-        r = median_of(t.get("rustc_check"))
+        r = median_of(t.get("rustc_self"))
         sv = median_of(t.get("silicon_verify"))
         if h and r:
             overhead.append(h / r)

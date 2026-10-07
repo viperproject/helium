@@ -4,18 +4,25 @@
 //! Every measurement is a separate process run one after another, never in
 //! parallel. Output goes to files rather than pipes, so a chatty process
 //! cannot block on a full pipe while it is being timed.
+//!
+//! The command runs in its own process tree (a process group on Unix, a job
+//! object on Windows), and the whole tree is killed on a timeout and cleaned
+//! up after exit. Killing only the direct child is not enough: `java` on
+//! Windows is often a launcher that starts the real JVM, and Silicon starts
+//! z3s; left running, they steal CPU from the next measurement and keep
+//! writing into the output files the next run reads.
 
 use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 
 /// One run of a command.
 #[derive(Debug, Clone)]
 pub struct Sample {
-    /// Seconds from spawn to exit (or to the kill, on timeout).
+    /// Seconds from start to exit (or to the kill, on timeout).
     pub wall: f64,
     pub peak_rss_mb: Option<f64>,
     /// Exit code; `None` when killed (timeout or signal).
@@ -34,9 +41,7 @@ pub fn run_once(cmd: &mut Command, timeout: Duration, scratch: &Path) -> std::io
         .stdout(File::create(&out_path)?)
         .stderr(File::create(&err_path)?);
 
-    let start = Instant::now();
-    let child = cmd.spawn()?;
-    let (wall, peak, code, timed_out) = imp::wait(child, start, timeout)?;
+    let (wall, peak, code, timed_out) = imp::run(cmd, timeout)?;
     Ok(Sample {
         wall,
         peak_rss_mb: peak.map(|b| b as f64 / (1024.0 * 1024.0)),
@@ -49,17 +54,40 @@ pub fn run_once(cmd: &mut Command, timeout: Duration, scratch: &Path) -> std::io
 
 #[cfg(unix)]
 mod imp {
-    use std::process::Child;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    /// The process group a [`spawn_tree`] child leads.
+    pub struct Guard(libc::pid_t);
+
+    impl Guard {
+        pub fn kill(&self) {
+            // SAFETY: a plain syscall on a process group id; with the group
+            // already empty it fails harmlessly.
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        }
+    }
+
+    pub fn spawn_tree(cmd: &mut Command) -> std::io::Result<(Child, Option<Guard>)> {
+        let child = cmd.process_group(0).spawn()?;
+        let pid = child.id() as libc::pid_t;
+        Ok((child, Some(Guard(pid))))
+    }
+
+    /// The child leads a new process group, so one `kill(-pgid)` reaches
+    /// everything it started. (A Ctrl-C at the terminal then no longer
+    /// reaches the tree, but the timeout does.)
+    ///
     /// `wait4` gives the exit status and the child's own peak RSS in one call;
     /// it runs on a helper thread so the main thread can time out and kill.
-    pub fn wait(
-        child: Child,
-        start: Instant,
+    pub fn run(
+        cmd: &mut Command,
         timeout: Duration,
     ) -> std::io::Result<(f64, Option<u64>, Option<i32>, bool)> {
+        let start = Instant::now();
+        let child = cmd.process_group(0).spawn()?;
         let pid = child.id() as libc::pid_t;
         let (tx, rx) = mpsc::channel();
         let waiter = std::thread::spawn(move || {
@@ -75,13 +103,18 @@ mod imp {
             Ok((r, s, m, e)) => (r, s, m, e, false),
             Err(_) => {
                 // SAFETY: the child has not been reaped (the waiter has not
-                // returned), so `pid` still names it.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
+                // returned), so its pid still names its process group.
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
                 let (r, s, m, _) = rx.recv().expect("waiter thread");
                 (r, s, m, start + timeout, true)
             }
         };
         let _ = waiter.join();
+        // Whatever the child left running. A pid is not reused while it still
+        // names a process group, so this cannot hit a stranger; with the
+        // group already empty it fails harmlessly.
+        // SAFETY: a plain syscall on a process group id.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
         // The child is reaped; dropping the handle does not wait on it again.
         drop(child);
         if r < 0 {
@@ -101,27 +134,148 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use std::os::windows::io::AsRawHandle;
-    use std::process::Child;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Child, Command};
     use std::time::{Duration, Instant};
 
-    use windows_sys::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject,
+    };
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
     };
-    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME, WaitForSingleObject,
+    };
 
-    pub fn wait(
-        mut child: Child,
-        start: Instant,
+    /// A job object holding the child and everything it starts. Dropping it
+    /// kills whatever is still running in it.
+    pub struct Job(HANDLE);
+
+    pub type Guard = Job;
+
+    pub fn spawn_tree(cmd: &mut Command) -> std::io::Result<(Child, Option<Guard>)> {
+        spawn(cmd).map(|(child, job, _)| (child, job))
+    }
+
+    impl Job {
+        fn new() -> Option<Job> {
+            // SAFETY: no security attributes, no name.
+            let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if h.is_null() {
+                return None;
+            }
+            let job = Job(h);
+            // SAFETY: plain old data, zeroed is a valid value.
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            // Also covers `bench` itself dying: closing the last handle kills
+            // the tree.
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `info` is the structure the information class names,
+            // passed with its size.
+            let ok = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const info).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            (ok != 0).then_some(job)
+        }
+
+        pub fn kill(&self) {
+            // SAFETY: `self.0` is a live job handle.
+            unsafe { TerminateJobObject(self.0, 1) };
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            self.kill();
+            // SAFETY: we own the handle and close it once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// Resume every thread of the (suspended, freshly created) process `pid`;
+    /// false when none was found.
+    fn resume(pid: u32) -> bool {
+        // SAFETY: a system-wide thread snapshot; the handle is closed below.
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snap == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        // SAFETY: plain old data; `dwSize` is set as the API requires.
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = size_of::<THREADENTRY32>() as u32;
+        let mut resumed = false;
+        // SAFETY: `snap` is a valid snapshot and `entry` is sized.
+        let mut more = unsafe { Thread32First(snap, &mut entry) } != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: opening a thread by id; the handle is closed below.
+                let t = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if !t.is_null() {
+                    // SAFETY: `t` is a live thread handle with resume access.
+                    resumed |= unsafe { ResumeThread(t) } != u32::MAX;
+                    // SAFETY: closing the handle we opened.
+                    unsafe { CloseHandle(t) };
+                }
+            }
+            // SAFETY: as for `Thread32First`.
+            more = unsafe { Thread32Next(snap, &mut entry) } != 0;
+        }
+        // SAFETY: closing the snapshot we took.
+        unsafe { CloseHandle(snap) };
+        resumed
+    }
+
+    /// Start `cmd` inside a fresh job. The process is created suspended and
+    /// resumed only once it is in the job, so nothing it starts can escape.
+    /// Without a job (creation failed, or assignment was refused) it runs as
+    /// a plain child and only it is killed on a timeout.
+    fn spawn(cmd: &mut Command) -> std::io::Result<(Child, Option<Job>, Instant)> {
+        let Some(job) = Job::new() else {
+            let start = Instant::now();
+            return Ok((cmd.spawn()?, None, start));
+        };
+        let mut child = cmd.creation_flags(CREATE_SUSPENDED).spawn()?;
+        // SAFETY: both handles are live.
+        let assigned =
+            unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) } != 0;
+        // The clock starts at the resume: creating the suspended process is
+        // not the command's own time.
+        let start = Instant::now();
+        if !resume(child.id()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other("could not resume the new process"));
+        }
+        Ok((child, assigned.then_some(job), start))
+    }
+
+    pub fn run(
+        cmd: &mut Command,
         timeout: Duration,
     ) -> std::io::Result<(f64, Option<u64>, Option<i32>, bool)> {
+        let (mut child, job, start) = spawn(cmd)?;
         let handle = child.as_raw_handle() as HANDLE;
         let ms = timeout.as_millis().min(u32::MAX as u128 - 1) as u32;
         // SAFETY: `handle` is the live process handle owned by `child`.
         let waited = unsafe { WaitForSingleObject(handle, ms) };
         let end = Instant::now();
         if waited == WAIT_TIMEOUT {
-            child.kill()?;
+            match &job {
+                Some(job) => job.kill(),
+                None => child.kill()?,
+            }
             child.wait()?;
             return Ok((timeout.as_secs_f64(), None, None, true));
         }
@@ -132,7 +286,44 @@ mod imp {
         let ok = unsafe { GetProcessMemoryInfo(handle, &mut counters, counters.cb) };
         let peak = (ok != 0).then_some(counters.PeakWorkingSetSize as u64);
         let status = child.wait()?;
+        // Dropping the job kills anything the child left running.
+        drop(job);
         Ok(((end - start).as_secs_f64(), peak, status.code(), false))
+    }
+}
+
+/// A long-lived child in its own process tree, as [`run_once`] runs its
+/// commands: [`Tree::kill`] reaches everything it started (a JVM's z3s too),
+/// and dropping the tree kills it.
+pub struct Tree {
+    child: std::process::Child,
+    guard: Option<imp::Guard>,
+}
+
+impl Tree {
+    pub fn spawn(cmd: &mut Command) -> std::io::Result<Tree> {
+        let (child, guard) = imp::spawn_tree(cmd)?;
+        Ok(Tree { child, guard })
+    }
+
+    pub fn child(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+
+    pub fn kill(&mut self) {
+        match &self.guard {
+            Some(g) => g.kill(),
+            None => {
+                let _ = self.child.kill();
+            }
+        }
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -296,6 +487,44 @@ mod tests {
         assert!(s.timed_out);
         assert!(s.wall < 10.0);
         assert_eq!(s.code, None);
+    }
+
+    /// A timeout kills the whole process tree, not just the direct child:
+    /// `java` on Windows is often a launcher whose JVM (and its z3s) would
+    /// otherwise keep running, stealing CPU from later measurements and
+    /// writing into their output files.
+    #[test]
+    fn timeout_kills_grandchildren() {
+        let dir = std::env::temp_dir().join(format!("bench-measure3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The grandchild marks that it started, then writes `late` after 4 s,
+        // past the parent's 3 s timeout.
+        let mut c = if cfg!(windows) {
+            let mut c = Command::new("powershell");
+            c.args([
+                "-NoProfile",
+                "-Command",
+                "Start-Process -WindowStyle Hidden powershell -ArgumentList \
+                 '-NoProfile','-Command','Set-Content started x; Start-Sleep 4; Set-Content late x'; \
+                 Start-Sleep 30",
+            ]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "(touch started; sleep 4; touch late) & sleep 30"]);
+            c
+        };
+        c.current_dir(&dir);
+        let s = run_once(&mut c, Duration::from_secs(3), &dir.join("out")).unwrap();
+        assert!(s.timed_out);
+        assert!(dir.join("started").exists(), "the grandchild never started");
+        std::thread::sleep(Duration::from_secs(5));
+        assert!(
+            !dir.join("late").exists(),
+            "the grandchild outlived the timeout"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

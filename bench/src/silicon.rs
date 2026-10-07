@@ -2,26 +2,26 @@
 //! for the same input.
 //!
 //! One pinned fat jar is used, identified by its SHA-256 (and the version line
-//! it prints) in every result. Two times per file: `silicon_wall`, the whole
-//! process including JVM startup (what a user waits for), and
-//! `silicon_verify`, the time Silicon itself reports (the fair comparison
-//! with `helium_verify`). Silicon's verdict is recorded per member, by mapping
-//! each error's source line to the declaration containing it.
+//! it prints) in every result. Silicon runs in one warmed-up JVM
+//! ([`crate::silicon_warm`]); this module holds what that shares with any
+//! Silicon run: how to start it, reading its output, and the cache. Silicon's
+//! verdict is recorded per member, by mapping each error's source line to the
+//! declaration containing it.
 //!
-//! Silicon's result depends only on the `.vpr` and the jar, never on our
-//! commit, so results are cached by `(vpr sha256, jar sha256)` and Silicon is
-//! rerun only when an encoding or the jar changes.
+//! Silicon's result depends only on the `.vpr`, the jar and its arguments,
+//! never on our commit, so results are cached by `(vpr sha256, jar sha256,
+//! arguments)` and Silicon is rerun only when one of those changes (see
+//! [`Cache`] for what is kept).
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::measure::{self, Sample, Status, Timing};
+use crate::measure::{Status, Timing};
 
 /// How to run Silicon.
 #[derive(Debug, Clone)]
@@ -62,14 +62,13 @@ impl Silicon {
         )
     }
 
-    pub fn command(&self, vpr: &Path) -> Command {
-        let mut c = Command::new(&self.java);
-        c.args(&self.jvm_args)
-            .arg("-jar")
-            .arg(&self.jar)
-            .args(&self.args)
-            .arg(vpr);
-        c
+    /// Everything besides the `.vpr` and the jar that shapes a cached result:
+    /// the JVM and Silicon arguments (`-Xss` decides whether Silicon crashes,
+    /// Silicon's own flags what it reports). A short hash, part of the cache
+    /// key.
+    pub fn config_id(&self) -> String {
+        let config = format!("jvm {:?}\0silicon {:?}", self.jvm_args, self.args);
+        crate::sha256_bytes(config.as_bytes())[..16].to_string()
     }
 }
 
@@ -95,6 +94,9 @@ pub struct SiliconResult {
     pub errors: Vec<SiliconError>,
     pub failed_members: BTreeSet<String>,
     pub message: Option<String>,
+    /// The per-run timeout, seconds (what a cached timeout is valid for).
+    #[serde(default)]
+    pub timeout_s: Option<f64>,
 }
 
 /// [`Timing`] in a form that round-trips through the cache file.
@@ -125,8 +127,12 @@ static FINISHED: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+/// One error line: `  [0] <message> (<file>@<line>.<col>)`. The position is
+/// often a range, `@320.11--321.30`; the error belongs to its start line.
+/// From ten errors on, Silicon pads the index: `[ 0]` ... `[10]`.
 static ERROR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*\[\d+\]\s+(.*?)\s*\(([^()@]*)@(\d+)\.(\d+)\)\s*$").unwrap()
+    Regex::new(r"(?m)^\s*\[\s*\d+\]\s+(.*?)\s*\(([^()@]*)@(\d+)\.(\d+)(?:--\d+\.\d+)?\)\s*$")
+        .unwrap()
 });
 static DECL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(method|function|predicate|domain|field|adt|define|import)\s+([A-Za-z_$][\w$']*)")
@@ -174,7 +180,7 @@ pub fn parse_output(out: &str, decls: &[(u64, String)]) -> SiliconOutput {
         Some(part(3)? * 3600.0 + part(4)? * 60.0 + secs)
     });
     let verified = finished.as_ref().map(|c| c[1].starts_with("finished"));
-    let errors = ERROR
+    let mut errors: Vec<SiliconError> = ERROR
         .captures_iter(out)
         .map(|c| {
             let line = c[3].parse().ok();
@@ -185,6 +191,23 @@ pub fn parse_output(out: &str, decls: &[(u64, String)]) -> SiliconOutput {
             }
         })
         .collect();
+    // Errors Silicon counted but we could not read stand in as one error
+    // outside every member, so no member is taken to verify: a dropped error
+    // would otherwise hide a soundness disagreement.
+    let reported = finished
+        .as_ref()
+        .and_then(|c| c.get(2))
+        .and_then(|n| n.as_str().parse::<usize>().ok());
+    if let Some(n) = reported.filter(|&n| n > errors.len()) {
+        errors.push(SiliconError {
+            member: None,
+            line: None,
+            message: format!(
+                "{} of Silicon's {n} errors could not be read",
+                n - errors.len()
+            ),
+        });
+    }
     SiliconOutput {
         version: VERSION.find(out).map(|m| m.as_str().to_string()),
         verified,
@@ -193,61 +216,33 @@ pub fn parse_output(out: &str, decls: &[(u64, String)]) -> SiliconOutput {
     }
 }
 
-/// Run Silicon on `vpr`: `warmup` untimed runs, then `runs` timed ones.
-pub fn measure(
-    silicon: &mut Silicon,
-    vpr: &Path,
-    vpr_sha256: &str,
-    warmup: usize,
-    runs: usize,
-    timeout: Duration,
-    scratch: &Path,
-) -> std::io::Result<SiliconResult> {
-    let source = std::fs::read_to_string(vpr)?;
-    let decls = declaration_lines(&source);
-    let finished = |s: &Sample| FINISHED.is_match(&s.stdout) || FINISHED.is_match(&s.stderr);
-    let samples = measure::repeat(
-        || silicon.command(vpr),
-        warmup,
-        runs,
-        timeout,
-        scratch,
-        finished,
-    )?;
-    let wall = measure::wall_timing(&samples, finished);
-
-    let parsed: Vec<SiliconOutput> = samples
-        .iter()
-        .filter(|s| finished(s))
-        .map(|s| parse_output(&format!("{}\n{}", s.stdout, s.stderr), &decls))
-        .collect();
-    if silicon.version.is_none() {
-        silicon.version = parsed.iter().find_map(|p| p.version.clone());
-    }
-    let verify_runs: Vec<f64> = parsed.iter().filter_map(|p| p.verify_time).collect();
-    let verify = Timing::from_runs(wall.status, verify_runs, &[], None);
-    let last = parsed.last();
-    let errors = last.map(|p| p.errors.clone()).unwrap_or_default();
-    Ok(SiliconResult {
-        silicon: silicon.id(),
-        vpr_sha256: vpr_sha256.to_string(),
-        status: wall.status,
-        verified: last.and_then(|p| p.verified),
-        wall: (&wall).into(),
-        verify: (&verify).into(),
-        peak_rss_mb: wall.peak_rss_mb,
-        failed_members: errors.iter().filter_map(|e| e.member.clone()).collect(),
-        errors,
-        message: wall.message.clone(),
-    })
-}
-
-/// Silicon results keyed by `"<vpr sha256>|<jar sha256>"`.
+/// Silicon results keyed by `"<vpr sha256>|<jar sha256>|<config>"` (see
+/// [`Silicon::config_id`]).
+///
+/// What is kept: finished results, and timeouts with the timeout they hit.
+/// Errors (a crash, an out-of-memory JVM) are not kept, since they may be
+/// the machine's fault rather than the file's, and are measured again.
 pub type Cache = crate::cache::Cache<SiliconResult>;
 
 impl Cache {
-    pub fn key(vpr_sha256: &str, jar_sha256: &str) -> String {
-        format!("{vpr_sha256}|{jar_sha256}")
+    pub fn key(vpr_sha256: &str, jar_sha256: &str, config: &str) -> String {
+        format!("{vpr_sha256}|{jar_sha256}|{config}")
+    }
+
+    /// Whether to keep `r` in the cache.
+    pub fn keeps(r: &SiliconResult) -> bool {
+        r.status != Status::Error
+    }
+
+    /// Whether `hit` answers a run of `runs` timed runs with `timeout`: a
+    /// finished result needs at least as many runs, a timeout must have hit a
+    /// limit no shorter than this one (it would time out again).
+    pub fn reusable(hit: &SiliconResult, runs: usize, timeout: Duration) -> bool {
+        match hit.status {
+            Status::Ok => hit.wall.runs.len() >= runs,
+            Status::Timeout => hit.timeout_s.is_some_and(|t| t >= timeout.as_secs_f64()),
+            Status::Error => false,
+        }
     }
 }
 
@@ -312,5 +307,120 @@ mod tests {
                 message: "Assert might fail. Assertion false might not hold.".into()
             }]
         );
+    }
+
+    /// Silicon usually reports a range (`@9.5--10.12`), with parentheses in
+    /// the message and Windows line endings; the error goes to the member
+    /// holding the range's start line.
+    #[test]
+    fn parses_error_ranges() {
+        let d = declaration_lines(SRC);
+        let out = "Silicon found 1 error in 18.56s:\r\n  [0] Postcondition of m_b might not hold. There might be insufficient permission to access p(get(old(x))) (x.vpr@9.5--10.12)\r\n";
+        let p = parse_output(out, &d);
+        assert_eq!(p.verified, Some(false));
+        assert_eq!(
+            p.errors,
+            [SiliconError {
+                member: Some("m_b".into()),
+                line: Some(9),
+                message: "Postcondition of m_b might not hold. There might be insufficient permission to access p(get(old(x)))".into()
+            }]
+        );
+    }
+
+    /// From ten errors on, Silicon pads the index (`[ 0]`); every error must
+    /// still be read, or the members it names pass as verified.
+    #[test]
+    fn parses_padded_error_indices() {
+        let d = declaration_lines(SRC);
+        let mut out = "Silicon found 11 errors in 31.37s:\n".to_string();
+        for i in 0..11 {
+            let line = if i == 0 { 5 } else { 9 };
+            out += &format!("  [{i:>2}] Assert might fail. (x.vpr@{line}.10--{line}.38)\n");
+        }
+        let p = parse_output(&out, &d);
+        assert_eq!(p.errors.len(), 11);
+        assert_eq!(p.errors[0].member.as_deref(), Some("m_a"));
+        assert!(p.errors.iter().all(|e| e.member.is_some()));
+    }
+
+    /// Errors Silicon counts but we cannot read become one unplaced error,
+    /// so no member is taken to verify.
+    #[test]
+    fn unread_errors_are_unplaced() {
+        let d = declaration_lines(SRC);
+        let out = "Silicon found 3 errors in 1.00s:\n  [0] Assert might fail. (x.vpr@5.3)\n  [1] Something new {x.vpr, line 9}\n";
+        let p = parse_output(out, &d);
+        assert_eq!(p.errors.len(), 2);
+        assert_eq!(p.errors[0].member.as_deref(), Some("m_a"));
+        assert_eq!(p.errors[1].member, None);
+        assert_eq!(
+            p.errors[1].message,
+            "2 of Silicon's 3 errors could not be read"
+        );
+    }
+
+    fn result(status: Status, runs: usize, timeout_s: Option<f64>) -> SiliconResult {
+        SiliconResult {
+            silicon: "s".into(),
+            vpr_sha256: "v".into(),
+            status,
+            verified: (status == Status::Ok).then_some(true),
+            wall: TimingData {
+                median: None,
+                mad: None,
+                runs: vec![1.0; runs],
+            },
+            verify: TimingData {
+                median: None,
+                mad: None,
+                runs: vec![],
+            },
+            peak_rss_mb: None,
+            errors: vec![],
+            failed_members: BTreeSet::new(),
+            message: None,
+            timeout_s,
+        }
+    }
+
+    #[test]
+    fn cache_keeps_and_reuses() {
+        let t = |s| Duration::from_secs(s);
+        // Finished: reused for as many runs as it has, not more.
+        let ok = result(Status::Ok, 5, Some(300.0));
+        assert!(Cache::keeps(&ok));
+        assert!(Cache::reusable(&ok, 5, t(300)));
+        assert!(!Cache::reusable(&ok, 6, t(300)));
+        // Timed out: reused only while the timeout is no longer.
+        let timeout = result(Status::Timeout, 1, Some(300.0));
+        assert!(Cache::keeps(&timeout));
+        assert!(Cache::reusable(&timeout, 5, t(300)));
+        assert!(Cache::reusable(&timeout, 5, t(60)));
+        assert!(!Cache::reusable(&timeout, 5, t(600)));
+        // A timeout cached before the limit was recorded is measured again.
+        assert!(!Cache::reusable(
+            &result(Status::Timeout, 1, None),
+            5,
+            t(60)
+        ));
+        // Errors are never kept.
+        let error = result(Status::Error, 1, Some(300.0));
+        assert!(!Cache::keeps(&error));
+        assert!(!Cache::reusable(&error, 1, t(300)));
+    }
+
+    #[test]
+    fn config_is_part_of_the_key() {
+        let s = |jvm: &str| Silicon {
+            java: "java".into(),
+            jar: "s.jar".into(),
+            jar_sha256: "j".into(),
+            jvm_args: vec![jvm.into()],
+            args: vec![],
+            version: None,
+        };
+        assert_eq!(s("-Xss128m").config_id(), s("-Xss128m").config_id());
+        assert_ne!(s("-Xss128m").config_id(), s("-Xss512m").config_id());
     }
 }
