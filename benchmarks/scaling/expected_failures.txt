@@ -7,8 +7,9 @@
 # loops: every point writes through `&mut` inside the loop, the shape of
 # `../loops/mutate_in_loop.rs::m_bump_n`, which Silicon rejects too (Prusti's inferred
 # permission invariant does not carry a written-through borrow across the back edge).
-# Here the postcondition's exhale fails for want of permission. Not cross-checked
-# with Silicon file by file.
+# Here the postcondition's exhale fails for want of permission. Silicon rejects all
+# 8 files the same way, and only there ("Postcondition of m_run might not hold ...
+# insufficient permission to access p_Param(...)"; checked 2026-10-07).
 loops_n1_b5 m_run
 loops_n1_b20 m_run
 loops_n2_b5 m_run
