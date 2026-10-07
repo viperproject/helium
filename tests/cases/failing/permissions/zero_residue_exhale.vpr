@@ -1,0 +1,19 @@
+// REGRESSION (soundness). `zero_residue_call_consume.vpr` with the call
+// contracts spelled out as exhale/inhale: the gated debit at `exhale acc(y.f)`
+// leaves `x`'s chunk at zero permission with its old value 4, and the summarized
+// `exhale acc(x.f)` must not claim that value agrees with the 5 held at `y`.
+//
+// Must FAIL.
+field f: Int
+
+method zero_residue_exhale(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    exhale acc(y.f)
+    inhale acc(y.f) && y.f == 5
+    exhale acc(x.f)
+    assert false
+  }
+}

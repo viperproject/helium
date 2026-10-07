@@ -1,0 +1,25 @@
+// REGRESSION (soundness). `zero_residue_function_frame.vpr` for a wildcard
+// precondition, which is framed without a consume: positivity is found on `y`'s
+// chunk (through the group summary), so the value must come from there too, not
+// from the zero-permission chunk left at `x`.
+//
+// Must FAIL.
+field f: Int
+
+method set5(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && r.f == 5
+
+function rdw(r: Ref): Int
+  requires acc(r.f, wildcard)
+{ r.f }
+
+method zero_residue_wildcard_frame(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    assert rdw(x) == 4
+  }
+}
