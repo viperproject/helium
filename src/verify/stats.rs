@@ -124,6 +124,12 @@ pub struct VerifyStats {
     /// Goals discharged by the last tier — non-forking `ite`-goal decomposition
     /// (a constant branch reduces the goal to its other branch, no case split).
     pub prove_ite_decompose: u64,
+    /// Summaries of a location's permission over the chunks that may sit there
+    /// (`summarize_perm_at`): the leaves of the totals built, each proven as its
+    /// own obligation, and the members whose aliasing the context left open — each
+    /// such member doubles the leaves. A must-alias member adds no leaf.
+    pub summary_leaves: u64,
+    pub summary_may_alias: u64,
     /// Non-deterministic timing (excluded from `Eq` / the gated snapshot).
     pub timing: TimingTrend,
     /// Per-e-graph wall clock (ground vs block scratch vs probes vs clones).
@@ -269,6 +275,8 @@ impl VerifyStats {
             prove_saturate,
             prove_probe,
             prove_ite_decompose,
+            summary_leaves,
+            summary_may_alias,
             timing,
             graph_timing,
             rule_timing,
@@ -298,6 +306,8 @@ impl VerifyStats {
             ("prove_saturate", n(prove_saturate)),
             ("prove_probe", n(prove_probe)),
             ("prove_ite_decompose", n(prove_ite_decompose)),
+            ("summary_leaves", n(summary_leaves)),
+            ("summary_may_alias", n(summary_may_alias)),
             (
                 "per_rule",
                 Json::obj(per_rule.iter().map(|(k, v)| (k.clone(), n(v)))),

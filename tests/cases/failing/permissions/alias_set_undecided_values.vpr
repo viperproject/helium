@@ -1,0 +1,17 @@
+// A consume whose location the context does not place: `x` is `y0` or `y1`, not
+// known which. The summary draws on both chunks, each gated by its own address
+// equality, and so may each member's value agreement be — but only that way. The
+// block scratch assumes a guarded fact *without* its guard, so an agreement left
+// to the guard equated `y0.f` with `y1.f` there, which `x == y0 != y1` refutes.
+
+field f: Int
+
+method m(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+  requires x == y0 || x == y1
+{
+  var a: Int := y0.f
+  var b: Int := y1.f
+  exhale acc(x.f, 1/2)
+  assert a == b
+}
