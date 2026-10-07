@@ -202,7 +202,7 @@ fn perm_add_wildcard(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) 
 ///
 /// The visited set only breaks cycles — ids are removed on the way out, so a
 /// shared subterm is not poisoned by an in-progress ancestor.
-fn perm_known_positive(ctx: &VerifyContext<'_>, id: egg::Id) -> bool {
+pub(crate) fn perm_known_positive(ctx: &VerifyContext<'_>, id: egg::Id) -> bool {
     perm_sign(ctx, id, true, &mut crate::dhash::HashSet::default())
 }
 
@@ -847,16 +847,24 @@ pub(crate) fn prove_perm_positive(
     held: &ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> bool {
-    prove_perm_leaves(ctx, held, pc_lits, &|ctx, h, pc| {
-        if let Some(hr) = known_real(ctx, h) {
-            if hr > num::BigRational::from(num::BigInt::from(0)) {
-                return true;
-            }
-        }
-        let zero = expr!(ctx, 0 / 1);
-        let goal = expr!(ctx, { zero } < r { h });
-        ctx.prove_under_pc(goal, pc)
-    })
+    prove_perm_leaves(ctx, held, pc_lits, &|ctx, h, pc| prove_positive(ctx, h, pc))
+}
+
+/// `0 < t` under `pc` for one permission term: its sign first, then the prover.
+///
+/// The e-graph has no order reasoning over products, so the prover alone cannot
+/// sign a *scaled* amount — a predicate body's `1/2` or `read()` multiplied by the
+/// amount it was unfolded at, which inside a function is always a wildcard. Its
+/// sign is a property of the term ([`perm_known_positive`]: a product of
+/// positives, a positive plus a non-negative, an `ite` of positives, over leaves
+/// whose positivity is a literal or a standing fact), so it is read off first, and
+/// the prover answers only what the term's structure leaves open.
+fn prove_positive(ctx: &mut VerifyContext<'_>, t: egg::Id, pc: &[(egg::Id, Polarity)]) -> bool {
+    if perm_known_positive(ctx, t) {
+        return true;
+    }
+    let goal = expr!(ctx, (0 / 1) < r { t });
+    ctx.prove_under_pc(goal, pc)
 }
 
 /// `¬(held < cap)` (full/write permission) over a structured `held`, per leaf.
@@ -1400,8 +1408,7 @@ fn debit_wildcard_walk(
                 return (held.clone(), held_value, None);
             }
             let held_id = held.to_id(ctx);
-            let held_pos = expr!(ctx, (0 / 1) < r { held_id });
-            if !ctx.prove_under_pc(held_pos, pc_lits) {
+            if !prove_positive(ctx, held_id, pc_lits) {
                 return (
                     held.clone(),
                     held_value,

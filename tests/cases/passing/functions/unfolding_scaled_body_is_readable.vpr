@@ -1,0 +1,99 @@
+// Inside a function every permission amount is read-only (Viper treats it as a
+// wildcard when positive), so an `unfolding` in a function body unfolds at a
+// wildcard and produces the predicate body's amounts SCALED by it: `w * 1/2`,
+// `w * read()`, `w * w'`, `w * p`. Reading through the unfolded predicate needs
+// only that the scaled amount is positive. That is a fact about the product's
+// factors, which the e-graph (no order reasoning over products) cannot prove; it
+// is read off the term's sign instead. Silicon verifies every member.
+//
+// `p_Ref_immutable_snap` is the shape Prusti (rewrite-2023) emits for every `&T`:
+// the reference predicate holds `read()` of the pointee, and its snapshot function
+// calls the pointee's snapshot function, whose precondition names `write`.
+
+domain ReadPerm {
+    function read(): Perm
+    axiom read_bounds { none < read() && read() < write }
+}
+
+field f: Int
+field g: Int
+
+predicate PH(x: Ref) { acc(x.f, 1/2) }
+predicate PR(x: Ref) { acc(x.f, read()) }
+predicate PW(x: Ref) { acc(x.f, wildcard) }
+predicate PN(x: Ref) { acc(PR(x), read()) }
+predicate PP(x: Ref, p: Perm) { none < p && acc(x.f, p) }
+predicate PG(x: Ref, b: Bool) { b ==> acc(x.f, 1/2) }
+predicate PT(x: Ref, b: Bool) { b ? acc(x.f, 1/2) : acc(x.g, 1/2) }
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+function half_call(x: Ref): Int
+    requires acc(PH(x), write)
+{ unfolding acc(PH(x), write) in rd(x) }
+
+function half_read(x: Ref): Int
+    requires acc(PH(x), write)
+{ unfolding acc(PH(x), write) in x.f }
+
+function read_call(x: Ref): Int
+    requires acc(PR(x), write)
+{ unfolding acc(PR(x), write) in rd(x) }
+
+function wild_call(x: Ref): Int
+    requires acc(PW(x), write)
+{ unfolding acc(PW(x), write) in rd(x) }
+
+function nested_call(x: Ref): Int
+    requires acc(PN(x), write)
+{ unfolding acc(PN(x), write) in unfolding acc(PR(x), write) in rd(x) }
+
+function param_call(x: Ref, p: Perm): Int
+    requires acc(PP(x, p), write)
+{ unfolding acc(PP(x, p), write) in rd(x) }
+
+function gated_read(x: Ref, b: Bool): Int
+    requires b && acc(PG(x, b), write)
+{ unfolding acc(PG(x, b), write) in x.f }
+
+function gated_branch_call(x: Ref, b: Bool): Int
+    requires acc(PG(x, b), write)
+{ unfolding acc(PG(x, b), write) in (b ? rd(x) : 0) }
+
+function ternary_read(x: Ref, b: Bool): Int
+    requires acc(PT(x, b), write)
+{ unfolding acc(PT(x, b), write) in (b ? x.f : x.g) }
+
+// The Prusti `&T` shape.
+domain Snap {
+    function snap_cons(a: Ref, v: Int): Snap
+}
+
+predicate p_Param(self: Ref) { acc(self.f) }
+predicate p_Ref_immutable(self: Ref) {
+    acc(self.g) && acc(p_Param(loc(self)), read())
+}
+
+function loc(r: Ref): Ref
+
+function p_Param_snap(self: Ref): Int
+    requires acc(p_Param(self), write)
+
+function p_Ref_immutable_snap(self: Ref): Snap
+    requires acc(p_Ref_immutable(self), write)
+{
+    unfolding acc(p_Ref_immutable(self), write) in
+        snap_cons(loc(self), p_Param_snap(loc(self)))
+}
+
+// Callers hold only a fraction; a function call frames, it takes nothing.
+method client(x: Ref)
+    requires acc(PR(x), 1/3)
+    ensures acc(PR(x), 1/3)
+{
+    var a: Int := read_call(x)
+    var b: Int := read_call(x)
+    assert a == b
+}
