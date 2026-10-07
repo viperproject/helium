@@ -1,0 +1,50 @@
+// Unfolding at a fraction (or a wildcard) produces the predicate body's amounts
+// scaled by it. When the body amount is not a literal (`read()`, a wildcard) the
+// product does not const-fold, and its positivity -- all a function call or a field
+// read needs -- follows from the signs of its factors, not from anything the
+// e-graph can prove about the product itself. Silicon verifies every member.
+
+domain ReadPerm {
+    function read(): Perm
+    axiom read_bounds { none < read() && read() < write }
+}
+
+field f: Int
+
+predicate PH(x: Ref) { acc(x.f, 1/2) }
+predicate PR(x: Ref) { acc(x.f, read()) }
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+method unfold_call(x: Ref)
+    requires acc(PR(x), 1/2)
+{
+    var v: Int
+    unfold acc(PR(x), 1/2)
+    v := rd(x)
+}
+
+method unfolding_call(x: Ref)
+    requires acc(PR(x), 1/2)
+{
+    var v: Int
+    v := unfolding acc(PR(x), 1/2) in rd(x)
+}
+
+method unfold_read(x: Ref)
+    requires acc(PR(x), 1/3)
+{
+    var v: Int
+    unfold acc(PR(x), 1/3)
+    v := x.f
+}
+
+method unfold_wildcard_call(x: Ref)
+    requires acc(PH(x), wildcard)
+{
+    var v: Int
+    unfold acc(PH(x), wildcard)
+    v := rd(x)
+}

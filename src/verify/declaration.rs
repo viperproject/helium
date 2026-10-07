@@ -11,8 +11,8 @@ use crate::{
             Chunk, ChunkPerm, Heap, LocationKind,
             algebra::{
                 Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
-                merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
-                summarize_perm_at, union_heaps,
+                merge_heaps, perm_held_at, perm_known_positive, prove_perm_positive,
+                prove_perm_write, summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
         },
@@ -2862,6 +2862,13 @@ fn inst_obligations(
                     let zero = expr!(ctx, 0 / 1);
                     let goal = ctx.add(Symbolic::Binary(BinOp::LtR, [zero, zero]));
                     vec![(goal, VerifyError::InsufficientPermission)]
+                }
+                // A leaf whose sign its structure already settles (a scaled
+                // amount, see `prove_perm_positive`) owes no goal.
+                Some(p @ ChunkPerm::Leaf { .. })
+                    if perm_known_positive(ctx, p.as_leaf().unwrap()) =>
+                {
+                    vec![]
                 }
                 Some(p @ ChunkPerm::Leaf { .. }) => {
                     let leaf = p.as_leaf().unwrap();

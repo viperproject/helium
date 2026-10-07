@@ -1,0 +1,14 @@
+// As `scaled_possibly_zero_amount.vpr`, through a call's precondition (the framing
+// path) rather than a field read. Silicon: "Precondition of function rd might not hold".
+
+field f: Int
+
+predicate PZ(x: Ref, p: Perm) { none <= p && acc(x.f, p) }
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+function bad(x: Ref, p: Perm): Int
+    requires acc(PZ(x, p), write)
+{ unfolding acc(PZ(x, p), write) in rd(x) }
