@@ -605,6 +605,7 @@ impl Heap {
     }
 
     /// The chunk held at `addr` within `kind`'s group (exact e-class match).
+    #[cfg(test)]
     pub fn chunk(&self, kind: &LocationKind, addr: egg::Id) -> Option<&Chunk> {
         self.chunks_of(kind).iter().find(|c| c.addr == addr)
     }

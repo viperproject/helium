@@ -1,0 +1,14 @@
+// A read through a location two chunks share only inside the branch makes their
+// values agree there, and nowhere else.
+
+field f: Int
+
+method m(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  var v: Int
+  if (x == y0 && x == y1) {
+    v := x.f
+  }
+  assert y0.f == y1.f
+}

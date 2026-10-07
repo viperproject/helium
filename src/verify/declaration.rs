@@ -10,11 +10,10 @@ use crate::{
         heap::{
             Chunk, ChunkPerm, Heap, LocationKind,
             algebra::{
-                Demand, Taken, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
-                merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
+                Demand, Members, Taken, find_chunk_consolidated, heap_subtract, heap_union,
+                heap_write, merge_heaps, perm_held_at, prove_perm_positive, read_location,
                 summarize_perm_at, summarized_value, union_heaps,
             },
-            gate_perm_by_guard,
         },
         lang::Symbolic,
         stats,
@@ -364,22 +363,22 @@ fn eval_pure_inst(
         PureInst::Deref(hv, loc) => {
             let heap = get_heap(state, hv);
             let addr = state.get_val(ctx, loc);
-            let chunk = state
+            let read = state
                 .loc_kind(loc)
-                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(&k), addr, pc_lits).cloned());
-            match chunk {
-                Some(c) => {
+                .and_then(|k| read_location(ctx, heap.chunks_of(&k), addr, pc_lits));
+            match read {
+                Some((_, taken)) => {
                     // The chunk's recipe provenance is the deref's pure term —
                     // per heap state, so a two-state resource reading the same
                     // address in `h0` and `h1` stays distinct.
                     let recipe = if ctx.recipe.is_some() {
-                        Some(c.recipe.clone().ok_or(VerifyError::Unimplemented(
+                        Some(taken.recipe.ok_or(VerifyError::Unimplemented(
                             "purify: deref outside footprint",
                         ))?)
                     } else {
                         None
                     };
-                    (c.value, recipe)
+                    (taken.value, recipe)
                 }
                 None => {
                     if ctx.recipe.is_some() {
@@ -1065,39 +1064,12 @@ fn eval_heap_inst(
             let kind = state
                 .loc_kind(loc)
                 .expect("assign location must be Addr-typed");
-            let held = h.chunk(&kind, addr).cloned();
-            let perm = held
-                .as_ref()
-                .map(|c| c.ungated_perm().clone())
-                .unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1)));
-            let guard = held
-                .as_ref()
-                .map(|c| c.guard_pc())
-                .unwrap_or_else(|| std::rc::Rc::from(Vec::new()));
-            // SIDECOND: prove `not(perm < cap)` (full/write permission, `cap` =
-            // the location's own permission bound, `1/1` for a field) under pc —
-            // per leaf, so a branch-structured held perm never materializes. Under
-            // the guarded-merge path the write obligation is proven against the
-            // guard-gated perm (write required only where the chunk is present).
             let pc_lits: Vec<(egg::Id, Polarity)> = pc
                 .conds
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
-            let proof_perm = if !guard.is_empty() {
-                gate_perm_by_guard(ctx, &perm, &guard)
-            } else {
-                perm.clone()
-            };
-            if !prove_perm_write(ctx, &proof_perm, &kind.bound, &pc_lits) {
-                return Err(VerifyError::InsufficientPermission);
-            }
-            // Permission (and its presence guard) unchanged by the write; keep it
-            // structural.
-            Ok(h.with_chunk(
-                &kind,
-                Chunk::new_perm(addr, perm, new_val).with_guard(guard),
-            ))
+            heap_write(ctx, &h, &kind, addr, new_val, &pc_lits)
         }
     }
 }
@@ -1520,7 +1492,8 @@ fn walk_footprint(
                     None if suff => Taken::fresh(ctx, &slot.kind),
                     _ => {
                         let chunks = heap.chunks_of(&slot.kind).to_vec();
-                        let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
+                        let (total, set) =
+                            summarize_perm_at(ctx, &chunks, addr, pc_lits, Members::All);
                         let mut pc = pc_lits.to_vec();
                         pc.push((guard, Polarity::Positive));
                         if set.is_empty() || !prove_perm_positive(ctx, &total, &pc) {
@@ -2830,18 +2803,18 @@ fn inst_obligations(
         // `0 < perm(heap, loc)` — the location must be framed by the heap being
         // read. In a function body that heap is the one the entry bound `inhale`
         // reconstructs from the snapshot parameter, so this failing means a read
-        // outside the declared precondition. `chunk_under_pc` lets an address
-        // that only aliases a held chunk under this instruction's branch (e.g.
-        // `y.f` where `x == y` holds here) still frame.
+        // outside the declared precondition. `read_location` lets an address
+        // that only aliases held chunks in this instruction's context (e.g. `y.f`
+        // where `x == y` holds here) still frame, by their summed permission.
         InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
             let addr = state.get_val(ctx, loc);
             let held = get_heap(state, heap);
-            let perm = state.loc_kind(loc).and_then(|k| {
-                let c = chunk_under_pc(ctx, held.chunks_of(&k), addr, pc_lits)?.clone();
-                // Frame against the gated perm: a conditionally-held location
-                // frames only where its guard holds.
-                Some(c.gated_perm(ctx))
-            });
+            // Framed by the gated perm: a conditionally-held location frames only
+            // where its guard holds.
+            let perm = state
+                .loc_kind(loc)
+                .and_then(|k| read_location(ctx, held.chunks_of(&k), addr, pc_lits))
+                .map(|(perm, _)| perm);
             match perm {
                 // A bare (or absent) perm: the goal `0 < leaf` is discharged by
                 // the caller exactly as before (flag-OFF byte-identical).

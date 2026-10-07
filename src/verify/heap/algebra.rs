@@ -14,8 +14,11 @@
 
 use crate::verify::{
     context::VerifyContext,
+    context::prove::AddrRelation,
     error::VerifyError,
-    heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_meet, cube_push},
+    heap::{
+        Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_entails, cube_eq, cube_meet, cube_push,
+    },
     lang::Symbolic,
 };
 use crate::vmir::{BinOp, Bound, Literal, Polarity};
@@ -664,6 +667,57 @@ pub(crate) fn heap_union(
     }
     assume_location_axioms(ctx, &out);
     out
+}
+
+/// Field assignment: write `new_val` to the location `addr`, which needs all the
+/// permission the location can carry ([`prove_perm_write`]).
+///
+/// First against the chunk at `addr` itself. When that is not enough, the location's
+/// permission may be spread over chunks that coincide with `addr` only in this
+/// context, so the write is proven against their sum ([`summarize_perm_at`]) and
+/// lands on every one of them: each is the location wherever its condition holds,
+/// so each takes `new_val` there and keeps its own value elsewhere. The permission
+/// amounts are unchanged by a write.
+pub(crate) fn heap_write(
+    ctx: &mut VerifyContext<'_>,
+    h: &Heap,
+    kind: &LocationKind,
+    addr: egg::Id,
+    new_val: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Result<Heap, VerifyError> {
+    let (out, held) = find_chunk_consolidated(ctx, h, kind, addr, pc_lits, false);
+    if let Some(c) = &held {
+        // Proven against the guard-gated perm: write is required only where the
+        // chunk is present. Per leaf, so a branch-structured perm never
+        // materializes.
+        let perm = c.gated_perm(ctx);
+        if prove_perm_write(ctx, &perm, &kind.bound, pc_lits) {
+            let mut written = c.clone();
+            written.value = new_val;
+            written.recipe = None;
+            return Ok(out.with_chunk(kind, written));
+        }
+    }
+    let chunks = out.chunks_of(kind).to_vec();
+    let (total, set) = summarize_tiered(ctx, &chunks, addr, pc_lits, held.is_some());
+    if set.len() <= usize::from(held.is_some())
+        || !prove_perm_write(ctx, &total, &kind.bound, pc_lits)
+    {
+        return Err(VerifyError::InsufficientPermission);
+    }
+    let mut out = out;
+    for (c, cube) in set {
+        let (_, own) = split_ambient(ctx, &cube);
+        let mut written = c.clone();
+        written.value = own.iter().rev().fold(new_val, |acc, (lit, pol)| match pol {
+            Polarity::Positive => expr!(ctx, if {*lit} then {acc} else {c.value}),
+            Polarity::Negative => expr!(ctx, if {*lit} then {c.value} else {acc}),
+        });
+        written.recipe = None;
+        out = out.with_chunk(kind, written);
+    }
+    Ok(out)
 }
 
 /// Prove a per-leaf permission predicate over a (possibly branch-structured)
@@ -1459,29 +1513,18 @@ fn debit_wildcard_walk(
     }
 }
 
-/// The two **summarized** resolutions of a consume that the direct path could not
-/// settle, tried in order. Shared by both callers in [`heap_subtract_inner`] — the
-/// no-chunk-at-all case and the chunk-found-but-insufficient case — which ran two
-/// near-copies of this ladder before.
+/// The **summarized** resolution of a consume that the direct path could not
+/// settle: the permission at the demanded location summed over every chunk of the
+/// group that may sit there ([`summarize_perm_at`]), consumed by
+/// [`heap_subtract_summarized`]. Shared by both callers in [`heap_subtract_inner`] —
+/// the no-chunk-at-all case and the chunk-found-but-insufficient case.
 ///
-/// In order, cheapest first:
-/// 1. **pc-implied aliasing** ([`VerifyContext::pc_alias_partners`]) — the demanded
-///    address coincides with held chunks only under the path condition. Needs a
-///    probe, so it is tried only once the direct path has failed.
-/// 2. **whole-group Σ-ite summary** ([`summarize_perm_at`]) — a chunk may still sit
-///    at this address under an equality the pc does not mention. Strictly the last
-///    resort: it walks every chunk of the group.
-///
-/// `existing` is the chunk that matched on ground, if any, and does double duty:
-/// - it **seeds** the pc-alias set, so the ground match's own fraction joins the sum;
-/// - it sets the **bar** for the group summary. With nothing matched, any non-empty
-///   summary is new information. With a chunk already tried and found insufficient, a
-///   one-member summary is that same chunk again — only a genuinely larger set is
-///   worth the attempt.
-///
-/// The pc-alias branch **returns** rather than falling through when it produces a
-/// set: its `Err` is the answer. (With `existing = Some`, the set always contains at
-/// least that chunk, so this is exactly the pre-refactor control flow of both callers.)
+/// The set is drawn from `out`, the heap after [`find_chunk_consolidated`] merged
+/// the ground-equal chunks, so it holds `existing` itself when one matched. That
+/// sets the **bar**: with nothing matched, any non-empty summary is new
+/// information; with a chunk already tried and found insufficient, a one-member
+/// summary is that same chunk again — only a genuinely larger set is worth the
+/// attempt.
 pub(crate) fn heap_subtract_summarized_fallbacks(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
@@ -1492,29 +1535,10 @@ pub(crate) fn heap_subtract_summarized_fallbacks(
     chunk2_perm: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Result<(Heap, Taken), VerifyError> {
-    // 1. pc-implied aliasing. The whole partner *set* is collected, not the first
-    //    hit: several held chunks can coincide with the demand under the pc, and only
-    //    their sum is the permission at that location. A first-hit lookup is
-    //    order-dependent — it can land on a chunk an earlier consume already drained
-    //    while the full permission sits in another.
-    //
-    //    Consuming through it goes down the invariant-7 path: sufficiency is proven
-    //    under the pc and the debit is **gated** by the pc, so off-path — where the
-    //    addresses are unrelated — nothing is taken, and ground never consolidates
-    //    two chunks that are only conditionally equal.
-    let partners = pc_alias_partners(ctx, h1.chunks_of(kind), addr, pc_lits);
-    if !partners.is_empty() {
-        let (set, total) = pc_alias_set(ctx, h1, kind, existing, &partners, pc_lits);
-        if !set.is_empty() {
-            let r = heap_subtract_summarized(ctx, out, kind, &set, total, chunk2_perm, pc_lits);
-            return r;
-        }
-    }
-    // 2. Whole-group Σ-ite summary.
-    let (total, set) = summarize_perm_at(ctx, h1.chunks_of(kind), addr, pc_lits);
+    let chunks = out.chunks_of(kind).to_vec();
+    let (total, set) = summarize_tiered(ctx, &chunks, addr, pc_lits, existing.is_some());
     if set.len() > usize::from(existing.is_some())
-        && let Ok(r) =
-            heap_subtract_summarized(ctx, out.clone(), kind, &set, total, chunk2_perm, pc_lits)
+        && let Ok(r) = heap_subtract_summarized(ctx, out, kind, &set, total, chunk2_perm, pc_lits)
     {
         return Ok(r);
     }
@@ -1564,6 +1588,19 @@ pub(crate) fn subtract_miss_trace(
     }
 }
 
+/// Split a summarized member's cube into the part the current block's cube already
+/// assumes and the member's own condition. The block's heap exists only on the
+/// block's path, so the first part is given wherever that heap is read; only the
+/// second distinguishes where the member sits at the location from where it does
+/// not.
+fn split_ambient(
+    ctx: &VerifyContext<'_>,
+    cube: &[(egg::Id, Polarity)],
+) -> (Vec<(egg::Id, Polarity)>, Vec<(egg::Id, Polarity)>) {
+    cube.iter()
+        .partition(|lit| cube_entails(ctx, ctx.current_cube(), std::slice::from_ref(*lit)))
+}
+
 /// A chunk's amount as it counts under `pc`: bare when the pc already entails the
 /// chunk's presence guard (the common case, and it keeps the term small), gated
 /// `guard ? perm : 0` otherwise.
@@ -1579,66 +1616,17 @@ fn present_amount(
     }
 }
 
-/// Build the pc-alias flavour of a [`heap_subtract_summarized`] set: `existing` (when
-/// a chunk did match on ground) followed by the pc-alias `partners`, every member
-/// gated by the *same* cube — the pc.
-///
-/// The returned total is not gated by the pc: the sufficiency proof runs under the
-/// pc anyway ([`VerifyContext::prove_under_pc`]), so gating each addend would only
-/// grow the term. Each addend is gated by its own presence guard, though (see
-/// [`present_amount`]).
-pub(crate) fn pc_alias_set(
-    ctx: &mut VerifyContext<'_>,
-    h1: &Heap,
-    kind: &LocationKind,
-    existing: Option<&Chunk>,
-    partners: &[egg::Id],
-    pc_lits: &[(egg::Id, Polarity)],
-) -> (Vec<(Chunk, crate::verify::heap::HeapPc)>, ChunkPerm) {
-    let members: Vec<Chunk> = existing
-        .cloned()
-        .into_iter()
-        .chain(partners.iter().filter_map(|a| {
-            let canon = ctx.egraph.find(*a);
-            h1.chunks_of(kind)
-                .iter()
-                .find(|c| ctx.egraph.find(c.addr) == canon)
-                .cloned()
-        }))
-        .collect();
-    // Structural, like the Σ-ite summary's: a member whose perm carries join
-    // structure keeps it, so sufficiency is decided per leaf rather than over a
-    // flattened `ite`.
-    // A member contributes only where it is PRESENT. The pc gate is implicit (the
-    // proof runs under the pc), but a member's own presence guard is a different
-    // condition — a chunk held on one join arm only — and summing it ungated
-    // counted permission on the arm where the chunk does not exist.
-    let mut total: Option<ChunkPerm> = None;
-    for c in &members {
-        let amount = present_amount(ctx, c, pc_lits);
-        total = Some(match total {
-            None => amount,
-            Some(t) => perm_add(ctx, &t, &amount),
-        });
-    }
-    let cube: crate::verify::heap::HeapPc = std::rc::Rc::from(pc_lits.to_vec());
-    let set = members.into_iter().map(|c| (c, cube.clone())).collect();
-    (
-        set,
-        total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1))),
-    )
-}
-
 /// Consume `chunk2_perm` against a **summarized** location: a set of chunks that each
 /// sit at the demanded address only *conditionally*, paired with the cube that
 /// condition is.
 ///
-/// Two callers supply two different gates, and the algorithm is the same for both:
-/// - **pc-alias** (invariant 7 of the two-egraph block model) — cube = the pc.
-///   `acc(x.f,1/2)` and `acc(y.f,1/2)` are distinct chunks on ground, but under an
-///   in-branch `x == y` they are one location holding `1/1`.
-/// - **Σ-ite** — cube = `c.addr == addr` itself, the condition the pc gate is
-///   only ever a proxy for. Strictly more precise, and it needs no probe.
+/// Each member comes with the condition under which it sits at the demanded address
+/// ([`summarize_perm_at`]): nothing for a ground match, the operation's context for
+/// a must-alias (`acc(x.f,1/2)` and `acc(y.f,1/2)` are distinct chunks on ground,
+/// but under an in-branch `x == y` they are one location holding `1/1`), the address
+/// equality itself for a may-alias. The algorithm is the same for all of them; what
+/// varies is only how much of the condition is the block's cube, which the heap of a
+/// block takes as given ([`split_ambient`]).
 ///
 /// - **Sufficiency** is proven against `total`, the sum the caller summarized: at any
 ///   state where a member's cube holds it is the demanded location, so its fraction
@@ -1696,6 +1684,13 @@ pub(crate) fn heap_subtract_summarized(
     let mut out = out;
     let mut remaining = chunk2_perm;
     for (chunk, cube) in set.iter().cloned() {
+        // The demand is met: the members after this one give up nothing and stay
+        // as they are.
+        if known_real(ctx, remaining)
+            .is_some_and(|r| r == num::BigRational::from(num::BigInt::from(0)))
+        {
+            break;
+        }
         // What the chunk can give up is what it holds where it is present: an
         // absent member (its guard false) must neither be debited nor retire any
         // of the demand, or a present member is left holding permission it had
@@ -1706,10 +1701,14 @@ pub(crate) fn heap_subtract_summarized(
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
         // fractions fold it away.
         let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
-        let gated = gate_amount_by_pc(ctx, take, &cube);
+        // Gated by the member's own condition only: this heap exists only on the
+        // block's path, so the cube's ambient part is already given there, and
+        // gating by it would only keep the remainder from folding.
+        let (_, own) = split_ambient(ctx, &cube);
+        let gated = gate_amount_by_pc(ctx, take, &own);
         let rest = perm_sub(ctx, chunk.ungated_perm(), gated);
         // Debit `remaining` by what was actually taken — the **gated** amount, not
-        // `take`. With one shared cube (the pc-alias caller) the two coincide on-path
+        // `take`. With one shared cube (a must-alias set) the two coincide on-path
         // and both are `0` off-path, so this is that path unchanged. With per-chunk
         // cubes they diverge, and using `take` would be unsound: a member whose gate
         // is false gives up nothing, yet would still retire part of the demand,
@@ -1772,7 +1771,8 @@ pub(crate) fn summarized_value(
         .map(|(chunk, _)| present_amount(ctx, chunk, pc_lits).to_id(ctx))
         .collect();
     let holder = set.iter().zip(&holds).position(|((_, cube), hold)| {
-        crate::verify::heap::cube_entails(ctx, pc_lits, cube) && perm_known_positive(ctx, *hold)
+        let (_, own) = split_ambient(ctx, cube);
+        crate::verify::heap::cube_entails(ctx, pc_lits, &own) && perm_known_positive(ctx, *hold)
     });
     let taken = match holder {
         Some(i) => Taken::of(&set[i].0),
@@ -1784,8 +1784,14 @@ pub(crate) fn summarized_value(
         }
         let held = expr!(ctx, (0 / 1) < r { hold });
         let agree = expr!(ctx, { chunk.value } == { taken.value });
-        let agree = ctx.implication(agree, std::iter::once((held, Polarity::Positive)));
-        ctx.assume_guarded(agree, cube.iter().rev().copied());
+        // Only the block's own cube may be left to the guard: the scratch assumes
+        // the fact without it. The member's own condition — an address equality,
+        // a presence guard, the instruction's pc — has to sit inside the fact, or
+        // the scratch equates the values of every member, aliased or not.
+        let (ambient, own) = split_ambient(ctx, cube);
+        let antecedents = std::iter::once((held, Polarity::Positive)).chain(own.into_iter().rev());
+        let agree = ctx.implication(agree, antecedents);
+        ctx.assume_guarded(agree, ambient.into_iter().rev());
     }
     taken
 }
@@ -1891,6 +1897,75 @@ pub(crate) fn merge_heaps(
     out
 }
 
+/// Where each chunk of a group stands to `addr` in the context of a heap operation
+/// ([`VerifyContext::addr_relations`]), paired with the `c.addr == addr` node an
+/// undecided member is gated by (the chunk's own address for a ground match, which
+/// mints no node). With `gates` off no equality node is minted at all — for a
+/// caller that only uses `Equal` members — so nothing is `Distinct` either.
+fn relate_chunks(
+    ctx: &mut VerifyContext<'_>,
+    chunks: &[Chunk],
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+    gates: bool,
+) -> Vec<(AddrRelation, egg::Id)> {
+    let canon = ctx.egraph.find(addr);
+    let pairs: Vec<(egg::Id, egg::Id)> = chunks
+        .iter()
+        .map(|c| {
+            let eq = if !gates || ctx.egraph.find(c.addr) == canon {
+                c.addr
+            } else {
+                expr!(ctx, { c.addr } == { addr })
+            };
+            (c.addr, eq)
+        })
+        .collect();
+    let relations = ctx.addr_relations(addr, &pairs, pc_lits);
+    relations
+        .into_iter()
+        .zip(pairs.into_iter().map(|(_, eq)| eq))
+        .collect()
+}
+
+/// The context [`relate_chunks`] decides `Equal` in, as a cube — the block's cube
+/// and `pc_lits` — which is the condition a member found there sits at the location
+/// under.
+fn context_cube(ctx: &VerifyContext<'_>, pc_lits: &[(egg::Id, Polarity)]) -> HeapPc {
+    let cube = ctx.current_cube().to_vec();
+    std::rc::Rc::from(cube_meet(ctx, &cube, pc_lits).unwrap_or(cube))
+}
+
+/// Which chunks a [`summarize_perm_at`] counts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Members {
+    /// Only those the context places at the location (must-aliases): a sum of
+    /// plain addends, one leaf per leaf of the members' own structure.
+    Placed,
+    /// Also those it leaves open, each gated by its address equality — whose
+    /// `Select`s multiply the leaves, see [`summarize_perm_at`].
+    All,
+}
+
+/// The summary a consume or a write draws on, cheapest first: the members the
+/// context places at the location, and only when it places none beyond the chunk
+/// already tried (`tried`), every chunk that may sit there. Permission is never
+/// negative, so the placed members' sum is a lower bound the open ones can only
+/// add to; deciding that bound needs no case analysis over the open gates.
+fn summarize_tiered(
+    ctx: &mut VerifyContext<'_>,
+    chunks: &[Chunk],
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+    tried: bool,
+) -> (ChunkPerm, Vec<(Chunk, crate::verify::heap::HeapPc)>) {
+    let placed = summarize_perm_at(ctx, chunks, addr, pc_lits, Members::Placed);
+    if placed.1.len() > usize::from(tried) {
+        return placed;
+    }
+    summarize_perm_at(ctx, chunks, addr, pc_lits, Members::All)
+}
+
 /// The **Σ-ite summary** of a location: the permission held at `addr`, summed over
 /// *every* chunk of the group, each gated by whether it sits at that address.
 ///
@@ -1906,22 +1981,25 @@ pub(crate) fn merge_heaps(
 /// - the **address gate** (`c.addr == addr`) — whether this chunk is *at* the
 ///   location at all.
 ///
-/// The address gate is resolved by the engine, not by Rust-side `find` at walk
-/// time. That distinction is the point: an inhaled `a == b` merges the two address
-/// classes only once the `eq-true-union` rewrite fires during saturation, so a
-/// walk-time `find` reads the pre-merge graph and silently drops the aliasing chunk.
-/// Leaving the condition in the term lets whatever saturation the obligation runs
-/// settle it.
-///
-/// Cheap in the common case, because the gate is decided structurally where it can be:
+/// Each address gate is first **decided against the context** of the operation —
+/// ground, the block's cube and the pc, one saturated graph for the whole group
+/// ([`relate_chunks`]) — and only a gate that context leaves open is kept in the
+/// sum. That is what keeps the summary proportional to the group: every open gate
+/// is a `Select`, and [`perm_add`] distributes the `Select`s of independent gates
+/// into one leaf per alias configuration, each its own obligation, so `K` open gates
+/// cost `2^K` proofs. The configurations the context refutes are exactly the ones a
+/// decided gate drops. Per chunk:
 /// - **ground-equal address** — ungated, contributing exactly the term the old
 ///   ground-match sum built, so the fast path mints no extra nodes;
-/// - **provably distinct** — skipped outright, minting nothing. This prune is what
-///   keeps the sum from growing the `ite` tower recorded in
-///   `project_perm_collapse_root_cause`;
+/// - **equal in the context** (must-alias) — ungated as well, a plain addend; the
+///   returned cube is the context ([`context_cube`]), the condition a fact or a
+///   debit drawn from the member needs;
+/// - **distinct in the context** — skipped outright. This prune is what keeps the
+///   sum from growing the `ite` tower recorded in `project_perm_collapse_root_cause`;
 /// - **equal under the chunk's own presence cube** — ungated too, see below;
-/// - **otherwise** — gated, and the cube it was gated by is returned alongside, so a
-///   consume can gate its debit by the very same condition.
+/// - **otherwise** (may-alias) — gated, and the cube it was gated by is returned
+///   alongside, so a consume can gate its debit by the very same condition. Only
+///   these still multiply the leaves; `VerifyStats::summary_may_alias` counts them.
 ///
 /// # The address gate is decided under the chunk's presence cube
 ///
@@ -1948,25 +2026,30 @@ pub(crate) fn summarize_perm_at(
     chunks: &[Chunk],
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
+    members: Members,
 ) -> (ChunkPerm, Vec<(Chunk, crate::verify::heap::HeapPc)>) {
     let canon = ctx.egraph.find(addr);
+    // Every member is decided against one context graph, up front. A gate left to
+    // the sum would make it a `Select` per member, and `perm_add` distributes
+    // those into one leaf per alias configuration — 2^K proofs for K members
+    // whose aliasing the context already settles.
+    let relations = relate_chunks(ctx, chunks, addr, pc_lits, members == Members::All);
+    let here = context_cube(ctx, pc_lits);
     let mut total: Option<ChunkPerm> = None;
     let mut set: Vec<(Chunk, crate::verify::heap::HeapPc)> = Vec::new();
-    for c in chunks {
+    for (c, (rel, eq)) in chunks.iter().zip(relations) {
         let held = c.gated_perm(ctx);
-        // Ground match: no address gate at all (and no `Eq` node minted).
-        let (amount, cube): (ChunkPerm, crate::verify::heap::HeapPc) =
-            if ctx.egraph.find(c.addr) == canon {
+        let (amount, cube): (ChunkPerm, crate::verify::heap::HeapPc) = match rel {
+            // Ground match: no address gate at all (and no `Eq` node minted).
+            AddrRelation::Equal if ctx.egraph.find(c.addr) == canon => {
                 (held, std::rc::Rc::from(Vec::new()))
-            } else {
-                let eq = expr!(ctx, { c.addr } == { addr });
-                // Disproven aliasing contributes nothing — skip before minting the gate.
-                if matches!(
-                    ctx.egraph[ctx.egraph.find(eq)].data.known(),
-                    Some(Literal::Bool(false))
-                ) {
-                    continue;
-                }
+            }
+            // The same location wherever this operation runs: a plain addend.
+            AddrRelation::Equal => (held, here.clone()),
+            // Disproven aliasing contributes nothing.
+            AddrRelation::Distinct => continue,
+            AddrRelation::Unknown if members == Members::Placed => continue,
+            AddrRelation::Unknown => {
                 // Equal wherever this chunk is held: no address gate, and the
                 // condition on the contribution is the guard `held` already carries.
                 let presence = match c.presence_cube(ctx, pc_lits) {
@@ -1986,22 +2069,25 @@ pub(crate) fn summarize_perm_at(
                     // and each leaf is proven under its own gate polarities.
                     let cube = vec![(eq, Polarity::Positive)];
                     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+                    crate::verify::stats::bump(|s| s.summary_may_alias += 1);
                     (
                         ChunkPerm::select(ctx, eq, held, zero),
                         std::rc::Rc::from(cube),
                     )
                 }
-            };
+            }
+        };
         set.push((c.clone(), cube));
         total = Some(match total {
             None => amount,
             Some(t) => perm_add(ctx, &t, &amount),
         });
     }
-    (
-        total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1))),
-        set,
-    )
+    let total = total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1)));
+    let mut leaves = 0;
+    total.for_each_leaf_under(&mut |_, _| leaves += 1);
+    crate::verify::stats::bump(|s| s.summary_leaves += leaves);
+    (total, set)
 }
 
 /// The permission held at `addr`, as a term — what `perm(loc)` evaluates to.
@@ -2019,7 +2105,7 @@ pub(crate) fn perm_held_at(
 ) -> egg::Id {
     // `perm(loc)` is asked for as a *value*, so the branch structure has to be
     // materialized here — the one place it is.
-    let total = summarize_perm_at(ctx, chunks, addr, pc_lits).0;
+    let total = summarize_perm_at(ctx, chunks, addr, pc_lits, Members::All).0;
     let id = total.to_id(ctx);
     // Flattening loses what the tree made obvious. `perm(x.f)` after a gated
     // wildcard exhale is `ite(c, r, 1/1)`: positive on both arms, but deciding that
@@ -2646,105 +2732,92 @@ mod tests {
 
 // ---- pc-sensitive location lookups (moved off VerifyContext) ----
 
-/// Resolve which of `chunks` sits at address `addr`, consulting aliasing
-/// that may only hold under the path condition `pc_lits`.
+/// The location `addr` as a read sees it: the permission held there (what frames
+/// the read) and its value.
 ///
-/// Fast path (what normal framing hits): a canonical match in the **live**
-/// graph — the address `add`ed for the read is congruent to a held chunk's
-/// address. Zero extra cost, no clone.
+/// Fast path (what normal framing hits): a canonical match in the **live** graph —
+/// the address `add`ed for the read is congruent to a held chunk's address. That
+/// chunk alone answers, as it always has.
 ///
-/// Slow path (a miss, and only then): clone, assume the path condition, and
-/// saturate. An assumed `x == y` fires `eq-true-union`, congruence then merges
-/// `f(x)` and `f(y)`, so the chunk `acc(x.f)` answers a read of `y.f` — which is
-/// what lets a predicate body like `acc(x.f) && x == y && y.f == 10` frame its
-/// `y.f` deref.
+/// Otherwise the location is every chunk that sits at `addr` in the context of the
+/// read ([`relate_chunks`]: the block's cube and `pc_lits`) — all of them, not the
+/// first: their permissions add up, and only one that holds a positive share
+/// carries the location's value. So the value is the first such member's, chosen
+/// by a positivity chain (`0 < p₁ ? v₁ : 0 < p₂ ? v₂ : …`, a term, so two reads
+/// of the location agree), and every member is assumed to agree with it where it
+/// sits there and holds permission — the golden rule a ground merge
+/// ([`merge_chunks`]) states for chunks it can fold. A member known to hold the
+/// location wherever the read happens supplies the value itself, with no chain.
 ///
-/// The returned chunk's `perm`/`value` ids are live-graph ids (the probe never
-/// touches live state), so they are valid to discharge obligations over.
-pub(crate) fn chunk_under_pc<'c>(
-    ctx: &mut VerifyContext<'_>,
-    chunks: &'c [Chunk],
-    addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> Option<&'c Chunk> {
-    let canon = ctx.egraph.find(addr);
-    if let Some(c) = chunks.iter().find(|c| ctx.egraph.find(c.addr) == canon) {
-        return Some(c);
-    }
-    // No unconditional match. Aliasing under the path condition can only help
-    // if there is one; a truly-unheld location stays a miss.
-    if pc_lits.is_empty() {
-        return None;
-    }
-    let mut probe = ctx.egraph.clone();
-    for (id, pol) in pc_lits {
-        let want_true = matches!(pol, Polarity::Positive);
-        // An unsatisfiable path condition makes every read vacuous — leave
-        // the resolution to the (vacuous-pc) obligation check, don't invent
-        // a chunk here.
-        if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
-            return None;
-        }
-        let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
-        probe.union(*id, lit);
-    }
-    probe.rebuild();
-    let probe = ctx.run_probe(probe);
-    let canon = probe.find(addr);
-    chunks.iter().find(move |c| probe.find(c.addr) == canon)
-}
-
-/// The chunks that alias `addr` **only under `pc_lits`** — pc-equal but not
-/// ground-equal. These are the partners a consume may draw on (invariant 7): at
-/// a state where the pc holds they are the *same* location as `addr`, so their
-/// fractions add, while on ground they stay distinct and must not be merged.
-/// Returns their addresses (stable keys into the heap group). Same probe shape as
-/// [`Self::chunk_under_pc`], but collects every match: sufficiency needs the sum.
-pub(crate) fn pc_alias_partners(
+/// Only must-aliases count: a chunk the context cannot place at `addr` neither
+/// frames the read nor supplies its value.
+pub(crate) fn read_location(
     ctx: &mut VerifyContext<'_>,
     chunks: &[Chunk],
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> Vec<egg::Id> {
-    if pc_lits.is_empty() {
-        return Vec::new();
+) -> Option<(ChunkPerm, Taken)> {
+    let canon = ctx.egraph.find(addr);
+    if let Some(c) = chunks.iter().find(|c| ctx.egraph.find(c.addr) == canon) {
+        return Some((c.gated_perm(ctx), Taken::of(c)));
     }
-    // Inside a method block the answer is already sitting in the block scratch: it is
-    // ground with this block's cube assumed and saturated, warm from the sufficiency
-    // proof that got us here. Reading the coincidence off it costs a `find` per
-    // chunk, where the clone+saturate below is a full probe — half of every probe
-    // saturation on the enum grid was this one lookup (40 of `enum_v8_p1`'s 80,
-    // 16.8s of its 70.5s). Measured to return the identical partner set on every
-    // call it was asked (55/55 across `structs_enums` and `enum_v5_p1`).
-    //
-    // Only when the instruction's pc *is* the block cube: a wider pc would ask the
-    // scratch about literals it never assumed.
-    if ctx.cube_matches(pc_lits)
-        && let Some(partners) =
-            ctx.scratch_alias_partners(addr, &chunks.iter().map(|c| c.addr).collect::<Vec<_>>())
-    {
-        return partners;
-    }
-    let ground = ctx.egraph.find(addr);
-    let mut probe = ctx.egraph.clone();
-    for (id, pol) in pc_lits {
-        let want_true = matches!(pol, Polarity::Positive);
-        // Unsatisfiable pc: the consume is vacuous, so inventing partners would
-        // only mask that — leave it to the (vacuous-pc) obligation check.
-        if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
-            return Vec::new();
-        }
-        let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
-        probe.union(*id, lit);
-    }
-    probe.rebuild();
-    let probe = ctx.run_probe(probe);
-    let canon = probe.find(addr);
-    chunks
+    let relations = relate_chunks(ctx, chunks, addr, pc_lits, false);
+    let here = context_cube(ctx, pc_lits);
+    let members: Vec<&Chunk> = chunks
         .iter()
-        .filter(|c| probe.find(c.addr) == canon && ctx.egraph.find(c.addr) != ground)
-        .map(|c| c.addr)
-        .collect()
+        .zip(relations)
+        .filter(|(_, (rel, _))| *rel == AddrRelation::Equal)
+        .map(|(c, _)| c)
+        .collect();
+    let (first, rest) = members.split_first()?;
+    let mut perm = first.gated_perm(ctx);
+    if rest.is_empty() {
+        return Some((perm, Taken::of(first)));
+    }
+    for c in rest {
+        let p = c.gated_perm(ctx);
+        perm = perm_add(ctx, &perm, &p);
+    }
+    let holds: Vec<egg::Id> = members
+        .iter()
+        .map(|c| present_amount(ctx, c, pc_lits).to_id(ctx))
+        .collect();
+    let (ambient, own) = split_ambient(ctx, &here);
+    let holder = cube_entails(ctx, pc_lits, &own)
+        .then(|| holds.iter().position(|h| perm_known_positive(ctx, *h)))
+        .flatten();
+    let taken = match holder {
+        Some(i) => Taken::of(members[i]),
+        None => {
+            // A chain over the members in heap order; the last is the default.
+            let last = members[members.len() - 1].value;
+            let value = members
+                .iter()
+                .zip(&holds)
+                .rev()
+                .skip(1)
+                .fold(last, |acc, (c, h)| {
+                    let pos = expr!(ctx, (0 / 1) < r { *h });
+                    expr!(ctx, if {pos} then {c.value} else {acc})
+                });
+            Taken {
+                value,
+                recipe: first.recipe.clone(),
+            }
+        }
+    };
+    for (i, (c, hold)) in members.iter().zip(holds).enumerate() {
+        if Some(i) == holder {
+            continue;
+        }
+        let held = expr!(ctx, (0 / 1) < r { hold });
+        let agree = expr!(ctx, { c.value } == { taken.value });
+        let antecedents =
+            std::iter::once((held, Polarity::Positive)).chain(own.iter().rev().copied());
+        let agree = ctx.implication(agree, antecedents);
+        ctx.assume_guarded(agree, ambient.iter().rev().copied());
+    }
+    Some((perm, taken))
 }
 
 /// Gate a permission amount by a path condition: `pc ? amount : 0`. The ground

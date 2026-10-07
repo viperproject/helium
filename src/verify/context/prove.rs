@@ -82,6 +82,39 @@ impl BlockScratch {
     }
 }
 
+/// How a held address stands to a demanded one in the context of a heap
+/// operation — see [`VerifyContext::addr_relations`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AddrRelation {
+    /// The same location wherever the operation runs (must-alias).
+    Equal,
+    /// A different location wherever the operation runs.
+    Distinct,
+    /// The context decides neither (may-alias).
+    Unknown,
+}
+
+/// Settle the still-`Unknown` entries of `out` against `graph`, in which `addr`
+/// and each `(held, eq)` pair have already been translated.
+fn classify_addrs(
+    graph: &egg::EGraph<Symbolic, ConstFold>,
+    addr: egg::Id,
+    held: &[(egg::Id, egg::Id)],
+    out: &mut [AddrRelation],
+) {
+    let canon = graph.find(addr);
+    for (rel, &(h, eq)) in out.iter_mut().zip(held) {
+        if *rel != AddrRelation::Unknown {
+            continue;
+        }
+        if graph.find(h) == canon {
+            *rel = AddrRelation::Equal;
+        } else if VerifyContext::known_bool_class(graph, eq, false) {
+            *rel = AddrRelation::Distinct;
+        }
+    }
+}
+
 /// How hard a decomposition's working graph has been run since its last
 /// assumption — the escalation ladder [`VerifyContext::prove_by_ite_decomposition`]
 /// climbs when its chain stalls, cheapest rung first.
@@ -837,51 +870,95 @@ impl<'a> VerifyContext<'a> {
         matches!(probe[probe.find(id)].data.known(), Some(Literal::Bool(v)) if *v == b)
     }
 
-    /// Which held chunk addresses coincide with `addr` in the **block scratch** —
-    /// the graph that already has this block's cube assumed and saturated, reused
-    /// across the block's obligations. `None` outside a block (functions and
-    /// resources have no CFG, so no scratch); the caller then falls back to its own
-    /// clone-and-probe.
+    /// How each held address stands to `addr` in the **context of a heap
+    /// operation**: the ground facts, the current block's cube, and `pc_lits`.
+    /// `held` pairs each address with its ground `held == addr` node, which is what
+    /// `Distinct` is read off.
     ///
-    /// This is the pc-alias question [`pc_alias_partners`](crate::verify::heap::algebra::pc_alias_partners)
-    /// asks, answered by `find` instead of by a fresh saturation.
-    pub(crate) fn scratch_alias_partners(
+    /// The cube belongs to the context because a block body's heap exists only on
+    /// that block's path (a join reads a predecessor's heap only under its edge
+    /// condition), so an equality the cube implies holds wherever that heap is.
+    ///
+    /// One graph answers the whole set: the block scratch when `pc_lits` adds
+    /// nothing to the cube, otherwise a single probe with the extra literals
+    /// assumed. Deciding every member against one graph is what lets the caller
+    /// sum a must-alias set as plain addends rather than enumerate the alias
+    /// configurations of its members.
+    pub(crate) fn addr_relations(
         &mut self,
         addr: egg::Id,
-        chunk_addrs: &[egg::Id],
-    ) -> Option<Vec<egg::Id>> {
-        if !self.in_block {
-            return None;
-        }
-        self.ensure_scratch();
-        if self.block_dead {
-            return None;
-        }
-        // Translate everything first: `tr` can import nodes and dirty the scratch.
-        let ta = self.tr(addr);
-        let tcs: Vec<egg::Id> = chunk_addrs.iter().map(|c| self.tr(*c)).collect();
-        self.saturate_scratch();
+        held: &[(egg::Id, egg::Id)],
+        pc_lits: &[(egg::Id, Polarity)],
+    ) -> Vec<AddrRelation> {
         let ground = self.egraph.find(addr);
-        let sc = self.scratch.as_ref().unwrap();
-        let canon = sc.egraph.find(ta);
-        let mut out = Vec::new();
-        for (c, tc) in chunk_addrs.iter().zip(tcs) {
-            if sc.egraph.find(tc) == canon && self.egraph.find(*c) != ground {
-                out.push(*c);
-            }
+        let mut out: Vec<AddrRelation> = held
+            .iter()
+            .map(|&(h, eq)| {
+                if self.egraph.find(h) == ground {
+                    AddrRelation::Equal
+                } else if Self::known_bool_class(&self.egraph, eq, false) {
+                    AddrRelation::Distinct
+                } else {
+                    AddrRelation::Unknown
+                }
+            })
+            .collect();
+        if !out.contains(&AddrRelation::Unknown) {
+            return out;
         }
-        Some(out)
-    }
-
-    /// Whether `pc_lits` *is* the current block's control cube — the precondition
-    /// for reading an answer off the scratch, which has assumed exactly that cube.
-    pub(crate) fn cube_matches(&self, pc_lits: &[(egg::Id, Polarity)]) -> bool {
-        self.current_cube.len() == pc_lits.len()
-            && self
-                .current_cube
+        // The literals the context graph does not already assume.
+        let extra: Vec<(egg::Id, Polarity)> = pc_lits
+            .iter()
+            .filter(|(id, pol)| {
+                !(self.in_block
+                    && self
+                        .current_cube
+                        .iter()
+                        .any(|(c, p)| p == pol && self.egraph.find(*c) == self.egraph.find(*id)))
+            })
+            .copied()
+            .collect();
+        if !self.in_block && extra.is_empty() {
+            return out;
+        }
+        let (graph, ta, tpairs, textra) = if self.in_block {
+            self.ensure_scratch();
+            if self.block_dead {
+                return out;
+            }
+            // Translate first: `tr` can import nodes and dirty the scratch.
+            let ta = self.tr(addr);
+            let tpairs: Vec<(egg::Id, egg::Id)> = held
                 .iter()
-                .zip(pc_lits)
-                .all(|(a, b)| self.egraph.find(a.0) == self.egraph.find(b.0) && a.1 == b.1)
+                .map(|&(h, eq)| (self.tr(h), self.tr(eq)))
+                .collect();
+            let textra: Vec<(egg::Id, Polarity)> =
+                extra.iter().map(|(id, p)| (self.tr(*id), *p)).collect();
+            self.saturate_scratch();
+            let sc = self.scratch.as_ref().unwrap();
+            if extra.is_empty() {
+                classify_addrs(&sc.egraph, ta, &tpairs, &mut out);
+                return out;
+            }
+            (sc.egraph.clone(), ta, tpairs, textra)
+        } else {
+            (self.egraph.clone(), addr, held.to_vec(), extra)
+        };
+        let mut probe = graph;
+        for (id, pol) in &textra {
+            let want = matches!(pol, Polarity::Positive);
+            // An unsatisfiable context decides nothing here; the obligations
+            // that follow hold vacuously on their own.
+            if Self::known_bool_class(&probe, *id, !want) {
+                return out;
+            }
+            let lit = probe.add(Symbolic::Lit(Literal::Bool(want)));
+            probe.union(*id, lit);
+        }
+        probe.rebuild();
+        let probe = self.run_probe(probe);
+        classify_addrs(&probe, ta, &tpairs, &mut out);
+        out
     }
 
     /// Saturate a detached probe e-graph with the full rule set, inside a
