@@ -179,7 +179,26 @@ Helium (`verify --json`: total, phases, per-member times, all `VerifyStats`
 counters, peak memory), Silicon (process wall time and its own reported time,
 per-member verdicts; cached by `.vpr` hash, jar hash and arguments). The site and
 the summary use only the self-reported times (`rustc_self`, `helium_verify`,
-`silicon_verify`); the wall-clock ones stay in the run files. Each tool gets one
+`silicon_verify`); the wall-clock ones stay in the run files.
+
+Silicon's own time still includes the cold JVM: its clock starts before it creates
+its verifier, so class loading and the JIT's first passes add about two seconds to
+every file. With `silicon_warm` set (in `config.local.json`, since the corpus is a
+local Silicon checkout), each file is also timed in one JVM that first verified
+other files for `warmup_s` seconds; files equal to a benchmark are left out of that
+warm-up. This adds a `silicon_warm` column and a "Speedup vs warm Silicon" tile:
+
+```json
+"silicon_warm": {
+  "corpus": ["../Silicon/silver/src/test/resources", "../Silicon/src/test/resources"],
+  "warmup_s": 60,
+  "file_timeout_s": 10
+}
+```
+
+The corpus paths are relative to the repository root. `bench run` takes the same
+settings as `--silicon-warm DIR` (repeatable), `--silicon-warmup-s` and
+`--silicon-warmup-file-timeout`; see `plans/regression-pipeline.md` for the details. Each tool gets one
 warm-up and five timed runs (median and MAD) under a 300 s timeout, recorded as a
 timeout (killing the command's whole process tree, JVM and z3s included). The run
 also records the Rust metrics (`bench rust-metrics FILE.rs`) and Viper metrics

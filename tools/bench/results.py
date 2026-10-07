@@ -132,6 +132,14 @@ def bench_run(cfg: dict, out: Path, extra: list, caches: Path | None) -> dict:
             cmd += ["--silicon-arg", a]
         if caches:
             cmd += ["--silicon-cache", caches / "silicon_cache.json"]
+        warm = cfg.get("silicon_warm")
+        if warm:
+            for d in warm.get("corpus", []):
+                cmd += ["--silicon-warm", REPO / d]
+            if warm.get("warmup_s") is not None:
+                cmd += ["--silicon-warmup-s", warm["warmup_s"]]
+            if warm.get("file_timeout_s") is not None:
+                cmd += ["--silicon-warmup-file-timeout", warm["file_timeout_s"]]
     cmd += extra
     run(cmd, cwd=REPO)
     return json.loads(out.read_text(encoding="utf-8"))
@@ -158,8 +166,8 @@ def summarize(run_data: dict) -> dict:
     coverage: dict = {}
     by_suite: dict = {}
     # Self-reported times only: no total counts process or JVM startup.
-    totals = {"helium_verify": 0.0, "rustc_self": 0.0, "silicon_verify": 0.0}
-    overhead, speedup = [], []
+    totals = {"helium_verify": 0.0, "rustc_self": 0.0, "silicon_verify": 0.0, "silicon_warm": 0.0}
+    overhead, speedup, speedup_warm = [], [], []
     members = disagreements = timeouts = file_errors = 0
     for f in files:
         t = f.get("times", {})
@@ -181,6 +189,9 @@ def summarize(run_data: dict) -> dict:
             overhead.append(h / r)
         if h and sv:
             speedup.append(sv / h)
+        sw = median_of(t.get("silicon_warm"))
+        if h and sw:
+            speedup_warm.append(sw / h)
         members += len(f.get("members", []))
         disagreements += sum(1 for m in f.get("members", []) if m.get("disagreement"))
         timeouts += sum(1 for v in t.values() if v and v.get("status") == "timeout")
@@ -193,6 +204,7 @@ def summarize(run_data: dict) -> dict:
         "totals": totals,
         "geomean_overhead": geomean(overhead),
         "geomean_speedup": geomean(speedup),
+        "geomean_speedup_warm": geomean(speedup_warm),
         "disagreements": disagreements,
         "timeouts": timeouts,
         "file_errors": file_errors,

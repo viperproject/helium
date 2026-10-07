@@ -21,6 +21,7 @@ use crate::helium::{self, HeliumRun};
 use crate::measure::{self, Sample, Status, Timing};
 use crate::rust_metrics::{self, FileMetrics, FnMetrics};
 use crate::silicon::{self, Silicon, SiliconResult};
+use crate::silicon_warm::{WarmInfo, WarmOptions, WarmSilicon};
 use crate::suites::{self, Suite, SuiteFile};
 
 pub const SCHEMA: u32 = 1;
@@ -50,6 +51,8 @@ pub struct Options {
     pub rustc_cache: Option<PathBuf>,
     pub silicon: Option<Silicon>,
     pub silicon_cache: Option<PathBuf>,
+    /// Also time Silicon in a warm JVM (`silicon_warm`; needs `silicon`).
+    pub silicon_warm: Option<WarmOptions>,
     pub scratch: PathBuf,
 }
 
@@ -175,6 +178,9 @@ pub struct Tools {
     pub rustc: Option<String>,
     pub rustc_toolchain: Option<String>,
     pub silicon: Option<String>,
+    /// How the warm JVM behind `silicon_warm` was warmed up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silicon_warm: Option<WarmInfo>,
     /// The commit `verify` reports it was built from (JSON builds only).
     pub verify_commit: Option<String>,
     pub verify_json: bool,
@@ -271,6 +277,10 @@ pub struct Times {
     pub helium_wall: Option<Timing>,
     pub silicon_wall: Option<SiliconTiming>,
     pub silicon_verify: Option<SiliconTiming>,
+    /// The time Silicon reports in a JVM warmed up on other files (see
+    /// [`crate::silicon_warm`]): no class loading or first JIT passes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silicon_warm: Option<SiliconTiming>,
 }
 
 /// A tool's self-reported total, with the median of each phase it reports.
@@ -493,7 +503,7 @@ pub fn rust_fn_for<'a>(
 
 // ── Measuring ──
 
-fn progress(msg: impl AsRef<str>) {
+pub(crate) fn progress(msg: impl AsRef<str>) {
     eprintln!("[bench] {}", msg.as_ref());
 }
 
@@ -510,6 +520,7 @@ struct Ctx<'a> {
     rustc_cache: Option<RustcCache>,
     silicon_cache: Option<silicon::Cache>,
     silicon: Option<Silicon>,
+    silicon_warm: Option<WarmSilicon>,
     verify_commit: Option<String>,
     verify_json: bool,
     warnings: Vec<String>,
@@ -532,6 +543,13 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         }
         suites_found.retain(|s| opts.suites.contains(&s.name));
     }
+    // Every suite's `.vpr` files, measured in this run or not: the warm-up
+    // corpus leaves them out (see `silicon_warm`).
+    let all_vprs: Vec<PathBuf> = suites_found
+        .iter()
+        .flat_map(|s| s.files.iter())
+        .filter_map(|f| f.vpr.clone())
+        .collect();
     let errors: Vec<&String> = suites_found.iter().flat_map(|s| &s.errors).collect();
     if !errors.is_empty() {
         return Err(format!(
@@ -563,6 +581,15 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         rustc_cache,
         silicon_cache,
         silicon: opts.silicon.clone(),
+        silicon_warm: match (&opts.silicon, &opts.silicon_warm) {
+            (Some(sil), Some(warm)) => Some(WarmSilicon::new(
+                sil.clone(),
+                warm.clone(),
+                &all_vprs,
+                &opts.scratch,
+            )?),
+            _ => None,
+        },
         verify_commit: None,
         verify_json: true,
         warnings: suites_found
@@ -572,6 +599,12 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
     };
     for w in &ctx.warnings {
         progress(format!("warning: {w}"));
+    }
+    if let Some(w) = &ctx.silicon_warm {
+        progress(format!(
+            "silicon warm: {} warm-up files ({} left out as benchmarks)",
+            w.info.warmup_files, w.info.excluded
+        ));
     }
 
     // The commit is fixed before measuring: a commit made while a long run is
@@ -620,6 +653,7 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
             rustc: ctx.rustc_version.clone(),
             rustc_toolchain: opts.rustc.as_ref().and_then(|r| r.toolchain.clone()),
             silicon: ctx.silicon.as_ref().map(Silicon::id),
+            silicon_warm: ctx.silicon_warm.as_ref().map(|w| w.info.clone()),
             verify_commit: ctx.verify_commit,
             verify_json: ctx.verify_json,
         },
@@ -983,6 +1017,52 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
         }
     }
 
+    // ── Silicon, warm ──
+    if suite.silicon()
+        && let Some(warm) = ctx.silicon_warm.as_mut()
+    {
+        let key = warm.cache_key(&vpr_sha);
+        let hit = ctx
+            .silicon_cache
+            .as_ref()
+            .and_then(|c| c.entries.get(&key))
+            .filter(|hit| silicon::Cache::reusable(hit, opts.runs, timeout))
+            .cloned();
+        let (r, cached) = match hit {
+            Some(hit) => (hit, true),
+            None => {
+                let r = warm.measure(vpr, &vpr_sha, opts.runs, timeout)?;
+                if let Some(cache) = ctx.silicon_cache.as_mut() {
+                    if silicon::Cache::keeps(&r) {
+                        cache.entries.insert(key, r.clone());
+                    } else {
+                        cache.entries.remove(&key);
+                    }
+                }
+                (r, false)
+            }
+        };
+        // The warm JVM runs the same Silicon on the same file: a different
+        // verdict means state leaked between files, and its time is not
+        // comparable.
+        if let Some((cold, _)) = &silicon_result
+            && let (Some(c), Some(w)) = (cold.verified, r.verified)
+            && (c != w || cold.failed_members != r.failed_members)
+        {
+            ctx.warnings.push(format!(
+                "{}/{}: warm Silicon disagrees with cold Silicon (cold verified: {c}, warm: {w})",
+                suite.name, file.stem
+            ));
+        }
+        times.silicon_warm = Some(SiliconTiming {
+            status: r.status,
+            median: r.verify.median,
+            mad: r.verify.mad,
+            runs: r.verify.runs.clone(),
+            cached,
+        });
+    }
+
     // ── Members ──
     let fns = rust.as_ref().map(|r| &r.functions);
     let mut coverage: BTreeMap<String, u64> = BTreeMap::new();
@@ -1069,12 +1149,17 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     let t = &times;
     let cached = |c: bool| if c { " (cached)" } else { "" };
     progress(format!(
-        "  helium {} | rustc_check {}{} | silicon_verify {}{}",
+        "  helium {} | rustc_check {}{} | silicon_verify {}{}{}",
         fmt_time(t.helium_verify.as_ref().and_then(|h| h.timing.median)),
         fmt_time(t.rustc_check.as_ref().and_then(|x| x.median)),
         cached(t.rustc_check.as_ref().is_some_and(|x| x.cached)),
         fmt_time(t.silicon_verify.as_ref().and_then(|x| x.median)),
         cached(t.silicon_verify.as_ref().is_some_and(|s| s.cached)),
+        t.silicon_warm.as_ref().map_or(String::new(), |w| format!(
+            " | silicon_warm {}{}",
+            fmt_time(w.median),
+            cached(w.cached)
+        )),
     ));
 
     let family = suite.family_of(&file.stem);

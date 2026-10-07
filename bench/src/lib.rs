@@ -3,6 +3,7 @@
 //! - [`suites`]: discovering suites under `benchmarks/` by directory layout;
 //! - [`measure`]: timing one process (wall time, peak memory, timeout);
 //! - [`helium`], [`silicon`]: running and reading the two verifiers;
+//! - [`silicon_warm`]: Silicon in one warmed-up JVM (`silicon_warm`);
 //! - [`cache`]: rustc and Silicon results reused across runs;
 //! - [`rust_metrics`]: per-function shape metrics from a `syn` parse;
 //! - [`run`]: measuring every file and joining it all into one run JSON;
@@ -15,6 +16,7 @@ pub mod measure;
 pub mod run;
 pub mod rust_metrics;
 pub mod silicon;
+pub mod silicon_warm;
 pub mod suites;
 
 use std::path::Path;

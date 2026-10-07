@@ -55,9 +55,26 @@ pub fn run_once(cmd: &mut Command, timeout: Duration, scratch: &Path) -> std::io
 #[cfg(unix)]
 mod imp {
     use std::os::unix::process::CommandExt;
-    use std::process::Command;
+    use std::process::{Child, Command};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    /// The process group a [`spawn_tree`] child leads.
+    pub struct Guard(libc::pid_t);
+
+    impl Guard {
+        pub fn kill(&self) {
+            // SAFETY: a plain syscall on a process group id; with the group
+            // already empty it fails harmlessly.
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        }
+    }
+
+    pub fn spawn_tree(cmd: &mut Command) -> std::io::Result<(Child, Option<Guard>)> {
+        let child = cmd.process_group(0).spawn()?;
+        let pid = child.id() as libc::pid_t;
+        Ok((child, Some(Guard(pid))))
+    }
 
     /// The child leads a new process group, so one `kill(-pgid)` reaches
     /// everything it started. (A Ctrl-C at the terminal then no longer
@@ -139,7 +156,13 @@ mod imp {
 
     /// A job object holding the child and everything it starts. Dropping it
     /// kills whatever is still running in it.
-    struct Job(HANDLE);
+    pub struct Job(HANDLE);
+
+    pub type Guard = Job;
+
+    pub fn spawn_tree(cmd: &mut Command) -> std::io::Result<(Child, Option<Guard>)> {
+        spawn(cmd).map(|(child, job, _)| (child, job))
+    }
 
     impl Job {
         fn new() -> Option<Job> {
@@ -167,7 +190,7 @@ mod imp {
             (ok != 0).then_some(job)
         }
 
-        fn kill(&self) {
+        pub fn kill(&self) {
             // SAFETY: `self.0` is a live job handle.
             unsafe { TerminateJobObject(self.0, 1) };
         }
@@ -266,6 +289,41 @@ mod imp {
         // Dropping the job kills anything the child left running.
         drop(job);
         Ok(((end - start).as_secs_f64(), peak, status.code(), false))
+    }
+}
+
+/// A long-lived child in its own process tree, as [`run_once`] runs its
+/// commands: [`Tree::kill`] reaches everything it started (a JVM's z3s too),
+/// and dropping the tree kills it.
+pub struct Tree {
+    child: std::process::Child,
+    guard: Option<imp::Guard>,
+}
+
+impl Tree {
+    pub fn spawn(cmd: &mut Command) -> std::io::Result<Tree> {
+        let (child, guard) = imp::spawn_tree(cmd)?;
+        Ok(Tree { child, guard })
+    }
+
+    pub fn child(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+
+    pub fn kill(&mut self) {
+        match &self.guard {
+            Some(g) => g.kill(),
+            None => {
+                let _ = self.child.kill();
+            }
+        }
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 

@@ -43,6 +43,11 @@
 //! --jvm-arg ARG           extra JVM argument (repeatable; default -Xss128m)
 //! --silicon-arg ARG       extra Silicon argument (repeatable)
 //! --silicon-cache FILE    Silicon results cache (read and updated)
+//! --silicon-warm DIR      also time Silicon in one JVM warmed up on the .vpr files under
+//!                         DIR (repeatable; files equal to a benchmark are left out)
+//! --silicon-warmup-s SECS warm-up budget of each new warm JVM (default 60)
+//! --silicon-warmup-file-timeout SECS
+//!                         Silicon's --timeout for each warm-up file (default 10)
 //! --scratch DIR           scratch directory (default: system temp)
 //! --out FILE              write the run JSON here (default: stdout)
 //! ```
@@ -52,6 +57,7 @@ use std::process::ExitCode;
 
 use bench::run::{Options, RustcOptions};
 use bench::silicon::Silicon;
+use bench::silicon_warm::WarmOptions;
 
 fn usage() -> ExitCode {
     eprintln!(
@@ -287,6 +293,7 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
         rustc_cache: None,
         silicon: None,
         silicon_cache: None,
+        silicon_warm: None,
         scratch: default_scratch(),
     };
     let mut out: Option<PathBuf> = None;
@@ -294,6 +301,9 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
     let mut java = PathBuf::from("java");
     let mut jvm_args: Vec<String> = Vec::new();
     let mut silicon_args: Vec<String> = Vec::new();
+    let mut warm_corpus: Vec<PathBuf> = Vec::new();
+    let mut warmup_s = 60.0;
+    let mut warmup_file_timeout = 10.0;
     let mut suite_args = SuiteArgs::default();
     while let Some(a) = args.rest.next() {
         match a.as_str() {
@@ -333,6 +343,9 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             "--silicon-arg" => silicon_args.push(args.value(&a)?),
             "--rustc-cache" => opts.rustc_cache = Some(args.value(&a)?.into()),
             "--silicon-cache" => opts.silicon_cache = Some(args.value(&a)?.into()),
+            "--silicon-warm" => warm_corpus.push(args.value(&a)?.into()),
+            "--silicon-warmup-s" => warmup_s = args.number(&a)?,
+            "--silicon-warmup-file-timeout" => warmup_file_timeout = args.number(&a)?,
             "--scratch" => opts.scratch = args.value(&a)?.into(),
             "--out" => out = Some(args.value(&a)?.into()),
             _ if suite_args.take(&a, args)? => {}
@@ -357,6 +370,13 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             Silicon::new(java, jar.clone(), jvm_args, silicon_args)
                 .map_err(|e| format!("{}: {e}", jar.display()))?,
         );
+        if !warm_corpus.is_empty() {
+            opts.silicon_warm = Some(WarmOptions {
+                corpus: warm_corpus,
+                warmup_s,
+                file_timeout_s: (warmup_file_timeout as u64).max(1),
+            });
+        }
     } else {
         eprintln!("[bench] no --silicon-jar: Silicon columns are skipped");
     }

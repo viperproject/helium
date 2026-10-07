@@ -9,6 +9,7 @@
   "java": "java",
   "jvm_args": ["-Xss128m"],
   "silicon_args": [],
+  "silicon_warm": null,
   "warmup": 1,
   "runs": 5,
   "timeout_s": null,
