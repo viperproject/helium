@@ -2,11 +2,11 @@
 //! for the same input.
 //!
 //! One pinned fat jar is used, identified by its SHA-256 (and the version line
-//! it prints) in every result. Two times per file: `silicon_wall`, the whole
-//! process including JVM startup (what a user waits for), and
-//! `silicon_verify`, the time Silicon itself reports (the fair comparison
-//! with `helium_verify`). Silicon's verdict is recorded per member, by mapping
-//! each error's source line to the declaration containing it.
+//! it prints) in every result. Silicon runs in one warmed-up JVM
+//! ([`crate::silicon_warm`]); this module holds what that shares with any
+//! Silicon run: how to start it, reading its output, and the cache. Silicon's
+//! verdict is recorded per member, by mapping each error's source line to the
+//! declaration containing it.
 //!
 //! Silicon's result depends only on the `.vpr`, the jar and its arguments,
 //! never on our commit, so results are cached by `(vpr sha256, jar sha256,
@@ -14,15 +14,14 @@
 //! [`Cache`] for what is kept).
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::measure::{self, Sample, Status, Timing};
+use crate::measure::{Status, Timing};
 
 /// How to run Silicon.
 #[derive(Debug, Clone)]
@@ -70,16 +69,6 @@ impl Silicon {
     pub fn config_id(&self) -> String {
         let config = format!("jvm {:?}\0silicon {:?}", self.jvm_args, self.args);
         crate::sha256_bytes(config.as_bytes())[..16].to_string()
-    }
-
-    pub fn command(&self, vpr: &Path) -> Command {
-        let mut c = Command::new(&self.java);
-        c.args(&self.jvm_args)
-            .arg("-jar")
-            .arg(&self.jar)
-            .args(&self.args)
-            .arg(vpr);
-        c
     }
 }
 
@@ -225,58 +214,6 @@ pub fn parse_output(out: &str, decls: &[(u64, String)]) -> SiliconOutput {
         verify_time,
         errors,
     }
-}
-
-/// Run Silicon on `vpr`: `warmup` untimed runs, then `runs` timed ones.
-pub fn measure(
-    silicon: &mut Silicon,
-    vpr: &Path,
-    vpr_sha256: &str,
-    warmup: usize,
-    runs: usize,
-    timeout: Duration,
-    scratch: &Path,
-) -> std::io::Result<SiliconResult> {
-    let source = std::fs::read_to_string(vpr)?;
-    let decls = declaration_lines(&source);
-    let finished = |s: &Sample| FINISHED.is_match(&s.stdout) || FINISHED.is_match(&s.stderr);
-    let samples = measure::repeat(
-        || silicon.command(vpr),
-        warmup,
-        runs,
-        timeout,
-        scratch,
-        finished,
-    )?;
-    let wall = measure::wall_timing(&samples, finished);
-
-    // A timed-out sample's output is not its own verdict, even when it holds
-    // a summary line: only runs that finished inside the timeout count.
-    let parsed: Vec<SiliconOutput> = samples
-        .iter()
-        .filter(|s| !s.timed_out && finished(s))
-        .map(|s| parse_output(&format!("{}\n{}", s.stdout, s.stderr), &decls))
-        .collect();
-    if silicon.version.is_none() {
-        silicon.version = parsed.iter().find_map(|p| p.version.clone());
-    }
-    let verify_runs: Vec<f64> = parsed.iter().filter_map(|p| p.verify_time).collect();
-    let verify = Timing::from_runs(wall.status, verify_runs, &[], None);
-    let last = parsed.last();
-    let errors = last.map(|p| p.errors.clone()).unwrap_or_default();
-    Ok(SiliconResult {
-        silicon: silicon.id(),
-        vpr_sha256: vpr_sha256.to_string(),
-        status: wall.status,
-        verified: last.and_then(|p| p.verified),
-        wall: (&wall).into(),
-        verify: (&verify).into(),
-        peak_rss_mb: wall.peak_rss_mb,
-        failed_members: errors.iter().filter_map(|e| e.member.clone()).collect(),
-        errors,
-        message: wall.message.clone(),
-        timeout_s: Some(timeout.as_secs_f64()),
-    })
 }
 
 /// Silicon results keyed by `"<vpr sha256>|<jar sha256>|<config>"` (see

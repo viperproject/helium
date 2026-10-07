@@ -45,9 +45,10 @@
 //! --jvm-arg ARG           extra JVM argument (repeatable; default -Xss128m)
 //! --silicon-arg ARG       extra Silicon argument (repeatable)
 //! --silicon-cache FILE    Silicon results cache (read and updated)
-//! --silicon-warm DIR      also time Silicon in one JVM warmed up on the .vpr files under
-//!                         DIR (repeatable; files equal to a benchmark are left out)
-//! --silicon-warmup-s SECS warm-up budget of each new warm JVM (default 60)
+//! --silicon-warm DIR      Silicon runs in one JVM, warmed up first on the .vpr files under
+//!                         DIR (repeatable; required with --silicon-jar; files equal to a
+//!                         benchmark are left out)
+//! --silicon-warmup-s SECS warm-up budget of each new JVM (default 60)
 //! --silicon-warmup-file-timeout SECS
 //!                         Silicon's --timeout for each warm-up file (default 10)
 //! --scratch DIR           scratch directory (default: system temp)
@@ -382,13 +383,16 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             Silicon::new(java, jar.clone(), jvm_args, silicon_args)
                 .map_err(|e| format!("{}: {e}", jar.display()))?,
         );
-        if !warm_corpus.is_empty() {
-            opts.silicon_warm = Some(WarmOptions {
-                corpus: warm_corpus,
-                warmup_s,
-                file_timeout_s: (warmup_file_timeout as u64).max(1),
-            });
+        if warm_corpus.is_empty() {
+            return Err("--silicon-jar needs --silicon-warm DIR (`silicon_warm` in \
+                        config.json): Silicon runs only in a warmed-up JVM"
+                .into());
         }
+        opts.silicon_warm = Some(WarmOptions {
+            corpus: warm_corpus,
+            warmup_s,
+            file_timeout_s: (warmup_file_timeout as u64).max(1),
+        });
     } else {
         eprintln!("[bench] no --silicon-jar: Silicon columns are skipped");
     }

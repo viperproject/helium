@@ -24,8 +24,7 @@ The comparison, per source file:
 | `rustc_check` | `rustc --edition 2021 --crate-type lib --emit=metadata` | Same as `cargo check`: type and borrow checking only. This is the fairest match for "checking". |
 | `rustc_self` | the same runs, with `-Z time-passes` (nightly only) | rustc's own `total`, without process startup, plus each pass. The like-for-like match for `helium_verify`; the passes nest, so they do not add up to the total. |
 | `helium_verify` | `verify --json` | Total time plus the phases (parse, typecheck, translate, verify) |
-| `silicon_wall`, `silicon_verify` | Viper Silicon on the same `.vpr` | The reference verifier for the same input. See below. |
-| `silicon_warm` (optional) | the same Silicon, in one JVM warmed up on other files | Silicon's own time without class loading and the JIT's first passes. See below. |
+| `silicon_wall`, `silicon_verify` | Viper Silicon on the same `.vpr`, in one JVM warmed up on other files | The reference verifier for the same input, without class loading and the JIT's first passes. See below. |
 
 The headline numbers, tracked per file and as a geometric mean over the corpus:
 
@@ -37,10 +36,10 @@ Both use the time each tool reports itself, so neither counts process or JVM sta
 ### Silicon
 
 - Pin one Silicon build (a fat jar at a fixed version, recorded by its commit and SHA-256 in every result).
+- Run Silicon only in one JVM that has already verified other files (`silicon_warm` sets the warm-up corpus; it is required with a jar). Silicon's clock starts in `SilFrontend.execute`, before it creates its verifier and starts Z3, so in a cold `java -jar` run its time still holds class loading and the JIT's first passes: about two seconds on any file, however small. Cold runs are not measured at all. See "Decisions" for how the JVM is warmed up.
 - Record two times per file:
-  - `silicon_wall`: the whole process, including JVM startup. This is what a user waits for.
-  - `silicon_verify`: the time Silicon reports for verification itself, without JVM startup. This is the fair comparison with `helium_verify`.
-  - `silicon_warm` (when `silicon_warm` is configured): the time Silicon reports in a JVM that has already verified other files. Silicon's clock starts in `SilFrontend.execute`, before it creates its verifier and starts Z3, so on a cold JVM `silicon_verify` still holds class loading and the JIT's first passes: about two seconds on any file, however small. `silicon_warm` takes those out, to compare the verifiers rather than their start-up. See "Decisions" for how the JVM is warmed up.
+  - `silicon_verify`: the time Silicon reports for verifying the file. This is the fair comparison with `helium_verify`.
+  - `silicon_wall`: the file end to end in the warm JVM, by the driver's clock.
 - Record Silicon's verdict per member as well as Helium's. A member where the two disagree is flagged in the results: a Helium FAIL where Silicon verifies is incompleteness, and a Helium OK where Silicon fails needs a soundness look.
 - Silicon's result depends only on the `.vpr` and the Silicon version, not on our commit. Cache it by (`.vpr` hash, Silicon version and arguments) so the runner only reruns Silicon when an encoding, the Silicon build or its arguments change.
 
@@ -201,7 +200,7 @@ benchmarks branch
   benchmarks/results/
     index.json                one entry per run: commit, date, subject, totals, coverage
     runs/<date>_<sha>.json    one file per run (full data)
-    silicon_cache.json        Silicon results keyed by (.vpr hash, jar hash, arguments), warm ones also by the warm-up id
+    silicon_cache.json        Silicon results keyed by (.vpr hash, jar hash, arguments, warm-up id)
     rustc_cache.json          rustc_check and rustc_self timings keyed by (.rs hash, rustc version, arguments)
   docs/                       the GitHub Pages site, served from this branch
 ```
@@ -227,7 +226,7 @@ All data is JSON. A run file looks like:
         "rustc_check":   { "median": 0.081, "mad": 0.002, "runs": [0.080, 0.081, …] },
         "rustc_self":    { "median": 0.062, "mad": 0.001, "phases": { "type_check_crate": 0.02, "…": 0 } },
         "helium_verify": { "median": 3.12,  "mad": 0.04,  "phases": { "parse": 0.2, "…": 0 } },
-        "silicon_wall":  { "median": 9.8 }, "silicon_verify": { "median": 6.1 }, "silicon_warm": { "median": 2.3 }
+        "silicon_wall":  { "median": 9.8 }, "silicon_verify": { "median": 2.3 }
       },
       "peak_rss_mb": { "helium": 412, "silicon": 1330 },
       "stats": { "sat_iterations": 1234, "prove_probe": 17, "…": 0 },
@@ -248,7 +247,7 @@ All data is JSON. A run file looks like:
 
 ## GitHub Pages site
 
-A static site in `docs/` on the `benchmarks` branch, published with GitHub Pages from that branch. Plain HTML and JavaScript with a charting library from a CDN (Plotly), no build step. It reads `index.json` and the run files directly. (GitHub Pages on a private repository needs a paid plan.) Every time it shows is a tool's self-reported one: `rustc_self`, `helium_verify`, `silicon_verify`, and `silicon_warm` when the run has it (a "Speedup vs warm Silicon" tile, trend lines and a scaling line; runs without it show none of these).
+A static site in `docs/` on the `benchmarks` branch, published with GitHub Pages from that branch. Plain HTML and JavaScript with a charting library from a CDN (Plotly), no build step. It reads `index.json` and the run files directly. (GitHub Pages on a private repository needs a paid plan.) Every time it shows is a tool's self-reported one: `rustc_self`, `helium_verify`, `silicon_verify` (Silicon in its warm JVM).
 
 Pages:
 
@@ -307,7 +306,7 @@ Decisions made while implementing:
 - **Silicon errors are placed by the start of their location**, which is usually a range (`@320.11--321.30`); reading only single positions (`@5.3`) had dropped those errors and reported the failing member as OK, i.e. as a Helium incompleteness. Silicon's verdict is per declaration, so a failing `m_f` leaves the verdict of its contract rows (`m_f#requires`, `m_f#ensures`) unknown rather than FAIL, and a rejection that cannot be placed in a member leaves every member unknown (with a warning) rather than OK.
 - **Every Silicon error is read, or none is trusted.** From ten errors on, Silicon pads the index (`[ 0]`); reading only `[0]` had dropped all but `[10]` of `must_fail`'s eleven errors and reported ten failing members as OK (false incompleteness, and a Helium OK there would have hidden a soundness disagreement). The parser now also checks the count on Silicon's summary line: errors it could not read stand in as one error outside every member, so no member is called OK.
 - **A timeout kills the whole process tree.** `java` on Windows is often the `javapath` launcher, which starts the real JVM, which starts z3s; killing only the launcher left them running, stealing CPU from later measurements and writing their summary into the next file's output (a timed-out Silicon run was recorded as verified, in more time than the timeout). Each command now runs in a job object (Windows: created suspended, assigned, then resumed, so nothing escapes) or its own process group (Unix), killed on a timeout and cleaned up after exit; a timed-out sample's output is never parsed as a verdict.
-- **Warm Silicon (`silicon_warm`) runs in one JVM, warmed up on files that are not benchmarks.** The driver (`bench/silicon/SiliconWarm.java`, run from source with `java -cp silicon.jar`, so no build step and always the pinned jar) verifies each file through Silicon's own command-line path, `SilFrontend.execute`, with a fresh verifier and Z3 per file, as `java -jar` does. The output, verdict and reported time therefore mean what they mean for a cold run; only the JVM is warm. Each new JVM first verifies files of `silicon_warm.corpus` (Silicon's and Silver's test files) for `warmup_s` seconds (default 60), each under Silicon's `--timeout file_timeout_s` (default 10). Any corpus file with the same content (SHA-256) as a `.vpr` of any suite is left out, so the JIT has never seen a benchmark before timing it; the suite selection does not change the set. There are no per-file warm-up runs: repeating the file first would let the JIT specialise on it, which neither a user nor the cold column gets. A heap collection runs before each file, outside Silicon's clock. A timeout or a crash ends the JVM (its process tree, z3s included); the next file starts and warms up a new one, so one bad file does not leave the others hot or cold by accident. The warm-up id (driver source, warm-up file hashes, budget, file timeout) is part of the cache key and recorded under `tools.silicon_warm`, with how many JVMs were started. A warm verdict that differs from the cold one is a warning: state leaked between files and the time is not comparable. Measured on one Windows laptop (30 s warm-up), trivial Prusti files went from 6–11 s cold to 1.3–2.6 s warm; the files right after a short warm-up are slower, hence the 60 s default.
+- **Silicon runs only in one JVM, warmed up on files that are not benchmarks.** One `java -jar` process per file ("cold") was measured first and is gone: its time was mostly the JVM's start, and the warm runs give the same output and verdicts. The driver (`bench/silicon/SiliconWarm.java`, run from source with `java -cp silicon.jar`, so no build step and always the pinned jar) verifies each file through Silicon's own command-line path, `SilFrontend.execute`, with a fresh verifier and Z3 per file, as `java -jar` does. The output, verdict and reported time therefore mean what they mean for a cold run; only the JVM is warm. Each new JVM first verifies files of `silicon_warm.corpus` (Silicon's and Silver's test files) for `warmup_s` seconds (default 60), each under Silicon's `--timeout file_timeout_s` (default 10). Any corpus file with the same content (SHA-256) as a `.vpr` of any suite is left out, so the JIT has never seen a benchmark before timing it; the suite selection does not change the set. There are no per-file warm-up runs: repeating the file first would let the JIT specialise on it, which a user does not get. A heap collection runs before each file, outside Silicon's clock. A timeout or a crash ends the JVM (its process tree, z3s included); the next file starts and warms up a new one, so one bad file does not leave the others hot or cold by accident. The warm-up id (driver source, warm-up file hashes, budget, file timeout) is part of the cache key and recorded under `tools.silicon_warm`, with how many JVMs were started. Measured on one Windows laptop (30 s warm-up), trivial Prusti files went from 6–11 s cold to 1.3–2.6 s warm; the files right after a short warm-up are slower, hence the 60 s default.
 - **What the caches keep.** rustc: successful timings, reused only for runs asking no more timed runs than they hold. Silicon: finished results (same run-count rule) and timeouts with the limit they hit, reused only while the timeout is no longer; errors (a crash, an out-of-memory JVM) are measured again. The Silicon key also covers the JVM and Silicon arguments (`-Xss` decides whether Silicon crashes).
 - **Pages serves the branch root**, not `/docs`: the site reads `../benchmarks/results/`, and a root `index.html` redirects to `docs/`.
 - **Only `rustc_check`, Helium and Silicon are timed.** Prusti's encode time and the rustc debug/release build times were dropped: none of them is a cost of checking the file.

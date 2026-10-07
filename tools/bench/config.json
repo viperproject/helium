@@ -9,7 +9,11 @@
   "java": "java",
   "jvm_args": ["-Xss128m"],
   "silicon_args": [],
-  "silicon_warm": null,
+  "silicon_warm": {
+    "corpus": ["../Silicon/silver/src/test/resources", "../Silicon/src/test/resources"],
+    "warmup_s": 60,
+    "file_timeout_s": 10
+  },
   "warmup": 1,
   "runs": 5,
   "timeout_s": null,

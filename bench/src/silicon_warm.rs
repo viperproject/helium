@@ -1,9 +1,9 @@
-//! Silicon in a warm JVM: the `silicon_warm` column.
+//! Silicon in a warm JVM: how every Silicon column is measured.
 //!
-//! `silicon_verify` is the time Silicon reports for a cold `java -jar` run.
-//! Its clock starts before Silicon creates its verifier, so on small files it
-//! is mostly class loading, the JIT's first passes and Z3's start, about two
-//! seconds that do not depend on the file. Here one JVM runs every file
+//! In a cold `java -jar` run, Silicon's own clock starts before it creates
+//! its verifier, so on small files its time is mostly class loading, the
+//! JIT's first passes and Z3's start, about two seconds that do not depend on
+//! the file. Cold runs are therefore not measured at all. One JVM runs every file
 //! through Silicon's own command-line path (`SilFrontend.execute`, a fresh
 //! verifier and Z3 per file, as a cold run), after it has been warmed up on
 //! files of a separate corpus: Silicon's own test files, minus any file whose
@@ -320,6 +320,9 @@ impl WarmSilicon {
             match d.reply(timeout) {
                 Reply::Done(out, end) => {
                     let p = silicon::parse_output(&out, &decls);
+                    if self.silicon.version.is_none() {
+                        self.silicon.version = p.version.clone();
+                    }
                     let driver_ok = end.get(1).is_some_and(|s| s == "ok");
                     if !driver_ok || p.verify_time.is_none() {
                         status = Status::Error;
@@ -365,6 +368,23 @@ impl WarmSilicon {
             message,
             timeout_s: Some(timeout.as_secs_f64()),
         })
+    }
+
+    /// `"<version line>@sha256:<jar hash>"`, once a run has printed the
+    /// version (or a cached result has carried it).
+    pub fn silicon_id(&self) -> String {
+        self.silicon.id()
+    }
+
+    /// Take the version line from a cached result's `silicon` id, when no run
+    /// of this JVM has printed it yet.
+    pub fn adopt_version(&mut self, id: &str) {
+        if self.silicon.version.is_none() {
+            self.silicon.version = id
+                .rsplit_once("@sha256:")
+                .map(|(v, _)| v.to_string())
+                .filter(|v| v != "silicon");
+        }
     }
 
     /// End the JVM (and its z3s).

@@ -166,10 +166,10 @@ function numericPaths(objs, prefix, skip = new Set()) {
   return [...out].sort();
 }
 // Only the times each tool reports itself, so no column counts process or JVM
-// startup; the wall-clock columns stay in the run files. `silicon_warm` is
+// startup; the wall-clock columns stay in the run files. `silicon_verify` is
 // Silicon's own time in a JVM warmed up on other files (no class loading or
-// first JIT passes), present only when the run was configured for it.
-const TIME_COLUMNS = ["rustc_self", "helium_verify", "silicon_verify", "silicon_warm"];
+// first JIT passes).
+const TIME_COLUMNS = ["rustc_self", "helium_verify", "silicon_verify"];
 function fileMetricPaths(run) {
   const times = TIME_COLUMNS.filter((c) => run.files.some((f) => med(f.times?.[c]) != null)).map((c) => "times." + c);
   const rest = numericPaths(run.files, "").filter((p) => !p.startsWith("times.") && !p.startsWith("knobs."));
@@ -275,7 +275,6 @@ async function pageOverview() {
         fairRatio ? `${fmtChange(fairRatio)} over ${cmp.rows.length} shared files` : "", fairRatio > 1.15 ? "bad" : fairRatio && fairRatio < 0.95 ? "good" : "")}
       ${tile("Overhead vs rustc", fmtRatio(s.geomean_overhead), ps ? dRatio(ps.geomean_overhead, s.geomean_overhead) : "geometric mean")}
       ${tile("Speedup vs Silicon", fmtRatio(s.geomean_speedup), s.geomean_speedup ? (ps ? dRatio(ps.geomean_speedup, s.geomean_speedup) : "geometric mean") : "no Silicon data")}
-      ${s.geomean_speedup_warm ? tile("Speedup vs warm Silicon", fmtRatio(s.geomean_speedup_warm), ps?.geomean_speedup_warm ? dRatio(ps.geomean_speedup_warm, s.geomean_speedup_warm) : "geometric mean, JVM warmed up on other files") : ""}
       ${tile("Members verified", fmtNum(s.coverage.OK || 0), `of ${fmtNum(s.members)}${ps ? ` · was ${fmtNum(ps.coverage.OK || 0)}` : ""}`)}
       ${tile("Not verified", fmtNum(s.members - (s.coverage.OK || 0)), coverageLabel({ ...s.coverage, OK: 0 }))}
       ${tile("Helium/Silicon disagree", fmtNum(s.disagreements), s.timeouts ? `${s.timeouts} timeouts` : "")}
@@ -351,10 +350,8 @@ async function pageTrends(params) {
     ["summary.totals.helium_verify", "Helium verify, total (s)"],
     ["summary.totals.rustc_self", "rustc check, total (s)"],
     ["summary.totals.silicon_verify", "Silicon verify, total (s)"],
-    ["summary.totals.silicon_warm", "Silicon verify in a warm JVM, total (s)"],
     ["summary.geomean_overhead", "Overhead vs rustc (geomean ×)"],
     ["summary.geomean_speedup", "Speedup vs Silicon (geomean ×)"],
-    ["summary.geomean_speedup_warm", "Speedup vs warm Silicon (geomean ×)"],
     ["summary.coverage.OK", "Members OK"],
     ["summary.coverage.FAIL", "Members FAIL"],
     ["summary.coverage.UNSUPPORTED", "Members UNSUPPORTED"],
@@ -546,7 +543,7 @@ async function pageScaling(params) {
   const families = [];
   for (const [suite, info] of Object.entries(cur.suites || {})) for (const f of info.families || []) families.push({ suite, ...f, key: `${suite}/${f.name}` });
   const el = $(`<div><h1>Scaling</h1><div class="controls"></div><div class="card"><div class="chart" id="chart"></div><p class="muted" id="note"></p></div>
-    <p class="muted">Time against one knob with the others held fixed, log–log. One line per commit, or, with <em>lines: tools</em>, one line per tool (rustc, Helium, Silicon) at one commit. Every time is the one the tool reports itself (rustc's <code>-Z time-passes</code> total, Helium's pipeline total, Silicon's summary line), so process and JVM startup are not in it. The legend gives each line's fitted power-law exponent k (time ∝ knob^k); a straight line on these axes is polynomial, an upward bend exponential.
+    <p class="muted">Time against one knob with the others held fixed, log–log. One line per commit, or, with <em>lines: tools</em>, one line per tool (rustc, Helium, Silicon) at one commit. Every time is the one the tool reports itself (rustc's <code>-Z time-passes</code> total, Helium's pipeline total, Silicon's summary line, in a JVM warmed up on other files), so process and JVM startup are not in it. The legend gives each line's fitted power-law exponent k (time ∝ knob^k); a straight line on these axes is polynomial, an upward bend exponential.
     With <em>baseline: on</em>, each line's value at the smallest knob is subtracted from all its points, so a fixed cost (Prusti's prelude) drops out and only the growth is left; the y-axis is then linear, since the first point is zero, and k is fitted to that growth.</p>
     <h2>Fitted exponents</h2><div id="fits"></div></div>`);
   app.replaceChildren(el);
@@ -557,7 +554,7 @@ async function pageScaling(params) {
   const famKey = families.some((f) => f.key === params.get("family")) ? params.get("family") : families[0].key;
   const fam = families.find((f) => f.key === famKey);
   const knob = fam.knobs.includes(params.get("knob")) ? params.get("knob") : fam.knobs[0];
-  const metrics = ["times.helium_verify", "times.silicon_verify", "times.silicon_warm", "times.rustc_self", "stats.prove_probe", "stats.sat_iterations", "stats.egraph_nodes_peak", "viper_metrics.loc"];
+  const metrics = ["times.helium_verify", "times.silicon_verify", "times.rustc_self", "stats.prove_probe", "stats.sat_iterations", "stats.egraph_nodes_peak", "viper_metrics.loc"];
   const metric = metrics.includes(params.get("metric")) ? params.get("metric") : metrics[0];
   const byTool = params.get("lines") === "tools";
   const baseline = params.get("baseline") === "on";
@@ -651,7 +648,6 @@ async function pageScaling(params) {
     ["times.rustc_self", "rustc"],
     ["times.helium_verify", "Helium"],
     ["times.silicon_verify", "Silicon"],
-    ["times.silicon_warm", "Silicon (warm)"],
   ];
   let traces;
   const missing = [];
@@ -660,8 +656,7 @@ async function pageScaling(params) {
     TOOLS.forEach(([path, label], i) => {
       const pts = points(loaded[0], path);
       if (pts.length) traces.push(trace(pts, label, i));
-      // Warm Silicon is optional: its absence is not worth a note.
-      else if (path !== "times.silicon_warm") missing.push(label);
+      else missing.push(label);
     });
   } else {
     traces = loaded.map((r, i) => trace(points(r, metric), short(chosen[i]), i));

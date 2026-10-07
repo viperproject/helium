@@ -49,9 +49,11 @@ pub struct Options {
     pub rustc: Option<RustcOptions>,
     /// rustc timings reused across runs (read and updated).
     pub rustc_cache: Option<PathBuf>,
+    /// Silicon to compare with; it runs in one warmed-up JVM, so it needs
+    /// `silicon_warm` too ([`crate::silicon_warm`]).
     pub silicon: Option<Silicon>,
     pub silicon_cache: Option<PathBuf>,
-    /// Also time Silicon in a warm JVM (`silicon_warm`; needs `silicon`).
+    /// How Silicon's JVM is warmed up.
     pub silicon_warm: Option<WarmOptions>,
     pub scratch: PathBuf,
 }
@@ -178,7 +180,7 @@ pub struct Tools {
     pub rustc: Option<String>,
     pub rustc_toolchain: Option<String>,
     pub silicon: Option<String>,
-    /// How the warm JVM behind `silicon_warm` was warmed up.
+    /// How Silicon's JVM was warmed up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub silicon_warm: Option<WarmInfo>,
     /// The commit `verify` reports it was built from (JSON builds only).
@@ -275,12 +277,11 @@ pub struct Times {
     pub helium_verify: Option<PhasedTiming>,
     /// The `verify` process, end to end.
     pub helium_wall: Option<Timing>,
+    /// One file in Silicon's warm JVM, end to end (the driver's clock).
     pub silicon_wall: Option<SiliconTiming>,
-    pub silicon_verify: Option<SiliconTiming>,
-    /// The time Silicon reports in a JVM warmed up on other files (see
+    /// The time Silicon reports, in a JVM warmed up on other files (see
     /// [`crate::silicon_warm`]): no class loading or first JIT passes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub silicon_warm: Option<SiliconTiming>,
+    pub silicon_verify: Option<SiliconTiming>,
 }
 
 /// A tool's self-reported total, with the median of each phase it reports.
@@ -519,7 +520,6 @@ struct Ctx<'a> {
     rustc_version: Option<String>,
     rustc_cache: Option<RustcCache>,
     silicon_cache: Option<silicon::Cache>,
-    silicon: Option<Silicon>,
     silicon_warm: Option<WarmSilicon>,
     verify_commit: Option<String>,
     verify_json: bool,
@@ -580,7 +580,6 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         rustc,
         rustc_cache,
         silicon_cache,
-        silicon: opts.silicon.clone(),
         silicon_warm: match (&opts.silicon, &opts.silicon_warm) {
             (Some(sil), Some(warm)) => Some(WarmSilicon::new(
                 sil.clone(),
@@ -588,7 +587,14 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
                 &all_vprs,
                 &opts.scratch,
             )?),
-            _ => None,
+            (Some(_), None) => {
+                return Err(
+                    "Silicon runs only in a warmed-up JVM: give its warm-up corpus \
+                            (`silicon_warm` in config.json, `--silicon-warm DIR`)"
+                        .into(),
+                );
+            }
+            (None, _) => None,
         },
         verify_commit: None,
         verify_json: true,
@@ -678,7 +684,7 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
         tools: Tools {
             rustc: ctx.rustc_version.clone(),
             rustc_toolchain: opts.rustc.as_ref().and_then(|r| r.toolchain.clone()),
-            silicon: ctx.silicon.as_ref().map(Silicon::id),
+            silicon: ctx.silicon_warm.as_ref().map(WarmSilicon::silicon_id),
             silicon_warm: ctx.silicon_warm.as_ref().map(|w| w.info.clone()),
             verify_commit: ctx.verify_commit,
             verify_json: ctx.verify_json,
@@ -984,66 +990,8 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     }
     times.helium_wall = Some(wall);
 
-    // ── Silicon ──
+    // ── Silicon (in its warm JVM) ──
     let mut silicon_result: Option<(SiliconResult, bool)> = None;
-    if suite.silicon() {
-        if let Some(sil) = ctx.silicon.as_mut() {
-            let key = silicon::Cache::key(&vpr_sha, &sil.jar_sha256, &sil.config_id());
-            let hit = ctx
-                .silicon_cache
-                .as_ref()
-                .and_then(|c| c.entries.get(&key))
-                .filter(|hit| silicon::Cache::reusable(hit, opts.runs, timeout));
-            match hit {
-                Some(hit) => {
-                    if sil.version.is_none() {
-                        sil.version = hit
-                            .silicon
-                            .rsplit_once("@sha256:")
-                            .map(|(v, _)| v.to_string());
-                    }
-                    silicon_result = Some((hit.clone(), true));
-                }
-                None => {
-                    let r = silicon::measure(
-                        sil,
-                        vpr,
-                        &vpr_sha,
-                        opts.warmup,
-                        opts.runs,
-                        timeout,
-                        &scratch,
-                    )
-                    .map_err(|e| format!("silicon: {e}"))?;
-                    if let Some(cache) = ctx.silicon_cache.as_mut() {
-                        if silicon::Cache::keeps(&r) {
-                            cache.entries.insert(key, r.clone());
-                        } else {
-                            // Not a stale answer for the next run either.
-                            cache.entries.remove(&key);
-                        }
-                    }
-                    silicon_result = Some((r, false));
-                }
-            }
-        }
-    }
-    if let Some((r, cached)) = &silicon_result {
-        let t = |d: &silicon::TimingData| SiliconTiming {
-            status: r.status,
-            median: d.median,
-            mad: d.mad,
-            runs: d.runs.clone(),
-            cached: *cached,
-        };
-        times.silicon_wall = Some(t(&r.wall));
-        times.silicon_verify = Some(t(&r.verify));
-        if let Some(p) = r.peak_rss_mb {
-            peaks.insert("silicon".into(), p);
-        }
-    }
-
-    // ── Silicon, warm ──
     if suite.silicon()
         && let Some(warm) = ctx.silicon_warm.as_mut()
     {
@@ -1055,38 +1003,33 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
             .filter(|hit| silicon::Cache::reusable(hit, opts.runs, timeout))
             .cloned();
         let (r, cached) = match hit {
-            Some(hit) => (hit, true),
+            Some(hit) => {
+                warm.adopt_version(&hit.silicon);
+                (hit, true)
+            }
             None => {
                 let r = warm.measure(vpr, &vpr_sha, opts.runs, timeout)?;
                 if let Some(cache) = ctx.silicon_cache.as_mut() {
                     if silicon::Cache::keeps(&r) {
                         cache.entries.insert(key, r.clone());
                     } else {
+                        // Not a stale answer for the next run either.
                         cache.entries.remove(&key);
                     }
                 }
                 (r, false)
             }
         };
-        // The warm JVM runs the same Silicon on the same file: a different
-        // verdict means state leaked between files, and its time is not
-        // comparable.
-        if let Some((cold, _)) = &silicon_result
-            && let (Some(c), Some(w)) = (cold.verified, r.verified)
-            && (c != w || cold.failed_members != r.failed_members)
-        {
-            ctx.warnings.push(format!(
-                "{}/{}: warm Silicon disagrees with cold Silicon (cold verified: {c}, warm: {w})",
-                suite.name, file.stem
-            ));
-        }
-        times.silicon_warm = Some(SiliconTiming {
+        let t = |d: &silicon::TimingData| SiliconTiming {
             status: r.status,
-            median: r.verify.median,
-            mad: r.verify.mad,
-            runs: r.verify.runs.clone(),
+            median: d.median,
+            mad: d.mad,
+            runs: d.runs.clone(),
             cached,
-        });
+        };
+        times.silicon_wall = Some(t(&r.wall));
+        times.silicon_verify = Some(t(&r.verify));
+        silicon_result = Some((r, cached));
     }
 
     // ── Members ──
@@ -1175,17 +1118,12 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     let t = &times;
     let cached = |c: bool| if c { " (cached)" } else { "" };
     progress(format!(
-        "  helium {} | rustc_check {}{} | silicon_verify {}{}{}",
+        "  helium {} | rustc_check {}{} | silicon_verify {}{}",
         fmt_time(t.helium_verify.as_ref().and_then(|h| h.timing.median)),
         fmt_time(t.rustc_check.as_ref().and_then(|x| x.median)),
         cached(t.rustc_check.as_ref().is_some_and(|x| x.cached)),
         fmt_time(t.silicon_verify.as_ref().and_then(|x| x.median)),
         cached(t.silicon_verify.as_ref().is_some_and(|s| s.cached)),
-        t.silicon_warm.as_ref().map_or(String::new(), |w| format!(
-            " | silicon_warm {}{}",
-            fmt_time(w.median),
-            cached(w.cached)
-        )),
     ));
 
     let family = suite.family_of(&file.stem);

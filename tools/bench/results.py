@@ -166,8 +166,8 @@ def summarize(run_data: dict) -> dict:
     coverage: dict = {}
     by_suite: dict = {}
     # Self-reported times only: no total counts process or JVM startup.
-    totals = {"helium_verify": 0.0, "rustc_self": 0.0, "silicon_verify": 0.0, "silicon_warm": 0.0}
-    overhead, speedup, speedup_warm = [], [], []
+    totals = {"helium_verify": 0.0, "rustc_self": 0.0, "silicon_verify": 0.0}
+    overhead, speedup = [], []
     members = disagreements = timeouts = file_errors = 0
     for f in files:
         t = f.get("times", {})
@@ -189,9 +189,6 @@ def summarize(run_data: dict) -> dict:
             overhead.append(h / r)
         if h and sv:
             speedup.append(sv / h)
-        sw = median_of(t.get("silicon_warm"))
-        if h and sw:
-            speedup_warm.append(sw / h)
         members += len(f.get("members", []))
         disagreements += sum(1 for m in f.get("members", []) if m.get("disagreement"))
         timeouts += sum(1 for v in t.values() if v and v.get("status") == "timeout")
@@ -204,7 +201,6 @@ def summarize(run_data: dict) -> dict:
         "totals": totals,
         "geomean_overhead": geomean(overhead),
         "geomean_speedup": geomean(speedup),
-        "geomean_speedup_warm": geomean(speedup_warm),
         "disagreements": disagreements,
         "timeouts": timeouts,
         "file_errors": file_errors,
