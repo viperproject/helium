@@ -1,0 +1,27 @@
+// REGRESSION (soundness). An `unfold` yields the snapshot it consumes, not the
+// value of whichever chunk sits at the predicate's address.
+//
+// `setP5(y)` consumes `P(y)` off `x`'s predicate chunk under the path condition
+// `y == x`, leaving it at zero permission with its old snapshot (x.f == 4). The
+// `unfold P(x)` read that stale snapshot off the ground match before consuming,
+// although the permission it consumes is the one `setP5` handed back (x.f == 5).
+//
+// Must FAIL.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method setP5(r: Ref)
+  requires P(r)
+  ensures P(r) && (unfolding P(r) in r.f == 5)
+
+method zero_residue_unfold(x: Ref, y: Ref, b: Bool)
+  requires P(x) && (unfolding P(x) in x.f == 4)
+{
+  if (b) {
+    assume y == x
+    setP5(y)
+    unfold P(x)
+    assert x.f == 4
+  }
+}

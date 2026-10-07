@@ -997,16 +997,60 @@ pub(crate) fn perm_all_zero(ctx: &VerifyContext<'_>, perm: &ChunkPerm) -> bool {
     }
 }
 
-/// Heap subtraction for a single location chunk of kind `kind`.
+/// What a consume took from the heap: the location's value, and (certificate walks)
+/// its recipe provenance.
+///
+/// The value is an **output** of the consume, never an input: only the consume knows
+/// which chunks the permission came from, and a chunk's value is the location's
+/// value only where that chunk holds positive permission. A chunk whose remainder
+/// is zero on some path stays in the heap with its old value (it is dropped only
+/// when the remainder is unconditionally zero), so reading a value off whichever
+/// chunk matches the address, before consuming, can pick up a stale one.
+#[derive(Debug, Clone)]
+pub(crate) struct Taken {
+    pub(crate) value: egg::Id,
+    pub(crate) recipe: Option<crate::vmir::Val>,
+}
+
+impl Taken {
+    pub(crate) fn of(chunk: &Chunk) -> Self {
+        Self {
+            value: chunk.value,
+            recipe: chunk.recipe.clone(),
+        }
+    }
+
+    /// A value no held chunk pins down outright: unconstrained here, and bound
+    /// (if at all) by facts the caller assumes about it.
+    pub(crate) fn fresh(ctx: &mut VerifyContext<'_>, kind: &LocationKind) -> Self {
+        Self {
+            value: ctx.fresh_symbolic_value(kind.value.clone()),
+            recipe: None,
+        }
+    }
+}
+
+/// Heap subtraction of `needed` at `addr`, a location of kind `kind`. Returns the
+/// remaining heap and what was taken.
 pub(crate) fn heap_subtract(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
     kind: &LocationKind,
-    chunk2: Chunk,
+    addr: egg::Id,
+    needed: ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
     demand: Demand,
-) -> Result<Heap, VerifyError> {
-    heap_subtract_inner(ctx, h1, kind, chunk2, pc_lits, demand, ConsumePass::First)
+) -> Result<(Heap, Taken), VerifyError> {
+    heap_subtract_inner(
+        ctx,
+        h1,
+        kind,
+        addr,
+        needed,
+        pc_lits,
+        demand,
+        ConsumePass::First,
+    )
 }
 
 /// Where a [`heap_subtract_inner`] call sits in the ground-miss retry cycle.
@@ -1098,7 +1142,7 @@ pub(crate) fn normalize_guard_for_consume(
     }
 }
 
-/// Consume `chunk2` from `h1`. The body is a **ladder, cheapest rung first**, and the
+/// Consume `needed` at `addr` from `h1`. The body is a **ladder, cheapest rung first**, and the
 /// order is load-bearing for cost rather than for correctness — every rung below the
 /// first is reached only by an obligation that would otherwise fail, so a consume
 /// that succeeds outright never pays for the ones under it.
@@ -1125,14 +1169,15 @@ pub(crate) fn heap_subtract_inner(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
     kind: &LocationKind,
-    chunk2: Chunk,
+    addr: egg::Id,
+    needed: ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
     demand: Demand,
     pass: ConsumePass,
-) -> Result<Heap, VerifyError> {
-    let (out, existing) = find_chunk_consolidated(ctx, h1, kind, chunk2.addr, pc_lits, true);
+) -> Result<(Heap, Taken), VerifyError> {
+    let (out, existing) = find_chunk_consolidated(ctx, h1, kind, addr, pc_lits, true);
     let (existing, kept) = normalize_guard_for_consume(ctx, existing, pc_lits);
-    let chunk2_perm = chunk2.ungated_perm().to_id(ctx);
+    let chunk2_perm = needed.to_id(ctx);
     let Some(existing) = existing else {
         // No chunk at `addr`. Subtracting a provably-zero permission (e.g. a
         // conditional footprint slot whose guard is false — a nested predicate
@@ -1169,7 +1214,7 @@ pub(crate) fn heap_subtract_inner(
                 out.clone(),
                 kind,
                 None,
-                chunk2.clone(),
+                addr,
                 chunk2_perm,
                 pc_lits,
             )
@@ -1193,7 +1238,7 @@ pub(crate) fn heap_subtract_inner(
         {
             let nonpos = expr!(ctx, not((0 / 1) < r { chunk2_perm }));
             if ctx.prove_under_pc(nonpos, pc_lits) {
-                return Ok(out);
+                return Ok((out, Taken::fresh(ctx, kind)));
             }
         }
         if matches!(pass, ConsumePass::First) {
@@ -1203,7 +1248,8 @@ pub(crate) fn heap_subtract_inner(
                 ctx,
                 h1,
                 kind,
-                chunk2,
+                addr,
+                needed,
                 pc_lits,
                 demand,
                 ConsumePass::Retry {
@@ -1221,20 +1267,19 @@ pub(crate) fn heap_subtract_inner(
             out,
             kind,
             None,
-            chunk2,
+            addr,
             chunk2_perm,
             pc_lits,
         );
     };
 
     if demand == Demand::Wildcard {
-        return debit_wildcard(ctx, out, kind, &existing, &chunk2, pc_lits, kept);
+        return debit_wildcard(ctx, out, kind, &existing, &needed, pc_lits, kept);
     }
 
     // Sufficiency `held ≥ needed`, proven per-leaf over the (possibly
     // branch-structured) held perm — the `Select` never enters the graph.
-    let proven =
-        prove_sufficient_aligned(ctx, existing.ungated_perm(), chunk2.ungated_perm(), pc_lits);
+    let proven = prove_sufficient_aligned(ctx, existing.ungated_perm(), &needed, pc_lits);
     if !proven {
         // Invariant 7 — consume under **pc-implied aliasing**. `acc(x.f,1/2)` and
         // `acc(y.f,1/2)` are distinct chunks on ground, but under an in-branch
@@ -1257,43 +1302,37 @@ pub(crate) fn heap_subtract_inner(
             out,
             kind,
             Some(&existing),
-            chunk2,
+            addr,
             chunk2_perm,
             pc_lits,
         );
         return r;
     }
 
-    Ok(debit_direct(ctx, out, kind, &existing, &chunk2, kept))
+    Ok(debit_direct(ctx, out, kind, &existing, &needed, kept))
 }
 
-/// Take `chunk2_perm` off a single chunk whose sufficiency is already proven, and
-/// store the remainder back under `kept`.
+/// Take `needed` off a single chunk whose sufficiency is already proven, and store
+/// the remainder back under `kept`.
 ///
-/// The value union is **unconditional**, unlike the guarded rule [`union_heaps`] and
-/// [`merge_chunks`] use. Sound here because the two sides are not symmetric:
-/// `chunk2.value` is minted fresh by [`heap_acc`] for *this* consume and carries no
-/// prior meaning, so the union constrains only the fresh symbol and cannot corrupt
-/// `existing.value`. (The loop frame restore's bug was the symmetric case — two
-/// pre-existing values, one of them a havoc symbol something downstream reads.) Note
-/// it is NOT implied by the sufficiency proof: `held ≥ needed` permits `needed == 0`,
-/// so a conditional exhale does bind the slot value off-path. Probed with
-/// complementary conditional exhales and with a call whose `requires` has a
-/// conditional footprint; both are correctly rejected.
+/// What was taken is `existing`'s value. `held ≥ needed` permits `needed == 0`, so
+/// where nothing is demanded that value may be stale, but nothing is taken there
+/// either: a consumer reads the value only under `0 < needed` (a snapshot member's
+/// presence, a footprint slot's own guard).
 pub(crate) fn debit_direct(
     ctx: &mut VerifyContext<'_>,
     out: Heap,
     kind: &LocationKind,
     existing: &Chunk,
-    chunk2: &Chunk,
+    needed: &ChunkPerm,
     kept: crate::verify::heap::HeapPc,
-) -> Heap {
-    ctx.union(existing.value, chunk2.value);
+) -> (Heap, Taken) {
+    let taken = Taken::of(existing);
     // Remainder stays structural (leaves get `SubR`); never an `ite` in the graph.
     // Aligned against the *demand's* structure too, so a guarded consume cancels per
     // arm (`c ? 0 : 1/1`) rather than leaving `1/1 - (c ? 1/1 : 0/1)` in every leaf --
     // which is what lets `perm_all_zero` below see the emptied branch.
-    let remainder = perm_sub_aligned(ctx, existing.ungated_perm(), chunk2.ungated_perm());
+    let remainder = perm_sub_aligned(ctx, existing.ungated_perm(), needed);
     // Whether to drop the emptied chunk is a statement about the *heap*, so it has
     // to hold at the heap's scope — **unconditionally**, not under this
     // instruction's `pc`.
@@ -1308,7 +1347,7 @@ pub(crate) fn debit_direct(
     // stay O(1) — asking the prover runs once per chunk per consume and dominated
     // everything (93s vs 4s). Keeping a chunk we merely failed to prove empty is
     // sound: a zero-permission chunk is inert (`perm > 0` gates every use).
-    if perm_all_zero(ctx, &remainder) {
+    let out = if perm_all_zero(ctx, &remainder) {
         out.without_chunk(kind, existing.addr)
     } else {
         // The value (and so its recipe provenance) is unchanged by a subtract, and
@@ -1320,7 +1359,8 @@ pub(crate) fn debit_direct(
                 .with_recipe(existing.recipe.clone())
                 .with_guard(kept),
         )
-    }
+    };
+    (out, taken)
 }
 
 /// Wildcard exhale. Instead of proving `held ≥ needed` (a wildcard has no fixed
@@ -1335,31 +1375,29 @@ pub(crate) fn debit_wildcard(
     out: Heap,
     kind: &LocationKind,
     existing: &Chunk,
-    chunk2: &Chunk,
+    needed: &ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
     kept: crate::verify::heap::HeapPc,
-) -> Result<Heap, VerifyError> {
+) -> Result<(Heap, Taken), VerifyError> {
     // Walk the DEMAND's branch structure: a gated `exhale b ==> acc(x.f, wildcard)`
     // takes a share only where `b` holds, and states nothing where it does not.
-    // Flat, the rule read only `chunk2.value` and constrained the remainder
-    // `r < held` on both arms — including the arm where nothing was demanded, which
-    // is imprecise rather than unsound but throws away permission the program kept.
-    let (perm, value, err) = debit_wildcard_walk(
-        ctx,
-        existing.ungated_perm(),
-        chunk2.ungated_perm(),
-        existing.value,
-        chunk2.value,
-        pc_lits,
-    );
+    // Flat, the rule constrained the remainder `r < held` on both arms — including
+    // the arm where nothing was demanded, which is imprecise rather than unsound but
+    // throws away permission the program kept.
+    let (perm, err) = debit_wildcard_walk(ctx, existing.ungated_perm(), needed, pc_lits);
     if let Some(e) = err {
         return Err(e);
     }
-    Ok(out.with_chunk(
-        kind,
-        Chunk::new_perm(existing.addr, perm, value)
-            .with_recipe(existing.recipe.clone())
-            .with_guard(kept),
+    // What was taken is `existing`'s value: `held > 0` is proven on every arm that
+    // demands a share.
+    Ok((
+        out.with_chunk(
+            kind,
+            Chunk::new_perm(existing.addr, perm, existing.value)
+                .with_recipe(existing.recipe.clone())
+                .with_guard(kept),
+        ),
+        Taken::of(existing),
     ))
 }
 
@@ -1388,46 +1426,35 @@ fn debit_wildcard_walk(
     ctx: &mut VerifyContext<'_>,
     held: &ChunkPerm,
     needed: &ChunkPerm,
-    held_value: egg::Id,
-    needed_value: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, egg::Id, Option<VerifyError>) {
+) -> (ChunkPerm, Option<VerifyError>) {
     match needed {
         ChunkPerm::Leaf { id, .. } => {
             // Nothing demanded on this arm: no obligation, no fact, no debit.
             let nonpos = expr!(ctx, not ((0/1) <r {*id}));
             if ctx.prove_under_pc(nonpos, pc_lits) {
-                return (held.clone(), held_value, None);
+                return (held.clone(), None);
             }
             let held_id = held.to_id(ctx);
             let held_pos = expr!(ctx, (0 / 1) < r { held_id });
             if !ctx.prove_under_pc(held_pos, pc_lits) {
-                return (
-                    held.clone(),
-                    held_value,
-                    Some(VerifyError::InsufficientPermission),
-                );
+                return (held.clone(), Some(VerifyError::InsufficientPermission));
             }
-            // Unconditional union is safe on both counts: `held > 0` was just proven
-            // and a wildcard `needed` is positive by construction, so this is the
-            // both-held case — and `chunk2.value` is fresh besides.
-            ctx.union(held_value, needed_value);
             let remainder = ctx.fresh_wildcard();
             let lt = expr!(ctx, { remainder } < r { held_id });
             ctx.assume_all_guarded([lt], pc_lits);
-            (ChunkPerm::wild_leaf(remainder), held_value, None)
+            (ChunkPerm::wild_leaf(remainder), None)
         }
         ChunkPerm::Select { cond, then, els } => {
             let ht = ChunkPerm::restrict(ctx, *cond, held.clone(), true);
             let mut pc_t = pc_lits.to_vec();
             pc_t.push((*cond, Polarity::Positive));
-            let (t, value, e1) =
-                debit_wildcard_walk(ctx, &ht, then, held_value, needed_value, &pc_t);
+            let (t, e1) = debit_wildcard_walk(ctx, &ht, then, &pc_t);
             let he = ChunkPerm::restrict(ctx, *cond, held.clone(), false);
             let mut pc_e = pc_lits.to_vec();
             pc_e.push((*cond, Polarity::Negative));
-            let (e, _, e2) = debit_wildcard_walk(ctx, &he, els, held_value, needed_value, &pc_e);
-            (ChunkPerm::select(ctx, *cond, t, e), value, e1.or(e2))
+            let (e, e2) = debit_wildcard_walk(ctx, &he, els, &pc_e);
+            (ChunkPerm::select(ctx, *cond, t, e), e1.or(e2))
         }
     }
 }
@@ -1461,10 +1488,10 @@ pub(crate) fn heap_subtract_summarized_fallbacks(
     out: Heap,
     kind: &LocationKind,
     existing: Option<&Chunk>,
-    chunk2: Chunk,
+    addr: egg::Id,
     chunk2_perm: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> Result<Heap, VerifyError> {
+) -> Result<(Heap, Taken), VerifyError> {
     // 1. pc-implied aliasing. The whole partner *set* is collected, not the first
     //    hit: several held chunks can coincide with the demand under the pc, and only
     //    their sum is the permission at that location. A first-hit lookup is
@@ -1475,32 +1502,23 @@ pub(crate) fn heap_subtract_summarized_fallbacks(
     //    under the pc and the debit is **gated** by the pc, so off-path — where the
     //    addresses are unrelated — nothing is taken, and ground never consolidates
     //    two chunks that are only conditionally equal.
-    let partners = pc_alias_partners(ctx, h1.chunks_of(kind), chunk2.addr, pc_lits);
+    let partners = pc_alias_partners(ctx, h1.chunks_of(kind), addr, pc_lits);
     if !partners.is_empty() {
         let (set, total) = pc_alias_set(ctx, h1, kind, existing, &partners, pc_lits);
         if !set.is_empty() {
-            let r =
-                heap_subtract_summarized(ctx, out, kind, &set, total, chunk2, chunk2_perm, pc_lits);
+            let r = heap_subtract_summarized(ctx, out, kind, &set, total, chunk2_perm, pc_lits);
             return r;
         }
     }
     // 2. Whole-group Σ-ite summary.
-    let (total, set) = summarize_perm_at(ctx, h1.chunks_of(kind), chunk2.addr, pc_lits);
+    let (total, set) = summarize_perm_at(ctx, h1.chunks_of(kind), addr, pc_lits);
     if set.len() > usize::from(existing.is_some())
-        && let Ok(h) = heap_subtract_summarized(
-            ctx,
-            out.clone(),
-            kind,
-            &set,
-            total,
-            chunk2.clone(),
-            chunk2_perm,
-            pc_lits,
-        )
+        && let Ok(r) =
+            heap_subtract_summarized(ctx, out.clone(), kind, &set, total, chunk2_perm, pc_lits)
     {
-        return Ok(h);
+        return Ok(r);
     }
-    subtract_miss_trace(ctx, h1, kind, existing, &chunk2, chunk2_perm);
+    subtract_miss_trace(ctx, h1, kind, existing, addr, chunk2_perm);
     Err(VerifyError::InsufficientPermission)
 }
 
@@ -1514,7 +1532,7 @@ pub(crate) fn subtract_miss_trace(
     h1: &Heap,
     kind: &LocationKind,
     existing: Option<&Chunk>,
-    chunk2: &Chunk,
+    addr: egg::Id,
     chunk2_perm: egg::Id,
 ) {
     match existing {
@@ -1535,7 +1553,7 @@ pub(crate) fn subtract_miss_trace(
                 eprintln!(
                     "[miss] group {:?} demanded addr:\n{}held addrs ({}):",
                     kind.group,
-                    crate::verify::viz::dump_term(ctx, chunk2.addr, 40),
+                    crate::verify::viz::dump_term(ctx, addr, 40),
                     h1.chunks_of(kind).len(),
                 );
                 for c in h1.chunks_of(kind).to_vec() {
@@ -1611,14 +1629,15 @@ pub(crate) fn pc_alias_set(
     )
 }
 
-/// Consume `chunk2` against a **summarized** location: a set of chunks that each sit
-/// at `chunk2.addr` only *conditionally*, paired with the cube that condition is.
+/// Consume `chunk2_perm` against a **summarized** location: a set of chunks that each
+/// sit at the demanded address only *conditionally*, paired with the cube that
+/// condition is.
 ///
 /// Two callers supply two different gates, and the algorithm is the same for both:
 /// - **pc-alias** (invariant 7 of the two-egraph block model) — cube = the pc.
 ///   `acc(x.f,1/2)` and `acc(y.f,1/2)` are distinct chunks on ground, but under an
 ///   in-branch `x == y` they are one location holding `1/1`.
-/// - **Σ-ite** — cube = `c.addr == chunk2.addr` itself, the condition the pc gate is
+/// - **Σ-ite** — cube = `c.addr == addr` itself, the condition the pc gate is
 ///   only ever a proxy for. Strictly more precise, and it needs no probe.
 ///
 /// - **Sufficiency** is proven against `total`, the sum the caller summarized: at any
@@ -1643,7 +1662,8 @@ pub(crate) fn pc_alias_set(
 ///   so `exhale acc(y.f,1/2)` would wrongly succeed without ever reaching this
 ///   function. Distributing drives every member of the set to its true remainder.
 /// - **Value agreement** is likewise assumed only under each member's own cube:
-///   unioning the values outright would claim `x.f == y.f` where `x != y`.
+///   unioning the values outright would claim `x.f == y.f` where `x != y`. See
+///   [`summarized_value`] for the second condition it needs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn heap_subtract_summarized(
     ctx: &mut VerifyContext<'_>,
@@ -1651,10 +1671,9 @@ pub(crate) fn heap_subtract_summarized(
     kind: &LocationKind,
     set: &[(Chunk, crate::verify::heap::HeapPc)],
     total: ChunkPerm,
-    chunk2: Chunk,
     chunk2_perm: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> Result<Heap, VerifyError> {
+) -> Result<(Heap, Taken), VerifyError> {
     // `needed ≤ total`, per leaf of `total`, each under the pc plus that leaf's
     // branch literals.
     if !prove_sufficient(ctx, &total, chunk2_perm, pc_lits) {
@@ -1671,18 +1690,17 @@ pub(crate) fn heap_subtract_summarized(
         }
         return Err(VerifyError::InsufficientPermission);
     }
-    // Golden rule, but only where the locations coincide — each member under its own
-    // gate, so a chunk that is only conditionally at this address claims value
-    // agreement only under that condition.
-    for (chunk, cube) in set {
-        let agree = expr!(ctx, { chunk.value } == { chunk2.value });
-        ctx.assume_guarded(agree, cube.iter().rev().copied());
-    }
+    let taken = summarized_value(ctx, kind, set, pc_lits);
 
-    // Greedy distribution over the set, demanded chunk first.
+    // Greedy distribution over the set, demanded chunk first -- after the members
+    // whose cube already holds: the location is certainly there, and a member that
+    // only may be there then gives up only what is left (often nothing) rather
+    // than keeping a conditional residue whose value nothing can read.
+    let mut order: Vec<&(Chunk, crate::verify::heap::HeapPc)> = set.iter().collect();
+    order.sort_by_key(|(_, cube)| !cube_holds(ctx, pc_lits, cube));
     let mut out = out;
     let mut remaining = chunk2_perm;
-    for (chunk, cube) in set.iter().cloned() {
+    for (chunk, cube) in order.into_iter().cloned() {
         // What the chunk can give up is what it holds where it is present: an
         // absent member (its guard false) must neither be debited nor retire any
         // of the demand, or a present member is left holding permission it had
@@ -1723,7 +1741,86 @@ pub(crate) fn heap_subtract_summarized(
             );
         }
     }
-    Ok(out)
+    Ok((out, taken))
+}
+
+/// Whether `cube` holds wherever `pc_lits` does: each literal is in the pc, or its
+/// class is already decided with the literal's polarity (a Σ-ite address gate the
+/// sufficiency proof has since settled).
+fn cube_holds(
+    ctx: &VerifyContext<'_>,
+    pc_lits: &[(egg::Id, Polarity)],
+    cube: &[(egg::Id, Polarity)],
+) -> bool {
+    cube.iter().all(|lit @ (id, pol)| {
+        crate::verify::heap::cube_entails(ctx, pc_lits, std::slice::from_ref(lit))
+            || matches!(
+                ctx.egraph[ctx.egraph.find(*id)].data.known(),
+                Some(Literal::Bool(b)) if *b == matches!(pol, Polarity::Positive)
+            )
+    })
+}
+
+/// The value a summarized consume takes: the golden rule over the members of `set`,
+/// each of which agrees with the location's value where it sits at the location
+/// (its cube) **and holds positive permission there**.
+///
+/// The second condition is not implied by the first. A member can hold nothing on
+/// this path and still be in the heap: a debit gated by the path condition leaves
+/// `1/1 - (b ? 1/1 : 0)`, which is zero under `b` but not unconditionally, so the
+/// chunk is kept, with the value it had before it was given away. Equating that
+/// stale value with the location's current one (held by another member) made the
+/// state inconsistent. The amount tested is the member's [`present_amount`], so a
+/// member absent by its own presence guard claims nothing either.
+///
+/// The value itself is, like [`debit_direct`]'s, a member's own value when one is
+/// known to hold the location wherever the consume happens: its cube holds there
+/// ([`cube_holds`]) and its present amount is positive by structure
+/// ([`perm_known_positive`] -- no prover call). Otherwise it is fresh. A fresh
+/// value is equal to the members only under their cubes, so every term built over
+/// it is new on ground; preferring a holder keeps those terms shared.
+///
+/// The positivity antecedent is part of each fact, not of its guard: the block
+/// scratch assumes facts without their (cube) guard, and it must still see the
+/// implication there. A member positive by structure needs no antecedent (the
+/// fact is the plain golden rule), and one whose amount folds to zero claims
+/// nothing.
+pub(crate) fn summarized_value(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    set: &[(Chunk, crate::verify::heap::HeapPc)],
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Taken {
+    let holds: Vec<(egg::Id, bool)> = set
+        .iter()
+        .map(|(chunk, _)| {
+            let hold = present_amount(ctx, chunk, pc_lits).to_id(ctx);
+            (hold, perm_known_positive(ctx, hold))
+        })
+        .collect();
+    let holder = set
+        .iter()
+        .zip(&holds)
+        .position(|((_, cube), (_, positive))| *positive && cube_holds(ctx, pc_lits, cube));
+    let taken = match holder {
+        Some(i) => Taken::of(&set[i].0),
+        None => Taken::fresh(ctx, kind),
+    };
+    let zero = num::BigRational::from(num::BigInt::from(0));
+    for (i, ((chunk, cube), (hold, positive))) in set.iter().zip(holds).enumerate() {
+        if Some(i) == holder || known_real(ctx, hold).is_some_and(|r| r == zero) {
+            continue;
+        }
+        let agree = expr!(ctx, { chunk.value } == { taken.value });
+        let agree = if positive {
+            agree
+        } else {
+            let held = expr!(ctx, (0 / 1) < r { hold });
+            ctx.implication(agree, std::iter::once((held, Polarity::Positive)))
+        };
+        ctx.assume_guarded(agree, cube.iter().rev().copied());
+    }
+    taken
 }
 
 /// Structural control-flow merge of two predecessor exit heaps at a binary join
@@ -2207,11 +2304,12 @@ mod tests {
         ctx.egraph.rebuild();
 
         let one = real(&mut ctx, 1, 1);
-        let out = heap_subtract(
+        let (out, _) = heap_subtract(
             &mut ctx,
             &h,
             &test_kind(),
-            Chunk::new(a, one, v0),
+            a,
+            ChunkPerm::leaf(one),
             &[],
             Demand::Concrete,
         )
@@ -2358,6 +2456,78 @@ mod tests {
         assert_eq!(ctx.egraph.find(v0), ctx.egraph.find(v1));
     }
 
+    /// A summarized set `{stale, holder}` under the pc `c`: `stale` is what a debit
+    /// gated by `c` leaves, `1 - (c ? 1 : 0)`, zero on this path, still carrying its
+    /// old value. The value taken is the holder's, and the stale value must not be
+    /// equated with it where `c` holds.
+    fn zero_residue_set(
+        ctx: &mut VerifyContext<'_>,
+        stale_perm: egg::Id,
+    ) -> (
+        Vec<(Chunk, HeapPc)>,
+        [(egg::Id, Polarity); 1],
+        egg::Id,
+        egg::Id,
+    ) {
+        let (a, b, c) = (
+            ctx.add(Symbolic::Fresh(0)),
+            ctx.add(Symbolic::Fresh(1)),
+            ctx.add(Symbolic::Fresh(2)),
+        );
+        let (v_old, v_new) = (ctx.add(Symbolic::Fresh(3)), ctx.add(Symbolic::Fresh(4)));
+        let one = real(ctx, 1, 1);
+        let pc = [(c, Polarity::Positive)];
+        let cube: HeapPc = std::rc::Rc::from(pc.to_vec());
+        let set = vec![
+            (Chunk::new(a, stale_perm, v_old), cube.clone()),
+            (Chunk::new(b, one, v_new), cube),
+        ];
+        (set, pc, v_old, v_new)
+    }
+
+    #[test]
+    fn summarized_value_ignores_member_without_permission() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(2));
+        let (one, zero) = (real(&mut ctx, 1, 1), real(&mut ctx, 0, 1));
+        let debit = ctx.add(Symbolic::Ite([c, one, zero]));
+        let stale = ctx.add(Symbolic::Binary(BinOp::SubR, [one, debit]));
+        let (set, pc, v_old, v_new) = zero_residue_set(&mut ctx, stale);
+
+        let taken = summarized_value(&mut ctx, &test_kind(), &set, &pc);
+        assert_eq!(
+            taken.value, v_new,
+            "the structurally positive holder is taken"
+        );
+        let true_ = expr!(&mut ctx, true);
+        ctx.union(c, true_);
+        ctx.saturate();
+        assert!(!ctx.is_inconsistent());
+        assert_ne!(
+            ctx.egraph.find(v_old),
+            ctx.egraph.find(v_new),
+            "a member holding no permission claimed value agreement"
+        );
+    }
+
+    #[test]
+    fn summarized_value_agrees_where_member_holds() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(2));
+        let p = ctx.add(Symbolic::Fresh(5));
+        let (set, pc, v_old, v_new) = zero_residue_set(&mut ctx, p);
+
+        summarized_value(&mut ctx, &test_kind(), &set, &pc);
+        let held = expr!(&mut ctx, (0 / 1) < r { p });
+        let true_ = expr!(&mut ctx, true);
+        ctx.union(held, true_);
+        ctx.union(c, true_);
+        ctx.saturate();
+        assert_eq!(ctx.egraph.find(v_old), ctx.egraph.find(v_new));
+    }
+
     #[test]
     fn subtract_symbolic_perm_fails_without_proof() {
         let interner = lasso::Rodeo::new();
@@ -2367,7 +2537,6 @@ mod tests {
         let p_have = ctx.add(Symbolic::Fresh(1));
         let p_take = ctx.add(Symbolic::Fresh(2));
         let v1 = ctx.add(Symbolic::Fresh(3));
-        let v2 = ctx.add(Symbolic::Fresh(4));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p_have, v1));
         // Symbolic perms → `have >= take` not provable by equality saturation.
@@ -2375,7 +2544,8 @@ mod tests {
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p_take, v2),
+            a,
+            ChunkPerm::leaf(p_take),
             &[],
             Demand::Concrete,
         )
@@ -2396,17 +2566,17 @@ mod tests {
         let p2 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(2).into())));
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
-        let v2 = ctx.add(Symbolic::Fresh(3));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p2, v1));
         ctx.union(a, b);
         ctx.egraph.rebuild();
 
-        let result = heap_subtract(
+        let (result, taken) = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(b, p1, v2),
+            b,
+            ChunkPerm::leaf(p1),
             &[],
             Demand::Concrete,
         )
@@ -2422,7 +2592,7 @@ mod tests {
             ctx.egraph.find(chunk.perm_repr_id()),
             ctx.egraph.find(expected_perm)
         );
-        assert_eq!(ctx.egraph.find(v1), ctx.egraph.find(v2));
+        assert_eq!(ctx.egraph.find(taken.value), ctx.egraph.find(v1));
     }
 
     #[test]
@@ -2433,14 +2603,14 @@ mod tests {
         let a = ctx.add(Symbolic::Fresh(0));
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
-        let v2 = ctx.add(Symbolic::Fresh(3));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
-        let result = heap_subtract(
+        let (result, _) = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p1, v2),
+            a,
+            ChunkPerm::leaf(p1),
             &[],
             Demand::Concrete,
         )
@@ -2462,14 +2632,14 @@ mod tests {
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let p2 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(2).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
-        let v2 = ctx.add(Symbolic::Fresh(3));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
         let err = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p2, v2),
+            a,
+            ChunkPerm::leaf(p2),
             &[],
             Demand::Concrete,
         )
@@ -2488,14 +2658,14 @@ mod tests {
         let a = ctx.add(Symbolic::Fresh(0));
         let _b = ctx.add(Symbolic::Fresh(1));
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
-        let v1 = ctx.add(Symbolic::Fresh(2));
 
         let h1 = Heap::empty();
         let err = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p1, v1),
+            a,
+            ChunkPerm::leaf(p1),
             &[],
             Demand::Concrete,
         )

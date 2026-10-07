@@ -10,9 +10,9 @@ use crate::{
         heap::{
             Chunk, ChunkPerm, Heap, LocationKind,
             algebra::{
-                Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
+                Demand, Taken, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
                 merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
-                summarize_perm_at, union_heaps,
+                summarize_perm_at, summarized_value, union_heaps,
             },
             gate_perm_by_guard,
         },
@@ -1048,7 +1048,8 @@ fn eval_heap_inst(
                         "purify: unsupported heap inst in a resource body",
                     ));
                 }
-                heap_subtract(ctx, &base_h, &kind, ch, &pc_lits, demand_of(&cperm))
+                let demand = demand_of(&cperm);
+                heap_subtract(ctx, &base_h, &kind, ch.addr, cperm, &pc_lits, demand).map(|(h, _)| h)
             }
         }
         // Resource inhale/exhale need the program + certificates; method-only.
@@ -1254,10 +1255,11 @@ fn eval_method_inst(
 
 /// Where a footprint slot's value comes from (see [`walk_footprint`]).
 enum ValueSource {
-    /// Read the chunk value at the slot's address from this heap (fresh if
-    /// absent). Used by `fold`/`snap`/`exhale`, which read a heap they hold.
-    /// A certificate walk propagates the hit chunk's recipe provenance.
-    ReadHeap(Heap),
+    /// What consuming (or, for a frame-only wildcard slot, framing) the slot
+    /// takes from the heap -- see [`Taken`]. Used by `fold`/`snap`/`exhale`, which
+    /// consume a heap they hold. A certificate walk propagates the taken chunk's
+    /// recipe provenance.
+    Taken,
     /// Recover it from the snapshot `s` as `unwrap(proj_i(s))`. Used by
     /// `unfold`/`from_snap`, which reconstruct the footprint from a snapshot.
     /// The second field is `s`'s recipe term (certificate walks only) — each
@@ -1360,7 +1362,7 @@ fn walk_footprint(
             }
         };
         // Heap framing is a *syntactic* e-class match (`heap_subtract`,
-        // `ValueSource::ReadHeap`), so a slot address has to be in normal form
+        // `find_chunk_consolidated`), so a slot address has to be in normal form
         // before we look it up: an address reaching through a snapshot
         // (`Pt(f(r, cons(Some(unwrap(proj_0(s))))))`) only becomes e-class-equal to
         // the held chunk's address once `proj∘cons` / `unwrap∘Some` have fired.
@@ -1412,16 +1414,9 @@ fn walk_footprint(
         }
         let addr = ctx.egraph.find(addr);
         let elem = slot.elem.clone();
-        let (value, recipe) = match &source {
-            // Values are read from the *original* heap (aliased slots agree);
-            // the hit chunk's recipe provenance rides along.
-            ValueSource::ReadHeap(h) => h
-                .entries()
-                .find_map(|(_, c)| {
-                    (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
-                        .then(|| (c.value, c.recipe.clone()))
-                })
-                .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None)),
+        let sourced = match &source {
+            // Known only once the slot is consumed (or framed), below.
+            ValueSource::Taken => None,
             // `proj_i(s)` recovers the optional member (collapsing to the `cons`
             // argument when `s` is concrete); `unwrap` peels to the field value.
             // A certificate walk mirrors the projection into the recipe.
@@ -1448,13 +1443,13 @@ fn walk_footprint(
                     }
                     _ => None,
                 };
-                (value, recipe)
+                Some((value, recipe))
             }
             // Inhale: an unconstrained fresh value per slot.
-            ValueSource::Fresh => (ctx.fresh_symbolic_value(elem.clone()), None),
+            ValueSource::Fresh => Some((ctx.fresh_symbolic_value(elem.clone()), None)),
         };
         // Snapshot member `present ? Some(v) : None`, plus the slot's heap effect.
-        let present = match bperm {
+        let (value, recipe, present) = match bperm {
             // Normal path: apply the (optionally scaled) permission to the heap
             // (subtract/union), presence is `0 < perm`.
             SlotPerm::Amount(bperm) => {
@@ -1462,15 +1457,21 @@ fn walk_footprint(
                     Some(pm) => scale_perm(ctx, pm, scale_wild, bperm.clone()),
                     None => bperm.clone(),
                 };
-                let chunk = Chunk::new_perm(addr, p, value).with_recipe(recipe.clone());
-                heap = match direction {
-                    Direction::Consume => {
-                        heap_subtract(ctx, &heap, &slot.kind, chunk, pc_lits, slot_demand)?
+                let (value, recipe) = match sourced {
+                    None => {
+                        let (h, taken) =
+                            heap_subtract(ctx, &heap, &slot.kind, addr, p, pc_lits, slot_demand)?;
+                        heap = h;
+                        (taken.value, taken.recipe)
                     }
-                    Direction::Produce => heap_union(ctx, &heap, &slot.kind, chunk, pc_lits),
+                    Some((value, recipe)) => {
+                        let chunk = Chunk::new_perm(addr, p, value).with_recipe(recipe.clone());
+                        heap = heap_union(ctx, &heap, &slot.kind, chunk, pc_lits);
+                        (value, recipe)
+                    }
                 };
                 let bperm_id = bperm.to_id(ctx);
-                expr!(ctx, (0 / 1) < r { bperm_id })
+                (value, recipe, expr!(ctx, (0 / 1) < r { bperm_id }))
             }
             // Wildcard `Snap` slot: no heap effect (Snap frames). Presence is the
             // gating guard `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when
@@ -1482,7 +1483,7 @@ fn walk_footprint(
                 let guard = expr!(ctx, (0 / 1) < r { pp });
                 let (_, existing) =
                     find_chunk_consolidated(ctx, &heap, &slot.kind, addr, pc_lits, true);
-                let suff = match existing {
+                let suff = match &existing {
                     Some(c) => {
                         // `guard ⇒ 0 < held`, proven per leaf (never materialize
                         // the held `Select`): assume `guard` in the pc, prove
@@ -1509,17 +1510,26 @@ fn walk_footprint(
                 // shape. Summarize the group at `addr` and ask for positivity per
                 // leaf. Reached only by a check that would otherwise fail, so no
                 // framing check that succeeds outright pays for it.
-                let suff = suff || {
-                    let chunks = heap.chunks_of(&slot.kind).to_vec();
-                    let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
-                    let mut pc = pc_lits.to_vec();
-                    pc.push((guard, Polarity::Positive));
-                    !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
+                //
+                // The value is read where the permission was found: off `existing`
+                // when it is the chunk shown positive, else a fresh value the
+                // summary's members agree with where they hold (as a summarized
+                // consume does), else -- no chunk, slot not required here -- fresh.
+                let taken = match existing {
+                    Some(c) if suff => Taken::of(&c),
+                    None if suff => Taken::fresh(ctx, &slot.kind),
+                    _ => {
+                        let chunks = heap.chunks_of(&slot.kind).to_vec();
+                        let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
+                        let mut pc = pc_lits.to_vec();
+                        pc.push((guard, Polarity::Positive));
+                        if set.is_empty() || !prove_perm_positive(ctx, &total, &pc) {
+                            return Err(VerifyError::InsufficientPermission);
+                        }
+                        summarized_value(ctx, &slot.kind, &set, pc_lits)
+                    }
                 };
-                if !suff {
-                    return Err(VerifyError::InsufficientPermission);
-                }
-                guard
+                (taken.value, taken.recipe, guard)
             }
         };
         members.push(ctx.option_member(elem, present, value));
@@ -1610,40 +1620,21 @@ fn eval_sub_yield(
         .map(|(v, p)| (state.get_val(ctx, v), *p))
         .collect();
 
-    // The held value, and (certificate walks) its provenance. The `Option` below
-    // is concretely `Some` on every path that continues: `heap_subtract` fails
-    // unless the permission is held, so `None` is reachable only at a
-    // provably-non-positive permission.
+    // The held value is what the subtraction takes, and (certificate walks) its
+    // provenance. The `Option` below is concretely `Some` on every path that
+    // continues: `heap_subtract` fails unless the permission is held, so `None` is
+    // reachable only at a provably-non-positive permission.
     //
-    // A miss of this canonical-address scan is not yet a missing permission: the
-    // subtraction below also matches a chunk whose address equals the demand only
-    // under the path condition, and owes nothing on a dead path -- a plain
-    // `exhale` of the same location succeeds in both cases. So stand in a fresh
-    // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
-    // consumes. A certificate walk needs the held chunk's recipe, so there a miss
-    // stays a failure.
-    let a = ctx.egraph.find(addr);
-    let hit = base_h
-        .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
-    let (held, held_recipe) = match hit {
-        Some(x) => x,
-        None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
-        None => return Err(VerifyError::InsufficientPermission),
-    };
+    // A certificate walk needs the held chunk's recipe, so a value the consume
+    // could not take off one chunk is a failure there.
+    let demand = demand_of(&cperm);
+    let (out, taken) = heap_subtract(ctx, &base_h, &kind, addr, cperm.clone(), &pc_lits, demand)?;
+    let (held, held_recipe) = (taken.value, taken.recipe);
     if ctx.recipe.is_some() && held_recipe.is_none() {
         return Err(VerifyError::Unimplemented(
             "purify: consume of an unheld location",
         ));
     }
-    let out = heap_subtract(
-        ctx,
-        &base_h,
-        &kind,
-        Chunk::new_perm(addr, cperm.clone(), held),
-        &pc_lits,
-        demand_of(&cperm),
-    )?;
     state.push_heap(out);
 
     // Presence is `0 < perm`, built from the permission the instruction names.
@@ -1759,11 +1750,7 @@ fn eval_resource_op(
         guard.extend_from_slice(&pc_lits);
         (source, Direction::Produce, guard)
     } else {
-        (
-            ValueSource::ReadHeap(base_h.clone()),
-            Direction::Consume,
-            pc_lits.clone(),
-        )
+        (ValueSource::Taken, Direction::Consume, pc_lits.clone())
     };
     let FootprintResult {
         heap: out,
