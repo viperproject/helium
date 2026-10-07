@@ -1,0 +1,27 @@
+// REGRESSION (soundness). A heap-dependent function call frames the value its
+// precondition check consumes, not a stale one.
+//
+// After `set5(y)` under `y == x`, `x`'s chunk holds zero permission and its old
+// value 4, while the permission (and the value 5) sits at `y`. The frame check of
+// `rd(x)` read the stale 4 into the snapshot, so `rd(x) == 4` verified.
+//
+// Must FAIL.
+field f: Int
+
+method set5(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && r.f == 5
+
+function rd(r: Ref): Int
+  requires acc(r.f)
+{ r.f }
+
+method zero_residue_function_frame(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    assert rd(x) == 4
+  }
+}
