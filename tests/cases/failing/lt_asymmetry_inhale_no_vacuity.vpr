@@ -1,0 +1,12 @@
+// The real-world shape of lt_asymmetry_perm_no_vacuity.vpr: inhaling a
+// permission asks for `!(a < none)`, which lt-asymmetry derives from the
+// precondition `none < a`. That derivation must not refute the precondition.
+
+field f: Int
+
+method m(x: Ref, a: Perm)
+    requires none < a
+{
+    inhale acc(x.f, a)
+    assert false
+}

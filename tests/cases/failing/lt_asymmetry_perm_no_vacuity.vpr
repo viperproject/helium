@@ -1,0 +1,12 @@
+// `none < amt` assumed true: lt-asymmetry pins the mirror `amt < none` false,
+// which merges it into the `false` class. Re-walking that class must not apply
+// lt-asymmetry to it (its `<` nodes are false, not true), or the mirror of the
+// mirror (the assumption itself) is merged with `false` and every assertion
+// after it holds vacuously.
+
+method h(amt: Perm)
+    requires none < amt
+{
+    assert !(amt < none)
+    assert false
+}
