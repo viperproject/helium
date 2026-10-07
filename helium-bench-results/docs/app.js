@@ -166,7 +166,9 @@ function numericPaths(objs, prefix, skip = new Set()) {
   return [...out].sort();
 }
 // Only the times each tool reports itself, so no column counts process or JVM
-// startup; the wall-clock columns stay in the run files.
+// startup; the wall-clock columns stay in the run files. `silicon_verify` is
+// Silicon's own time in a JVM warmed up on other files (no class loading or
+// first JIT passes).
 const TIME_COLUMNS = ["rustc_self", "helium_verify", "silicon_verify"];
 function fileMetricPaths(run) {
   const times = TIME_COLUMNS.filter((c) => run.files.some((f) => med(f.times?.[c]) != null)).map((c) => "times." + c);
@@ -541,7 +543,7 @@ async function pageScaling(params) {
   const families = [];
   for (const [suite, info] of Object.entries(cur.suites || {})) for (const f of info.families || []) families.push({ suite, ...f, key: `${suite}/${f.name}` });
   const el = $(`<div><h1>Scaling</h1><div class="controls"></div><div class="card"><div class="chart" id="chart"></div><p class="muted" id="note"></p></div>
-    <p class="muted">Time against one knob with the others held fixed, log–log. One line per commit, or, with <em>lines: tools</em>, one line per tool (rustc, Helium, Silicon) at one commit. Every time is the one the tool reports itself (rustc's <code>-Z time-passes</code> total, Helium's pipeline total, Silicon's summary line), so process and JVM startup are not in it. The legend gives each line's fitted power-law exponent k (time ∝ knob^k); a straight line on these axes is polynomial, an upward bend exponential.
+    <p class="muted">Time against one knob with the others held fixed, log–log. One line per commit, or, with <em>lines: tools</em>, one line per tool (rustc, Helium, Silicon) at one commit. Every time is the one the tool reports itself (rustc's <code>-Z time-passes</code> total, Helium's pipeline total, Silicon's summary line, in a JVM warmed up on other files), so process and JVM startup are not in it. The legend gives each line's fitted power-law exponent k (time ∝ knob^k); a straight line on these axes is polynomial, an upward bend exponential.
     With <em>baseline: on</em>, each line's value at the smallest knob is subtracted from all its points, so a fixed cost (Prusti's prelude) drops out and only the growth is left; the y-axis is then linear, since the first point is zero, and k is fitted to that growth.</p>
     <h2>Fitted exponents</h2><div id="fits"></div></div>`);
   app.replaceChildren(el);

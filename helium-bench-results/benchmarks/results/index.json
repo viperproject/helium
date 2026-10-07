@@ -3,53 +3,58 @@
  "repo_url": "https://github.com/viperproject/helium",
  "runs": [
   {
-   "commit": "7febae3989f646d2e90a23e971b72e8ff9a61b5d",
-   "commit_date": "2026-10-05T17:43:18+02:00",
-   "date": "2026-10-07T07:08:22Z",
-   "subject": "bench: include subdirectories of an external Viper-only suite",
+   "commit": "a1009f43d866f17ec2868a018a6b0c52f24547ed",
+   "commit_date": "2026-10-07T15:42:13+02:00",
+   "date": "2026-10-07T14:05:35Z",
+   "subject": "bench: run Silicon only in the warm JVM; drop the cold runs",
    "host": "cab-e81-22.inf.ethz.ch",
    "dirty": true,
-   "file": "runs/2026-10-07_7febae3989f6.json",
+   "file": "runs/2026-10-07_a1009f43d866.json",
    "tools": {
     "rustc": "rustc 1.100.0-nightly (e71c0f1e3 2026-08-18)",
     "rustc_toolchain": null,
     "silicon": "Silicon 1.1-SNAPSHOT (bde6c6ee)@sha256:2c05f51df3f77ef7de4740d0ef0293fe3aa51b45d9399520f4a9fe5712fe0d12",
-    "verify_commit": "7febae3989f646d2e90a23e971b72e8ff9a61b5d",
+    "silicon_warm": {
+     "id": "f53cf800f60ad714",
+     "warmup_files": 1488,
+     "excluded": 14,
+     "warmup_s": 60.0,
+     "file_timeout_s": 10,
+     "jvms": 1,
+     "warmup_runs": [
+      117
+     ]
+    },
+    "verify_commit": "a1009f43d866f17ec2868a018a6b0c52f24547ed",
     "verify_json": true
    },
    "summary": {
-    "files": 4849,
-    "members": 158277,
+    "files": 111,
+    "members": 712,
     "coverage": {
-     "FAIL": 346,
-     "OK": 20280,
-     "SKIP": 93226,
-     "UNSUPPORTED": 42130,
-     "ERROR": 2295
+     "FAIL": 101,
+     "OK": 611
     },
     "suites": {
      "CvsSi": {
-      "files": 4849,
-      "helium_verify": 47.75018120999998,
+      "files": 111,
+      "helium_verify": 1.0085506349999998,
       "coverage": {
-       "FAIL": 346,
-       "OK": 20280,
-       "SKIP": 93226,
-       "UNSUPPORTED": 42130,
-       "ERROR": 2295
+       "FAIL": 101,
+       "OK": 611
       }
      }
     },
     "totals": {
-     "helium_verify": 47.75018120999998,
+     "helium_verify": 1.0085506349999998,
      "rustc_self": 0.0,
-     "silicon_verify": 31199.499999999927
+     "silicon_verify": 365.18
     },
     "geomean_overhead": null,
-    "geomean_speedup": 652.3783270267179,
-    "disagreements": 292,
-    "timeouts": 246,
-    "file_errors": 27
+    "geomean_speedup": 128.12693459256803,
+    "disagreements": 81,
+    "timeouts": 0,
+    "file_errors": 0
    },
    "scaling": {}
   }
