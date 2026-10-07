@@ -4,7 +4,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, Changes, EGraph, Id, Language, PatternAst, Rewrite, SearchMatches, Searcher, Subst,
+    Symbol, Var,
+};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::cert::FunctionDefinition;
@@ -133,6 +136,47 @@ impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
         }
         out
     }
+    /// A call matches anew when it is new, or when its `f%pre(args)` token
+    /// appeared since the rule last ran: both bring the call's class back.
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        _limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let mut classes: Vec<Id> = changes
+            .nodes(&Discriminant::FuncApp(self.func))
+            .map(|(class, _)| *class)
+            .collect();
+        for (_, token) in changes.nodes(&Discriminant::FuncApp(self.pre_token)) {
+            // The calls this token belongs to: same arguments.
+            let calls = |n: &Symbolic| matches!(n, Symbolic::FuncApp(f, ..) if *f == self.func);
+            match token.children().first() {
+                Some(&arg) => classes.extend(
+                    parents_where(egraph, arg, calls)
+                        .into_iter()
+                        .filter(|(_, call)| call.children() == token.children())
+                        .map(|(class, _)| class),
+                ),
+                None => classes.extend(
+                    egraph
+                        .classes_for_op(&Discriminant::FuncApp(self.func))
+                        .into_iter()
+                        .flatten(),
+                ),
+            }
+        }
+        for class in &mut classes {
+            *class = egraph.find(*class);
+        }
+        classes.sort_unstable();
+        classes.dedup();
+        classes
+            .into_iter()
+            .filter_map(|class| self.search_eclass_with_limit(egraph, class, usize::MAX))
+            .collect()
+    }
+
     fn search_eclass_with_limit(
         &self,
         egraph: &EGraph<Symbolic, ConstFold>,

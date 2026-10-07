@@ -6,7 +6,9 @@
 
 use std::sync::{Arc, RwLock};
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, Changes, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var,
+};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
@@ -140,7 +142,33 @@ pub(super) fn match_term_anywhere(
 /// recipe — indexed, no whole-graph scan). Quantifiers are *data*, not rules, so
 /// a `forall` materialized mid-run is picked up on the next iteration; egg
 /// forbids injecting rules mid-`Runner`.
-pub(super) struct ForallSearcher;
+pub(super) struct ForallSearcher {
+    pub(super) table: Arc<RwLock<RecipeTable>>,
+}
+
+/// The variable a match of [`ForallSearcher::search_changes`] binds to the class
+/// where a trigger term may match anew.
+fn anchor() -> Var {
+    var("?anchor")
+}
+
+impl PreparedTerm {
+    /// Adds the functions and literals of this term to `funcs` and `lits`, and
+    /// returns its height (an `App` over leaves is 1).
+    fn shape(&self, funcs: &mut Vec<FuncId>, lits: &mut Vec<Literal>) -> usize {
+        match self {
+            PreparedTerm::Bound(_) | PreparedTerm::Capture(_) => 0,
+            PreparedTerm::Lit(lit) => {
+                lits.push(lit.clone());
+                1
+            }
+            PreparedTerm::App { func, args, .. } => {
+                funcs.push(*func);
+                1 + args.iter().map(|a| a.shape(funcs, lits)).max().unwrap_or(0)
+            }
+        }
+    }
+}
 
 impl Searcher<Symbolic, ConstFold> for ForallSearcher {
     fn search_with_limit(
@@ -164,6 +192,102 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
                 ast: None,
             })
             .collect()
+    }
+
+    /// A quantifier new to its class (or whose captures changed) is instantiated in
+    /// full. Every other quantifier only at the classes where one of its trigger
+    /// terms may match anew: those holding a changed application or literal of a
+    /// trigger, and the classes above them through trigger applications, up to the
+    /// height of the tallest trigger term. A match binds such a class to
+    /// [`anchor`]; the applier joins the term rooted there with the group's other
+    /// terms matched anywhere.
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        _limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let mut found: Vec<(Id, Subst)> = changes
+            .nodes(&Discriminant::Forall)
+            .map(|(class, _)| (*class, Subst::default()))
+            .collect();
+        let Some(quants) = egraph.classes_for_op(&Discriminant::Forall) else {
+            return group_matches(found);
+        };
+        // Each quantifier class with the root functions of its trigger terms, and
+        // the shape of all of them.
+        let table = self.table.read().expect("recipe table lock");
+        let (mut funcs, mut lits, mut height) = (Vec::new(), Vec::new(), 0);
+        let mut roots_of: Vec<(Id, Vec<FuncId>)> = Vec::new();
+        for q in quants {
+            let mut roots = Vec::new();
+            for node in &egraph[q].nodes {
+                let Symbolic::Forall(rid, _) = node else {
+                    continue;
+                };
+                for term in table.get(*rid).groups.iter().flatten() {
+                    height = height.max(term.shape(&mut funcs, &mut lits));
+                    roots.extend(term.root_func());
+                }
+            }
+            roots.sort_unstable();
+            roots.dedup();
+            roots_of.push((q, roots));
+        }
+        drop(table);
+        funcs.sort_unstable();
+        funcs.dedup();
+        let in_trigger = |n: &Symbolic| match n {
+            Symbolic::FuncApp(f, ..) => funcs.binary_search(f).is_ok(),
+            Symbolic::Lit(lit) => lits.contains(lit),
+            _ => false,
+        };
+        let mut level: Vec<Id> = changes
+            .iter()
+            .filter(|(_, n)| in_trigger(n))
+            .map(|(class, _)| *class)
+            .collect();
+        let mut anchors: Vec<Id> = Vec::new();
+        let is_trigger_app = |n: &Symbolic| matches!(n, Symbolic::FuncApp(..)) && in_trigger(n);
+        for _ in 0..height {
+            level.sort_unstable();
+            level.dedup();
+            anchors.extend(&level);
+            level = level
+                .iter()
+                .flat_map(|&class| parents_where(egraph, class, is_trigger_app))
+                .map(|(up, _)| up)
+                .collect();
+        }
+        anchors.sort_unstable();
+        anchors.dedup();
+        // The root functions each anchor holds an application of.
+        let anchor_funcs: Vec<(Id, Vec<FuncId>)> = anchors
+            .into_iter()
+            .map(|a| {
+                let mut fs: Vec<FuncId> = egraph[a]
+                    .nodes
+                    .iter()
+                    .filter_map(|n| match n {
+                        Symbolic::FuncApp(f, ..) => Some(*f),
+                        _ => None,
+                    })
+                    .collect();
+                fs.dedup();
+                (a, fs)
+            })
+            .filter(|(_, fs)| !fs.is_empty())
+            .collect();
+        for (q, roots) in &roots_of {
+            for (a, fs) in &anchor_funcs {
+                if fs.iter().any(|f| roots.binary_search(f).is_ok()) {
+                    let mut subst = Subst::default();
+                    subst.insert(anchor(), *a);
+                    found.push((*q, subst));
+                }
+            }
+        }
+        group_matches(found)
     }
 
     fn search_eclass_with_limit(
@@ -212,10 +336,13 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
+        subst: &Subst,
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
+        // With an anchor, only the σ under which some trigger term matches at the
+        // anchor class are new (see `ForallSearcher::search_changes`).
+        let anchor = subst.get(anchor()).map(|&a| egraph.find(a));
         // Distinct capture tuples in one e-class are distinct quantifiers (each
         // yields its own instances); the guard is this e-class either way.
         let quants: Vec<(RecipeId, Box<[Id]>)> = egraph[eclass]
@@ -234,19 +361,30 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             let recipe = table.get(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
             for group in &recipe.groups {
-                let Some((anchor, rest)) = group.split_first() else {
-                    continue;
-                };
                 let empty: Sigma = vec![None; recipe.n_bound];
-                let mut sigmas = match_term_anywhere(egraph, anchor, &caps, &empty);
-                for term in rest {
-                    sigmas = sigmas
-                        .iter()
-                        .flat_map(|s| match_term_anywhere(egraph, term, &caps, s))
-                        .collect();
-                    if sigmas.is_empty() {
-                        break;
+                // Which term is matched first, and where: the whole group's first
+                // term anywhere, or (anchored) each term at the anchor in turn.
+                let starts: Vec<(usize, Vec<Sigma>)> = match anchor {
+                    None => match group.first() {
+                        Some(first) => vec![(0, match_term_anywhere(egraph, first, &caps, &empty))],
+                        None => vec![],
+                    },
+                    Some(at) => (0..group.len())
+                        .map(|i| (i, match_term(egraph, &group[i], at, &caps, &empty)))
+                        .collect(),
+                };
+                let mut sigmas = Vec::new();
+                for (first, mut partial) in starts {
+                    for (i, term) in group.iter().enumerate() {
+                        if i == first || partial.is_empty() {
+                            continue;
+                        }
+                        partial = partial
+                            .iter()
+                            .flat_map(|s| match_term_anywhere(egraph, term, &caps, s))
+                            .collect();
                     }
+                    sigmas.extend(partial);
                 }
                 for sigma in sigmas {
                     // A group covers every binder (typecheck-enforced), so a
@@ -302,7 +440,9 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
 /// are e-nodes, so this replaces the old per-quantifier, per-trigger-group rule
 /// minting entirely.
 pub(crate) fn forall_rule(table: Arc<RwLock<RecipeTable>>) -> Rule {
-    let searcher = ForallSearcher;
+    let searcher = ForallSearcher {
+        table: Arc::clone(&table),
+    };
     let applier = ForallApplier {
         table,
         memo: Arc::new(Memo::new()),

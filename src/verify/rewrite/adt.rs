@@ -3,9 +3,13 @@
 //! op-indexed searcher they use.
 
 use crate::dhash::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, Changes, EGraph, Id, Language, PatternAst, Rewrite, SearchMatches, Searcher, Subst,
+    Symbol, Var,
+};
 
 use crate::verify::analysis::{ConstFold, Data};
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
@@ -20,7 +24,10 @@ pub fn proj_rule(accessor: FuncId, ctor: FuncId, index: usize) -> Rule {
     timed(
         Rewrite::new(
             format!("proj-{}", accessor.0),
-            UnaryAppSearcher { func: accessor },
+            UnaryAppSearcher {
+                func: accessor,
+                reads: ArgReads::Projection,
+            },
             ProjApplier { ctor, index },
         )
         .expect("valid proj rewrite"),
@@ -39,7 +46,10 @@ pub fn inj_rule(ctor: FuncId) -> Rule {
     timed(
         Rewrite::new(
             format!("inj-{}", ctor.0),
-            AxiomTriggerSearcher { func: ctor },
+            AxiomTriggerSearcher {
+                func: ctor,
+                token: None,
+            },
             InjApplier { ctor },
         )
         .expect("valid injectivity rewrite"),
@@ -54,7 +64,10 @@ pub fn is_rule(is_fn: FuncId, ctor: FuncId) -> Rule {
     timed(
         Rewrite::new(
             format!("is-{}", is_fn.0),
-            UnaryAppSearcher { func: is_fn },
+            UnaryAppSearcher {
+                func: is_fn,
+                reads: ArgReads::Constructor,
+            },
             IsApplier { ctor },
         )
         .expect("valid is rewrite"),
@@ -72,6 +85,82 @@ pub(super) fn arg_x() -> Var {
 /// so this is hand-written. Shared by the tester and projection reductions.
 pub(super) struct UnaryAppSearcher {
     pub(super) func: FuncId,
+    pub(super) reads: ArgReads,
+}
+
+/// What a unary-application rule reads in its argument's class, so which changes
+/// there make it search again.
+pub(super) enum ArgReads {
+    /// Whether the class's data is a constructor ([`IsApplier`]).
+    Constructor,
+    /// The constructor applications and `ite`s the projection extracts through,
+    /// down `ite` arms ([`ProjApplier::project`]).
+    Projection,
+}
+
+/// The unary applications over each class whose projection may have changed,
+/// by function: see [`projected`].
+type Projected = HashMap<FuncId, Vec<(Id, Subst)>>;
+
+thread_local! {
+    /// [`projected`] for the change set with this serial. One projection rule is
+    /// minted per accessor, and each would otherwise walk the same changes.
+    static PROJECTED: std::cell::RefCell<Option<(u64, Rc<Projected>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The unary applications, by function, over each class whose projection (see
+/// [`ProjApplier::project`]) may have changed: the classes that gained a
+/// constructor application or an `ite`, and every class above them through `ite`
+/// arms. A class whose data is a literal holds no constructor value and is no arm
+/// of one, so the walk does not enter it (the `true` class, which holds every
+/// proven fact, among them).
+fn projected(egraph: &EGraph<Symbolic, ConstFold>, changes: &Changes<Symbolic>) -> Rc<Projected> {
+    if let Some(hit) = PROJECTED.with(|p| {
+        let p = p.borrow();
+        p.as_ref()
+            .filter(|(serial, _)| *serial == changes.serial())
+            .map(|(_, out)| Rc::clone(out))
+    }) {
+        return hit;
+    }
+    let opaque = |class: Id| egraph[class].data.known().is_some();
+    let mut stack: Vec<Id> = changes
+        .iter()
+        .filter(|(class, node)| match node {
+            Symbolic::Ite(..) => true,
+            Symbolic::FuncApp(..) => matches!(egraph[*class].data, Data::Ctor(..)),
+            _ => false,
+        })
+        .map(|(class, _)| *class)
+        .filter(|&class| !opaque(class))
+        .collect();
+    let mut seen = HashSet::default();
+    let mut out = Projected::default();
+    let x = [arg_x()];
+    while let Some(class) = stack.pop() {
+        if !seen.insert(class) {
+            continue;
+        }
+        let ups = parents_where(egraph, class, |n| {
+            matches!(n, Symbolic::Ite(..))
+                || matches!(n, Symbolic::FuncApp(_, _, a) if a.len() == 1)
+        });
+        for (up, node) in ups {
+            match node {
+                Symbolic::Ite([_, t, e]) if (t == class || e == class) && !opaque(up) => {
+                    stack.push(up)
+                }
+                Symbolic::FuncApp(f, _, ref a) if a[0] == class => {
+                    out.entry(f).or_default().push((up, flat_subst(&x, &node)))
+                }
+                _ => {}
+            }
+        }
+    }
+    let out = Rc::new(out);
+    PROJECTED.with(|p| *p.borrow_mut() = Some((changes.serial(), Rc::clone(&out))));
+    out
 }
 
 impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
@@ -100,6 +189,43 @@ impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
             }
         }
         ms
+    }
+
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        _limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let x = [arg_x()];
+        let mut found: Vec<(Id, Subst)> = changes
+            .nodes(&Discriminant::FuncApp(self.func))
+            .filter(|(_, n)| n.children().len() == 1)
+            .map(|(class, node)| (*class, flat_subst(&x, node)))
+            .collect();
+        match &self.reads {
+            ArgReads::Constructor => {
+                let mut args: Vec<Id> = changes
+                    .data()
+                    .iter()
+                    .copied()
+                    .filter(|&class| matches!(egraph[class].data, Data::Ctor(..)))
+                    .collect();
+                args.sort_unstable();
+                args.dedup();
+                let is_app = |n: &Symbolic| matches!(n, Symbolic::FuncApp(f, _, a) if *f == self.func && a.len() == 1);
+                for arg in args {
+                    for (app, node) in parents_where(egraph, arg, is_app) {
+                        found.push((app, flat_subst(&x, &node)));
+                    }
+                }
+            }
+            ArgReads::Projection => {
+                let projected = projected(egraph, changes);
+                found.extend(projected.get(&self.func).into_iter().flatten().cloned());
+            }
+        }
+        group_matches(found)
     }
 
     fn search_eclass_with_limit(
