@@ -1,64 +1,17 @@
 //! `ite` reduction: the fused rule that decomposes and collapses conditionals.
 //!
-//! One rule rather than a dozen, driven by a `classes_by_op` bucket scan instead
-//! of a dozen pattern searches. It does two different kinds of inference over the
-//! same node loop: **decomposition** (the class's known value constrains its
+//! One rule rather than a dozen, matching one flat `ite` pattern instead of a
+//! dozen nested ones. It does two different kinds of inference over the same
+//! node: **decomposition** (the class's known value constrains its
 //! parts) and **reduction** (the parts' known values collapse the class).
 
-use egg::{Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{Applier, EGraph, Id, PatternAst, Subst, Symbol, Var};
 
 use crate::verify::analysis::ConstFold;
-use crate::verify::lang::{Discriminant, Symbolic};
+use crate::verify::lang::Symbolic;
 use crate::vmir::Literal;
 
 use super::*;
-
-/// Searcher for the fused ite rule: every e-class holding an `Ite` node, via
-/// the `classes_by_op` bucket (no whole-graph scan). One empty subst per class;
-/// the applier re-reads the nodes.
-#[derive(Clone)]
-pub(super) struct IteBucketSearcher;
-
-impl Searcher<Symbolic, ConstFold> for IteBucketSearcher {
-    fn search_with_limit(
-        &self,
-        egraph: &EGraph<Symbolic, ConstFold>,
-        limit: usize,
-    ) -> Vec<SearchMatches<'_, Symbolic>> {
-        let Some(classes) = egraph.classes_for_op(&Discriminant::Ite) else {
-            return vec![];
-        };
-        classes
-            .take(limit)
-            .map(|eclass| SearchMatches {
-                eclass,
-                substs: vec![Subst::default()],
-                ast: None,
-            })
-            .collect()
-    }
-
-    fn search_eclass_with_limit(
-        &self,
-        egraph: &EGraph<Symbolic, ConstFold>,
-        eclass: Id,
-        _limit: usize,
-    ) -> Option<SearchMatches<'_, Symbolic>> {
-        egraph[eclass]
-            .nodes
-            .iter()
-            .any(|n| matches!(n, Symbolic::Ite(..)))
-            .then(|| SearchMatches {
-                eclass,
-                substs: vec![Subst::default()],
-                ast: None,
-            })
-    }
-
-    fn vars(&self) -> Vec<Var> {
-        vec![]
-    }
-}
 
 /// The known boolean of a class, per `ConstFold`. Subsumes matching a literal
 /// node (the analysis is seeded by literals), so this fires at least wherever
@@ -70,14 +23,20 @@ pub(super) fn known_bool(egraph: &EGraph<Symbolic, ConstFold>, class: Id) -> Opt
     }
 }
 
+/// `(ite ?c ?t ?e)`: one `Ite` node, its condition and arms.
+fn ite_pattern() -> egg::Pattern<Symbolic> {
+    "(ite ?c ?t ?e)".parse().expect("ite pattern")
+}
+
 pub(super) struct IteReduceApplier;
 
 impl Applier<Symbolic, ConstFold> for IteReduceApplier {
+    /// Reduces the one `ite(?c, ?t, ?e)` node of `eclass` the match names.
     fn apply_one(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
+        subst: &Subst,
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
@@ -87,20 +46,17 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
             True,
             False,
         }
+        let eclass = egraph.find(eclass);
         // An inconsistent class (`true` merged with `false`) has nothing left to
-        // derive. Matches go stale within an iteration, so once a graph collapses
-        // every remaining match resolves to that one class, and walking its
-        // nodes per match would cost the class size times the match count.
+        // derive.
         if egraph[eclass].data.is_inconsistent() {
             return Vec::new();
         }
         let mut unions: Vec<(Id, Target)> = Vec::new();
         let self_lit = known_bool(egraph, eclass);
-        for node in &egraph[eclass].nodes {
-            let Symbolic::Ite([c, t, e]) = node else {
-                continue;
-            };
-            let (c, t, e) = (egraph.find(*c), egraph.find(*t), egraph.find(*e));
+        {
+            let [c, t, e] = [var("?c"), var("?t"), var("?e")].map(|v| subst[v]);
+            let (c, t, e) = (egraph.find(c), egraph.find(t), egraph.find(e));
             let (t_lit, e_lit) = (known_bool(egraph, t), known_bool(egraph, e));
             // Decompositions: the *class's* proven boolean constrains the parts.
             match self_lit {
@@ -218,11 +174,12 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
 /// post-`fold`/`unfold` reduction set. Under an assumed branch literal these
 /// reduce a gated permission `b ? p : 0` to `p` (resp. `0`).
 ///
-/// Fused into **one** rule that scans the `Ite` op bucket once per iteration and
-/// node-checks every shape: as twelve `rw!` patterns they cost ~70% of all search
-/// time, since the nested two-level patterns pay a backtracking cross-product
-/// over a bucket holding thousands of classes. The fused pass is linear in the
-/// bucket (plus the two branch classes' nodes) and union-only.
+/// Fused into **one** rule over the flat pattern `(ite ?c ?t ?e)` whose applier
+/// checks every shape: as twelve `rw!` patterns they cost ~70% of all search time,
+/// since the nested two-level patterns pay a backtracking cross-product over a
+/// bucket holding thousands of classes. The fused match is one `Ite` node plus the
+/// data of its class and its three children — exactly what semi-naive matching
+/// re-searches when any of them changes — and the applier is union-only.
 ///
 /// Shapes, all decided from a single `Ite` node and its two branch classes:
 /// - `ite(true, x, y) ⇒ x`, `ite(false, x, y) ⇒ y` (via `ConstFold` on `c`)
@@ -239,9 +196,9 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
 /// structurally at construction by [`ChunkPerm::collapse_same_cond`], with no scan
 /// and no budget.
 pub(super) fn terminating_ite_rules() -> Vec<Rule> {
-    vec![bucket_rule(
+    vec![local_fixpoint_rule(
         "ite-reduce",
-        IteBucketSearcher,
+        ite_pattern(),
         IteReduceApplier,
     )]
 }
