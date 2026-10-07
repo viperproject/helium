@@ -1,0 +1,57 @@
+{
+ "schema": 1,
+ "repo_url": "https://github.com/viperproject/helium",
+ "runs": [
+  {
+   "commit": "7febae3989f646d2e90a23e971b72e8ff9a61b5d",
+   "commit_date": "2026-10-05T17:43:18+02:00",
+   "date": "2026-10-07T07:08:22Z",
+   "subject": "bench: include subdirectories of an external Viper-only suite",
+   "host": "cab-e81-22.inf.ethz.ch",
+   "dirty": true,
+   "file": "runs/2026-10-07_7febae3989f6.json",
+   "tools": {
+    "rustc": "rustc 1.100.0-nightly (e71c0f1e3 2026-08-18)",
+    "rustc_toolchain": null,
+    "silicon": "Silicon 1.1-SNAPSHOT (bde6c6ee)@sha256:2c05f51df3f77ef7de4740d0ef0293fe3aa51b45d9399520f4a9fe5712fe0d12",
+    "verify_commit": "7febae3989f646d2e90a23e971b72e8ff9a61b5d",
+    "verify_json": true
+   },
+   "summary": {
+    "files": 4849,
+    "members": 158277,
+    "coverage": {
+     "FAIL": 346,
+     "OK": 20280,
+     "SKIP": 93226,
+     "UNSUPPORTED": 42130,
+     "ERROR": 2295
+    },
+    "suites": {
+     "CvsSi": {
+      "files": 4849,
+      "helium_verify": 47.75018120999998,
+      "coverage": {
+       "FAIL": 346,
+       "OK": 20280,
+       "SKIP": 93226,
+       "UNSUPPORTED": 42130,
+       "ERROR": 2295
+      }
+     }
+    },
+    "totals": {
+     "helium_verify": 47.75018120999998,
+     "rustc_self": 0.0,
+     "silicon_verify": 31199.499999999927
+    },
+    "geomean_overhead": null,
+    "geomean_speedup": 652.3783270267179,
+    "disagreements": 292,
+    "timeouts": 246,
+    "file_errors": 27
+   },
+   "scaling": {}
+  }
+ ]
+}
