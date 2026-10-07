@@ -2,8 +2,7 @@
 //! no hand-written searcher or applier.
 
 use egg::{
-    Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var,
-    rewrite as rw,
+    Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var, rewrite as rw,
 };
 
 use crate::verify::analysis::ConstFold;
@@ -86,30 +85,21 @@ pub(super) fn static_rules() -> Vec<Rule> {
     ]);
     // Disequality reasoning over disproven `==` classes — standalone rules that
     // share the `Eq` bucket + the `Known(false)` gate.
-    rules.push(
-        Rewrite::new(
-            "eq-false-mirror",
-            EqBucketSearcher,
-            PerClass(EqFalseMirrorApplier),
-        )
-        .expect("eq-false-mirror rule"),
-    );
-    rules.push(
-        Rewrite::new(
-            "contra-congruence",
-            EqBucketSearcher,
-            PerClass(ContraCongruenceApplier { memo: Memo::new() }),
-        )
-        .expect("contra-congruence rule"),
-    );
-    rules.push(
-        Rewrite::new(
-            "distinguishing-observation",
-            EqBucketSearcher,
-            PerClass(DistinguishingObsApplier { memo: Memo::new() }),
-        )
-        .expect("distinguishing-observation rule"),
-    );
+    rules.push(bucket_rule(
+        "eq-false-mirror",
+        EqBucketSearcher,
+        EqFalseMirrorApplier,
+    ));
+    rules.push(bucket_rule(
+        "contra-congruence",
+        EqBucketSearcher,
+        ContraCongruenceApplier { memo: Memo::new() },
+    ));
+    rules.push(bucket_rule(
+        "distinguishing-observation",
+        EqBucketSearcher,
+        DistinguishingObsApplier { memo: Memo::new() },
+    ));
     rules.extend(disequality_unit_prop_rules());
     rules.extend(lt_asymmetry_rules());
     rules
@@ -136,14 +126,14 @@ fn lt_asymmetry_rules() -> Vec<Rule> {
                 BinOp::LtI => "lt-asymmetry-int",
                 _ => "lt-asymmetry-real",
             };
-            Rewrite::new(name, LtBucketSearcher(op), PerClass(LtAsymmetryApplier(op)))
-                .expect("lt-asymmetry rule")
+            bucket_rule(name, LtBucketSearcher(op), LtAsymmetryApplier(op))
         })
         .collect()
 }
 
 /// Searcher over the `<` op bucket for one operand sort. One empty subst per
 /// class; the applier re-reads the nodes.
+#[derive(Clone)]
 struct LtBucketSearcher(BinOp);
 
 impl Searcher<Symbolic, ConstFold> for LtBucketSearcher {

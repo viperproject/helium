@@ -1,0 +1,9 @@
+// Integer counterpart of lt_asymmetry_perm_no_vacuity.vpr: proving the mirror
+// `x < 0` false must not make `0 < x` false as well.
+
+method h(x: Int)
+    requires 0 < x
+{
+    assert !(x < 0)
+    assert false
+}
