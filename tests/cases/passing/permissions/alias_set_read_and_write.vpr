@@ -1,0 +1,66 @@
+// Reads and writes of a location whose permission is spread over several chunks
+// that coincide with it — on ground (a precondition equality) or only inside a
+// branch. The location is all of them: a read sees one value, which every member
+// that holds a share agrees with; a write needs, and updates, the whole set.
+
+field f: Int
+
+method read_in_branch(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  var v: Int
+  if (x == y0 && x == y1) {
+    v := x.f
+    assert v == y1.f
+    assert v == y0.f
+  }
+}
+
+method write_ground_alias(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+  requires x == y0 && x == y1
+{
+  x.f := 1
+  assert y1.f == 1
+}
+
+method write_in_branch(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+  ensures acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  if (x == y0 && x == y1) {
+    x.f := 1
+    assert y1.f == 1
+    assert y0.f == 1
+  }
+}
+
+method drain_then_reinhale(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  if (x == y0 && x == y1) {
+    exhale acc(x.f, 1/1)
+    inhale acc(x.f, 1/1)
+    x.f := 3
+    assert y0.f == 3
+  }
+}
+
+method many_exhales(x: Ref, y0: Ref, y1: Ref, y2: Ref)
+  requires acc(y0.f, 1/3) && acc(y1.f, 1/3) && acc(y2.f, 1/3)
+  ensures acc(y0.f, 1/3) && acc(y1.f, 1/3) && acc(y2.f, 1/3)
+{
+  if (x == y0 && x == y1 && x == y2) {
+    exhale acc(x.f, 1/2)
+    exhale acc(x.f, 1/2)
+    inhale acc(y0.f, 1/3) && acc(y1.f, 1/3) && acc(y2.f, 1/3)
+  }
+}
+
+method perm_of_set(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  if (x == y0 && x == y1) {
+    assert perm(x.f) == write
+  }
+}
