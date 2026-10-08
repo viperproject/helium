@@ -1,0 +1,11 @@
+// The unfolded body holds `x.f` at `w * p` with only `none <= p` known: the product
+// may be zero, so its sign is unknown and the read must be rejected (Silicon: "There
+// might be insufficient permission to access x.f").
+
+field f: Int
+
+predicate PZ(x: Ref, p: Perm) { none <= p && acc(x.f, p) }
+
+function bad(x: Ref, p: Perm): Int
+    requires acc(PZ(x, p), write)
+{ unfolding acc(PZ(x, p), write) in x.f }
