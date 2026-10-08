@@ -163,8 +163,6 @@ dependencies = [
 [[package]]
 name = "egg"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd40cfd4196d7a8f882ace95d623d4d6734588e502b4e188675a7c2f55eb4fb4"
 dependencies = [
  "env_logger",
  "hashbrown 0.15.5",

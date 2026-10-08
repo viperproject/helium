@@ -39,6 +39,7 @@ Helium was initially developed by Jakub Adam Trzykowski.
 - `benchmarks/` – benchmark suites and baseline snapshots (see `benchmarks/README.md`)
 - `bench/` – the benchmark runner (a separate workspace member): times rustc, Helium and Silicon per file, extracts Rust and Viper shape metrics, writes one JSON per run
 - `tools/bench/` – `run.py` / `backfill.py` record runs on the `benchmarks` branch; `site/` is the GitHub Pages site that plots them
+- `vendor/egg/` – the `egg` e-graph library, as a submodule of the fork [JonasAlaif/egg](https://github.com/JonasAlaif/egg) (branch `helium`), patched in through `[patch.crates-io]`
 - `Cargo.toml` – Rust project configuration
 - `rust-toolchain.toml` – pins the nightly toolchain
 
@@ -56,7 +57,10 @@ The repository pins that toolchain in `rust-toolchain.toml`.
 
 ### Build the project
 
+`egg` is a git submodule, so fetch it before the first build (or clone with `--recursive`):
+
 ```bash
+git submodule update --init
 cargo build
 ```
 
