@@ -31,6 +31,16 @@ pub(super) fn note_time(name: Symbol, search: f64, apply: f64) {
         entry.search += search;
         entry.apply += apply;
     });
+    // The same split per verification unit, for a `rule` trace with `time`.
+    if crate::trace::enabled(crate::trace::Category::Time) {
+        crate::trace::trace_tally!(
+            Rule,
+            "rule",
+            [rule = name.as_str()],
+            search_ns = search * 1e9,
+            apply_ns = apply * 1e9
+        );
+    }
 }
 
 /// Wrap a rule so its searcher/applier report wall-clock time into the

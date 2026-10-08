@@ -6,7 +6,7 @@
 // `HeapInst::Unfold` broke the block model. Measured 2026-07-30: the lowering
 // re-folds, so the effect is scoped, and the guarded form fabricates no permission —
 // see the failing/unfolding_* counterparts. It does carry a pc suffix beyond the
-// block cube, so `SILVER_OXIDE_ASSERT_BLOCK_PC` fires on the guarded form; the
+// block cube, so `verify --trace=block` reports a `pc_suffix` on the guarded form; the
 // invariant is the thing that is too strong, not this code.
 
 field f: Int

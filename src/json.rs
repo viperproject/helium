@@ -54,6 +54,19 @@ impl From<f64> for Json {
     }
 }
 
+impl From<u32> for Json {
+    fn from(v: u32) -> Self {
+        Json::UInt(v.into())
+    }
+}
+
+/// `Some(v)` as `v`, `None` as `null`.
+impl<T: Into<Json>> From<Option<T>> for Json {
+    fn from(v: Option<T>) -> Self {
+        v.map_or(Json::Null, Into::into)
+    }
+}
+
 impl From<bool> for Json {
     fn from(v: bool) -> Self {
         Json::Bool(v)

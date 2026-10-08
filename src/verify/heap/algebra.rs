@@ -1504,11 +1504,10 @@ pub(crate) fn heap_subtract_summarized_fallbacks(
     Err(VerifyError::InsufficientPermission)
 }
 
-/// Env-gated diagnostics for a consume that resolved nowhere. Two different
-/// questions, so two different dumps: with no ground match the useful thing is the
-/// demanded address against the held ones (`SILVER_OXIDE_TRACE_MISS`); with a match
-/// that proved insufficient it is the two permission terms
-/// (`SILVER_OXIDE_DUMP_PERM`).
+/// The `fail` trace for a consume that resolved nowhere. Two different questions,
+/// so two different events: with no ground match the useful thing is the demanded
+/// address against the held ones (`miss`); with a match that proved insufficient
+/// it is the two permission terms (`insufficient`).
 pub(crate) fn subtract_miss_trace(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
@@ -1519,29 +1518,30 @@ pub(crate) fn subtract_miss_trace(
 ) {
     match existing {
         Some(existing) => {
-            if crate::verify::viz::dump_perm_enabled() {
+            if crate::trace::enabled(crate::trace::Category::Fail) {
                 let existing_perm = existing.ungated_perm().to_id(ctx);
-                eprintln!(
-                    "[perm-dump] insufficient at subtract in group {:?}\n\
-                     held.perm:\n{}needed.perm:\n{}",
-                    kind.group,
-                    crate::verify::viz::dump_term(ctx, existing_perm, 64),
-                    crate::verify::viz::dump_term(ctx, chunk2_perm, 64),
+                crate::trace::trace_event!(
+                    Fail,
+                    "insufficient",
+                    group = ctx.groups.resolve(&kind.group).to_string(),
+                    held = crate::verify::viz::dump_term(ctx, existing_perm, 64),
+                    needed = crate::verify::viz::dump_term(ctx, chunk2_perm, 64),
                 );
             }
         }
         None => {
-            if std::env::var_os("SILVER_OXIDE_TRACE_MISS").is_some() {
-                eprintln!(
-                    "[miss] group {:?} demanded addr:\n{}held addrs ({}):",
-                    kind.group,
-                    crate::verify::viz::dump_term(ctx, chunk2.addr, 40),
-                    h1.chunks_of(kind).len(),
-                );
-                for c in h1.chunks_of(kind).to_vec() {
-                    eprintln!("{}", crate::verify::viz::dump_term(ctx, c.addr, 40));
-                }
-            }
+            crate::trace::trace_event!(
+                Fail,
+                "miss",
+                group = ctx.groups.resolve(&kind.group).to_string(),
+                demanded = crate::verify::viz::dump_term(ctx, chunk2.addr, 40),
+                held = crate::json::Json::Arr(
+                    h1.chunks_of(kind)
+                        .iter()
+                        .map(|c| crate::verify::viz::dump_term(ctx, c.addr, 40).into())
+                        .collect(),
+                ),
+            );
         }
     }
 }
@@ -1658,15 +1658,15 @@ pub(crate) fn heap_subtract_summarized(
     // `needed ≤ total`, per leaf of `total`, each under the pc plus that leaf's
     // branch literals.
     if !prove_sufficient(ctx, &total, chunk2_perm, pc_lits) {
-        if crate::verify::viz::dump_perm_enabled() {
+        if crate::trace::enabled(crate::trace::Category::Fail) {
             let total = total.to_id(ctx);
-            eprintln!(
-                "[perm-dump] insufficient in summarized subtract, group {:?}, {} chunk(s)\n\
-                 total:\n{}needed:\n{}",
-                kind.group,
-                set.len(),
-                crate::verify::viz::dump_term(ctx, total, 64),
-                crate::verify::viz::dump_term(ctx, chunk2_perm, 64),
+            crate::trace::trace_event!(
+                Fail,
+                "insufficient_summarized",
+                group = ctx.groups.resolve(&kind.group).to_string(),
+                chunks = set.len(),
+                held = crate::verify::viz::dump_term(ctx, total, 64),
+                needed = crate::verify::viz::dump_term(ctx, chunk2_perm, 64),
             );
         }
         return Err(VerifyError::InsufficientPermission);
@@ -1741,7 +1741,7 @@ pub(crate) fn heap_subtract_summarized(
 ///   `cond` in the amount (genuine perm divergence, per-leaf prove). Guard shared.
 /// - **both arms, guards differ** ⇒ genuine `(cond∧g_t)∨(¬cond∧g_e)` disjunction,
 ///   not a flat cube: fall back to the gated `guard?perm:0` amount encoding
-///   (rare — counted via `MergeTrace`).
+///   (rare — counted by the `heap` trace).
 ///
 /// The presence guard is reconstructed into the exact `guard?perm:0` obligation
 /// **transiently at each consume site** (`gate_perm_by_guard`), so merges stay
@@ -1801,7 +1801,7 @@ pub(crate) fn merge_heaps(
                         // legacy gated encoding — `guard? p : 0` on each side under
                         // `cond` — with an empty residual guard (conditionality
                         // lives in the amount here).
-                        crate::verify::heap::MergeTrace::bump_zero();
+                        crate::trace::trace_tally!(Heap, "zero_leaf", [], built = 1);
                         let pa = a.gated_perm(ctx);
                         let pb = b.gated_perm(ctx);
                         let perm = ChunkPerm::select(ctx, cond, pa, pb);

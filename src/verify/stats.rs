@@ -43,6 +43,23 @@ pub(crate) fn take_stats() -> VerifyStats {
     stats
 }
 
+/// The work counters now, to report a trace scope's share of them with
+/// [`work_since`].
+pub(crate) fn work_now() -> [(&'static str, u64); 8] {
+    with_stats(|s| s.work())
+}
+
+/// Each work counter's growth since `start`, as trace event fields.
+pub(crate) fn work_since(
+    start: &[(&'static str, u64); 8],
+) -> Vec<(&'static str, crate::json::Json)> {
+    work_now()
+        .iter()
+        .zip(start)
+        .map(|((name, now), (_, then))| (*name, (now - then).into()))
+        .collect()
+}
+
 /// Wall-clock saturation time, broken into egg's phases. Non-deterministic —
 /// reported for trends, never compared in the gating snapshot.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -94,6 +111,10 @@ pub struct VerifyStats {
     pub block_scratch_freehits: u64,
     /// total egg `Runner` iterations across all saturations/reductions/probes.
     pub sat_iterations: u64,
+    /// Rule runs stopped by the iteration or node limit rather than by reaching
+    /// a fixpoint (or by a hook). Each is a silent truncation: whatever the
+    /// missing iterations would have derived is absent from the verdict.
+    pub sat_bound_stops: u64,
     /// peak e-graph size observed in any iteration.
     pub egraph_nodes_peak: usize,
     pub egraph_classes_peak: usize,
@@ -221,6 +242,21 @@ impl VerifyStats {
         s
     }
 
+    /// The deterministic work counters a trace scope reports the growth of
+    /// (`member`/`block` end events).
+    pub(crate) fn work(&self) -> [(&'static str, u64); 8] {
+        [
+            ("insts", self.insts_processed),
+            ("prove_calls", self.prove_calls),
+            ("saturations", self.saturations),
+            ("reduces", self.reduces),
+            ("probe_runs", self.probe_saturations + self.probe_reduces),
+            ("scratch_saturations", self.block_scratch_saturations),
+            ("sat_iterations", self.sat_iterations),
+            ("rule_applications", self.rule_applications),
+        ]
+    }
+
     /// Fold one finished `Runner`'s iterations into the stats.
     pub(crate) fn record_run(&mut self, iterations: &[egg::Iteration<()>]) {
         for it in iterations {
@@ -256,6 +292,7 @@ impl VerifyStats {
             block_scratch_iterations,
             block_scratch_freehits,
             sat_iterations,
+            sat_bound_stops,
             egraph_nodes_peak,
             egraph_classes_peak,
             insts_processed,
@@ -286,6 +323,7 @@ impl VerifyStats {
             ("block_scratch_iterations", n(block_scratch_iterations)),
             ("block_scratch_freehits", n(block_scratch_freehits)),
             ("sat_iterations", n(sat_iterations)),
+            ("sat_bound_stops", n(sat_bound_stops)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
             ("insts_processed", n(insts_processed)),
