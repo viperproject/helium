@@ -5,7 +5,7 @@ use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
 
 use crate::viper::{
     self,
-    globals::{GlobalSignature, Globals},
+    globals::{DtorInfo, GlobalSignature, Globals},
     interner::Interner,
     typed::{
         self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MethodBodyExt, MethodEnsuresExt,
@@ -50,6 +50,52 @@ fn check_predicate_foldable(
     }
 }
 
+/// Silver's well-formedness of a written type: every named type is a declared
+/// domain or ADT applied to as many type arguments as it declares, or a type
+/// parameter in scope (`is_param`). Nothing else checks this — `Type::from`
+/// turns any name into an opaque domain type.
+fn check_type(
+    ty: &viper::Type,
+    globals: &Globals,
+    interner: &Interner,
+    is_param: &dyn Fn(Spur) -> bool,
+) -> Result<(), TypeError> {
+    use crate::viper::parsed::ast::Type as P;
+    match ty {
+        P::Bool | P::Int | P::Real | P::Ref => Ok(()),
+        P::Generic(id) if is_param(id.id()) => Ok(()),
+        P::Generic(id) => Err(TypeError::UnboundTypeParam(
+            interner.resolve(&id.id()).to_string(),
+        )),
+        P::Domain(id, args) => {
+            let name = id.id();
+            if args.is_empty() && is_param(name) {
+                return Ok(());
+            }
+            let expected = match globals.resolve(name).map(|s| s.signature()) {
+                Some(GlobalSignature::Domain(d)) => d.type_arity,
+                Some(GlobalSignature::Adt(a)) => a.type_arity,
+                // The collection types: parsed so `scan_unsupported` can name
+                // them, rejected there.
+                _ => match interner.resolve(&name) {
+                    "Seq" | "Set" | "Multiset" => 1,
+                    "Map" => 2,
+                    other => return Err(TypeError::UndeclaredType(other.to_string())),
+                },
+            };
+            if args.len() != expected {
+                return Err(TypeError::WrongTypeArgCount {
+                    name: interner.resolve(&name).to_string(),
+                    expected,
+                    found: args.len(),
+                });
+            }
+            args.iter()
+                .try_for_each(|a| check_type(a, globals, interner, is_param))
+        }
+    }
+}
+
 /// Persistent lexical environment for a declaration (function, method, or predicate).
 /// Holds only scope data: `locals` grows incrementally as params and `var` stmts are
 /// processed (so uses before declarations produce UndefinedVariable), and pre-collected
@@ -60,6 +106,16 @@ struct LocalEnv<'g> {
     interner: &'g Interner,
     locals: HashMap<Spur, Type>,
     labels: HashSet<Spur>,
+    /// Every label of the method, wherever it sits (`labels` leaves out those
+    /// inside loops). For name clashes; a superset of `labels`.
+    all_labels: HashSet<Spur>,
+    /// The method's parameters: in scope like any local, but not assignable.
+    params: HashSet<Spur>,
+    /// Every local in declaration order, so a block can drop its own on exit.
+    declared_order: Vec<Spur>,
+    /// Locals of blocks already left: no longer visible, but their names stay
+    /// taken for the rest of the method.
+    retired: HashSet<Spur>,
 }
 
 impl<'g> LocalEnv<'g> {
@@ -69,22 +125,36 @@ impl<'g> LocalEnv<'g> {
             interner,
             locals: HashMap::default(),
             labels: HashSet::default(),
+            all_labels: HashSet::default(),
+            params: HashSet::default(),
+            declared_order: Vec::new(),
+            retired: HashSet::default(),
         }
     }
 
+    /// Whether `name` is already taken where a new local or binder would be
+    /// declared: a global, a local, or a label. (ADT field names are not
+    /// globals here — Silver lets a local share one.)
+    fn declared(&self, name: Spur) -> bool {
+        self.globals.resolve(name).is_some()
+            || self.locals.contains_key(&name)
+            || self.retired.contains(&name)
+            || self.all_labels.contains(&name)
+    }
+
     fn add_local(&mut self, name: Spur, ty: Type) -> Result<(), TypeError> {
-        let s = self.interner.resolve(&name).to_string();
-        if self.globals.resolve(name).is_some() {
-            return Err(TypeError::ShadowedName(s));
-        }
-        if self.locals.contains_key(&name) {
-            return Err(TypeError::ShadowedName(s));
-        }
-        if self.labels.contains(&name) {
-            return Err(TypeError::ShadowedName(s));
+        if self.declared(name) {
+            return Err(TypeError::ShadowedName(
+                self.interner.resolve(&name).to_string(),
+            ));
         }
         self.locals.insert(name, ty);
+        self.declared_order.push(name);
         Ok(())
+    }
+
+    fn check_type(&self, ty: &viper::Type) -> Result<(), TypeError> {
+        check_type(ty, self.globals, self.interner, &|_| false)
     }
 
     /// Typecheck a pure expression and lower it to `typed`.
@@ -102,6 +172,7 @@ impl<'g> LocalEnv<'g> {
         // type arguments) so a nested mismatch (e.g. `Option[Int]` vs
         // `Option[Bool]`) is caught at the root.
         c.impose_type(root, expected, &HashMap::default())?;
+        c.resolve_shared_destructors()?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
         LoweringCtx::new(self, &table).lower_pure::<Ext>(exp)
     }
@@ -121,6 +192,7 @@ impl<'g> LocalEnv<'g> {
         c.rigid_generics = rigid.iter().copied().collect();
         let root = c.constrain_pure(exp)?;
         c.impose_type(root, &Type::Bool, &HashMap::default())?;
+        c.resolve_shared_destructors()?;
         // Peek at the solved variants (preliminary pass on a clone; the real
         // checker stays open for the defaulting impositions below).
         let prelim =
@@ -154,6 +226,7 @@ impl<'g> LocalEnv<'g> {
     ) -> Result<SpatialExp<Ext>, TypeError> {
         let mut c = ConstraintCtx::new(self, None);
         c.constrain_spatial(exp)?;
+        c.resolve_shared_destructors()?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
         LoweringCtx::new(self, &table).lower_spatial::<Ext>(exp)
     }
@@ -167,6 +240,7 @@ impl<'g> LocalEnv<'g> {
         c.constrain_resource(&mut acc.loc)?;
         let pk = c.constrain_pure(&mut acc.perm)?;
         c.tc.impose(pk.concretizes_explicit(ViperTcType::Numeric))?;
+        c.resolve_shared_destructors()?;
         let table = c.tc.type_check().map_err(TypeError::from)?;
 
         let lowerer = LoweringCtx::new(self, &table);
@@ -203,6 +277,10 @@ struct ConstraintCtx<'a, 'g> {
     /// with the type-parameter name it instantiates. Lets the axiom path apply
     /// Silver's `ground()` defaulting to the ones no argument pinned.
     generic_insts: Vec<(Spur, TcKey)>,
+    /// Destructors `e.f` whose name several ADTs declare, as (field, receiver
+    /// key, result key): the owner is picked by
+    /// `resolve_shared_destructors` once the receiver's type is known.
+    shared_dtors: Vec<(Spur, TcKey, TcKey)>,
 }
 
 impl<'a, 'g> ConstraintCtx<'a, 'g> {
@@ -214,6 +292,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             result_ty,
             rigid_generics: HashSet::default(),
             generic_insts: Vec::new(),
+            shared_dtors: Vec::new(),
         }
     }
 }
@@ -599,6 +678,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
 
             ExpKind::Ascribe(inner, ascribed_ty) => {
+                self.check_binder_type(ascribed_ty)?;
                 let target = Type::from(&*ascribed_ty);
                 let inner_key = self.constrain_pure(inner)?;
                 self.impose_type(inner_key, &target, &HashMap::default())?;
@@ -623,9 +703,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 let binder_spur = binder.0.id();
                 // Error if binder would shadow a currently in-scope name.
                 // Sibling scopes are fine: after the body, binder_spur is removed/restored.
-                if self.env.locals.contains_key(&binder_spur)
-                    || self.let_bindings.contains_key(&binder_spur)
-                {
+                if self.env.declared(binder_spur) || self.let_bindings.contains_key(&binder_spur) {
                     return Err(TypeError::ShadowedName(
                         self.env.interner.resolve(&binder_spur).to_string(),
                     ));
@@ -649,37 +727,21 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
             ExpKind::AdtDestructor(base, field) => {
                 // `e.f`: `e` must be the ADT owning destructor `f`; the result is
-                // the field's type.
+                // the field's type. A name several ADTs declare (legal Silver)
+                // waits for the receiver's type to pick its owner.
                 let fid = field.id();
-                let (adt, field_ty) = {
-                    let info = self.env.globals.dtor_by_name.get(&fid).ok_or_else(|| {
-                        TypeError::Other(format!(
-                            "unknown ADT destructor: {}",
-                            self.env.interner.resolve(&fid)
-                        ))
-                    })?;
-                    (info.adt, info.ty.clone())
-                };
-                let (arity, adt_params) = {
-                    let sig = self.env.globals.resolve(adt).and_then(|s| s.as_adt());
-                    match sig {
-                        Some(s) => (s.type_arity, s.params.clone()),
-                        None => (0, Vec::new()),
-                    }
-                };
                 let base_key = self.constrain_pure(base)?;
-                self.tc.impose(
-                    base_key.concretizes_explicit(ViperTcType::Domain(Ident(adt), arity)),
-                )?;
-                // Map each of the ADT's type parameters to the scrutinee's
-                // corresponding type argument (its `i`-th child), so a generic
-                // field type `T` resolves to the concrete instantiation.
-                let mut subst = HashMap::default();
-                for (i, pname) in adt_params.iter().enumerate() {
-                    let child = self.tc.get_child_key(base_key, i)?;
-                    subst.insert(*pname, child);
+                let globals = self.env.globals;
+                let owners = globals.dtor_by_name.get(&fid).ok_or_else(|| {
+                    TypeError::Other(format!(
+                        "unknown ADT destructor: {}",
+                        self.env.interner.resolve(&fid)
+                    ))
+                })?;
+                match owners.as_slice() {
+                    [only] => self.impose_destructor(only, base_key, key)?,
+                    _ => self.shared_dtors.push((fid, base_key, key)),
                 }
-                self.impose_type(key, &field_ty, &subst)?;
             }
 
             ExpKind::AdtDiscriminator(base, variant) => {
@@ -718,8 +780,18 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             ExpKind::Quantifier(_, bound_vars, triggers, body) => {
                 // Treat quantifier binders like let-binders: impose their declared type,
                 // restore the previous bindings afterwards.
+                // A binder may not shadow anything in scope, an enclosing
+                // binder or one of its siblings included.
                 let mut prev_bindings = Vec::with_capacity(bound_vars.len());
                 for bv in bound_vars.iter() {
+                    let spur = bv.idn.0.id();
+                    // (Siblings already bound are in `let_bindings`.)
+                    if self.env.declared(spur) || self.let_bindings.contains_key(&spur) {
+                        return Err(TypeError::ShadowedName(
+                            self.env.interner.resolve(&spur).to_string(),
+                        ));
+                    }
+                    self.check_binder_type(&bv.ty)?;
                     let ty = Type::from(&bv.ty);
                     let bk = self.tc.new_term_key();
                     self.tc.impose(bk.concretizes_explicit(type_to_tc(&ty)))?;
@@ -760,6 +832,76 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         }
 
         Ok(key)
+    }
+
+    /// `e.f` with `f` the destructor `info`: the receiver (`base_key`) is
+    /// `info`'s ADT and the result (`key`) has the field's type, a generic
+    /// field instantiated from the receiver's type arguments.
+    fn impose_destructor(
+        &mut self,
+        info: &DtorInfo,
+        base_key: TcKey,
+        key: TcKey,
+    ) -> Result<(), TypeError> {
+        let (arity, adt_params) = match self.env.globals.resolve(info.adt).and_then(|s| s.as_adt())
+        {
+            Some(s) => (s.type_arity, s.params.clone()),
+            None => (0, Vec::new()),
+        };
+        self.tc
+            .impose(base_key.concretizes_explicit(ViperTcType::Domain(Ident(info.adt), arity)))?;
+        // Map each of the ADT's type parameters to the scrutinee's
+        // corresponding type argument (its `i`-th child), so a generic
+        // field type `T` resolves to the concrete instantiation.
+        let mut subst = HashMap::default();
+        for (i, pname) in adt_params.iter().enumerate() {
+            let child = self.tc.get_child_key(base_key, i)?;
+            subst.insert(*pname, child);
+        }
+        self.impose_type(key, &info.ty, &subst)
+    }
+
+    /// Pick the owner of each destructor in `shared_dtors` by its receiver's
+    /// type, once the whole expression is constrained. One preliminary solve
+    /// settles every destructor whose receiver it determines, however many;
+    /// another round is needed only when a receiver is itself such a
+    /// destructor (`x.f.f`). A receiver of an ADT that does not declare the
+    /// field gets the first owner, so its receiver constraint reports the
+    /// mismatch; a receiver no round determines is ambiguous.
+    fn resolve_shared_destructors(&mut self) -> Result<(), TypeError> {
+        let globals = self.env.globals;
+        while !self.shared_dtors.is_empty() {
+            let prelim = self.tc.clone().type_check_preliminary()?;
+            let pending = std::mem::take(&mut self.shared_dtors);
+            let mut resolved = false;
+            for (field, base_key, key) in pending {
+                let Some(ViperTcType::Domain(Ident(adt), _)) =
+                    prelim.get(&base_key).map(|p| &p.variant)
+                else {
+                    self.shared_dtors.push((field, base_key, key));
+                    continue;
+                };
+                let owners = &globals.dtor_by_name[&field];
+                let info = owners.iter().find(|d| d.adt == *adt).unwrap_or(&owners[0]);
+                self.impose_destructor(info, base_key, key)?;
+                resolved = true;
+            }
+            if !resolved {
+                let (field, _, _) = self.shared_dtors[0];
+                return Err(TypeError::AmbiguousAdtField(
+                    self.env.interner.resolve(&field).to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// [`check_type`] for a type written inside an expression; in an axiom
+    /// the owning domain's parameters are in scope.
+    fn check_binder_type(&self, ty: &viper::Type) -> Result<(), TypeError> {
+        check_type(ty, self.env.globals, self.env.interner, &|p| {
+            self.rigid_generics.contains(&p)
+        })
     }
 
     fn constrain_unop(
@@ -1479,6 +1621,39 @@ fn collect_labels(stmts: &[viper::Statement], labels: &mut HashSet<Spur>) {
     }
 }
 
+/// Every label of a method body, loops included. A label shares the method's
+/// namespace: it may not repeat or reuse a global name (Silver's duplicate
+/// identifier check; the clash with a local is `add_local`'s).
+fn check_label_names(
+    stmts: &[viper::Statement],
+    ctx: &LocalEnv,
+    seen: &mut HashSet<Spur>,
+) -> Result<(), TypeError> {
+    for stmt in stmts {
+        match stmt {
+            viper::Statement::Label(decl, _) => {
+                let id = decl.0.id();
+                if !seen.insert(id) || ctx.globals.resolve(id).is_some() {
+                    return Err(TypeError::ShadowedName(
+                        ctx.interner.resolve(&id).to_string(),
+                    ));
+                }
+            }
+            viper::Statement::Block(block) | viper::Statement::While(_, _, _, block) => {
+                check_label_names(&block.0, ctx, seen)?;
+            }
+            viper::Statement::If(_, then_blk, else_blk) => {
+                check_label_names(&then_blk.0, ctx, seen)?;
+                if let Some(b) = else_blk {
+                    check_label_names(&b.0, ctx, seen)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn lower_statement(
     stmt: &mut viper::Statement,
     ctx: &mut LocalEnv,
@@ -1501,6 +1676,7 @@ fn lower_statement(
         S::Var(decls, init) => {
             let mut typed_decls = Vec::with_capacity(decls.len());
             for d in decls.iter() {
+                ctx.check_type(&d.ty)?;
                 let ty = Type::from(&d.ty);
                 ctx.add_local(d.idn.0.id(), ty.clone())?;
                 typed_decls.push(TypedIdent {
@@ -1517,6 +1693,16 @@ fn lower_statement(
         }
 
         S::Assign(lhs_list, rhs) => {
+            let mut targets = HashSet::default();
+            for lhs in lhs_list.iter() {
+                if let viper::AssignLhs::Ident(ident) = lhs
+                    && !targets.insert(ident.id())
+                {
+                    return Err(TypeError::DuplicateTarget(
+                        ctx.interner.resolve(&ident.id()).to_string(),
+                    ));
+                }
+            }
             // Lower LHS first — concrete types, never generic
             let lowered_lhs_typed: Vec<(typed::AssignLhs, Type)> = lhs_list
                 .iter_mut()
@@ -1529,7 +1715,7 @@ fn lower_statement(
         }
 
         S::Block(block) => {
-            let stmts = lower_stmt_block(&mut block.0, ctx)?;
+            let stmts = lower_scoped_block(&mut block.0, ctx)?;
             Ok(typed::Statement::Block(typed::StmtBlock(stmts)))
         }
 
@@ -1553,10 +1739,10 @@ fn lower_statement(
         // resolved later by the CFG (`viper::cfg`).
         S::If(cond, then_blk, else_blk) => {
             let cond = ctx.typecheck_pure::<MethodBodyExt>(cond, &Type::Bool, None)?;
-            let then_s = lower_stmt_block(&mut then_blk.0, ctx)?;
+            let then_s = lower_scoped_block(&mut then_blk.0, ctx)?;
             let else_s = else_blk
                 .as_mut()
-                .map(|b| lower_stmt_block(&mut b.0, ctx))
+                .map(|b| lower_scoped_block(&mut b.0, ctx))
                 .transpose()?;
             Ok(typed::Statement::If(
                 cond,
@@ -1579,7 +1765,7 @@ fn lower_statement(
                 .iter_mut()
                 .map(|inv| ctx.typecheck_spatial::<MethodBodyExt>(&mut inv.0))
                 .collect::<Result<Vec<_>, _>>()?;
-            let body = lower_stmt_block(&mut body.0, ctx)?;
+            let body = lower_scoped_block(&mut body.0, ctx)?;
             Ok(typed::Statement::While(cond, invs, typed::StmtBlock(body)))
         }
     }
@@ -1592,6 +1778,11 @@ fn lower_assign_lhs_typed(
     match lhs {
         viper::AssignLhs::Ident(ident) => {
             let spur = ident.id();
+            if ctx.params.contains(&spur) {
+                return Err(TypeError::NotAssignable(
+                    ctx.interner.resolve(&spur).to_string(),
+                ));
+            }
             let ty = ctx.locals.get(&spur).cloned().ok_or_else(|| {
                 TypeError::UndefinedVariable(ctx.interner.resolve(&spur).to_string())
             })?;
@@ -1708,6 +1899,23 @@ fn lower_rhs_against_lhs(
     }
 }
 
+/// A nested block (`{ .. }`, an `if` arm, a loop body). As in Silver, a
+/// `var` it declares is visible only up to its end. Unlike Silver, the name
+/// stays taken for the rest of the method (`retired`): locals are flat
+/// downstream, so sibling blocks cannot each declare their own `x`.
+fn lower_scoped_block(
+    stmts: &mut [viper::Statement],
+    ctx: &mut LocalEnv,
+) -> Result<Vec<typed::Statement>, TypeError> {
+    let mark = ctx.declared_order.len();
+    let lowered = lower_stmt_block(stmts, ctx)?;
+    for name in ctx.declared_order.drain(mark..) {
+        ctx.locals.remove(&name);
+        ctx.retired.insert(name);
+    }
+    Ok(lowered)
+}
+
 fn lower_stmt_block(
     stmts: &mut [viper::Statement],
     ctx: &mut LocalEnv,
@@ -1719,11 +1927,16 @@ fn lower_stmt_block(
 // 11. Declaration-level functions
 // ==========================================
 
-fn typecheck_field(field: &viper::Field) -> typed::Declaration {
-    typed::Declaration::Field(typed::Field(TypedIdent {
+fn typecheck_field(
+    field: &viper::Field,
+    globals: &Globals,
+    interner: &Interner,
+) -> Result<typed::Declaration, TypeError> {
+    check_type(&field.0.ty, globals, interner, &|_| false)?;
+    Ok(typed::Declaration::Field(typed::Field(TypedIdent {
         name: Ident(field.0.idn.0.id()),
         ty: Type::from(&field.0.ty),
-    }))
+    })))
 }
 
 /// Lower a parsed type, resolving a bare `Domain(p, [])` whose head is one of
@@ -1753,7 +1966,11 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
 /// Convert a parsed ADT into its typed declaration. Variant field types are
 /// lowered with the ADT's type parameters in scope; anonymous fields are
 /// rejected — the read-only interner cannot mint a destructor name for them.
-fn typecheck_adt(adt: &viper::Adt) -> Result<typed::Declaration, TypeError> {
+fn typecheck_adt(
+    adt: &viper::Adt,
+    globals: &Globals,
+    interner: &Interner,
+) -> Result<typed::Declaration, TypeError> {
     let type_params: Vec<lasso::Spur> = adt.params.iter().map(|p| p.0.id()).collect();
     let mut variants = Vec::with_capacity(adt.variants.len());
     for v in &adt.variants {
@@ -1762,6 +1979,7 @@ fn typecheck_adt(adt: &viper::Adt) -> Result<typed::Declaration, TypeError> {
             let idn = field.idn().ok_or_else(|| {
                 TypeError::Other("anonymous ADT variant field is unsupported".to_string())
             })?;
+            check_type(field.ty(), globals, interner, &|p| type_params.contains(&p))?;
             params.push(TypedIdent {
                 name: Ident(idn.0.id()),
                 ty: type_with_generics(field.ty(), &type_params),
@@ -1804,6 +2022,29 @@ fn domain_function_to_typed(
     }
 }
 
+/// A domain function's signature: well-formed types (the domain's parameters
+/// in scope) and distinct parameter names.
+fn check_domain_function(
+    df: &viper::DomainFunction,
+    type_params: &[Spur],
+    globals: &Globals,
+    interner: &Interner,
+) -> Result<(), TypeError> {
+    let is_param = |p| type_params.contains(&p);
+    let mut names = HashSet::default();
+    for arg in df.signature.args.iter().chain(&df.signature.ret) {
+        check_type(arg.ty(), globals, interner, &is_param)?;
+        if let Some(idn) = arg.idn()
+            && !names.insert(idn.0.id())
+        {
+            return Err(TypeError::ShadowedName(
+                interner.resolve(&idn.0.id()).to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn collect_params(args: &[viper::ArgOrType]) -> Vec<TypedIdent> {
     args.iter()
         .filter_map(|p| {
@@ -1817,6 +2058,7 @@ fn collect_params(args: &[viper::ArgOrType]) -> Vec<TypedIdent> {
 
 fn add_arg_locals(ctx: &mut LocalEnv, args: &[viper::ArgOrType]) -> Result<(), TypeError> {
     for arg in args {
+        ctx.check_type(arg.ty())?;
         if let viper::ArgOrType::Arg(decl) = arg {
             ctx.add_local(decl.idn.0.id(), Type::from(&decl.ty))?;
         }
@@ -1869,6 +2111,7 @@ fn typecheck_function(
 
     let mut ctx = LocalEnv::new(globals, interner);
     add_arg_locals(&mut ctx, &func.signature.args)?;
+    ctx.check_type(func.signature.ret[0].ty())?;
 
     let requires = combine_spatial::<typed::HeapExt>(&mut func.contract.precondition, &ctx)?;
 
@@ -1916,9 +2159,18 @@ fn typecheck_method(
     // Collect all label names from the body before processing anything.
     if let Some(body) = &method.body {
         collect_labels(&body.0, &mut ctx.labels);
+        let mut all_labels = HashSet::default();
+        check_label_names(&body.0, &ctx, &mut all_labels)?;
+        ctx.all_labels = all_labels;
     }
 
     add_arg_locals(&mut ctx, &method.signature.args)?;
+    ctx.params = method
+        .signature
+        .args
+        .iter()
+        .filter_map(|a| a.idn().map(|idn| idn.0.id()))
+        .collect();
 
     let requires = combine_spatial::<typed::HeapExt>(&mut method.contract.precondition, &ctx)?;
 
@@ -2115,6 +2367,10 @@ pub fn typecheck_program_reporting(
             && let viper::DomainElementKind::Function(df) = &de.kind
         {
             let params = domain_params.get(&de.domain.id()).map_or(&[][..], |v| v);
+            if let Err(e) = check_domain_function(df, params, globals, &interner) {
+                errors.push((interner.resolve(&de.domain.id()).to_string(), e));
+                continue;
+            }
             domain_fns
                 .entry(de.domain.id())
                 .or_default()
@@ -2164,7 +2420,9 @@ pub fn typecheck_program_reporting(
 
     for decl in &mut program.0 {
         let result = match decl {
-            viper::Declaration::Field(field) => Ok(Some(typecheck_field(field))),
+            viper::Declaration::Field(field) => {
+                typecheck_field(field, globals, &interner).map(Some)
+            }
             viper::Declaration::Predicate(pred) => {
                 typecheck_predicate(pred, globals, &interner).map(Some)
             }
@@ -2174,7 +2432,7 @@ pub fn typecheck_program_reporting(
             viper::Declaration::Method(method) => {
                 typecheck_method(method, globals, &interner).map(Some)
             }
-            viper::Declaration::Adt(adt) => typecheck_adt(adt).map(Some),
+            viper::Declaration::Adt(adt) => typecheck_adt(adt, globals, &interner).map(Some),
             viper::Declaration::Domain(domain) => {
                 let functions = domain_fns.remove(&domain.name.0.id()).unwrap_or_default();
                 Ok(Some(typed::Declaration::Domain(typed::Domain {
@@ -2196,6 +2454,10 @@ pub fn typecheck_program_reporting(
         }
     }
 
+    let errors = errors
+        .into_iter()
+        .map(|(name, e)| (name, e.with_names(&interner)))
+        .collect();
     (typed::Program { decls, interner }, errors)
 }
 
@@ -2829,7 +3091,7 @@ function bad(a: Int, b: Bool): Int
         assert!(
             result
                 .as_ref()
-                .is_err_and(|errs| errs.iter().any(|e| matches!(e, TypeError::Tc(_)))),
+                .is_err_and(|errs| errs.iter().any(|e| matches!(e, TypeError::Mismatch(..)))),
             "expected type constraint error, got: {result:?}"
         );
     }
@@ -3057,6 +3319,318 @@ domain List[T] {
     function len(xs: List[T]): Int
 }
 method client() { assert len((nil(): List[Int])) == 0 }
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    // ---- Programs Silicon rejects at type checking ----
+
+    /// Assert `input` fails typechecking with an error matching `pred`, and
+    /// that the error counts as ill-typed input rather than unsupported.
+    fn assert_rejected(input: &str, pred: impl Fn(&TypeError) -> bool) {
+        let result = run_pipeline(input);
+        let errs = result.as_ref().expect_err("expected a type error");
+        assert!(
+            errs.iter().any(|e| pred(e) && !e.is_unsupported()),
+            "unexpected errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn adt_constructor_argument_of_wrong_domain_rejected() {
+        // tracing-core: an `s_Dyn` passed where the constructor wants `s_Param`.
+        assert_rejected(
+            r#"
+domain s_Param {}
+domain s_Dyn {}
+adt s_Ref { s_Ref_cons(s_Ref_0: Ref, s_Ref_1: s_Param) }
+function p_Dyn_snap(self: Ref): s_Dyn
+method m(x: Ref) { var r: s_Ref := s_Ref_cons(x, p_Dyn_snap(x)) }
+"#,
+            |e| {
+                matches!(e, TypeError::Mismatch(..))
+                    && e.to_string() == "type mismatch: cannot unify `s_Dyn` and `s_Param`"
+            },
+        );
+    }
+
+    #[test]
+    fn type_mismatch_names_viper_types() {
+        for (src, msg) in [
+            (
+                "method m() { var p: Perm := 1/2; var i: Int := p }",
+                "type mismatch: cannot unify `Perm` and `Int`",
+            ),
+            (
+                "function f(b: Bool): Int { b + 1 }",
+                "type mismatch: cannot unify `Bool` and a number (`Int` or `Perm`)",
+            ),
+            (
+                "adt A[T] { A1(x: T) }\nmethod m(a: A[Int]) { var r: Ref := a }",
+                "type mismatch: cannot unify `A[_]` and `Ref`",
+            ),
+        ] {
+            let errs = run_pipeline(src).expect_err("expected a type error");
+            assert!(
+                errs.iter().any(|e| e.to_string() == msg),
+                "{src}: expected `{msg}`, got {:?}",
+                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn undeclared_identifier_in_postcondition_disjunct_rejected() {
+        // zerocopy: an impl generic no `let` binds, in one disjunct of a
+        // bodyless function's postcondition. It is not a fresh constant.
+        assert_rejected(
+            r#"
+domain Type {
+    function s_Option_type(t: Type): Type
+    function s_FnPtr_type(): Type
+}
+function Sized_impl(t: Type): Bool
+function TryFromBytes_impl(Self$0_trait: Type): Bool
+  ensures result ==
+    ((let O$0_impl == (Self$0_trait) in Sized_impl(O$0_impl)) ||
+     Self$0_trait == s_Option_type(s_FnPtr_type()) && Sized_impl(M$0_impl))
+"#,
+            |e| matches!(e, TypeError::UndefinedVariable(n) if n == "M$0_impl"),
+        );
+    }
+
+    #[test]
+    fn undeclared_type_rejected() {
+        for decl in [
+            "field f: Foo",
+            "function f(x: Foo): Int",
+            "function f(): Foo",
+            "predicate p(x: Foo)",
+            "method m(x: Foo)",
+            "method m() returns (r: Foo)",
+            "method m() { var x: Foo }",
+            "adt A { A1(a: Foo) }",
+            "domain D { function d(x: Foo): Int }",
+            "function h(x: Int): Bool\nmethod m() { inhale forall x: Foo :: { h(1) } h(1) }",
+            // A type parameter is not in scope outside its ADT.
+            "adt A[T] { A1(a: T) }\nmethod m(x: T)",
+            // Names of other kinds are not types.
+            "adt A { Foo(a: Int) }\nmethod m(x: Foo)",
+        ] {
+            let result = run_pipeline(decl);
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|errs| errs.iter().any(|e| matches!(
+                        e,
+                        TypeError::UndeclaredType(n) if n == "Foo" || n == "T"
+                    ))),
+                "{decl}: expected an undeclared type, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_type_argument_count_rejected() {
+        for decl in [
+            "domain D {}\nmethod m(x: D[Int])",
+            "adt A { A1(a: Int) }\nmethod m(x: A[Int])",
+            "adt A[T] { A1(a: T) }\nmethod m(x: A)",
+        ] {
+            assert_rejected(decl, |e| matches!(e, TypeError::WrongTypeArgCount { .. }));
+        }
+    }
+
+    #[test]
+    fn declared_types_accepted() {
+        let result = run_pipeline(
+            r#"
+domain D {}
+adt A[T] { A1(a: T, d: D) }
+field f: A[Int]
+method m(x: A[A[Bool]], p: Perm) returns (r: D)
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn assignment_to_method_parameter_rejected() {
+        for body in [
+            "x := 1",
+            "x := n()",
+            "var y: Int; y, x := n2()",
+            "while (x > 0) { x := x - 1 }",
+        ] {
+            let src = format!(
+                "method n() returns (a: Int)\n\
+                 method n2() returns (a: Int, b: Int)\n\
+                 method m(x: Int) returns (r: Int) {{ r := 0; {body} }}"
+            );
+            assert_rejected(
+                &src,
+                |e| matches!(e, TypeError::NotAssignable(n) if n == "x"),
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_call_targets_rejected() {
+        assert_rejected(
+            r#"
+method n() returns (a: Int, b: Int)
+method m() { var x: Int; x, x := n() }
+"#,
+            |e| matches!(e, TypeError::DuplicateTarget(n) if n == "x"),
+        );
+    }
+
+    #[test]
+    fn label_name_clashes_rejected() {
+        for src in [
+            "method m() { label l; label l }",
+            "method m() { label l; while (true) { label l } }",
+            "function f(): Int\nmethod m() { label f }",
+        ] {
+            assert_rejected(src, |e| matches!(e, TypeError::ShadowedName(_)));
+        }
+        // Labels are per method.
+        let result = run_pipeline("method m() { label l }\nmethod n() { label l }");
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn binder_shadowing_rejected() {
+        for src in [
+            // A quantifier binder shadowing a local, a global, an enclosing
+            // binder, or a sibling.
+            "function h(x: Int): Bool\nmethod m(x: Int) { inhale forall x: Int :: { h(x) } h(x) }",
+            "function h(x: Int): Bool\nmethod m() { inhale forall h: Int :: { h(h) } true }",
+            "function h(x: Int): Bool\nmethod m() { inhale forall x: Int :: { h(x) } (forall x: Int :: { h(x) } h(x)) }",
+            "function h(x: Int): Bool\nmethod m() { inhale forall x: Int, x: Int :: { h(x) } h(x) }",
+            "domain D { function d(x: Int): Bool  axiom { forall d: Int :: { d(d) } d(d) } }",
+            // A `let` binder shadowing a global.
+            "function f(): Int\nmethod m() { assert (let f == (1) in f) == 1 }",
+            // Duplicate domain-function parameters.
+            "domain D { function d(x: Int, x: Int): Int }",
+        ] {
+            assert_rejected(src, |e| matches!(e, TypeError::ShadowedName(_)));
+        }
+    }
+
+    #[test]
+    fn shared_adt_field_resolves_through_receiver_type() {
+        // Legal Silver: two ADTs may declare `f`; each `e.f` is the receiver's.
+        let result = run_pipeline(
+            r#"
+adt A { A1(f: Int) }
+adt B { B1(f: Int) }
+function g(a: A): Int { a.f }
+function h(b: B): Int { b.f }
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        // Receivers of every kind: let binder, quantifier binder, call result,
+        // and a chain whose inner receiver is itself shared (`a.f.f`, resolved
+        // in a second round).
+        let result = run_pipeline(
+            r#"
+adt A { A1(f: B) }
+adt B { B1(f: Int) }
+function k(): B
+function chain(a: A): Int { a.f.f }
+method m() {
+  assert (let x == (k()) in x.f) == k().f
+  inhale forall b: B :: { b.f } b.f == 0
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn shared_adt_field_gets_receivers_field_type() {
+        let program = run_pipeline(
+            r#"
+adt A { A1(f: Int) }
+adt B { B1(f: Bool) }
+function h(b: B): Bool { b.f }
+"#,
+        )
+        .expect("B's `f` is a Bool");
+        let Some(typed::Declaration::Function(h)) = program.decls.iter().find(|d| {
+            matches!(d, typed::Declaration::Function(f) if program.interner.resolve(&f.name.0) == "h")
+        }) else {
+            panic!("no function h");
+        };
+        let body = h.body.as_ref().expect("h has a body");
+        assert!(matches!(*body.exp, PureExpKind::AdtDestructor(..)));
+        assert_eq!(body.ty, Type::Bool);
+
+        // So reading it as an Int is a type error, naming both types.
+        assert_rejected(
+            "adt A { A1(f: Int) }\nadt B { B1(f: Bool) }\nfunction h(b: B): Int { b.f }",
+            |e| {
+                let msg = e.to_string();
+                matches!(e, TypeError::Mismatch(..))
+                    && msg.contains("`Bool`")
+                    && msg.contains("`Int`")
+            },
+        );
+    }
+
+    #[test]
+    fn shared_adt_field_on_undetermined_receiver_is_ambiguous() {
+        // Silicon: "found incompatible receiver type `T#2` when destructing
+        // adt field `f`".
+        assert_rejected(
+            r#"
+adt P[T] { P1(p: T) P0() }
+adt A { A1(f: Int) }
+adt B { B1(f: Int) }
+method m() { assume P0().p.f == 0 }
+"#,
+            |e| matches!(e, TypeError::AmbiguousAdtField(n) if n == "f"),
+        );
+    }
+
+    #[test]
+    fn block_local_not_visible_after_block() {
+        for body in [
+            "if (b) { var x: Int := 1 } assert x == 1",
+            "while (b) { var x: Int := 1 } assert x == 1",
+            "{ var x: Int := 1 } assert x == 1",
+        ] {
+            let src = format!("method m(b: Bool) {{ {body} }}");
+            assert_rejected(
+                &src,
+                |e| matches!(e, TypeError::UndefinedVariable(n) if n == "x"),
+            );
+        }
+        // Still visible inside its block, nested blocks included.
+        let result =
+            run_pipeline("method m(b: Bool) { if (b) { var x: Int := 1; if (b) { x := 2 } } }");
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        // Silicon also rejects reusing the name after the block.
+        assert_rejected(
+            "method m(b: Bool) { if (b) { var x: Int } var x: Int }",
+            |e| matches!(e, TypeError::ShadowedName(n) if n == "x"),
+        );
+    }
+
+    #[test]
+    fn binders_may_reuse_sibling_and_adt_field_names() {
+        let result = run_pipeline(
+            r#"
+adt A { A1(f: Int) }
+function h(x: Int): Bool
+method m(a: A) {
+  inhale (forall x: Int :: { h(x) } h(x)) && (forall x: Int :: { h(x) } h(x))
+  inhale forall f: Int :: { h(f) } h(f)
+  var y: Int := let f == (a.f) in f
+}
 "#,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
