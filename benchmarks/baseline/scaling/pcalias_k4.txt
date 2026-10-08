@@ -1,0 +1,14 @@
+saturations=57
+reduces=13
+sat_iterations=190
+egraph_nodes_peak=1184
+egraph_classes_peak=551
+rule_applications=1247
+prove_calls=73
+prove_probe=0
+rule.add-zero-real-l=9
+rule.add-zero-real-r=33
+rule.eq-refl=1
+rule.eq-true-union=54
+rule.ite-reduce=1144
+rule.sub-add-cancel-real-r=6

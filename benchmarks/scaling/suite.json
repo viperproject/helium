@@ -12,6 +12,20 @@
     {"name": "call_fanout", "pattern": "calls_fanout(?P<fanout>\\d+)", "knobs": ["fanout"]},
     {"name": "mut_writes", "pattern": "mut_w(?P<writes>\\d+)_p(?P<path>\\d+)", "knobs": ["writes", "path"]},
     {"name": "arith", "pattern": "arith_k(?P<ops>\\d+)", "knobs": ["ops"]},
-    {"name": "struct_depth", "pattern": "struct_d(?P<depth>\\d+)", "knobs": ["depth"]}
+    {"name": "struct_depth", "pattern": "struct_d(?P<depth>\\d+)", "knobs": ["depth"]},
+    {"name": "struct_width", "pattern": "struct_w(?P<fields>\\d+)", "knobs": ["fields"]},
+    {"name": "tuple_width", "pattern": "tuple_w(?P<elements>\\d+)", "knobs": ["elements"]},
+    {"name": "enum_tag", "pattern": "enum_tag_v(?P<variants>\\d+)", "knobs": ["variants"]},
+    {"name": "enum_fields", "pattern": "enum_fields_n(?P<fields>\\d+)", "knobs": ["fields"]},
+    {"name": "option_depth", "pattern": "option_d(?P<depth>\\d+)", "knobs": ["depth"]},
+    {"name": "nway", "pattern": "nway_k(?P<arms>\\d+)", "knobs": ["arms"]},
+    {"name": "seqmatch", "pattern": "seqmatch_k(?P<decisions>\\d+)", "knobs": ["decisions"]},
+    {"name": "reborrow", "pattern": "reborrow_n(?P<reborrows>\\d+)", "knobs": ["reborrows"]},
+    {"name": "condmove", "pattern": "condmove_k(?P<moves>\\d+)", "knobs": ["moves"]},
+    {"name": "generic", "pattern": "generic_k(?P<round_trips>\\d+)", "knobs": ["round_trips"]},
+    {"name": "impls", "pattern": "impls_k(?P<impls>\\d+)", "knobs": ["impls"]},
+    {"name": "units", "pattern": "units_k(?P<units>\\d+)", "knobs": ["units"]},
+    {"name": "straight", "pattern": "straight_k(?P<statements>\\d+)", "knobs": ["statements"]},
+    {"name": "pcalias", "pattern": "pcalias_k(?P<chunks>\\d+)", "knobs": ["chunks"]}
   ]
 }

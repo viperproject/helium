@@ -1,7 +1,8 @@
-//! Verification-cost regression gate. For each `benchmarks/*.vpr` (which must
-//! verify clean), capture the verifier's *deterministic* cost metrics and
-//! compare them against a committed baseline under
-//! `benchmarks/baseline/<name>.txt`.
+//! Verification-cost regression gate. For each `benchmarks/*.vpr` and each
+//! point in [`SCALING_POINTS`] (all of which must verify clean), capture the
+//! verifier's *deterministic* cost metrics and compare them against a committed
+//! baseline under `benchmarks/baseline/<name>.txt` (scaling points:
+//! `benchmarks/baseline/scaling/<stem>.txt`).
 //!
 //! egg is deterministic for a fixed rule set + input, so the metrics are the same
 //! on every machine. The aggregate counters ([`GATED`]) must stay within a band:
@@ -38,14 +39,48 @@ fn benchmarks_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks")
 }
 
-fn collect_benchmarks() -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(benchmarks_dir())
+/// Small points of the generated families in `benchmarks/scaling/` whose
+/// counters grow faster than linearly in their knob. Each family contributes two
+/// points, the second one knob step up, so a steeper growth rate pushes the
+/// larger point's counters out of band even where the smaller one stays put.
+/// Families whose counters are linear but whose time is not (per-operation cost
+/// growing with graph size) are invisible to this gate and are left out.
+const SCALING_POINTS: &[&str] = &[
+    "pcalias_k4",
+    "pcalias_k5",
+    "enum_tag_v8",
+    "enum_tag_v16",
+    "option_d2",
+    "option_d4",
+    "struct_w4",
+    "struct_w8",
+    "tuple_w2",
+    "tuple_w4",
+];
+
+/// `(name, program, baseline)` for every gated benchmark.
+fn collect_benchmarks() -> Vec<(String, PathBuf, PathBuf)> {
+    let dir = benchmarks_dir();
+    let baseline = dir.join("baseline");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&dir)
         .expect("benchmarks/ dir exists")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "vpr"))
         .collect();
     v.sort();
-    v
+    let flat = v.into_iter().map(|p| {
+        let name = p.file_stem().unwrap().to_str().unwrap().to_string();
+        let base = baseline.join(format!("{name}.txt"));
+        (name, p, base)
+    });
+    let scaling = SCALING_POINTS.iter().map(|stem| {
+        (
+            format!("scaling/{stem}"),
+            dir.join("scaling/vpr").join(format!("{stem}.vpr")),
+            baseline.join("scaling").join(format!("{stem}.txt")),
+        )
+    });
+    flat.chain(scaling).collect()
 }
 
 /// Render a `before → after` line diff so a regression is readable.
@@ -95,13 +130,11 @@ fn out_of_band(baseline: &str, current: &str) -> Vec<String> {
 #[test]
 fn verification_cost_matches_baseline() {
     let update = std::env::var_os("UPDATE_PERF_BASELINE").is_some();
-    let baseline_dir = benchmarks_dir().join("baseline");
     let benches = collect_benchmarks();
     assert!(!benches.is_empty(), "no benchmarks found");
 
     let mut failures = Vec::new();
-    for bench in benches {
-        let name = bench.file_stem().unwrap().to_str().unwrap().to_string();
+    for (name, bench, baseline_path) in benches {
         let (results, _timings, _member_times, stats) =
             pipeline::run_file_timed(&bench).unwrap_or_else(|e| panic!("{name}: pipeline {e}"));
         // A benchmark must verify clean — a failing program has no stable cost.
@@ -114,9 +147,9 @@ fn verification_cost_matches_baseline() {
         }
 
         let current = stats.snapshot_string();
-        let baseline_path = baseline_dir.join(format!("{name}.txt"));
 
         if update {
+            std::fs::create_dir_all(baseline_path.parent().unwrap()).expect("baseline dir");
             std::fs::write(&baseline_path, &current).expect("write baseline");
             continue;
         }
