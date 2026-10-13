@@ -1,3 +1,6 @@
+// prusti-encode: Prusti version: 0.3.0, commit ae6032113e3 2026-10-06 13:49:33 UTC, built on 2026-10-13 13:50:15 UTC
+// prusti-encode: checkout ae6032113e3, prusti-driver sha256 16a13eb208c6440e
+// prusti-encode: PRUSTI_CHECK_OVERFLOWS=false
 domain ParamTyp  {
   
   function s_Param_typ(arg0: s_Param): Type 
@@ -390,9 +393,9 @@ method m_peel(_0p: Ref, _1p: Ref)
   var _from_bb16_to_bb19: Bool
   var _from_bb62_to_bb64: Bool
   var _from_bb72_to_bb73: Bool
+  var _from_bb77_to_bb78: Bool
   var _from_bb40_to_bb43: Bool
   var _from_bb60_to_bb63: Bool
-  var _from_bb77_to_bb78: Bool
   var _from_bb73_to_bb74: Bool
   var _from_bb39_to_bb71: Bool
   var _from_bb42_to_bb44: Bool
@@ -568,9 +571,9 @@ method m_peel(_0p: Ref, _1p: Ref)
   _from_bb16_to_bb19 := false
   _from_bb62_to_bb64 := false
   _from_bb72_to_bb73 := false
+  _from_bb77_to_bb78 := false
   _from_bb40_to_bb43 := false
   _from_bb60_to_bb63 := false
-  _from_bb77_to_bb78 := false
   _from_bb73_to_bb74 := false
   _from_bb39_to_bb71 := false
   _from_bb42_to_bb44 := false

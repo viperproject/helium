@@ -4,7 +4,7 @@
     python3 gen_seq_if.py       # writes src/seqif_k{K}.rs
 
   K = two-way branches one after another in one block -> 2^K paths through
-      the function, where nesting K deep (`../rust/gen_depth.py`) gives K+1.
+      the function, where nesting K deep (`gen_depth.py`) gives K+1.
 
 Each branch writes through a `&mut`, so both arms carry heap state into the
 join.

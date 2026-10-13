@@ -1,3 +1,6 @@
+// prusti-encode: Prusti version: 0.3.0, commit ae6032113e3 2026-10-06 13:49:33 UTC, built on 2026-10-13 13:50:15 UTC
+// prusti-encode: checkout ae6032113e3, prusti-driver sha256 16a13eb208c6440e
+// prusti-encode: PRUSTI_CHECK_OVERFLOWS=false
 domain ParamTyp  {
   
   function s_Param_typ(arg0: s_Param): Type 
@@ -570,11 +573,11 @@ method m_churn(_0p: Ref, _1p: Ref)
   var _from_bb92_to_bb93: Bool
   var _from_bb118_to_bb120: Bool
   var _from_bb47_to_bb48: Bool
+  var _from_bb125_to_bb126: Bool
   var _from_bb127_to_bb129: Bool
   var _from_bb129_to_bb130: Bool
-  var _from_bb143_to_bb144: Bool
   var _from_bb101_to_bb102: Bool
-  var _from_bb125_to_bb126: Bool
+  var _from_bb143_to_bb144: Bool
   var _from_bb126_to_bb127: Bool
   var _from_bb34_to_bb35: Bool
   var _from_bb69_to_bb71: Bool
@@ -1133,11 +1136,11 @@ method m_churn(_0p: Ref, _1p: Ref)
   _from_bb92_to_bb93 := false
   _from_bb118_to_bb120 := false
   _from_bb47_to_bb48 := false
+  _from_bb125_to_bb126 := false
   _from_bb127_to_bb129 := false
   _from_bb129_to_bb130 := false
-  _from_bb143_to_bb144 := false
   _from_bb101_to_bb102 := false
-  _from_bb125_to_bb126 := false
+  _from_bb143_to_bb144 := false
   _from_bb126_to_bb127 := false
   _from_bb34_to_bb35 := false
   _from_bb69_to_bb71 := false

@@ -5,10 +5,13 @@ programs that do more computation than a bare enum match. Built to answer whethe
 lazy / sticky / dominator-scoped scratch e-graph designs have anything to work with
 (the block-VMIR two-e-graph design notes; those live outside the repo).
 
-    src/*.rs        hand-written and generated sources (committed)
+    src/*.rs        hand-written sources (committed)
     vpr/*.vpr       their Prusti encodings (committed — measurement needs no Prusti)
     encode_all.sh   src -> vpr, skipping anything already up to date
-    gen_depth.py    regenerates the depth_d{D}_m{M} family
+
+The generated `depth_d{D}_m{M}` and `enum_v{N}_p{D}` families that used to live here
+are now in `../scaling/` (`gen_depth.py`, `gen_enum.py`), with the other one-knob
+families; they still follow the rules below.
 
 Rules for every source here, same as `../../../cases/rust/structs_enums.rs`:
 
@@ -39,18 +42,14 @@ Rules for every source here, same as `../../../cases/rust/structs_enums.rs`:
 | `physics_step.rs` | composition: three bodies through integrate -> clamp -> bounce |
 | `classify_tuple.rs` | many sequential blocks, shallow cubes: an 8-element buffer classified element by element |
 | `borrow_fields.rs` | borrows *stored in* structs: `p_Ref_mutable` nested inside another type predicate, so a fold drags a borrow's permission through the footprint |
-| `depth_d{D}_m{M}.rs` | the two axes separated and scaled: D nesting levels x M statements per block |
-| `enum_v{N}_p{D}.rs` | payload-enum cost separated: N variants x payload nesting depth D, each arm writing through a `&mut` payload — cost is exponential in N, linear in payload size (`../../enum_scaling_2026-08-14.md`) |
 
 ## Encoding
 
-    python3 gen_depth.py         # regenerate the depth_d{D}_m{M} family
-    python3 gen_enum.py          # regenerate the enum_v{N}_p{D} family
     ./encode_all.sh              # all of src/
     ./encode_all.sh mat3_mul     # one file
 
-Needs the local Prusti checkout (`../../tools/prusti_encode.sh`, override with
-`PRUSTI_RUSTC`). Roughly 1-3 minutes and ~0.5-1 MB of Viper per source, which is why
+Needs a prusti-next build: set `PRUSTI_RUSTC` to its `prusti-rustc` (required by
+`../../tools/prusti_encode.sh`, which records it in each `.vpr`'s header). Roughly 1-3 minutes and ~0.5-1 MB of Viper per source, which is why
 `vpr/` is committed.
 
 ## Two `&mut`-into-a-call gaps this corpus uncovered
@@ -108,7 +107,7 @@ verifier. If any gap returns, those cases fail before the corpus does.
 Holds the corpus to the rule above — every member verifies — against the reviewed
 exception list in `expected_failures.txt`. Fails on a member that regressed *and* on a
 listed member that now passes, so a closed gap has to be deleted from the list rather
-than left to rot. Currently **2886 verified, 0 known-failing** — every member of the
+than left to rot. Currently **1692 verified, 0 known-failing** — every member of the
 corpus verifies, so `expected_failures.txt` is empty.
 
 Not part of `cargo test`: the corpus takes minutes and its `vpr/` is large, so it is a

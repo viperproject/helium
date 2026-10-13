@@ -3,6 +3,8 @@
   "tags": ["generated", "scaling"],
   "exhaustive": true,
   "families": [
+    {"name": "depth", "pattern": "depth_d(?P<depth>\\d+)_m(?P<stmts>\\d+)", "knobs": ["depth", "stmts"]},
+    {"name": "enum", "pattern": "enum_v(?P<variants>\\d+)_p(?P<payload>\\d+)", "knobs": ["variants", "payload"]},
     {"name": "loops", "pattern": "loops_n(?P<nesting>\\d+)_b(?P<body>\\d+)", "knobs": ["nesting", "body"]},
     {"name": "seq_if", "pattern": "seqif_k(?P<branches>\\d+)", "knobs": ["branches"]},
     {"name": "args_value", "pattern": "args_val_n(?P<args>\\d+)", "knobs": ["args"]},

@@ -1,3 +1,6 @@
+// prusti-encode: Prusti version: 0.3.0, commit ae6032113e3 2026-10-06 13:49:33 UTC, built on 2026-10-13 13:50:15 UTC
+// prusti-encode: checkout ae6032113e3, prusti-driver sha256 16a13eb208c6440e
+// prusti-encode: PRUSTI_CHECK_OVERFLOWS=false
 domain s_Int_i32  {
   
   function s_Int_i32_cons(arg0: Int): s_Int_i32 
@@ -1124,12 +1127,12 @@ method m_tag(_0p: Ref, _1p: Ref)
   var _from_bb0_to_bb44: Bool
   var _from_bb105_to_bb129: Bool
   var _from_bb117_to_bb129: Bool
+  var _from_bb62_to_bb68: Bool
   var _from_bb0_to_bb32: Bool
   var _from_bb26_to_bb104: Bool
   var _from_bb0_to_bb20: Bool
   var _from_bb33_to_bb97: Bool
   var _from_bb19_to_bb111: Bool
-  var _from_bb62_to_bb68: Bool
   var _from_bb0_to_bb8: Bool
   var _from_bb92_to_bb129: Bool
   var _from_bb104_to_bb129: Bool
@@ -1320,12 +1323,12 @@ method m_tag(_0p: Ref, _1p: Ref)
   _from_bb0_to_bb44 := false
   _from_bb105_to_bb129 := false
   _from_bb117_to_bb129 := false
+  _from_bb62_to_bb68 := false
   _from_bb0_to_bb32 := false
   _from_bb26_to_bb104 := false
   _from_bb0_to_bb20 := false
   _from_bb33_to_bb97 := false
   _from_bb19_to_bb111 := false
-  _from_bb62_to_bb68 := false
   _from_bb0_to_bb8 := false
   _from_bb92_to_bb129 := false
   _from_bb104_to_bb129 := false

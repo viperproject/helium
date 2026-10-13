@@ -7,7 +7,7 @@
   N = variants of one fieldless enum (`enum_tag`). `tag` matches every variant
       and `from` builds one from an integer, so the snapshot function's
       discriminant ladder, the type's axioms and two N-arm joins all grow
-      with N. The payload-carrying version is `../rust/gen_enum.py`.
+      with N. The payload-carrying version is `gen_enum.py`.
   N = enum-typed fields of one struct (`enum_fields`), each read by its own
       two-arm match: N independent discriminant decisions in one body, each
       under a field projection.

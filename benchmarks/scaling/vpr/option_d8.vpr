@@ -1,3 +1,6 @@
+// prusti-encode: Prusti version: 0.3.0, commit ae6032113e3 2026-10-06 13:49:33 UTC, built on 2026-10-13 13:50:15 UTC
+// prusti-encode: checkout ae6032113e3, prusti-driver sha256 16a13eb208c6440e
+// prusti-encode: PRUSTI_CHECK_OVERFLOWS=false
 domain ParamTyp  {
   
   function s_Param_typ(arg0: s_Param): Type 
@@ -300,17 +303,17 @@ method m_peel(_0p: Ref, _1p: Ref)
   var _from_bb23_to_bb35: Bool
   var _from_bb35_to_bb36: Bool
   var _from_bb36_to_bb37: Bool
+  var _from_bb37_to_bb38: Bool
   var _from_bb7_to_bb39: Bool
   var _from_bb20_to_bb23: Bool
-  var _from_bb37_to_bb38: Bool
+  var _from_bb11_to_bb38: Bool
   var _from_bb16_to_bb17: Bool
   var _from_bb2_to_bb4: Bool
   var _from_bb4_to_bb5: Bool
   var _from_bb16_to_bb18: Bool
   var _from_bb24_to_bb25: Bool
-  var _from_bb11_to_bb38: Bool
-  var _from_bb0_to_bb1: Bool
   var _from_bb3_to_bb40: Bool
+  var _from_bb0_to_bb1: Bool
   var _from_bb20_to_bb22: Bool
   var _from_bb8_to_bb11: Bool
   var _from_bb12_to_bb13: Bool
@@ -390,17 +393,17 @@ method m_peel(_0p: Ref, _1p: Ref)
   _from_bb23_to_bb35 := false
   _from_bb35_to_bb36 := false
   _from_bb36_to_bb37 := false
+  _from_bb37_to_bb38 := false
   _from_bb7_to_bb39 := false
   _from_bb20_to_bb23 := false
-  _from_bb37_to_bb38 := false
+  _from_bb11_to_bb38 := false
   _from_bb16_to_bb17 := false
   _from_bb2_to_bb4 := false
   _from_bb4_to_bb5 := false
   _from_bb16_to_bb18 := false
   _from_bb24_to_bb25 := false
-  _from_bb11_to_bb38 := false
-  _from_bb0_to_bb1 := false
   _from_bb3_to_bb40 := false
+  _from_bb0_to_bb1 := false
   _from_bb20_to_bb22 := false
   _from_bb8_to_bb11 := false
   _from_bb12_to_bb13 := false

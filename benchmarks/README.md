@@ -34,10 +34,10 @@ benchmarks/<suite>/
 
 | suite | what |
 |---|---|
-| `rust/` | realistic spec-less Rust, no loops; `depth_*`, `enum_*` generated families |
+| `rust/` | realistic spec-less Rust, no loops (hand-written) |
 | `loops/` | loops with Prusti-inferred permission invariants |
 | `panic_free/` | panic-freedom tiers (`isolate/`: hand-reduced Viper) |
-| `scaling/` | generated families, one knob each (`gen_*.py`; `pcalias` is Viper-only) |
+| `scaling/` | generated families, one or two knobs each (`gen_*.py`; `pcalias` is Viper-only) |
 | `viper` (this dir) | hand-written Viper, also the `perf_regression` gate |
 | `crates` (external) | the top-100 crates.io crates, one `.vpr` per crate; see [External suites](#external-suites) |
 
@@ -75,8 +75,7 @@ knob values are read from the stem, so a new generator gets scaling charts on th
 site with no site change. A suite holding several families gives
 `"families": [{"name": ..., "pattern": ..., "knobs": [...]}, ...]` instead; each
 must match at least one stem, and with `"exhaustive": true` every stem must match
-one (see `scaling/suite.json`, and `rust/suite.json` for families mixed with
-hand-written files).
+one (see `scaling/suite.json`).
 
 ## External suites
 
@@ -140,10 +139,13 @@ which is what `max_vpr_mb`, `runs` and `timeout_s` are for.
 ## Adding a suite
 
 1. Create `benchmarks/<suite>/src/` with the Rust sources (or a generator that
-   writes them, following `rust/gen_depth.py`: one knob varies, the rest fixed).
+   writes them, following `scaling/gen_depth.py`: one knob varies, the rest fixed).
 2. Encode them: `python3 tools/bench/encode.py <suite>` (runs
-   `tools/prusti_encode.sh` per source; set `PRUSTI_RUSTC` to the `prusti-rustc`
-   executable). Commit `vpr/`.
+   `tools/prusti_encode.sh` per source; `PRUSTI_RUSTC` must name the prusti-next
+   `prusti-rustc` executable, there is no PATH fallback). Commit `vpr/`. Each
+   `.vpr` starts with `// prusti-encode:` lines recording the Prusti that made it;
+   encode a whole suite with one Prusti (same `prusti-driver sha256`), or its
+   families differ by encoder as well as by knob.
 3. Optionally add `suite.json` (description, tags, `family` for a generated suite).
 4. `cargo run --release -p bench -- check-suites` — it reports missing `.vpr`s, a
    `suite.json` that does not parse, a family pattern that does not match, `.rs`

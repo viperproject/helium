@@ -1,3 +1,6 @@
+// prusti-encode: Prusti version: 0.3.0, commit ae6032113e3 2026-10-06 13:49:33 UTC, built on 2026-10-13 13:50:15 UTC
+// prusti-encode: checkout ae6032113e3, prusti-driver sha256 16a13eb208c6440e
+// prusti-encode: PRUSTI_CHECK_OVERFLOWS=false
 domain ParamTyp  {
   
   function s_Param_typ(arg0: s_Param): Type 
@@ -787,9 +790,9 @@ method m_churn(_0p: Ref, _1p: Ref)
   var _from_bb45_to_bb47: Bool
   var _from_bb84_to_bb85: Bool
   var _from_bb120_to_bb121: Bool
-  var _from_bb180_to_bb181: Bool
   var _from_bb106_to_bb107: Bool
   var _from_bb161_to_bb162: Bool
+  var _from_bb180_to_bb181: Bool
   var _from_bb23_to_bb25: Bool
   var _from_bb96_to_bb98: Bool
   var _from_bb192_to_bb193: Bool
@@ -824,22 +827,23 @@ method m_churn(_0p: Ref, _1p: Ref)
   var _from_bb200_to_bb201: Bool
   var _from_bb209_to_bb210: Bool
   var _from_bb3_to_bb5: Bool
-  var _from_bb231_to_bb233: Bool
+  var _from_bb224_to_bb225: Bool
   var _from_bb201_to_bb202: Bool
-  var _from_bb243_to_bb244: Bool
+  var _from_bb231_to_bb233: Bool
   var _from_bb27_to_bb28: Bool
   var _from_bb133_to_bb134: Bool
   var _from_bb158_to_bb160: Bool
   var _from_bb207_to_bb208: Bool
+  var _from_bb243_to_bb244: Bool
   var _from_bb246_to_bb247: Bool
-  var _from_bb224_to_bb225: Bool
+  var _from_bb276_to_bb278: Bool
   var _from_bb74_to_bb75: Bool
   var _from_bb12_to_bb14: Bool
   var _from_bb99_to_bb100: Bool
   var _from_bb24_to_bb26: Bool
   var _from_bb225_to_bb226: Bool
   var _from_bb144_to_bb146: Bool
-  var _from_bb276_to_bb278: Bool
+  var _from_bb282_to_bb285: Bool
   var _from_bb0_to_bb2: Bool
   var _from_bb17_to_bb18: Bool
   var _from_bb120_to_bb122: Bool
@@ -849,7 +853,6 @@ method m_churn(_0p: Ref, _1p: Ref)
   var _from_bb242_to_bb243: Bool
   var _from_bb21_to_bb24: Bool
   var _from_bb153_to_bb155: Bool
-  var _from_bb282_to_bb285: Bool
   var _from_bb14_to_bb16: Bool
   var _from_bb97_to_bb98: Bool
   var _from_bb237_to_bb240: Bool
@@ -1910,9 +1913,9 @@ method m_churn(_0p: Ref, _1p: Ref)
   _from_bb45_to_bb47 := false
   _from_bb84_to_bb85 := false
   _from_bb120_to_bb121 := false
-  _from_bb180_to_bb181 := false
   _from_bb106_to_bb107 := false
   _from_bb161_to_bb162 := false
+  _from_bb180_to_bb181 := false
   _from_bb23_to_bb25 := false
   _from_bb96_to_bb98 := false
   _from_bb192_to_bb193 := false
@@ -1947,22 +1950,23 @@ method m_churn(_0p: Ref, _1p: Ref)
   _from_bb200_to_bb201 := false
   _from_bb209_to_bb210 := false
   _from_bb3_to_bb5 := false
-  _from_bb231_to_bb233 := false
+  _from_bb224_to_bb225 := false
   _from_bb201_to_bb202 := false
-  _from_bb243_to_bb244 := false
+  _from_bb231_to_bb233 := false
   _from_bb27_to_bb28 := false
   _from_bb133_to_bb134 := false
   _from_bb158_to_bb160 := false
   _from_bb207_to_bb208 := false
+  _from_bb243_to_bb244 := false
   _from_bb246_to_bb247 := false
-  _from_bb224_to_bb225 := false
+  _from_bb276_to_bb278 := false
   _from_bb74_to_bb75 := false
   _from_bb12_to_bb14 := false
   _from_bb99_to_bb100 := false
   _from_bb24_to_bb26 := false
   _from_bb225_to_bb226 := false
   _from_bb144_to_bb146 := false
-  _from_bb276_to_bb278 := false
+  _from_bb282_to_bb285 := false
   _from_bb0_to_bb2 := false
   _from_bb17_to_bb18 := false
   _from_bb120_to_bb122 := false
@@ -1972,7 +1976,6 @@ method m_churn(_0p: Ref, _1p: Ref)
   _from_bb242_to_bb243 := false
   _from_bb21_to_bb24 := false
   _from_bb153_to_bb155 := false
-  _from_bb282_to_bb285 := false
   _from_bb14_to_bb16 := false
   _from_bb97_to_bb98 := false
   _from_bb237_to_bb240 := false
