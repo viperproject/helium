@@ -288,10 +288,15 @@ fn discover_root(root: &Path) -> Vec<Suite> {
     }
     for dir in subdirs(root) {
         let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let structured = dir.join("src").is_dir()
-            || dir.join("vpr").is_dir()
-            || dir.join("suite.json").is_file();
-        if structured {
+        let layout = dir.join("src").is_dir() || dir.join("vpr").is_dir();
+        // `.vpr` files only in subdirectories (e.g. one per crate of a split
+        // crate corpus): one Viper-only suite of the whole tree, as for an
+        // external directory, named `<suite>/<path>` file by file.
+        let tree = !layout && files_with_ext(&dir, "vpr").is_empty() && has_nested_vpr(&dir);
+        let structured = layout || dir.join("suite.json").is_file();
+        if tree {
+            suites.push(load_tree(&name, &dir));
+        } else if structured {
             suites.push(load_structured(&name, &dir));
             for sub in subdirs(&dir) {
                 let sub_name = sub.file_name().unwrap().to_string_lossy().into_owned();
@@ -305,6 +310,13 @@ fn discover_root(root: &Path) -> Vec<Suite> {
         }
     }
     suites
+}
+
+/// Whether a subdirectory of `dir`, at any depth, holds a `.vpr` file.
+fn has_nested_vpr(dir: &Path) -> bool {
+    subdirs(dir)
+        .iter()
+        .any(|sub| !files_with_ext(sub, "vpr").is_empty() || has_nested_vpr(sub))
 }
 
 fn load_external(ext: &External) -> Suite {
@@ -701,6 +713,36 @@ mod tests {
         assert!(a.errors.is_empty());
         assert!(a.expected_failures.contains(&("x".into(), "m_x".into())));
         assert_eq!(a.measurable().count(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nested_vpr_files_form_one_tree_suite() {
+        let root = scratch("nested");
+        write(&root.join("split/anyhow/0001_f.vpr"), "");
+        write(&root.join("split/anyhow/0002_g.vpr"), "");
+        write(&root.join("split/bytes/deep/0001_h.vpr"), "");
+        write(&root.join("split/suite.json"), r#"{"runs": 1}"#);
+        write(
+            &root.join("split/expected_failures.txt"),
+            "anyhow/0002_g m_g\n",
+        );
+
+        let suites = discover(&root);
+        let names: Vec<&str> = suites.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["split"]);
+        let s = &suites[0];
+        let stems: Vec<&str> = s.files.iter().map(|f| f.stem.as_str()).collect();
+        assert_eq!(
+            stems,
+            ["anyhow/0001_f", "anyhow/0002_g", "bytes/deep/0001_h"]
+        );
+        assert_eq!(s.config.runs, Some(1));
+        assert!(
+            s.expected_failures
+                .contains(&("anyhow/0002_g".into(), "m_g".into()))
+        );
+        assert!(s.errors.is_empty(), "{:?}", s.errors);
         let _ = std::fs::remove_dir_all(&root);
     }
 

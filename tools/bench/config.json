@@ -16,6 +16,7 @@
   },
   "warmup": 1,
   "runs": 5,
+  "sample": {"warmup": 0, "runs": 3},
   "timeout_s": null,
   "max_vpr_mb": null,
   "slowdown_warn": 0.15,

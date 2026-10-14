@@ -29,6 +29,11 @@ benchmarks/<suite>/
   one, `panic_free/isolate/`) form Viper-only suites (`viper`,
   `panic_free/isolate`).
 - A `.rs` with no `.vpr` is not encoded yet: a warning, never an error.
+- A directory with no `src/`/`vpr/` whose `.vpr` files all sit in subdirectories
+  (e.g. one per crate, `cratesTop100Split/anyhow/0001_f.vpr`) is one Viper-only
+  suite of the whole tree, like an [external](#external-suites) directory: each
+  file is named by its path inside it (`cratesTop100Split/anyhow/0001_f`). Copying
+  such a directory here is all it takes to measure or [sample](#sampling) it.
 
 | suite | what |
 |---|---|
@@ -226,3 +231,46 @@ To view results locally, serve the results checkout and open `docs/`:
 ```bash
 python3 -m http.server -d ../helium-bench-results 8000   # then http://localhost:8000/docs/
 ```
+
+## Sampling
+
+For a corpus too large to measure in full, or an evaluation with no fixed end,
+`bench sample` measures the selected files in a random order, Helium and Silicon
+on each exactly as `bench run` does, until every file is done or it is stopped.
+At any point the files measured so far are a uniform random sample of the
+selection, so their shares estimate those of the whole selection.
+
+```bash
+python3 tools/bench/sample.py ../samples/split -- --suite cratesTop100Split
+```
+
+`sample.py` builds, then runs `bench sample` with the tools of `config.json` /
+`config.local.json` (Silicon jar, JVM, warm-up corpus, `timeout_s`) and one timed
+run per tool and file, no warm-up (`sample` in `config.json`). Arguments after
+`--` go to `bench sample`: the suite options and `--suite`, `--only`, `--runs`, ...
+of `bench run`, plus `--seed N` (the order of a new sample; default from the
+clock), `--limit N` (stop after N more files) and `--fresh` (discard the sample
+and start a new one).
+
+The sample's directory holds `sample.json` (seed, `verify` build, settings),
+`order.txt` (the random order), `files.jsonl` (one `bench run` file result per
+line, appended as soon as a file is measured) and `summary.json`, replaced after
+every file:
+
+- `helium`, `silicon`: per verdict (`verified`, `failed`, `inconclusive`) the
+  count, the share with a 95% Wilson interval, and the projection to the whole
+  selection; the reasons for inconclusive files (`timeout`, `UNSUPPORTED`, ...);
+- `agreement`: files per pair of Helium and Silicon verdicts; `members`: member
+  statuses, disagreements, and the files where Helium verifies what Silicon
+  rejects (`soundness_files`, each needs a look);
+- `time_s`: Helium's and Silicon's times (projected to the selection too) and
+  Silicon's time over Helium's per file, as a geometric mean with a 95% interval;
+- `groups`: verdict counts per suite, or per first directory of the stems (per
+  crate of a split crate corpus).
+
+Stop it at any time: Ctrl-C drops the file in progress (on Windows the Ctrl-C
+reaches the verifiers too, so their result is not trusted), and even a hard kill
+loses at most that file. The same command continues the sample, in the same
+order, starting with the file that was interrupted. It refuses to continue with
+another `verify` build or other settings, which would mix two measurements: give
+a new build its own directory.

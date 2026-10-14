@@ -7,6 +7,7 @@
 //! - [`cache`]: rustc and Silicon results reused across runs;
 //! - [`rust_metrics`]: per-function shape metrics from a `syn` parse;
 //! - [`run`]: measuring every file and joining it all into one run JSON;
+//! - [`sample`]: `bench sample`, measuring files in a random order until stopped;
 //! - [`check`]: `bench check-suites`.
 
 pub mod cache;
@@ -15,6 +16,7 @@ pub mod helium;
 pub mod measure;
 pub mod run;
 pub mod rust_metrics;
+pub mod sample;
 pub mod silicon;
 pub mod silicon_warm;
 pub mod suites;
@@ -67,6 +69,40 @@ pub fn sha256_dir(dir: &Path) -> std::io::Result<String> {
         h.update([0]);
     }
     Ok(format!("{:x}", h.finalize()))
+}
+
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a Ctrl-C arrived since [`catch_interrupt`]. A measurement that was
+/// running then is not to be trusted: on Windows the Ctrl-C reaches the
+/// measured process too, which then exits as if it had crashed.
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Turn Ctrl-C (and Ctrl-Break) into [`interrupted`] instead of ending the
+/// process, so a caller can drop the measurement in progress and stop between
+/// files. Only on Windows, where the console's Ctrl-C also ends the measured
+/// process (whose result must then not be recorded); on Unix the measured
+/// process runs in its own process group, out of the terminal's reach, and
+/// `bench` just ends, before it records anything.
+pub fn catch_interrupt() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+        };
+        unsafe extern "system" fn handler(event: u32) -> i32 {
+            if event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT {
+                INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                1
+            } else {
+                0
+            }
+        }
+        // SAFETY: registers a handler that only stores to an atomic.
+        unsafe { SetConsoleCtrlHandler(Some(handler), 1) };
+    }
 }
 
 /// Run `git` in `repo`, returning trimmed stdout on success.

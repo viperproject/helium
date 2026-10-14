@@ -116,6 +116,16 @@ def bench_run(cfg: dict, out: Path, extra: list, caches: Path | None) -> dict:
     is the directory holding the rustc and Silicon caches (reused across runs:
     neither tool's result depends on the commit being measured)."""
     cmd = [bench_exe(), "run", "--out", out, "--warmup", cfg.get("warmup", 1), "--runs", cfg.get("runs", 5)]
+    cmd += tool_args(cfg, caches)
+    cmd += extra
+    run(cmd, cwd=REPO)
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def tool_args(cfg: dict, caches: Path | None) -> list:
+    """The `bench run` / `bench sample` arguments for the configured rustc,
+    Silicon and timeout, with the caches in `caches` if given."""
+    cmd = []
     if cfg.get("rustc_toolchain"):
         cmd += ["--rustc-toolchain", cfg["rustc_toolchain"]]
     else:
@@ -140,9 +150,7 @@ def bench_run(cfg: dict, out: Path, extra: list, caches: Path | None) -> dict:
                 cmd += ["--silicon-warmup-s", warm["warmup_s"]]
             if warm.get("file_timeout_s") is not None:
                 cmd += ["--silicon-warmup-file-timeout", warm["file_timeout_s"]]
-    cmd += extra
-    run(cmd, cwd=REPO)
-    return json.loads(out.read_text(encoding="utf-8"))
+    return cmd
 
 
 # ── Summaries ──

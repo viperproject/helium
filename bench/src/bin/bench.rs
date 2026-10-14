@@ -4,6 +4,7 @@
 //! ```text
 //! bench check-suites [--benchmarks DIR] [suite options] [--no-rustc] [--rustc PATH] [--rustc-toolchain TC]
 //! bench run [--out FILE] [suite options] [options]
+//! bench sample --out DIR [--seed N] [--fresh] [--limit N] [suite options] [options]
 //! bench rust-metrics FILE.rs
 //! ```
 //!
@@ -54,11 +55,23 @@
 //! --scratch DIR           scratch directory (default: system temp)
 //! --out FILE              write the run JSON here (default: stdout)
 //! ```
+//!
+//! `bench sample` takes the same options (except `--out`) and measures the
+//! selected files in a random order until all are done or it is stopped,
+//! keeping its results in a directory (see [`bench::sample`]):
+//!
+//! ```text
+//! --out DIR               the sample's directory (required); an existing sample there is continued
+//! --seed N                seed of a new sample's order (default: from the clock)
+//! --fresh                 discard the sample in --out and start a new one
+//! --limit N               measure at most N more files, then stop
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bench::run::{Options, RustcOptions};
+use bench::sample::{Outcome, SampleOptions};
 use bench::silicon::Silicon;
 use bench::silicon_warm::WarmOptions;
 
@@ -67,6 +80,7 @@ fn usage() -> ExitCode {
         "usage: bench check-suites [--benchmarks DIR] [--config FILE | --no-config] [--external-suites JSON]\n                          \
          [--max-vpr-mb MB] [--no-rustc] [--rustc PATH] [--rustc-toolchain TC]\n       \
          bench run [--out FILE] [options]   (see the source header or benchmarks/README.md)\n       \
+         bench sample --out DIR [--seed N] [--fresh] [--limit N] [run options]\n       \
          bench rust-metrics FILE.rs"
     );
     ExitCode::from(2)
@@ -114,6 +128,7 @@ fn main() -> ExitCode {
     let result = match cmd.as_str() {
         "check-suites" => check_suites(&mut args),
         "run" => run(&mut args),
+        "sample" => sample(&mut args),
         "rust-metrics" => rust_metrics(&mut args),
         "-h" | "--help" | "help" => return usage(),
         other => Err(format!("unknown command `{other}`")),
@@ -275,7 +290,13 @@ fn check_suites(args: &mut Args) -> Result<ExitCode, String> {
     })
 }
 
-fn run(args: &mut Args) -> Result<ExitCode, String> {
+/// The options of `bench run`, shared by `bench sample`. Flags it does not
+/// know go to `extra` (`true`: taken), else they are an error of `cmd`.
+fn run_options(
+    args: &mut Args,
+    cmd: &str,
+    extra: &mut dyn FnMut(&str, &mut Args) -> Result<bool, String>,
+) -> Result<Options, String> {
     let mut opts = Options {
         benchmarks: "benchmarks".into(),
         discovery: Default::default(),
@@ -299,7 +320,6 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
         silicon_warm: None,
         scratch: default_scratch(),
     };
-    let mut out: Option<PathBuf> = None;
     let mut jar: Option<PathBuf> = None;
     let mut java = PathBuf::from("java");
     let mut jvm_args: Vec<String> = Vec::new();
@@ -360,9 +380,9 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
             "--silicon-warmup-s" => warmup_s = args.number(&a)?,
             "--silicon-warmup-file-timeout" => warmup_file_timeout = args.number(&a)?,
             "--scratch" => opts.scratch = args.value(&a)?.into(),
-            "--out" => out = Some(args.value(&a)?.into()),
             _ if suite_args.take(&a, args)? => {}
-            _ => return Err(format!("run: unknown argument `{a}`")),
+            _ if extra(&a, args)? => {}
+            _ => return Err(format!("{cmd}: unknown argument `{a}`")),
         }
     }
     opts.discovery = suite_args.discovery()?;
@@ -396,7 +416,18 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
     } else {
         eprintln!("[bench] no --silicon-jar: Silicon columns are skipped");
     }
+    Ok(opts)
+}
 
+fn run(args: &mut Args) -> Result<ExitCode, String> {
+    let mut out: Option<PathBuf> = None;
+    let opts = run_options(args, "run", &mut |a, args| {
+        if a != "--out" {
+            return Ok(false);
+        }
+        out = Some(args.value(a)?.into());
+        Ok(true)
+    })?;
     let result = bench::run::run(&opts);
     let _ = std::fs::remove_dir_all(&opts.scratch);
     let run = result?;
@@ -414,6 +445,40 @@ fn run(args: &mut Args) -> Result<ExitCode, String> {
         None => println!("{json}"),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn sample(args: &mut Args) -> Result<ExitCode, String> {
+    let mut sopts = SampleOptions {
+        out: PathBuf::new(),
+        seed: None,
+        fresh: false,
+        limit: None,
+    };
+    let opts = run_options(args, "sample", &mut |a, args| {
+        match a {
+            "--out" => sopts.out = args.value(a)?.into(),
+            "--seed" => {
+                let v = args.value(a)?;
+                sopts.seed = Some(
+                    v.parse()
+                        .map_err(|_| format!("--seed: not a number: {v}"))?,
+                );
+            }
+            "--fresh" => sopts.fresh = true,
+            "--limit" => sopts.limit = Some(args.number(a)? as usize),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    })?;
+    if sopts.out.as_os_str().is_empty() {
+        return Err("sample: --out DIR is required (where the sample is kept)".into());
+    }
+    let result = bench::sample::sample(&opts, &sopts);
+    let _ = std::fs::remove_dir_all(&opts.scratch);
+    Ok(match result? {
+        Outcome::Complete | Outcome::Limited => ExitCode::SUCCESS,
+        Outcome::Interrupted => ExitCode::from(130),
+    })
 }
 
 fn rust_metrics(args: &mut Args) -> Result<ExitCode, String> {

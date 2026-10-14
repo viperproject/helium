@@ -527,115 +527,17 @@ struct Ctx<'a> {
 }
 
 pub fn run(opts: &Options) -> Result<RunFile, String> {
-    let mut suites_found = suites::discover_with(&opts.benchmarks, &opts.discovery);
-    if suites_found.is_empty() {
-        return Err(format!("no suites under {}", opts.benchmarks.display()));
-    }
-    if !opts.suites.is_empty() {
-        let known: BTreeSet<&str> = suites_found.iter().map(|s| s.name.as_str()).collect();
-        for s in &opts.suites {
-            if !known.contains(s.as_str()) {
-                return Err(format!(
-                    "unknown suite `{s}` (have: {})",
-                    known.into_iter().collect::<Vec<_>>().join(", ")
-                ));
-            }
-        }
-        suites_found.retain(|s| opts.suites.contains(&s.name));
-    }
-    // Every suite's `.vpr` files, measured in this run or not: the warm-up
-    // corpus leaves them out (see `silicon_warm`).
-    let all_vprs: Vec<PathBuf> = suites_found
-        .iter()
-        .flat_map(|s| s.files.iter())
-        .filter_map(|f| f.vpr.clone())
-        .collect();
-    let errors: Vec<&String> = suites_found.iter().flat_map(|s| &s.errors).collect();
-    if !errors.is_empty() {
-        return Err(format!(
-            "suite errors (run `bench check-suites`):\n  {}",
-            errors
-                .iter()
-                .map(|e| e.as_str())
-                .collect::<Vec<_>>()
-                .join("\n  ")
-        ));
-    }
-
-    let load_err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    let silicon_cache = match &opts.silicon_cache {
-        Some(p) if opts.silicon.is_some() => {
-            Some(silicon::Cache::load(p).map_err(|e| load_err(p, e))?)
-        }
-        _ => None,
-    };
-    let rustc_cache = match &opts.rustc_cache {
-        Some(p) if opts.rustc.is_some() => Some(RustcCache::load(p).map_err(|e| load_err(p, e))?),
-        _ => None,
-    };
-    let rustc = opts.rustc.as_ref().map(RustcOptions::resolve);
-    let mut ctx = Ctx {
-        opts,
-        rustc_version: rustc.as_ref().and_then(RustcOptions::version),
-        rustc,
-        rustc_cache,
-        silicon_cache,
-        silicon_warm: match (&opts.silicon, &opts.silicon_warm) {
-            (Some(sil), Some(warm)) => Some(WarmSilicon::new(
-                sil.clone(),
-                warm.clone(),
-                &all_vprs,
-                &opts.scratch,
-            )?),
-            (Some(_), None) => {
-                return Err(
-                    "Silicon runs only in a warmed-up JVM: give its warm-up corpus \
-                            (`silicon_warm` in config.json, `--silicon-warm DIR`)"
-                        .into(),
-                );
-            }
-            (None, _) => None,
-        },
-        verify_commit: None,
-        verify_json: true,
-        warnings: suites_found
-            .iter()
-            .flat_map(|s| s.warnings.clone())
-            .collect(),
-    };
-    for w in &ctx.warnings {
-        progress(format!("warning: {w}"));
-    }
-    if let Some(w) = &ctx.silicon_warm {
-        progress(format!(
-            "silicon warm: {} warm-up files ({} left out as benchmarks)",
-            w.info.warmup_files, w.info.excluded
-        ));
-    }
-
-    // The commit is fixed before measuring: a commit made while a long run is
-    // in progress must not be credited with it.
-    let repo = &opts.repo;
-    let commit = opts
-        .commit
-        .clone()
-        .or_else(|| crate::git(repo, &["rev-parse", "HEAD"]))
-        .unwrap_or_else(|| "unknown".into());
-    let dirty = opts.commit.is_none()
-        && crate::git(repo, &["status", "--porcelain", "--untracked-files=no"])
-            .is_some_and(|s| !s.is_empty());
-    let commit_date = crate::git(repo, &["show", "-s", "--format=%cI", &commit]);
-    let subject = crate::git(repo, &["show", "-s", "--format=%s", &commit]);
-
-    let suite_names: Vec<&str> = suites_found.iter().map(|s| s.name.as_str()).collect();
+    let mut session = Session::new(opts)?;
+    let suite_names: Vec<String> = session.suites.iter().map(|s| s.name.clone()).collect();
+    let suite_names: Vec<&str> = suite_names.iter().map(String::as_str).collect();
     let selection = Selection::new(&opts.only, &suite_names);
     let mut matched = vec![false; selection.entries.len()];
     let mut files = Vec::new();
-    for suite in &suites_found {
-        for file in suite.measurable() {
-            let key = format!("{}/{}", suite.name, file.stem);
+    for i in 0..session.suites.len() {
+        let measurable: Vec<SuiteFile> = session.suites[i].measurable().cloned().collect();
+        for file in &measurable {
             if !opts.only.is_empty() {
-                let hits = selection.matches(&suite.name, file);
+                let hits = selection.matches(&session.suites[i].name, file);
                 if hits.is_empty() {
                     continue;
                 }
@@ -643,16 +545,10 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
                     matched[i] = true;
                 }
             }
-            let result = measure_file(&mut ctx, suite, file).map_err(|e| format!("{key}: {e}"))?;
-            files.push(result);
+            files.push(session.measure(i, file)?);
             // Save the caches as we go: a crash an hour in keeps what was
             // measured.
-            if let (Some(cache), Some(path)) = (&ctx.silicon_cache, &opts.silicon_cache) {
-                cache.save(path).map_err(|e| load_err(path, e))?;
-            }
-            if let (Some(cache), Some(path)) = (&ctx.rustc_cache, &opts.rustc_cache) {
-                cache.save(path).map_err(|e| load_err(path, e))?;
-            }
+            session.save_caches()?;
         }
     }
     let unmatched: Vec<&str> = selection
@@ -670,76 +566,246 @@ pub fn run(opts: &Options) -> Result<RunFile, String> {
             if unmatched.len() > 5 { ", ..." } else { "" }
         );
         progress(format!("warning: {w}"));
-        ctx.warnings.push(w);
+        session.ctx.warnings.push(w);
+    }
+    Ok(session.finish(files))
+}
+
+/// One measuring session: the selected suites and the tools, ready to measure
+/// any of their files. [`run`] measures them all in order; `bench sample`
+/// ([`crate::sample`]) in a random order, for as long as it is left running.
+pub struct Session<'a> {
+    ctx: Ctx<'a>,
+    /// The selected suites (`--suite`), sorted by name.
+    pub suites: Vec<Suite>,
+    pub commit: String,
+    pub dirty: bool,
+    commit_date: Option<String>,
+    subject: Option<String>,
+}
+
+impl<'a> Session<'a> {
+    pub fn new(opts: &'a Options) -> Result<Session<'a>, String> {
+        let mut suites_found = suites::discover_with(&opts.benchmarks, &opts.discovery);
+        if suites_found.is_empty() {
+            return Err(format!("no suites under {}", opts.benchmarks.display()));
+        }
+        if !opts.suites.is_empty() {
+            let known: BTreeSet<&str> = suites_found.iter().map(|s| s.name.as_str()).collect();
+            for s in &opts.suites {
+                if !known.contains(s.as_str()) {
+                    return Err(format!(
+                        "unknown suite `{s}` (have: {})",
+                        known.into_iter().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            }
+            suites_found.retain(|s| opts.suites.contains(&s.name));
+        }
+        // Every suite's `.vpr` files, measured in this run or not: the warm-up
+        // corpus leaves them out (see `silicon_warm`).
+        let all_vprs: Vec<PathBuf> = suites_found
+            .iter()
+            .flat_map(|s| s.files.iter())
+            .filter_map(|f| f.vpr.clone())
+            .collect();
+        let errors: Vec<&String> = suites_found.iter().flat_map(|s| &s.errors).collect();
+        if !errors.is_empty() {
+            return Err(format!(
+                "suite errors (run `bench check-suites`):\n  {}",
+                errors
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            ));
+        }
+
+        let load_err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+        let silicon_cache = match &opts.silicon_cache {
+            Some(p) if opts.silicon.is_some() => {
+                Some(silicon::Cache::load(p).map_err(|e| load_err(p, e))?)
+            }
+            _ => None,
+        };
+        let rustc_cache = match &opts.rustc_cache {
+            Some(p) if opts.rustc.is_some() => {
+                Some(RustcCache::load(p).map_err(|e| load_err(p, e))?)
+            }
+            _ => None,
+        };
+        let rustc = opts.rustc.as_ref().map(RustcOptions::resolve);
+        let ctx = Ctx {
+            opts,
+            rustc_version: rustc.as_ref().and_then(RustcOptions::version),
+            rustc,
+            rustc_cache,
+            silicon_cache,
+            silicon_warm: match (&opts.silicon, &opts.silicon_warm) {
+                (Some(sil), Some(warm)) => Some(WarmSilicon::new(
+                    sil.clone(),
+                    warm.clone(),
+                    &all_vprs,
+                    &opts.scratch,
+                )?),
+                (Some(_), None) => {
+                    return Err(
+                        "Silicon runs only in a warmed-up JVM: give its warm-up corpus \
+                                (`silicon_warm` in config.json, `--silicon-warm DIR`)"
+                            .into(),
+                    );
+                }
+                (None, _) => None,
+            },
+            verify_commit: None,
+            verify_json: true,
+            warnings: suites_found
+                .iter()
+                .flat_map(|s| s.warnings.clone())
+                .collect(),
+        };
+        for w in &ctx.warnings {
+            progress(format!("warning: {w}"));
+        }
+        if let Some(w) = &ctx.silicon_warm {
+            progress(format!(
+                "silicon warm: {} warm-up files ({} left out as benchmarks)",
+                w.info.warmup_files, w.info.excluded
+            ));
+        }
+
+        // The commit is fixed before measuring: a commit made while a long run is
+        // in progress must not be credited with it.
+        let repo = &opts.repo;
+        let commit = opts
+            .commit
+            .clone()
+            .or_else(|| crate::git(repo, &["rev-parse", "HEAD"]))
+            .unwrap_or_else(|| "unknown".into());
+        let dirty = opts.commit.is_none()
+            && crate::git(repo, &["status", "--porcelain", "--untracked-files=no"])
+                .is_some_and(|s| !s.is_empty());
+        let commit_date = crate::git(repo, &["show", "-s", "--format=%cI", &commit]);
+        let subject = crate::git(repo, &["show", "-s", "--format=%s", &commit]);
+
+        Ok(Session {
+            ctx,
+            suites: suites_found,
+            commit,
+            dirty,
+            commit_date,
+            subject,
+        })
     }
 
-    Ok(RunFile {
-        schema: SCHEMA,
-        commit,
-        dirty,
-        date: crate::utc_now(),
-        commit_date,
-        subject,
-        host: opts.host.clone(),
-        tools: Tools {
-            rustc: ctx.rustc_version.clone(),
+    /// Measure `file` of the `suite`-th suite.
+    pub fn measure(&mut self, suite: usize, file: &SuiteFile) -> Result<FileResult, String> {
+        let suite = &self.suites[suite];
+        measure_file(&mut self.ctx, suite, file)
+            .map_err(|e| format!("{}/{}: {e}", suite.name, file.stem))
+    }
+
+    /// Write the rustc and Silicon caches back, if the run has them.
+    pub fn save_caches(&self) -> Result<(), String> {
+        let opts = self.ctx.opts;
+        let save_err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+        if let (Some(cache), Some(path)) = (&self.ctx.silicon_cache, &opts.silicon_cache) {
+            cache.save(path).map_err(|e| save_err(path, e))?;
+        }
+        if let (Some(cache), Some(path)) = (&self.ctx.rustc_cache, &opts.rustc_cache) {
+            cache.save(path).map_err(|e| save_err(path, e))?;
+        }
+        Ok(())
+    }
+
+    /// The tools as measured so far (Silicon's version is known once it ran).
+    pub fn tools(&self) -> Tools {
+        let opts = self.ctx.opts;
+        Tools {
+            rustc: self.ctx.rustc_version.clone(),
             rustc_toolchain: opts.rustc.as_ref().and_then(|r| r.toolchain.clone()),
-            silicon: ctx.silicon_warm.as_ref().map(WarmSilicon::silicon_id),
-            silicon_warm: ctx.silicon_warm.as_ref().map(|w| w.info.clone()),
-            verify_commit: ctx.verify_commit,
-            verify_json: ctx.verify_json,
-        },
-        settings: Settings {
-            warmup: opts.warmup,
-            runs: opts.runs,
-            timeout_s: opts.timeout,
-        },
-        suites: suites_found
-            .iter()
-            .map(|s| {
-                (
-                    s.name.clone(),
-                    SuiteInfo {
-                        description: s.config.description.clone(),
-                        tags: s.config.tags.clone(),
-                        families: s
-                            .families
-                            .iter()
-                            .map(|f| FamilyInfo {
-                                name: f.name.clone(),
-                                pattern: f.regex.as_str().to_string(),
-                                knobs: f.knobs.clone(),
-                            })
-                            .collect(),
-                        rustc_args: if s.files.iter().any(|f| f.krate.is_some()) {
-                            let mut a = vec!["cargo".to_string()];
-                            if let Some(t) = &s.config.rustc_target {
-                                a.extend(["--target".to_string(), t.clone()]);
-                            }
-                            a
-                        } else {
-                            s.rustc_args()
+            silicon: self.ctx.silicon_warm.as_ref().map(WarmSilicon::silicon_id),
+            silicon_warm: self.ctx.silicon_warm.as_ref().map(|w| w.info.clone()),
+            verify_commit: self.ctx.verify_commit.clone(),
+            verify_json: self.ctx.verify_json,
+        }
+    }
+
+    /// The host name recorded for the run.
+    pub fn host(&self) -> &str {
+        &self.ctx.opts.host
+    }
+
+    /// Warnings collected so far (suite loading and measuring).
+    pub fn warnings(&self) -> &[String] {
+        &self.ctx.warnings
+    }
+
+    /// The run file of `files`, measured in this session.
+    pub fn finish(self, files: Vec<FileResult>) -> RunFile {
+        let tools = self.tools();
+        RunFile {
+            schema: SCHEMA,
+            commit: self.commit,
+            dirty: self.dirty,
+            date: crate::utc_now(),
+            commit_date: self.commit_date,
+            subject: self.subject,
+            host: self.ctx.opts.host.clone(),
+            tools,
+            settings: Settings {
+                warmup: self.ctx.opts.warmup,
+                runs: self.ctx.opts.runs,
+                timeout_s: self.ctx.opts.timeout,
+            },
+            suites: self
+                .suites
+                .iter()
+                .map(|s| {
+                    (
+                        s.name.clone(),
+                        SuiteInfo {
+                            description: s.config.description.clone(),
+                            tags: s.config.tags.clone(),
+                            families: s
+                                .families
+                                .iter()
+                                .map(|f| FamilyInfo {
+                                    name: f.name.clone(),
+                                    pattern: f.regex.as_str().to_string(),
+                                    knobs: f.knobs.clone(),
+                                })
+                                .collect(),
+                            rustc_args: if s.files.iter().any(|f| f.krate.is_some()) {
+                                let mut a = vec!["cargo".to_string()];
+                                if let Some(t) = &s.config.rustc_target {
+                                    a.extend(["--target".to_string(), t.clone()]);
+                                }
+                                a
+                            } else {
+                                s.rustc_args()
+                            },
+                            silicon: s.silicon(),
+                            files: s.measurable().count(),
+                            warmup: s.warmup(self.ctx.opts.warmup),
+                            runs: s.runs(self.ctx.opts.runs),
+                            max_vpr_mb: s.config.max_vpr_mb.or(self.ctx.opts.discovery.max_vpr_mb),
+                            skipped_large: s
+                                .skipped_large
+                                .iter()
+                                .map(|(stem, mb)| SkippedFile {
+                                    stem: stem.clone(),
+                                    vpr_mb: (mb * 100.0).round() / 100.0,
+                                })
+                                .collect(),
                         },
-                        silicon: s.silicon(),
-                        files: s.measurable().count(),
-                        warmup: s.warmup(opts.warmup),
-                        runs: s.runs(opts.runs),
-                        max_vpr_mb: s.config.max_vpr_mb.or(opts.discovery.max_vpr_mb),
-                        skipped_large: s
-                            .skipped_large
-                            .iter()
-                            .map(|(stem, mb)| SkippedFile {
-                                stem: stem.clone(),
-                                vpr_mb: (mb * 100.0).round() / 100.0,
-                            })
-                            .collect(),
-                    },
-                )
-            })
-            .collect(),
-        files,
-        warnings: ctx.warnings,
-    })
+                    )
+                })
+                .collect(),
+            files,
+            warnings: self.ctx.warnings,
+        }
+    }
 }
 
 fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileResult, String> {
@@ -991,6 +1057,11 @@ fn measure_file(ctx: &mut Ctx, suite: &Suite, file: &SuiteFile) -> Result<FileRe
     times.helium_wall = Some(wall);
 
     // ── Silicon (in its warm JVM) ──
+    // After a Ctrl-C the file is dropped anyway; do not start (and warm up)
+    // a new JVM for it.
+    if crate::interrupted() {
+        return Err("interrupted".into());
+    }
     let mut silicon_result: Option<(SiliconResult, bool)> = None;
     if suite.silicon()
         && let Some(warm) = ctx.silicon_warm.as_mut()
