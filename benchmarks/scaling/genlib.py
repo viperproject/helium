@@ -1,6 +1,6 @@
 """Shared helpers for the benchmarks/scaling/ generators.
 
-Every generator follows the `../rust/gen_depth.py` pattern: one knob varies,
+Every generator follows the `gen_depth.py` pattern: one knob varies,
 everything else is held fixed, so a timing change can be attributed to that
 knob. Sources are spec-less Rust (no `prusti_contracts`): obligations come from
 Prusti's own type predicates. Unlike `../rust/`, loops are allowed here. Still

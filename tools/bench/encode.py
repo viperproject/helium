@@ -7,7 +7,8 @@
 
 For each `benchmarks/<suite>/src/<stem>.rs` this runs `tools/prusti_encode.sh
 <src> <vpr>` (override with $PRUSTI_ENCODE), writing `vpr/<stem>.vpr`. A source
-is skipped when its .vpr is newer than it.
+is skipped when its .vpr is newer than it. $PRUSTI_RUSTC must name the
+prusti-next `prusti-rustc`; the encoder records it in each .vpr's header.
 """
 
 from __future__ import annotations
