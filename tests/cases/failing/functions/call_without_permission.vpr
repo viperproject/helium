@@ -1,0 +1,13 @@
+// A function call needs some positive permission to its precondition's footprint;
+// none is held. Silicon: "Precondition of function rd might not hold".
+
+field f: Int
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+method bad(x: Ref)
+{
+    var v: Int := rd(x)
+}

@@ -1,0 +1,13 @@
+// A positive scaled amount at `x.f` frames `x.f` only, not `y.f`. Silicon rejects it.
+
+field f: Int
+
+predicate PH(x: Ref) { acc(x.f, 1/2) }
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+function bad(x: Ref, y: Ref): Int
+    requires acc(PH(x), write)
+{ unfolding acc(PH(x), write) in rd(y) }

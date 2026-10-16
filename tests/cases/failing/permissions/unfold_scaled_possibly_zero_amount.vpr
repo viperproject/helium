@@ -1,0 +1,19 @@
+// Method context: unfolding at `1/2` holds `x.f` at `1/2 * p` with only `none <= p`
+// known. The product may be zero, so neither the read nor the call is framed.
+// Silicon rejects both.
+
+field f: Int
+
+predicate PZ(x: Ref, p: Perm) { none <= p && acc(x.f, p) }
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+method bad_read(x: Ref, p: Perm)
+    requires acc(PZ(x, p), 1/2)
+{
+    var v: Int
+    unfold acc(PZ(x, p), 1/2)
+    v := x.f
+}
