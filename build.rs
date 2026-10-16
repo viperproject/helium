@@ -2,7 +2,8 @@
 //!
 //! Sets `HELIUM_GIT_COMMIT` (a full hash, or `unknown` outside a git checkout)
 //! and `HELIUM_GIT_DIRTY` (`true` when tracked files differ from that commit at
-//! build time). The benchmark runner records the commit it measures on its own
+//! build time), plus `HELIUM_GIT_DESCRIBE`: the hash with `-dirty` appended
+//! when dirty, for `verify --version`. The benchmark runner records the commit it measures on its own
 //! as well; this lets a lone JSON file say which build produced it.
 
 use std::process::Command;
@@ -21,6 +22,8 @@ fn main() {
         .unwrap_or(false);
     println!("cargo:rustc-env=HELIUM_GIT_COMMIT={commit}");
     println!("cargo:rustc-env=HELIUM_GIT_DIRTY={dirty}");
+    let suffix = if dirty { "-dirty" } else { "" };
+    println!("cargo:rustc-env=HELIUM_GIT_DESCRIBE={commit}{suffix}");
 
     // Rerun when HEAD moves (checkout, commit) or the sources change (dirty).
     // `--git-path` resolves correctly inside worktrees, where `.git` is a file.
