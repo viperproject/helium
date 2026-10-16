@@ -2,6 +2,11 @@
 //!
 //! Usage: `cargo run --bin verify -- [--breakdown] [--json] [--viper-metrics] cases/foo.vpr`
 //!
+//! `--version` (`-V`) prints the crate version and the git commit the binary
+//! was built from (with `-dirty` if tracked files had uncommitted changes).
+//! The same line is a plain string in the binary, so a binary that cannot be
+//! run can be checked with `strings verify | grep helium-build`.
+//!
 //! `--breakdown` (`-b`) prints per-member verify times, slowest first.
 //!
 //! `--json` prints one JSON object on stdout instead of the text rows: every
@@ -26,6 +31,14 @@ use silver_oxide::verify::VerifyStats;
 use silver_oxide::viper::metrics::ViperMetrics;
 use silver_oxide::{peak_memory, pipeline, viper_parser};
 use std::{path::Path, process::ExitCode, time::Duration};
+
+/// What `--version` prints; the `helium-build` prefix makes it greppable.
+const VERSION: &str = concat!(
+    "helium-build silver-oxide ",
+    env!("CARGO_PKG_VERSION"),
+    " commit ",
+    env!("HELIUM_GIT_DESCRIBE"),
+);
 
 /// Version of the `--json` output layout. Bump on an incompatible change.
 const JSON_SCHEMA: u64 = 1;
@@ -67,8 +80,15 @@ fn parse_args() -> Option<Args> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args()
+        .skip(1)
+        .any(|a| a == "--version" || a == "-V")
+    {
+        println!("{VERSION}");
+        return ExitCode::SUCCESS;
+    }
     let Some(args) = parse_args() else {
-        eprintln!("usage: verify [--breakdown] [--json] [--viper-metrics] <file.vpr>");
+        eprintln!("usage: verify [--breakdown] [--json] [--viper-metrics] <file.vpr> | --version");
         return ExitCode::FAILURE;
     };
     if args.metrics && !args.json {
