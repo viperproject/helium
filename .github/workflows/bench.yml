@@ -1,0 +1,6 @@
+on: workflow_dispatch
+jobs:
+  hello:
+    runs-on: [self-hosted, bench]
+    steps:
+      - run: hostname && echo "$DATABASE_URL" | sed 's/:[^:@]*@/:***@/'
