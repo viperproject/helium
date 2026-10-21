@@ -6,5 +6,10 @@ on:
 jobs:
   hello:
     runs-on: [self-hosted, bench]
+
+    defaults:
+      run:
+        working-directory: /opt/bench/runner
+
     steps:
-      - run: /opt/bench/runner/target/release/runner index
+      - run: ./target/release/runner index
