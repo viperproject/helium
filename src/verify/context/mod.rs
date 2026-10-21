@@ -795,8 +795,10 @@ pub(super) fn run_rules_until<'r>(
 /// applied already (applying it again changes nothing) or still pending: found by
 /// the rule's search of the changes since its position. Holds wherever a run
 /// stops — at a fixpoint, where nothing is pending, as well as at a limit or a
-/// settled goal. Checked on a clone, in a scratch memo scope, applying the
-/// matches that are not pending; a change is a match incremental search lost.
+/// settled goal. Checked on a clone, applying the matches that are not pending
+/// with the appliers' memos read-only (they answer as the run's do, so an
+/// instance the run remembers is not rebuilt, and remember nothing of the
+/// clone); a change is a match incremental search lost.
 ///
 /// A pending match that binds the forall searcher's anchor covers its whole
 /// class (the full search matches a quantifier class with an empty
@@ -806,7 +808,7 @@ fn no_match_lost(
     rules: &[&egg::Rewrite<Symbolic, ConstFold>],
 ) -> bool {
     use crate::dhash::HashSet;
-    let _scope = rewrite::ScratchScope::enter();
+    let _memos = rewrite::ReadOnlyMemos::enter();
     let anchor: egg::Var = "?anchor".parse().expect("var");
     let key = |vars: &[egg::Var], class: egg::Id, subst: &egg::Subst| {
         let bound = vars

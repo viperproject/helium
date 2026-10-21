@@ -54,6 +54,25 @@ impl ScratchScope {
     }
 }
 
+/// While alive, memos answer as they would but record nothing: for a debug check
+/// that re-applies rules to a copy of a graph and must see what the live run's
+/// memos remember (an applier may legitimately skip an instance it built under
+/// other conditions) without making them remember the copy's instances.
+pub(crate) struct ReadOnlyMemos;
+
+impl ReadOnlyMemos {
+    pub(crate) fn enter() -> Self {
+        READ_ONLY.with(|r| r.set(true));
+        ReadOnlyMemos
+    }
+}
+
+impl Drop for ReadOnlyMemos {
+    fn drop(&mut self) {
+        READ_ONLY.with(|r| r.set(false));
+    }
+}
+
 impl Drop for ScratchScope {
     fn drop(&mut self) {
         SCRATCH_STACK.with(|s| {
@@ -107,6 +126,8 @@ thread_local! {
     /// Source of scope ids. Fresh per [`ScratchScope::enter`]; a block scratch
     /// takes one at build time and `resume`s it for each of its runs.
     static NEXT_SCOPE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// See [`ReadOnlyMemos`].
+    static READ_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl<K: Eq + std::hash::Hash> Memo<K> {
@@ -132,6 +153,14 @@ impl<K: Eq + std::hash::Hash> Memo<K> {
         let stack = SCRATCH_STACK.with(|s| s.borrow().clone());
         if stack.is_empty() && memo.base.contains(&key) {
             return false;
+        }
+        if READ_ONLY.with(|r| r.get()) {
+            let in_scope = |(id, _): &(u64, bool)| {
+                memo.overlays
+                    .iter()
+                    .any(|(o, set)| o == id && set.contains(&key))
+            };
+            return !stack.iter().any(in_scope);
         }
         if stack.is_empty() {
             memo.overlays.clear();
