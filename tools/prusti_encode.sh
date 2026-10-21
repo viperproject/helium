@@ -61,8 +61,10 @@ if [ ! -f "$PRUSTI_DRIVER" ]; then
     echo "Error: no prusti-driver next to '$PRUSTI_RUSTC'." >&2
     exit 1
 fi
+# awk reads all of the output: `grep -m1` closed the pipe early, and under pipefail the
+# writer's SIGPIPE then appended "unknown" to the header as a stray line.
 PROV_VERSION="$(env -u PRUSTI_RUSTC -u PRUSTI_ENCODE -u PRUSTI_ENCODE_VERIFY \
-    "$PRUSTI_RUSTC" --version 2>&1 | grep -m1 '^Prusti version' || echo unknown)"
+    "$PRUSTI_RUSTC" --version 2>&1 | awk '/^Prusti version/ && !v { v = $0 } END { print (v ? v : "unknown") }')"
 PROV_CHECKOUT="$(git -C "$PRUSTI_BIN_DIR" describe --always --dirty --abbrev=11 2>/dev/null || echo unknown)"
 PROV_DRIVER="$(sha256sum "$PRUSTI_DRIVER" | cut -c1-16)"
 
