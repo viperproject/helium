@@ -1,4 +1,8 @@
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [setup-local-runner]
+
 jobs:
   hello:
     runs-on: [self-hosted, bench]
