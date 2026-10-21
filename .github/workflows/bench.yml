@@ -47,7 +47,7 @@ jobs:
     steps:
 
       - name: Benchmark
-        working-directory: bench-data/runner
+        working-directory: /opt/bench/runner
         run: >
           "./target/release/runner" bench
           --ci
