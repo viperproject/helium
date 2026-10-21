@@ -45,25 +45,6 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      # Side by side, as `helium.crate` and `suites_dir` in suite.ci.json expect.
-      - name: Check out Helium
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ env.HELIUM_COMMIT }}
-          path: helium
-          submodules: recursive
-
-      - name: Check out the benchmark data
-        uses: actions/checkout@v7
-        with:
-          repository: ${{ env.BENCH_DATA_REPO }}
-          ref: ${{ env.BENCH_DATA_REF }}
-          path: bench-data
-
-      # The runner container sets CARGO_TARGET_DIR to a persistent volume.
-      - name: Build the runner
-        working-directory: bench-data/runner
-        run: cargo build --release --locked
 
       - name: Benchmark
         working-directory: bench-data/runner
