@@ -690,6 +690,15 @@ pub(super) fn run_rules_until<'r>(
     // different graph must not read it (ground and its clones share ids).
     crate::verify::rewrite::diseq::new_scan_generation();
     let rules: Vec<&egg::Rewrite<Symbolic, ConstFold>> = rules.into_iter().collect();
+    // A rule's progress is kept under its name, so the names must tell rules apart.
+    debug_assert!(
+        {
+            let mut names: Vec<_> = rules.iter().map(|r| r.name.as_str()).collect();
+            names.sort_unstable();
+            names.windows(2).all(|w| w[0] != w[1])
+        },
+        "two rules share a name"
+    );
     // The limits are explicit and reproducible: iterations (one tower level
     // collapses per iteration, so deep-but-terminating collapses need iterations
     // ∝ depth) and nodes added. There is deliberately no time limit, which would
@@ -775,36 +784,83 @@ pub(super) fn run_rules_until<'r>(
             rebuild_time: rebuild.elapsed().as_secs_f64(),
         });
         if saturated {
-            debug_assert!(full_search_changes_nothing(&egraph, &rules));
             break;
         }
     }
+    debug_assert!(graph_inconsistent(&egraph) || no_match_lost(&egraph, &rules));
     (egraph, iterations)
 }
 
-/// Whether searching every rule over the whole of `egraph` and applying the
-/// matches changes nothing — on a clone, in a scratch memo scope. At a semi-naive
-/// fixpoint it must not: a change would be a match the incremental search missed.
-fn full_search_changes_nothing(
+/// Whether every match a full search of `rules` finds in `egraph` is either
+/// applied already (applying it again changes nothing) or still pending: found by
+/// the rule's search of the changes since its position. Holds wherever a run
+/// stops — at a fixpoint, where nothing is pending, as well as at a limit or a
+/// settled goal. Checked on a clone, in a scratch memo scope, applying the
+/// matches that are not pending; a change is a match incremental search lost.
+///
+/// A pending match that binds the forall searcher's anchor covers its whole
+/// class (the full search matches a quantifier class with an empty
+/// substitution); every other match is compared by class and substitution.
+fn no_match_lost(
     egraph: &egg::EGraph<Symbolic, ConstFold>,
     rules: &[&egg::Rewrite<Symbolic, ConstFold>],
 ) -> bool {
+    use crate::dhash::HashSet;
     let _scope = rewrite::ScratchScope::enter();
-    let mut full = egraph.clone();
+    let anchor: egg::Var = "?anchor".parse().expect("var");
+    let key = |vars: &[egg::Var], class: egg::Id, subst: &egg::Subst| {
+        let bound = vars
+            .iter()
+            .map(|v| subst.get(*v).map(|&id| egraph.find(id)));
+        (egraph.find(class), bound.collect::<Vec<_>>())
+    };
+    let mut lost = Vec::new();
+    for rule in rules {
+        let full = rule.search(egraph);
+        let pending = match egraph.seen(rule.name) {
+            Some(seen) => {
+                let changes = egraph.changes_since(seen).expect("unseen changes are kept");
+                rule.search_changes(egraph, &changes)
+            }
+            None => continue,
+        };
+        let vars = rule.searcher.vars();
+        let mut pending_matches = HashSet::default();
+        let mut pending_classes = HashSet::default();
+        for m in &pending {
+            for subst in &m.substs {
+                if subst.get(anchor).is_some() {
+                    pending_classes.insert(egraph.find(m.eclass));
+                }
+                pending_matches.insert(key(&vars, m.eclass, subst));
+            }
+        }
+        let rest: Vec<egg::SearchMatches<Symbolic>> = full
+            .into_iter()
+            .filter(|m| !pending_classes.contains(&egraph.find(m.eclass)))
+            .map(|mut m| {
+                m.substs
+                    .retain(|s| !pending_matches.contains(&key(&vars, m.eclass, s)));
+                m
+            })
+            .filter(|m| !m.substs.is_empty())
+            .collect();
+        lost.push((rule, rest));
+    }
+    let mut g = egraph.clone();
     let size = |g: &egg::EGraph<Symbolic, ConstFold>| (g.total_size(), g.number_of_classes());
-    let before = size(&full);
-    let matches: Vec<_> = rules.iter().map(|rule| rule.search(&full)).collect();
+    let before = size(&g);
     let mut missed = Vec::new();
-    for (rule, found) in rules.iter().zip(matches) {
-        let at = size(&full);
-        if !rule.apply(&mut full, &found).is_empty() || size(&full) != at {
+    for (rule, rest) in lost {
+        let at = size(&g);
+        if !rule.apply(&mut g, &rest).is_empty() || size(&g) != at {
             missed.push(rule.name);
         }
     }
-    full.rebuild();
+    g.rebuild();
     assert!(
-        missed.is_empty() && size(&full) == before,
-        "semi-naive matching missed matches of {missed:?}"
+        missed.is_empty() && size(&g) == before,
+        "semi-naive matching lost matches of {missed:?}"
     );
     true
 }

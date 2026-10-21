@@ -334,13 +334,18 @@ pub(crate) fn function_rule(
     timed(Rewrite::new(format!("fn-{name}"), searcher, applier).expect("function rule"))
 }
 
-/// Mint a post-only rule keyed on `func`: replays the definition's post, no
-/// definitional union. Two users:
-/// - the limited-twin post rule of a recursive function ([`function_post_rule`]);
-/// - the spec-derived post rule installed for each SCC member **during** a
-///   recursive batch's own verification, which is what makes induction over a
-///   recursive call work (Silicon's phase-1 `post` axiom).
+/// Mint the spec-derived post rule installed for each SCC member **during** a
+/// recursive batch's own verification, keyed on `func`: replays the post, no
+/// definitional union. This is what makes induction over a recursive call work
+/// (Silicon's phase-1 `post` axiom).
 pub(crate) fn post_rule(name: &str, func: FuncId, def: Arc<FunctionDefinition>) -> Rule {
+    post_only_rule(format!("fn-spec-post-{name}"), func, def)
+}
+
+/// A post-only rule keyed on `func`: replays the definition's post, no
+/// definitional union. Its name must be unique among the rules of a unit: a
+/// rule's progress through the e-graph's changes is kept under its name.
+fn post_only_rule(rule_name: String, func: FuncId, def: Arc<FunctionDefinition>) -> Rule {
     let searcher = AxiomTriggerSearcher { func, token: None };
     let applier = FunctionUnfoldApplier {
         func,
@@ -351,7 +356,7 @@ pub(crate) fn post_rule(name: &str, func: FuncId, def: Arc<FunctionDefinition>) 
         // Post-only rule: no definitional union, so no token gate.
         pre_token: None,
     };
-    timed(Rewrite::new(format!("fn-post-{name}"), searcher, applier).expect("function post rule"))
+    timed(Rewrite::new(rule_name, searcher, applier).expect("function post rule"))
 }
 
 /// Mint the limited-twin post rule for a **recursive** function: keyed on
@@ -361,7 +366,7 @@ pub(crate) fn post_rule(name: &str, func: FuncId, def: Arc<FunctionDefinition>) 
 /// `def.limited` is set and a post fact exists.
 pub(crate) fn function_post_rule(name: &str, def: Arc<FunctionDefinition>) -> Rule {
     let func = def.limited.expect("post rule requires a limited twin");
-    post_rule(name, func, def)
+    post_only_rule(format!("fn-post-{name}"), func, def)
 }
 
 /// A canonicalized call key: the ground `(type_args, value_args)` an occurrence

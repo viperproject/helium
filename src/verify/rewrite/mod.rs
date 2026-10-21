@@ -335,4 +335,28 @@ mod tests {
         }
         assert_sound(g, &orders, "saturation");
     }
+
+    /// Incremental matching through a changed node *below* a pattern's root: the
+    /// root `a + p` is in the graph and saturated before `a` gains the node
+    /// `x - p`, so `add-sub-cancel-int-r` (`(+i (-i ?x ?p) ?p)`) matches only
+    /// through the inner node that moved into `a`'s class.
+    #[test]
+    fn nested_match_found_through_a_changed_inner_node() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let (x, p, a) = (
+            ctx.add(Symbolic::Fresh(0)),
+            ctx.add(Symbolic::Fresh(1)),
+            ctx.add(Symbolic::Fresh(2)),
+        );
+        let sum = ctx.add(Symbolic::Binary(BinOp::AddI, [a, p]));
+        ctx.saturate();
+        let diff = ctx.add(Symbolic::Binary(BinOp::SubI, [x, p]));
+        // `a` keeps its id (it has the parent), so the `-` node moves into it
+        ctx.union(a, diff);
+        ctx.egraph.rebuild();
+        assert_eq!(ctx.egraph.find(a), a);
+        ctx.saturate();
+        assert_eq!(ctx.egraph.find(sum), ctx.egraph.find(x));
+    }
 }
