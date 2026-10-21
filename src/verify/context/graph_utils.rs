@@ -3,8 +3,8 @@ use crate::verify::lang::Symbolic;
 use crate::verify::stats;
 use crate::vmir::Literal;
 
-/// [`VerifyContext::is_inconsistent`](super::VerifyContext::is_inconsistent) for a detached graph (a probe, or the block
-/// scratch). `false` when either boolean literal is absent: a graph that never
+/// [`VerifyContext::is_inconsistent`](super::VerifyContext::is_inconsistent) for a detached graph (a probe, or the working
+/// graph). `false` when either boolean literal is absent: a graph that never
 /// mentioned one cannot have merged them.
 pub(super) fn graph_inconsistent(egraph: &egg::EGraph<Symbolic, ConstFold>) -> bool {
     let (Some(t), Some(f)) = (
@@ -34,8 +34,8 @@ pub(super) fn run_rules<'r>(
 ///
 /// **`goal` is only sound on a throwaway graph.** The returned e-graph is *not*
 /// saturated, so a caller that records it as clean — `VerifyContext::saturate`
-/// (which sets `self.clean`) or `saturate_scratch` (which clears `dirty` on a graph
-/// shared by every obligation in the block) — would make later obligations read a
+/// (which sets `self.clean`) or `saturate_work` (which clears `dirty` on the working
+/// graph, shared by every later obligation of the method) — would make later obligations read a
 /// fixpoint that was never reached. Pass `None` there and `Some` only for a probe
 /// that dies with the call.
 ///
@@ -51,7 +51,7 @@ pub(super) fn run_rules_until<'r>(
 ) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
     // A contradictory graph proves everything, so no rule can change any verdict
     // it yields — stop running them. This is the single choke point for every
-    // graph (ground saturate/reduce, scratch saturate/reduce, every probe), and
+    // graph (ground saturate/reduce, working-graph saturate/reduce, every probe), and
     // it is per-graph: a deliberately contradictory probe short-circuits without
     // touching a consistent ground graph.
     if graph_inconsistent(&egraph) {

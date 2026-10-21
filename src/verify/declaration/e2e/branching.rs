@@ -74,7 +74,7 @@ fn ternary_call_does_not_leak_callee_ensures() {
     // application, then its own internal pc) is vacuous — the caller's token is
     // the only thing that can confine `ensures false` to the `b` arm. A failing
     // assertion means *every* tier rejected, so this covers the ground graph, the
-    // block scratch and the probe clone in one test.
+    // working graph and its probes in one test.
     let input = r#"
 function g(a: Int): Bool
   ensures false

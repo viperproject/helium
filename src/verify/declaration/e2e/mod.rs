@@ -2472,7 +2472,7 @@ fn lower_err(input: &str) -> Vec<crate::translate::TranslationError> {
 #[test]
 fn forall_body_division_guarded_by_the_binder_is_well_defined() {
     // WD of a quantifier body, checked once at the point it is stated, against
-    // *fresh* binders in a scratch clone of the live graph. The body's own guard
+    // *fresh* binders in a scratch state of the live graph. The body's own guard
     // travels with it (short-circuit lowering emits the path condition), so the
     // division is discharged under `<i != 0>`.
     let input = r#"

@@ -1,8 +1,8 @@
 mod graph_utils;
 pub(crate) mod prove;
-mod scratch;
 
-use scratch::BlockScratch;
+pub(crate) use prove::BlockOrder;
+use prove::WorkGraph;
 
 use crate::dhash::HashMap;
 
@@ -116,21 +116,29 @@ pub(crate) struct VerifyContext<'a> {
     /// re-prove.
     proven_imps: crate::dhash::HashSet<egg::Id>,
     /// The current method block's control cube (the shared pc of all its insts),
-    /// as live-graph literal ids. Set by [`Self::begin_block`]; the scratch
-    /// assumes it. Empty outside a method block (functions/resources don't use
-    /// the scratch).
+    /// as live-graph literal ids. Set by [`Self::begin_block`]; the working graph
+    /// assumes it. Empty outside a method block body.
     current_cube: Vec<(egg::Id, Polarity)>,
-    /// Whether we are inside a method block walk — gates the scratch on
-    /// (functions/resources keep the per-obligation clone path).
+    /// Whether we are inside a method block's body walk — gates the working graph
+    /// on (functions/resources and join phases probe ground instead).
     in_block: bool,
-    /// The live per-block scratch, built lazily on the block's first `probe`-tier
-    /// obligation and discarded at block exit. `None` when no obligation has
-    /// needed it yet (or outside a method block).
-    scratch: Option<BlockScratch>,
+    /// The method's working graph (see [`WorkGraph`]), built on the first
+    /// `probe`-tier obligation of a method block and kept for the rest of the
+    /// method. `None` before that, outside a method, and while detached.
+    work: Option<WorkGraph>,
+    /// Every union made on ground through [`Self::union`] (or recorded by
+    /// [`Self::note_released`]) while a scope of the working graph is open: what
+    /// ground knows that the working graph must learn again when it closes the
+    /// scope. Emptied when the outermost scope closes.
+    facts: Vec<(egg::Id, egg::Id)>,
+    /// Dominance over the current method's blocks.
+    blocks: Option<BlockOrder>,
+    /// The method block being walked.
+    current_block: Option<usize>,
     /// Whether the current block's control cube is unsatisfiable — the block is
-    /// unreachable, so every obligation in it holds vacuously. Set when the
-    /// scratch is built (assuming the cube contradicts), cleared per block.
-    /// Unlike [`Self::is_inconsistent`] this is a fact about the *scratch*, so it
+    /// unreachable, so every obligation in it holds vacuously. Set when the cube is
+    /// assumed in the working graph, cleared per block. Unlike
+    /// [`Self::is_inconsistent`] this is a fact about the *working graph*, so it
     /// must never be consulted outside the block that established it.
     block_dead: bool,
 
@@ -205,7 +213,10 @@ impl<'a> VerifyContext<'a> {
             proven_imps: crate::dhash::HashSet::default(),
             current_cube: Vec::new(),
             in_block: false,
-            scratch: None,
+            work: None,
+            facts: Vec::new(),
+            blocks: None,
+            current_block: None,
             block_dead: false,
             z3translator: Z3Translation::default(),
         }
@@ -235,14 +246,15 @@ impl<'a> VerifyContext<'a> {
     /// Union two e-classes in the live graph — the sanctioned mutation path
     /// (invalidates the fixpoint cache). Callers still `rebuild()` after a
     /// batch of unions.
-    /// If a scratch graph exists, then the fact is also added there.
+    /// If a working graph exists, then the fact is also added there.
     pub(crate) fn union(&mut self, a: egg::Id, b: egg::Id) -> bool {
         let merged = self.egraph.union(a, b);
         if merged {
             self.clean = None;
         }
-        if let Some(sc) = self.scratch.as_mut() {
-            sc.mirror_union(&self.egraph, a, b);
+        if self.work.is_some() {
+            self.record_fact(a, b);
+            self.mirror_union(a, b);
         }
         merged
     }
@@ -379,7 +391,7 @@ impl<'a> VerifyContext<'a> {
 
     /// The full rule set: the static rules, the ADT reductions minted so far by
     /// the allocator, and the unit's axiom/function rules. What [`Self::saturate`],
-    /// the block scratch and every probe run.
+    /// the working graph and every probe run.
     pub(super) fn full_rules(&self) -> impl Iterator<Item = &egg::Rewrite<Symbolic, ConstFold>> {
         self.static_rules
             .iter()
@@ -417,34 +429,16 @@ impl<'a> VerifyContext<'a> {
             .expect("true present")
     }
 
-    /// One `[probe]` line per `probe`-tier obligation: ground size when the tier was
-    /// reached versus the scratch size the obligation reasons over, and how far the
-    /// scratch had to be run (`reduce` = the cheap reductions sufficed).
-    fn trace_probe(&self, g0: (usize, usize, usize), fresh: bool, ran: &str) {
-        let (n, c, tn) = self.scratch.as_ref().expect("scratch live").sizes();
-        eprintln!(
-            "[probe] ground {}n/{}c true={} | scratch {n}n/{c}c true={tn} | ratio {:.2} | {} | {}",
-            g0.0,
-            g0.1,
-            g0.2,
-            n as f64 / g0.0.max(1) as f64,
-            ran,
-            if fresh { "built" } else { "warm" },
-        );
-    }
-
     pub(crate) fn add(&mut self, node: Symbolic) -> egg::Id {
         let before = self.egraph.total_size();
-        // Keep `node` for the scratch mirror only when a scratch is live (the
-        // clone is not free — most adds happen with no scratch and pay nothing).
-        if self.scratch.is_some() {
+        // Keep `node` for the mirror only when a working graph is live (the
+        // clone is not free — most adds happen with none and pay nothing).
+        if self.work.is_some() {
             let id = self.egraph.add(node.clone());
             if self.egraph.total_size() != before {
                 self.clean = None;
             }
-            if let Some(sc) = self.scratch.as_mut() {
-                sc.mirror_add(&self.egraph, id, node);
-            }
+            self.mirror_add(id, node);
             id
         } else {
             let id = self.egraph.add(node);
@@ -536,9 +530,15 @@ impl<'a> VerifyContext<'a> {
         fact: egg::Id,
         guards: impl Iterator<Item = (egg::Id, Polarity)>,
     ) {
-        let imp = self.implication(fact, guards);
+        let guards: Vec<(egg::Id, Polarity)> = guards.collect();
+        let imp = self.implication(fact, guards.iter().copied());
         let true_ = expr!(self, true);
         self.union(imp, true_);
+        // Ground holds the fact guarded; the working graph holds it guarded only
+        // by conditions beyond the block cube (see `work_assume`).
+        if self.in_block {
+            self.work_assume(fact, &guards);
+        }
         self.egraph.rebuild();
     }
 
@@ -552,13 +552,12 @@ impl<'a> VerifyContext<'a> {
     /// path condition (a call under a ternary or an implication), so a bare
     /// `tok == true` would release the callee's facts on sibling intra-block paths.
     ///
-    /// The block scratch gets the same guarded implication, through the mirror in
+    /// The working graph gets the same guarded implication, through the mirror in
     /// [`Self::union`]. There the cube prefix of the guard chain collapses via
-    /// `ite-reduce` (the scratch has assumed the cube), and any residual
-    /// intra-block guard collapses in the probe clone, which assumes the
-    /// obligation's extra pc literals (see [`Self::prove_via_scratch`]). The token
-    /// therefore ends up true in the scratch on exactly the paths an obligation is
-    /// taken under.
+    /// `ite-reduce` (the working graph has assumed the cube), and any residual
+    /// intra-block guard collapses in the probe, which assumes the obligation's
+    /// extra pc literals (see [`Self::prove_in_work`]). The token therefore ends up
+    /// true in the working graph on exactly the paths an obligation is taken under.
     ///
     /// `guards` are in innermost-first fold order, matching [`Self::implication`].
     pub(crate) fn assume_token_guarded(
@@ -576,6 +575,8 @@ impl<'a> VerifyContext<'a> {
     /// single `rebuild()` at the end (rebuild dominates, so batching matters when
     /// a heap op assumes more than one fact — e.g. a wildcard exhale's
     /// `needed < held` and `0 < held − needed`).
+    ///
+    /// `guards` are in innermost-first fold order, matching [`Self::implication`].
     pub(crate) fn assume_all_guarded(
         &mut self,
         facts: impl IntoIterator<Item = egg::Id>,
@@ -585,6 +586,11 @@ impl<'a> VerifyContext<'a> {
         for fact in facts {
             let imp = self.implication(fact, guards.iter().copied());
             self.union(imp, true_);
+            // Ground holds the fact guarded; the working graph holds it guarded
+            // only by conditions beyond the block cube (see `work_assume`).
+            if self.in_block {
+                self.work_assume(fact, guards);
+            }
         }
         self.egraph.rebuild();
     }

@@ -1,0 +1,71 @@
+// The blocks after a join see a closed arm's facts the way ground holds them:
+// guarded by the arm's condition. Here the working graph exists before the
+// branch, and the arm's scope is rolled back at the join and replaced by the
+// arm's facts in guarded form, `c ==> x == y`.
+domain D {
+  function f(x: Int): Int
+  function g(x: Int): Int
+}
+
+method m(x: Int, y: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == y
+    assert f(x) == f(y)
+  }
+  assert c ==> g(x) == g(y)
+}
+
+// Every obligation that assumes `c` gets the fact, not only the first.
+method twice(x: Int, y: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == y
+  }
+  assert c ==> g(x) == g(y)
+  assert c ==> f(x) == f(y)
+}
+
+// The same through two nested arms: `c ==> d ==> x == y`.
+method nested(x: Int, y: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    if (d) {
+      inhale x == y
+    }
+    assert d ==> f(x) == f(y)
+  }
+  assert c ==> d ==> g(x) == g(y)
+}
+
+// A dead arm's facts do not matter after the join; the live arm's do, and they
+// hold on every path to it.
+method dead_arm(x: Int, y: Int, z: Int)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (x == 2) {
+    inhale x == y + 1
+  } else {
+    inhale y == x
+  }
+  assert g(x) == g(y)
+}
+
+// The guarded facts are used whatever the obligation mentions: under `e`,
+// `x == 2` refutes both `c ==> x == 1` and `!c ==> x == 3`, and the block is
+// unreachable. Nothing here assumes `c`; a scheme that learned an arm's facts
+// only once their guard holds would miss it.
+method contrapositive(x: Int, z: Int, c: Bool, e: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { inhale x == 1 }
+  if (!c) { inhale x == 3 }
+  if (e) {
+    inhale x == 2
+    assert false
+  }
+}
