@@ -823,6 +823,23 @@ enum WildcardAs {
 /// `ChunkPerm::select` is the smart constructor: it flattens arms branching on the
 /// same condition, collapses `then ≡ els`, and drops an arm whose condition
 /// const-folds — so a wildcard-free program still builds exactly what it did before.
+/// Run a certificate recipe `build` on ground and mirror what it released (the
+/// ids it merged with `true`, appended to `changed`) into the working graph: a
+/// recipe build adds to ground directly, past the `add`/`union` hooks.
+fn build_mirrored(
+    ctx: &mut VerifyContext<'_>,
+    changed: &mut Vec<egg::Id>,
+    build: impl FnOnce(
+        &mut egg::EGraph<Symbolic, crate::verify::analysis::ConstFold>,
+        &mut Vec<egg::Id>,
+    ) -> egg::Id,
+) -> egg::Id {
+    let start = changed.len();
+    let id = build(&mut ctx.egraph, changed);
+    ctx.note_released(&changed[start..]);
+    id
+}
+
 fn build_perm(
     ctx: &mut VerifyContext<'_>,
     perm: &PermRecipe,
@@ -841,9 +858,9 @@ fn build_perm(
         wildcard_as: WildcardAs,
     ) -> ChunkPerm {
         match pv {
-            vmir::PermVal::Amount(r) => {
-                ChunkPerm::leaf(r.build(&mut ctx.egraph, resolve, pc, changed))
-            }
+            vmir::PermVal::Amount(r) => ChunkPerm::leaf(build_mirrored(ctx, changed, |eg, ch| {
+                r.build(eg, resolve, pc, ch)
+            })),
             // `WildcardAs::One` builds a **presence** indicator, not a share: it is
             // the literal `1`, with no wildcard left in it, so the leaf is concrete.
             vmir::PermVal::Wildcard => match wildcard_as {
@@ -859,7 +876,7 @@ fn build_perm(
     let mut built: Vec<ChunkPerm> = Vec::with_capacity(perm.steps.len());
     for step in &perm.steps {
         let vmir::PermInst::Ite(c, t, e) = step;
-        let c = c.build(&mut ctx.egraph, resolve, pc, changed);
+        let c = build_mirrored(ctx, changed, |eg, ch| c.build(eg, resolve, pc, ch));
         let t = leaf(ctx, t, &built, resolve, pc, changed, wildcard_as);
         let e = leaf(ctx, e, &built, resolve, pc, changed, wildcard_as);
         built.push(ChunkPerm::select(ctx, c, t, e));
@@ -1400,9 +1417,9 @@ fn walk_footprint(
         };
         let wc_slot = frame_only && slot_wildcard;
         let before = ctx.egraph.total_number_of_nodes();
-        let addr = slot
-            .addr
-            .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+        let addr = build_mirrored(ctx, &mut changed, |eg, ch| {
+            slot.addr.build(eg, resolve, pc_lits, ch)
+        });
         let wildcard_as = if wc_slot {
             WildcardAs::One
         } else {
@@ -1552,9 +1569,9 @@ fn walk_footprint(
     // `bool_guard`, not `pc_lits`: it is the path condition at every call site
     // (an `inhale` extends it with `0 < scale`, the others pass `pc_lits`
     // itself), so it is the tighter of the two and always a superset.
-    let bool_id = def
-        .bool
-        .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+    let bool_id = build_mirrored(ctx, &mut changed, |eg, ch| {
+        def.bool.build(eg, resolve, pc_lits, ch)
+    });
     match direction {
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {
@@ -2414,6 +2431,16 @@ pub(crate) fn verify_method(
     let mut state = EvalState::new();
     let mut snap = Snapshotter::from_env(method_name);
     snap.snapshot(&ctx, &[], "init", None);
+    let preds: Vec<Vec<usize>> = method
+        .blocks
+        .iter()
+        .map(|b| match &b.preds {
+            vmir::Preds::Entry => vec![],
+            vmir::Preds::From(p) => vec![p.0],
+            vmir::Preds::Join { then_, els, .. } => vec![then_.0, els.0],
+        })
+        .collect();
+    ctx.begin_method(crate::verify::context::BlockOrder::new(&preds));
 
     // Block walker (Stage 3): evaluate blocks in stored order — which is
     // topological *and* the original emission order, so positional `EvalState`
@@ -2437,9 +2464,11 @@ pub(crate) fn verify_method(
         // `HeapInst::Merge` for a `Join`). Stage 3 threads the heap linearly via
         // the insts' explicit `base: HeapVal` refs, so there is nothing to do.
         // ───────────────────────────────────────────────────────────────────
-        // No scratch during the join phase: the cube's reach boolean is
-        // materialized *by* the join, so it isn't resolvable until join runs.
-        ctx.end_block();
+        // Close the working graph's scopes of blocks that do not dominate this
+        // one, and open its own. The join phase proves on ground: the cube's
+        // reach boolean is materialized *by* the join, so it isn't resolvable
+        // until the join runs.
+        ctx.enter_block(bid.0);
         state.join_arms_dead = match &block.preds {
             vmir::Preds::Join { then_, els, .. } => Some((
                 state.dead_blocks.contains(&then_.0),
@@ -2497,7 +2526,7 @@ pub(crate) fn verify_method(
             state.dead_blocks.insert(bid.0);
         }
     }
-    ctx.end_block();
+    ctx.end_method();
     if let Some(t) = crate::verify::heap::MergeTrace::take() {
         eprintln!(
             "[merge-trace] {method_name}: selects_built={} zero_leaves={} max_depth={}",

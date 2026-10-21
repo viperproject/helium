@@ -1,0 +1,23 @@
+// S1/S18 shape: terms first translated into the working graph inside a scope
+// that is rolled back (here a dead arm, whose scope holds `true == false`) must
+// not keep their translation. The scope's ids are reused by the next mints; a
+// stale entry for `f(y)` would point at whatever class `g(y)` got, and the last
+// assert would follow from `g(y) == 1`.
+//
+// Must FAIL (the last assert).
+domain D {
+  function f(x: Int): Int
+  function g(x: Int): Int
+  function h(x: Int): Int
+}
+
+method m(x: Int, y: Int, z: Int)
+  requires x == 1
+{
+  if (x == z) { assert h(x) == h(z) }
+  if (x == 2) {
+    assert f(y) == 0
+  }
+  inhale g(y) == 1
+  assert f(y) == 1
+}
