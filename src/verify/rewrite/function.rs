@@ -525,17 +525,28 @@ pub(crate) fn function_rule(
     timed(Rewrite::new(format!("fn-{name}"), searcher, applier).expect("function rule"))
 }
 
-/// Mint a post-only rule keyed on `func`: replays the definition's post behind
+/// Mint the spec-derived post rule installed for each SCC member **during** a
+/// recursive batch's own verification, keyed on `func`: replays the post behind
 /// the call's `pre_token` (the full function's `f%pre`), no definitional union.
-/// Two users:
-/// - the limited-twin post rule of a recursive function ([`function_post_rule`]);
-/// - the spec-derived post rule installed for each SCC member **during** a
-///   recursive batch's own verification, which is what makes induction over a
-///   recursive call work (Silicon's phase-1 `post` axiom). The recursive call
-///   in the body mints its token under the call's path condition, so the
-///   induction hypothesis holds only on the path that makes the call.
+/// This is what makes induction over a recursive call work (Silicon's phase-1
+/// `post` axiom). The recursive call in the body mints its token under the
+/// call's path condition, so the induction hypothesis holds only on the path
+/// that makes the call.
 pub(crate) fn post_rule(
     name: &str,
+    func: FuncId,
+    def: Arc<FunctionDefinition>,
+    pre_token: FuncId,
+) -> Rule {
+    post_only_rule(format!("fn-spec-post-{name}"), func, def, pre_token)
+}
+
+/// A post-only rule keyed on `func`: replays the definition's post behind the
+/// call's `pre_token`, no definitional union. Its name must be unique among the
+/// rules of a unit: a rule's progress through the e-graph's changes is kept under
+/// its name.
+fn post_only_rule(
+    rule_name: String,
     func: FuncId,
     def: Arc<FunctionDefinition>,
     pre_token: FuncId,
@@ -548,7 +559,7 @@ pub(crate) fn post_rule(
         def,
         memo: Memo::new(),
     };
-    timed(Rewrite::new(format!("fn-post-{name}"), searcher, applier).expect("function post rule"))
+    timed(Rewrite::new(rule_name, searcher, applier).expect("function post rule"))
 }
 
 /// Mint the limited-twin post rule for a **recursive** function: keyed on
@@ -562,7 +573,7 @@ pub(crate) fn function_post_rule(
     pre_token: FuncId,
 ) -> Rule {
     let func = def.limited.expect("post rule requires a limited twin");
-    post_rule(name, func, def, pre_token)
+    post_only_rule(format!("fn-post-{name}"), func, def, pre_token)
 }
 
 /// A canonicalized call key: the ground `(type_args, value_args)` an occurrence
