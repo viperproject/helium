@@ -6,6 +6,7 @@ on:
 jobs:
   hello:
     runs-on: [ self-hosted, bench ]
+    timeout-minutes: 7200 # 5 days
 
     defaults:
       run:
