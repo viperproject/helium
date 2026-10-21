@@ -11,7 +11,7 @@ jobs:
       run:
         working-directory: /opt/bench/runner
     
-    .env:
+    env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
