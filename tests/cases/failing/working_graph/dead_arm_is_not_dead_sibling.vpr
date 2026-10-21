@@ -1,0 +1,41 @@
+// A dead arm (its cube contradicts what holds) makes its own scope
+// inconsistent. That must neither leak into the sibling arm nor past the
+// join: the arm exports "this arm is unreachable", never `false`
+// (invariant 4 of the scoped working graph).
+//
+// Must FAIL (each method).
+domain D { function f(x: Int): Int }
+
+method sibling(x: Int, y: Int, z: Int)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (x == 2) {
+    assert false
+  } else {
+    assert false
+  }
+}
+
+method after_join(x: Int, y: Int, z: Int)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (x == 2) {
+    assert false
+  }
+  assert false
+}
+
+method nested(x: Int, y: Int, z: Int, c: Bool)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    if (x == 2) {
+      assert false
+    }
+    assert f(y) == 2
+  }
+  assert false
+}

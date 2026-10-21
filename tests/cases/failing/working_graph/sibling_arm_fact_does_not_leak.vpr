@@ -1,0 +1,19 @@
+// The working graph assumes a block's facts UNGUARDED inside the block's scope.
+// The then-arm's `x == y` must be gone when the else-arm is walked: the arm's
+// scope is rolled back before its sibling is entered (invariant 1 of the scoped
+// working graph). The first `if` makes the working graph exist before the
+// branch, so both arms are walked in one graph.
+//
+// Must FAIL (the else-arm assert).
+domain D { function f(x: Int): Int }
+
+method m(x: Int, y: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == y
+    assert f(x) == f(y)
+  } else {
+    assert f(x) == f(y)
+  }
+}

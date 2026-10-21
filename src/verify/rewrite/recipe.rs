@@ -120,7 +120,8 @@ impl Searcher<Symbolic, ConstFold> for AxiomTriggerSearcher {
 /// the e-graph, seeding the value slots with `vals_seed` (the captures ++
 /// bound-variable σ for a quantifier, the arguments for a function definition;
 /// empty for a closed axiom). Runs the body's `Assume`s (merging each with
-/// `true`) and returns the changed e-classes together with the body's `res`
+/// `true`) and returns, in `changed`, each id it merged with `true` (a fact the
+/// caller can mirror elsewhere), together with the body's `res`
 /// e-class id. The caller decides how to discharge `res` (an axiom merges it
 /// with `true`; a quantifier guards it; a function unfold unions it with the
 /// call e-class).
@@ -207,7 +208,7 @@ pub(crate) fn build_instance_releasing_tokens(
             Some(c) => egraph.add(Symbolic::Ite([c, inner, true_])),
         };
         if egraph.union(rel, true_) {
-            changed.push(egraph.find(rel));
+            changed.push(rel);
         }
     }
     resolve_val(egraph, &vals, res)
@@ -299,7 +300,7 @@ pub(super) fn build_instance_vals_impl(
                 let id = get(egraph, &vals, v);
                 let t = true_of(egraph);
                 if egraph.union(id, t) {
-                    changed.push(egraph.find(id));
+                    changed.push(id);
                 }
             }
             AxiomInst::Forall { recipe, caps } => {
@@ -328,7 +329,7 @@ pub(super) fn build_instance_vals_impl(
                     None => guarded,
                 };
                 if egraph.union(rel, t) {
-                    changed.push(egraph.find(rel));
+                    changed.push(rel);
                 }
             }
         }

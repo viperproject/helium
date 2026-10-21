@@ -3,20 +3,31 @@
 //! An applier that mints new nodes must not re-mint them every saturation
 //! iteration, so each such rule keeps a [`Memo`] of the instances it has already
 //! built. The memo is **unit-scoped** (a fresh e-graph makes remembered ids
-//! meaningless) and carries a **scratch overlay** so a throwaway probe clone can
-//! record instances without polluting the live run.
+//! meaningless) and keeps a separate record per **scope** — a graph state other
+//! than the live one: a probe that is rolled back, or a scope of the working graph
+//! — so instances built there neither pollute the live record nor outlive the
+//! state they were built in.
 
-use crate::dhash::HashSet;
+use crate::dhash::{HashMap, HashSet};
 use std::sync::Mutex;
 
-/// Mint a scope id to be `resume`d later — for a scratch graph that outlives a
-/// single run (the per-block scratch).
+/// Mint a scope id to be [`ScratchScope::resume`]d later — for a scope that
+/// outlives a single run (the working graph and its scopes). It stays live until
+/// [`retire_scope`].
 pub(crate) fn new_scope_id() -> u64 {
-    NEXT_SCOPE.with(|g| {
+    let id = NEXT_SCOPE.with(|g| {
         let id = g.get() + 1;
         g.set(id);
         id
-    })
+    });
+    LIVE_SCOPES.with(|l| l.borrow_mut().insert(id));
+    id
+}
+
+/// End scope `id`: what was recorded under it described a graph state that no
+/// longer exists (rolled back), so every memo forgets it.
+pub(crate) fn retire_scope(id: u64) {
+    LIVE_SCOPES.with(|l| l.borrow_mut().remove(&id));
 }
 
 /// Start a new memo unit. Call when a fresh e-graph is created for a unit.
@@ -24,33 +35,26 @@ pub(crate) fn new_memo_unit() {
     UNIT_GEN.with(|g| g.set(g.get() + 1));
 }
 
-/// RAII marker for a scratch (throwaway-clone) saturation scope.
-pub(crate) struct ScratchScope;
+/// RAII marker for running inside a scope.
+pub(crate) struct ScratchScope {
+    /// Retire the scope when leaving it (a one-shot scope).
+    retire: Option<u64>,
+}
 
 impl ScratchScope {
-    /// A one-shot scope: its overlay dies with the returned guard. For throwaway
-    /// clones (`probe`-tier probes, WD checks). Such a clone is taken from the
-    /// graph *as it is now*, so every base entry is already materialized in it —
-    /// it reads the base.
+    /// A one-shot scope, retired when the returned guard drops. For a probe whose
+    /// graph state is rolled back afterwards.
     pub(crate) fn enter() -> Self {
-        SCRATCH_STACK.with(|s| s.borrow_mut().push((new_scope_id(), false)));
-        ScratchScope
+        let id = new_scope_id();
+        SCRATCH_STACK.with(|s| s.borrow_mut().push(id));
+        ScratchScope { retire: Some(id) }
     }
 
-    /// Re-enter the scope `id`, so a graph that outlives one run keeps its memo
-    /// across runs. Must nest LIFO with every other scope.
-    ///
-    /// **Detached**: the graph this scope belongs to was cloned at some earlier
-    /// point and the live graph has moved on since, so a base entry recorded
-    /// after the clone describes an instance this graph does *not* have. Runs
-    /// under a detached scope therefore ignore the base and re-instantiate into
-    /// their own overlay. Reading it instead loses the instance in both graphs:
-    /// the live run claims the key, and the clone — which never saw the union,
-    /// because an applier unions its e-graph directly and only
-    /// `VerifyContext::union` mirrors — is told it already has it.
+    /// Re-enter the live scope `id`, so a graph state that outlives one run keeps
+    /// its memo across runs. Must nest LIFO with every other scope.
     pub(crate) fn resume(id: u64) -> Self {
-        SCRATCH_STACK.with(|s| s.borrow_mut().push((id, true)));
-        ScratchScope
+        SCRATCH_STACK.with(|s| s.borrow_mut().push(id));
+        ScratchScope { retire: None }
     }
 }
 
@@ -59,38 +63,34 @@ impl Drop for ScratchScope {
         SCRATCH_STACK.with(|s| {
             s.borrow_mut().pop();
         });
+        if let Some(id) = self.retire {
+            retire_scope(id);
+        }
     }
 }
 
 pub(super) struct MemoInner<K> {
     pub(super) unit: u64,
     pub(super) base: HashSet<K>,
-    /// One set per active scratch scope, innermost last, tagged with the scope id
-    /// it belongs to. Pruned lazily against [`SCRATCH_STACK`] on each insert: a
-    /// position whose id no longer matches belongs to a scope that has exited, so
-    /// it and everything above it are dropped.
-    pub(super) overlays: Vec<(u64, HashSet<K>)>,
+    /// One set per scope something was recorded under.
+    pub(super) scoped: HashMap<u64, HashSet<K>>,
 }
 
-/// A unit-scoped applier memo with a scratch overlay (see module docs above).
+/// A unit-scoped applier memo with per-scope records (see module docs above).
 pub(crate) struct Memo<K>(Mutex<MemoInner<K>>);
 
 // Applier-memo scoping ("already instantiated this call/σ"). A pure cost guard
 // keyed on canonical e-class ids; re-instantiating is idempotent.
 //
-// - **Live** runs write to a **base** set that survives across runs: the live
-//   e-graph of a unit only grows, so an entry stays valid for the whole unit.
-// - **Scratch** runs (`probe`-tier probes, forall-WD checks) saturate a throwaway
-//   clone and write to an **overlay** instead. A leaked scratch entry would be a
-//   completeness bug: the clone's ids can collide with ids the live graph mints
-//   later. Reading the base from a scratch run is fine.
-//
-// Scopes nest, and a nested clone contains everything its parent's graph does,
-// so overlays form a stack: a run reads the base plus every active overlay and
-// writes to the top one. A scope's overlay lives as long as its id is on the
-// stack — the long-lived per-block scratch `resume`s one id across all of its
-// runs so its instances stay remembered (a fresh scope per run measured ~2×
-// slower on `structs_enums.vpr`).
+// - **Live** runs (no scope active) write to a **base** set that survives across
+//   runs: the live e-graph of a unit only grows, so an entry stays valid for the
+//   whole unit.
+// - Runs inside scopes read and write only scope records: the base describes the
+//   live graph, which a scope's graph need not contain (the working graph is a
+//   copy taken at some point and has moved on separately). A run reads the
+//   records of every active scope — nested scopes are states derived from their
+//   enclosing ones, so what was built there is still there — and writes to the
+//   innermost. A record is dropped once its scope is retired.
 //
 // All state is thread-local; the `Mutex` in [`Memo`] only satisfies egg's
 // `Send + Sync` bounds.
@@ -98,14 +98,12 @@ thread_local! {
     /// Bumped per verification unit (`VerifyContext::new`): unit boundaries
     /// switch to a fresh e-graph, so all remembered ids are meaningless.
     static UNIT_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// The active scratch scopes, innermost last: a scope id whose overlay is
-    /// readable (and, for the last one, writable), plus whether that scope is
-    /// **detached** from the live graph (see [`ScratchScope::resume`]). Empty = a
-    /// live run.
-    static SCRATCH_STACK: std::cell::RefCell<Vec<(u64, bool)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-    /// Source of scope ids. Fresh per [`ScratchScope::enter`]; a block scratch
-    /// takes one at build time and `resume`s it for each of its runs.
+    /// The active scopes, innermost last. Empty = a live run.
+    static SCRATCH_STACK: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The scopes not yet retired.
+    static LIVE_SCOPES: std::cell::RefCell<HashSet<u64>> =
+        std::cell::RefCell::new(HashSet::default());
+    /// Source of scope ids.
     static NEXT_SCOPE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -114,50 +112,79 @@ impl<K: Eq + std::hash::Hash> Memo<K> {
         Self(Mutex::new(MemoInner {
             unit: u64::MAX,
             base: HashSet::default(),
-            overlays: Vec::new(),
+            scoped: HashMap::default(),
         }))
     }
 
     /// `true` when `key` has not been seen in the current scope — the caller
     /// should build the instance. Records the key in the base (live run) or
-    /// the overlay (scratch run).
+    /// the innermost scope's record.
     pub(super) fn insert(&self, key: K) -> bool {
         let unit = UNIT_GEN.with(|g| g.get());
         let mut memo = self.0.lock().unwrap();
         if memo.unit != unit {
             memo.unit = unit;
             memo.base.clear();
-            memo.overlays.clear();
+            memo.scoped.clear();
         }
-        let stack = SCRATCH_STACK.with(|s| s.borrow().clone());
-        if stack.is_empty() && memo.base.contains(&key) {
-            return false;
-        }
-        if stack.is_empty() {
-            memo.overlays.clear();
+        let innermost = SCRATCH_STACK.with(|s| s.borrow().last().copied());
+        let Some(innermost) = innermost else {
             return memo.base.insert(key);
+        };
+        if !memo.scoped.is_empty() {
+            LIVE_SCOPES.with(|live| {
+                let live = live.borrow();
+                memo.scoped.retain(|id, _| live.contains(id));
+            });
         }
-        // Drop overlays whose scope has exited (id mismatch at its position, or
-        // beyond the current depth), keeping the live prefix.
-        let keep = stack
-            .iter()
-            .zip(memo.overlays.iter())
-            .take_while(|((id, _), (oid, _))| id == oid)
-            .count();
-        memo.overlays.truncate(keep);
-        if memo.overlays.iter().any(|(_, set)| set.contains(&key)) {
+        let seen = SCRATCH_STACK.with(|s| {
+            s.borrow()
+                .iter()
+                .any(|id| memo.scoped.get(id).is_some_and(|set| set.contains(&key)))
+        });
+        if seen {
             return false;
         }
-        // Materialize the remaining active scopes (each nested clone contains
-        // everything its parent had, so an empty set for a scope is just "nothing
-        // recorded there yet"), then record against the innermost.
-        for (id, _) in &stack[memo.overlays.len()..] {
-            memo.overlays.push((*id, HashSet::default()));
+        memo.scoped.entry(innermost).or_default().insert(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record made in a scope is seen by the scopes nested in it and is gone
+    /// once the scope is retired: the ids it was keyed on are rolled back and
+    /// reused, so keeping it would skip a needed instance (S13).
+    #[test]
+    fn scope_records_die_with_their_scope() {
+        new_memo_unit();
+        let memo: Memo<u32> = Memo::new();
+        let outer = new_scope_id();
+        {
+            let _outer = ScratchScope::resume(outer);
+            let inner = new_scope_id();
+            {
+                let _inner = ScratchScope::resume(inner);
+                assert!(memo.insert(7), "first instance is built");
+                assert!(!memo.insert(7), "and remembered in its scope");
+            }
+            retire_scope(inner);
+            {
+                let _sibling = ScratchScope::enter();
+                assert!(memo.insert(7), "a retired scope's record is forgotten");
+            }
+            assert!(memo.insert(8));
+            {
+                let _nested = ScratchScope::enter();
+                assert!(!memo.insert(8), "an enclosing scope's record is seen");
+            }
         }
-        memo.overlays
-            .last_mut()
-            .expect("stack non-empty")
-            .1
-            .insert(key)
+        retire_scope(outer);
+        // The live record is separate from every scope's.
+        assert!(memo.insert(8), "scope records are not the live record");
+        assert!(!memo.insert(8));
+        let _probe = ScratchScope::enter();
+        assert!(memo.insert(8), "a scope does not read the live record");
     }
 }

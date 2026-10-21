@@ -1,0 +1,17 @@
+// A proof made in an arm holds under the arm's cube, which the working graph
+// has assumed unguarded. It must be recorded under the FULL path condition
+// (cube and instruction delta), so that after the join it is only known
+// where the arm was taken (invariant 3, S15/S17).
+//
+// Must FAIL (the assert after the join).
+domain D { function f(x: Int): Int }
+
+method m(x: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  inhale c ==> x == 1
+  if (c) {
+    assert x == 1
+  }
+  assert x == 1
+}

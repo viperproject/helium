@@ -2539,22 +2539,17 @@ pub(crate) fn chunk_under_pc<'c>(
     if pc_lits.is_empty() {
         return None;
     }
-    let mut probe = ctx.egraph.clone();
-    for (id, pol) in pc_lits {
-        let want_true = matches!(pol, Polarity::Positive);
-        // An unsatisfiable path condition makes every read vacuous — leave
-        // the resolution to the (vacuous-pc) obligation check, don't invent
-        // a chunk here.
-        if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
-            return None;
-        }
-        let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
-        probe.union(*id, lit);
-    }
-    probe.rebuild();
-    let probe = ctx.run_probe(probe);
-    let canon = probe.find(addr);
-    chunks.iter().find(move |c| probe.find(c.addr) == canon)
+    // An unsatisfiable path condition makes every read vacuous — leave the
+    // resolution to the (vacuous-pc) obligation check, don't invent a chunk here.
+    let ids: Vec<egg::Id> = std::iter::once(addr)
+        .chain(chunks.iter().map(|c| c.addr))
+        .collect();
+    let canons = ctx.classes_under_pc(pc_lits, &ids)?;
+    chunks
+        .iter()
+        .zip(&canons[1..])
+        .find(|(_, c)| **c == canons[0])
+        .map(|(chunk, _)| chunk)
 }
 
 /// The chunks that alias `addr` **only under `pc_lits`** — pc-equal but not
@@ -2589,24 +2584,19 @@ pub(crate) fn pc_alias_partners(
         return partners;
     }
     let ground = ctx.egraph.find(addr);
-    let mut probe = ctx.egraph.clone();
-    for (id, pol) in pc_lits {
-        let want_true = matches!(pol, Polarity::Positive);
-        // Unsatisfiable pc: the consume is vacuous, so inventing partners would
-        // only mask that — leave it to the (vacuous-pc) obligation check.
-        if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
-            return Vec::new();
-        }
-        let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
-        probe.union(*id, lit);
-    }
-    probe.rebuild();
-    let probe = ctx.run_probe(probe);
-    let canon = probe.find(addr);
+    // Unsatisfiable pc: the consume is vacuous, so inventing partners would only
+    // mask that — leave it to the (vacuous-pc) obligation check.
+    let ids: Vec<egg::Id> = std::iter::once(addr)
+        .chain(chunks.iter().map(|c| c.addr))
+        .collect();
+    let Some(canons) = ctx.classes_under_pc(pc_lits, &ids) else {
+        return Vec::new();
+    };
     chunks
         .iter()
-        .filter(|c| probe.find(c.addr) == canon && ctx.egraph.find(c.addr) != ground)
-        .map(|c| c.addr)
+        .zip(&canons[1..])
+        .filter(|(c, canon)| **canon == canons[0] && ctx.egraph.find(c.addr) != ground)
+        .map(|(c, _)| c.addr)
         .collect()
 }
 

@@ -1,0 +1,16 @@
+// An arm's facts reach the blocks after its join only GUARDED by the arm's
+// condition (as ground holds them), never as the unguarded facts the arm's
+// scope held. Positive control: passing/working_graph/join_sees_arm_fact.vpr.
+//
+// Must FAIL (the assert after the join).
+domain D { function f(x: Int): Int }
+
+method m(x: Int, y: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == y
+    assert f(x) == f(y)
+  }
+  assert f(x) == f(y)
+}

@@ -1,0 +1,38 @@
+// Function unfoldings and quantifier instances built inside a scope are
+// forgotten with it, and so is the applier-memo record of them. The two arms
+// mint the same shapes in the same order, so the else-arm's terms get the ids
+// the rolled-back then-arm's terms had. S13 analogue: a memo entry that
+// outlived its scope (one record for every scope, or the working graph sharing
+// the live record) says `inc` was already unfolded at that id, and the
+// else-arm assert fails.
+function inc(n: Int): Int { n + 1 }
+
+domain D {
+  function f(x: Int): Int
+  function p(x: Int): Bool
+  axiom ax { forall x: Int :: { p(x) } p(x) ==> f(x) > 0 }
+}
+
+method unfold(a: Int, b: Int, z: Int, c: Bool)
+{
+  if (a == z) { assert f(a) == f(z) }
+  if (c) {
+    inhale a == 2
+    assert inc(a * 3) == 7
+  } else {
+    inhale b == 2
+    assert inc(b * 3) == 7
+  }
+}
+
+method instantiate(a: Int, b: Int, z: Int, c: Bool)
+{
+  if (a == z) { assert f(a) == f(z) }
+  if (c) {
+    inhale p(a + 1)
+    assert f(a + 1) > 0
+  } else {
+    inhale p(b + 1)
+    assert f(b + 1) > 0
+  }
+}

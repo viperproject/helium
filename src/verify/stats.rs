@@ -83,15 +83,20 @@ pub struct VerifyStats {
     /// Rule runs abandoned by a `Runner` hook — the goal was settled, or the graph
     /// went contradictory, before the fixpoint. Counts iterations *not* spent.
     pub probe_early_stops: u64,
-    /// Per-block scratch e-graph: ground clones taken to build a block scratch (one per block that reaches
-    /// the `probe` tier), full-rule-set saturations of that shared scratch, and the egg
-    /// iterations they cost. `block_scratch_freehits` counts obligations
-    /// discharged straight off the saturated scratch with no per-obligation
-    /// clone (their pc was already implied by the block cube). All non-gated.
+    /// The method's working graph (`context::prove::WorkGraph`): ground copies
+    /// taken to build one (at most one per method), full-rule-set saturations of it,
+    /// and the egg iterations they cost. `block_scratch_freehits` counts
+    /// obligations discharged straight off it with no probe (their pc was already
+    /// implied by the block cube). All non-gated.
     pub block_scratch_clones: u64,
     pub block_scratch_saturations: u64,
     pub block_scratch_iterations: u64,
     pub block_scratch_freehits: u64,
+    /// Scopes the working graph opened (one per method block whose facts must not
+    /// outlive it), and the ground facts it re-asserted when closing them.
+    /// Non-gated.
+    pub work_scopes: u64,
+    pub work_replayed_facts: u64,
     /// total egg `Runner` iterations across all saturations/reductions/probes.
     pub sat_iterations: u64,
     /// peak e-graph size observed in any iteration.
@@ -255,6 +260,8 @@ impl VerifyStats {
             block_scratch_saturations,
             block_scratch_iterations,
             block_scratch_freehits,
+            work_scopes,
+            work_replayed_facts,
             sat_iterations,
             egraph_nodes_peak,
             egraph_classes_peak,
@@ -285,6 +292,8 @@ impl VerifyStats {
             ("block_scratch_saturations", n(block_scratch_saturations)),
             ("block_scratch_iterations", n(block_scratch_iterations)),
             ("block_scratch_freehits", n(block_scratch_freehits)),
+            ("work_scopes", n(work_scopes)),
+            ("work_replayed_facts", n(work_replayed_facts)),
             ("sat_iterations", n(sat_iterations)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
