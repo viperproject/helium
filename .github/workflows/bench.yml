@@ -1,0 +1,83 @@
+name: Benchmark
+
+# Runs the full benchmark suite (runner/suite.ci.json of the Data repo) on the
+# self-hosted benchmark machine, for exactly:
+# - the head commit of a PR when it is opened, reopened or new commits are
+#   (force) pushed to it; earlier heads' runs are kept;
+# - the last commit of every push to main (one squash commit per merge).
+# Closing a PR (merged or not) removes the runs of all its heads. Main runs
+# are never removed.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  BENCH_DATA_REPO: The-Ray-Man/HeliumBenchmarkData
+  BENCH_DATA_REF: c572628f73c084ebc1a67476deeada40c24f1a5c
+
+jobs:
+  benchmark:
+    # PRs from forks never run on the self-hosted runner: it would run their code.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.action != 'closed' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [ self-hosted, bench ]
+    timeout-minutes: 7200 # 5 days, the limit for self-hosted runners
+
+    # A new push to a PR cancels the run of its previous head, which ends as
+    # CANCELLED (its rows are kept). Each main commit gets a group of its own,
+    # so none is cancelled or dropped: they queue for the runner instead.
+    concurrency:
+      group: bench-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.sha) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # The PR's head, not GitHub's merge commit, so the stored commit is a real
+      # one; on a push, the last pushed commit.
+      HELIUM_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Empty on a push to main: the commit is registered as a main commit.
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Benchmark
+        working-directory: /opt/bench/runner
+        run: >
+          "./target/release/runner" bench
+          --config suite.ci.json
+          --ci
+          --run-id "$RUN_ID"
+          --helium-commit "$HELIUM_COMMIT"
+          --github-run-url "$RUN_URL"
+          ${PR_NUMBER:+--pr "$PR_NUMBER"}
+
+  close-pr:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [ self-hosted, bench ]
+    timeout-minutes: 60
+
+    # Same group as the PR's benchmark: a run still pending or in progress is
+    # cancelled first (and ends as CANCELLED), so its rows are removed too.
+    concurrency:
+      group: bench-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+
+    steps:
+      - name: Remove the PR's runs
+        working-directory: /opt/bench/runner
+        run: '"./target/release/runner" close-pr --pr "$PR_NUMBER"'
