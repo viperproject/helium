@@ -1,15 +1,18 @@
 on:
   workflow_dispatch:
   push:
-    branches: [setup-local-runner]
+    branches: [ setup-local-runner ]
 
 jobs:
   hello:
-    runs-on: [self-hosted, bench]
+    runs-on: [ self-hosted, bench ]
 
     defaults:
       run:
         working-directory: /opt/bench/runner
+    
+    .env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
       - run: ./target/release/runner index
