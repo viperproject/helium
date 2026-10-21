@@ -50,6 +50,7 @@ jobs:
         working-directory: /opt/bench/runner
         run: >
           "./target/release/runner" bench
+          --config suite.ci.json
           --ci
           --run-id "$RUN_ID"
           --helium-commit "$HELIUM_COMMIT"
