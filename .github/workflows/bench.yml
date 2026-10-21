@@ -1,19 +1,75 @@
+name: Benchmark
+
+# Runs the full benchmark suite (runner/suite.ci.json of the Data repo) on the
+# self-hosted benchmark machine, for exactly:
+# - the head commit of a PR when it is opened or new commits are (force) pushed to it;
+# - the last commit of every push to main.
+# Nothing here removes data: closing a PR leaves its runs in the database, and
+# `runner sync` / `runner close-pr` are never called.
 on:
-  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize]
   push:
-    branches: [ setup-local-runner ]
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # The Data repo (runner, suites, CI config), pinned so benchmark changes reach
+  # CI only through a Helium commit that bumps the pin.
+  BENCH_DATA_REPO: The-Ray-Man/HeliumBenchmarkData
+  BENCH_DATA_REF: c572628f73c084ebc1a67476deeada40c24f1a5c
 
 jobs:
-  hello:
+  benchmark:
+    # PRs from forks never run on the self-hosted runner: it would run their code.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [ self-hosted, bench ]
-    timeout-minutes: 7200 # 5 days
+    timeout-minutes: 7200 # 5 days, the limit for self-hosted runners
 
-    defaults:
-      run:
-        working-directory: /opt/bench/runner
-    
+    # A new push to a PR cancels the run of its previous head, which ends as
+    # CANCELLED (its rows are kept). Each main commit gets a group of its own,
+    # so none is cancelled or dropped: they queue for the runner instead (a
+    # shared group would keep only the last of several pending runs).
+    concurrency:
+      group: bench-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.sha) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # The PR's head, not GitHub's merge commit, so the stored commit is a real
+      # one; on a push, the last pushed commit.
+      HELIUM_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      - run: ./target/release/runner index
+      # Side by side, as `helium.crate` and `suites_dir` in suite.ci.json expect.
+      - name: Check out Helium
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.HELIUM_COMMIT }}
+          path: helium
+          submodules: recursive
+
+      - name: Check out the benchmark data
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.BENCH_DATA_REPO }}
+          ref: ${{ env.BENCH_DATA_REF }}
+          path: bench-data
+
+      # The runner container sets CARGO_TARGET_DIR to a persistent volume.
+      - name: Build the runner
+        working-directory: bench-data/runner
+        run: cargo build --release --locked
+
+      - name: Benchmark
+        working-directory: bench-data/runner
+        run: >
+          "./target/release/runner" bench
+          --ci
+          --run-id "$RUN_ID"
+          --helium-commit "$HELIUM_COMMIT"
+          --github-run-url "$RUN_URL"
