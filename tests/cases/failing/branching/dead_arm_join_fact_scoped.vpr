@@ -1,0 +1,15 @@
+// REGRESSION GUARD (soundness). What an inner join learns from a dead arm holds
+// only where that join is reached. Under `c` the `else` arm is dead, so past the
+// inner join `x == 1`; on the `!c` path nothing is known about `x`, and the
+// assertion after the outer join must fail.
+//
+// Ported from backend-blocks-perf 0d040b5.
+//
+// Must FAIL.
+method scoped(c: Bool, b: Bool, x: Int)
+{
+  if (c) {
+    if (b) { assume x == 1 } else { assume false }
+  }
+  assert x == 1
+}

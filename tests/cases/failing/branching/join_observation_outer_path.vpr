@@ -1,0 +1,26 @@
+// REGRESSION GUARD (soundness). What holds at an inner join holds only where that
+// join is reached (under `b` here). The inner join preserves `obs(r.f)` on both of
+// its arms, but on the `!b` path `r.f` changes, and the postcondition must be
+// rejected there.
+//
+// Ported from backend-blocks-perf (join observation anchors).
+//
+// Must FAIL.
+field f: Int
+field g: Int
+domain D { function obs(x: Int): Ref }
+
+method reset(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && obs(r.f) == old(obs(r.f))
+
+method outer_path(b: Bool, c: Bool, r: Ref)
+  requires acc(r.f) && acc(obs(r.f).g)
+  ensures acc(r.f) && acc(obs(r.f).g)
+{
+  if (b) {
+    if (c) { reset(r) } else { reset(r) }
+  } else {
+    r.f := r.f + 1
+  }
+}

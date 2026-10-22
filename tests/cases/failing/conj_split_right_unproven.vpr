@@ -1,0 +1,12 @@
+// REGRESSION GUARD (soundness). Proving a conjunction part by part must still
+// need every part: here only the left conjunct holds (`x == -1 && y == MIN` is
+// possible).
+//
+// Ported from backend-blocks-perf.
+//
+// Must FAIL.
+function pre(a: Int, b: Int): Bool { 0 != b && (a != -9223372036854775808 || -1 != b) }
+
+method right_open(x: Int, y: Int)
+  requires x != 0
+{ assert pre(y, x) }

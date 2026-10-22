@@ -1,0 +1,22 @@
+// REGRESSION GUARD (soundness). A chunk re-issued by a call on one arm sits at
+// the address the call's postcondition gives it. `reissue` does not preserve
+// `key(r.f)`, so on the then path the re-issued `g` chunk sits at an address
+// unrelated to `key(old(r.f))`, and the postcondition must be rejected there.
+//
+// Ported from backend-blocks-perf 0d040b5 (aligned moves at joins).
+//
+// Must FAIL.
+field f: Int
+field g: Int
+domain D { function key(x: Int): Ref }
+
+method reissue(r: Ref)
+  requires acc(r.f) && acc(key(r.f).g)
+  ensures acc(r.f) && acc(key(r.f).g)
+
+method m(c: Bool, r: Ref)
+  requires acc(r.f) && acc(key(r.f).g)
+  ensures acc(r.f) && acc(key(old(r.f)).g)
+{
+  if (c) { reissue(r) }
+}
