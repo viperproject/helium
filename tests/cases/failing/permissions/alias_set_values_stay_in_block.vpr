@@ -1,0 +1,22 @@
+// The then-block consumes `z.f` from a summary over `x.f` and `y.f` (either may be
+// the location) and assumes the members' values agree with what it took, each where
+// it sits at `z`. Those facts describe the then-block's heap: stated on ground without
+// the block's cube, they equated `x.f` (5) and `y.f` (4) in the else-block too, where
+// `z == x == y` is consistent, and `assert false` verified.
+
+field f: Int
+
+method m(x: Ref, y: Ref, z: Ref, c: Bool)
+  requires acc(y.f, 1/2) && y.f == 4
+{
+  if (c) {
+    inhale acc(x.f)
+    x.f := 5
+    exhale acc(x.f, 1/2)
+    inhale z == x || z == y
+    exhale acc(z.f, 1/2)
+  } else {
+    assume z == x && x == y
+    assert false
+  }
+}

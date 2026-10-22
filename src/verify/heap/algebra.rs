@@ -1809,20 +1809,28 @@ pub(crate) fn summarized_value(
         None => Taken::fresh(ctx, kind),
     };
     let zero = num::BigRational::from(num::BigInt::from(0));
+    let (_, delta) = split_ambient(ctx, pc_lits);
     for (i, ((chunk, cube), (hold, positive))) in set.iter().zip(holds).enumerate() {
         if Some(i) == holder || known_real(ctx, hold).is_some_and(|r| r == zero) {
             continue;
         }
         let agree = expr!(ctx, { chunk.value } == { taken.value });
-        // Only the block's own cube may be left to the guard: the scratch assumes
-        // the fact without it. The member's own condition — an address equality,
-        // a presence guard, the instruction's pc — has to sit inside the fact, or
-        // the scratch equates the values of every member, aliased or not.
-        let (ambient, own) = split_ambient(ctx, cube);
+        // The fact describes this block's heap, so it holds only on the block's path
+        // and where the instruction runs. The guard is the block's cube, which the
+        // scratch already assumes and drops. Everything else -- the member's own
+        // condition (an address equality, a presence guard) and the instruction's pc
+        // -- has to sit inside the fact: left to the guard, the scratch equated the
+        // values of every member, aliased or not; left out, ground stated the
+        // agreement on paths where this heap does not exist.
+        let (_, own) = split_ambient(ctx, cube);
         let held = (!positive).then(|| (expr!(ctx, (0 / 1) < r { hold }), Polarity::Positive));
-        let antecedents = held.into_iter().chain(own.into_iter().rev());
+        let antecedents = held
+            .into_iter()
+            .chain(own.into_iter().rev())
+            .chain(delta.iter().rev().copied());
         let agree = ctx.implication(agree, antecedents);
-        ctx.assume_guarded(agree, ambient.into_iter().rev());
+        let cube = ctx.current_cube().to_vec();
+        ctx.assume_guarded(agree, cube.into_iter().rev());
     }
     taken
 }
