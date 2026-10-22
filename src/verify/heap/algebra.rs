@@ -200,10 +200,10 @@ fn perm_add_wildcard(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) 
 /// absent: a remainder `held − w` is positive only under the pc that assumed it,
 /// which is a fact about a path, not about the term.
 ///
-/// The visited set only breaks cycles — ids are removed on the way out, so a
-/// shared subterm is not poisoned by an in-progress ancestor.
-fn perm_known_positive(ctx: &VerifyContext<'_>, id: egg::Id) -> bool {
-    perm_sign(ctx, id, true, &mut crate::dhash::HashSet::default())
+/// Linear in the classes below `id`: each (class, strictness) is decided once per
+/// call ([`perm_sign`]'s memo), however often a shared subterm recurs.
+pub(crate) fn perm_known_positive(ctx: &VerifyContext<'_>, id: egg::Id) -> bool {
+    perm_sign(ctx, id, true, &mut crate::dhash::HashMap::default())
 }
 
 /// Whether `0 < id` is already a **proven** fact in the graph, by pure lookup: the
@@ -232,16 +232,24 @@ fn positivity_known(ctx: &VerifyContext<'_>, id: egg::Id) -> bool {
 
 /// `strict`: `0 < t`. Otherwise `0 ≤ t`, which additionally admits `0` itself and
 /// a sum/product/`ite` of non-negatives.
+///
+/// `memo` holds each canonical class's answer, so a shared subterm (a DAG, or a class
+/// with several nodes over the same children) is walked once. A class is entered as
+/// `false` before its nodes are read, which is also what breaks e-graph cycles: a
+/// node reaching back into an in-progress class gets no sign from it. The cost of
+/// that is precision only, and only for a class first reached through its own cycle
+/// (its `false` stands for the rest of the call); the answer is never a wrong `true`.
 fn perm_sign(
     ctx: &VerifyContext<'_>,
     id: egg::Id,
     strict: bool,
-    seen: &mut crate::dhash::HashSet<(egg::Id, bool)>,
+    memo: &mut crate::dhash::HashMap<(egg::Id, bool), bool>,
 ) -> bool {
     let id = ctx.egraph.find(id);
-    if !seen.insert((id, strict)) {
-        return false;
+    if let Some(&known) = memo.get(&(id, strict)) {
+        return known;
     }
+    memo.insert((id, strict), false);
     // A known literal settles the class outright, whatever nodes it holds.
     let out = match ctx.egraph[id].data.known() {
         Some(Literal::Real(r)) => {
@@ -258,23 +266,23 @@ fn perm_sign(
         // Any node witnessing the sign settles it: all nodes of a class are equal.
         _ => ctx.egraph[id].nodes.iter().any(|n| match n {
             Symbolic::Ite([_, t, e]) => {
-                perm_sign(ctx, *t, strict, seen) && perm_sign(ctx, *e, strict, seen)
+                perm_sign(ctx, *t, strict, memo) && perm_sign(ctx, *e, strict, memo)
             }
             Symbolic::Binary(BinOp::AddR, [x, y]) => {
                 if strict {
-                    (perm_sign(ctx, *x, true, seen) && perm_sign(ctx, *y, false, seen))
-                        || (perm_sign(ctx, *y, true, seen) && perm_sign(ctx, *x, false, seen))
+                    (perm_sign(ctx, *x, true, memo) && perm_sign(ctx, *y, false, memo))
+                        || (perm_sign(ctx, *y, true, memo) && perm_sign(ctx, *x, false, memo))
                 } else {
-                    perm_sign(ctx, *x, false, seen) && perm_sign(ctx, *y, false, seen)
+                    perm_sign(ctx, *x, false, memo) && perm_sign(ctx, *y, false, memo)
                 }
             }
             Symbolic::Binary(BinOp::MulR, [x, y]) => {
-                perm_sign(ctx, *x, strict, seen) && perm_sign(ctx, *y, strict, seen)
+                perm_sign(ctx, *x, strict, memo) && perm_sign(ctx, *y, strict, memo)
             }
             _ => false,
         }),
     };
-    seen.remove(&(id, strict));
+    memo.insert((id, strict), out);
     out
 }
 
@@ -847,16 +855,24 @@ pub(crate) fn prove_perm_positive(
     held: &ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> bool {
-    prove_perm_leaves(ctx, held, pc_lits, &|ctx, h, pc| {
-        if let Some(hr) = known_real(ctx, h) {
-            if hr > num::BigRational::from(num::BigInt::from(0)) {
-                return true;
-            }
-        }
-        let zero = expr!(ctx, 0 / 1);
-        let goal = expr!(ctx, { zero } < r { h });
-        ctx.prove_under_pc(goal, pc)
-    })
+    prove_perm_leaves(ctx, held, pc_lits, &|ctx, h, pc| prove_positive(ctx, h, pc))
+}
+
+/// `0 < t` under `pc` for one permission term: its sign first, then the prover.
+///
+/// The e-graph has no order reasoning over products, so the prover alone cannot
+/// sign a *scaled* amount — a predicate body's `1/2` or `read()` multiplied by the
+/// amount it was unfolded at, which inside a function is always a wildcard. Its
+/// sign is a property of the term ([`perm_known_positive`]: a product of
+/// positives, a positive plus a non-negative, an `ite` of positives, over leaves
+/// whose positivity is a literal or a standing fact), so it is read off first, and
+/// the prover answers only what the term's structure leaves open.
+fn prove_positive(ctx: &mut VerifyContext<'_>, t: egg::Id, pc: &[(egg::Id, Polarity)]) -> bool {
+    if perm_known_positive(ctx, t) {
+        return true;
+    }
+    let goal = expr!(ctx, (0 / 1) < r { t });
+    ctx.prove_under_pc(goal, pc)
 }
 
 /// `¬(held < cap)` (full/write permission) over a structured `held`, per leaf.
@@ -1400,8 +1416,7 @@ fn debit_wildcard_walk(
                 return (held.clone(), held_value, None);
             }
             let held_id = held.to_id(ctx);
-            let held_pos = expr!(ctx, (0 / 1) < r { held_id });
-            if !ctx.prove_under_pc(held_pos, pc_lits) {
+            if !prove_positive(ctx, held_id, pc_lits) {
                 return (
                     held.clone(),
                     held_value,

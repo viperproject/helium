@@ -1,0 +1,10 @@
+// The unfolded body holds `x.f` at `b ? w * 1/2 : 0`; with `b` unknown the read is
+// not framed. Silicon rejects it.
+
+field f: Int
+
+predicate PG(x: Ref, b: Bool) { b ==> acc(x.f, 1/2) }
+
+function bad(x: Ref, b: Bool): Int
+    requires acc(PG(x, b), write)
+{ unfolding acc(PG(x, b), write) in x.f }
