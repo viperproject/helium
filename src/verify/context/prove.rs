@@ -12,7 +12,7 @@
 use crate::dhash::HashMap;
 
 use egg::Language as _;
-
+use z3::SatResult;
 use crate::{
     verify::{
         analysis::ConstFold,
@@ -287,7 +287,9 @@ impl<'a> VerifyContext<'a> {
         // Functions/resources have no CFG — a whole-body scratch would just equal
         // ground — so they keep the per-obligation clone path below.
         if self.in_block {
-            let proven = self.prove_via_scratch(goal, pc_lits);
+            // Z3 is the last rung: it runs on ground plus the cube, never on the
+            // scratch (translation.typ, "Inputs").
+            let proven = self.prove_via_scratch(goal, pc_lits) || self.prove_by_z3(goal, pc_lits);
             if proven {
                 // Export under the **full** path condition. `pc_lits` is only the
                 // instruction's delta; the block's cube is ambient — assumed by the
@@ -322,7 +324,8 @@ impl<'a> VerifyContext<'a> {
             )
         }) {
             let probe = self.egraph.clone();
-            let proven = self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated);
+            let proven = self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated)
+                || self.prove_by_z3(goal, pc_lits);
             if proven {
                 self.record_proven(imp, true_, pc_lits.is_empty());
             }
@@ -354,10 +357,11 @@ impl<'a> VerifyContext<'a> {
             true
         } else {
             let probe = self.run_probe_until(probe, goal);
-            // Last resort is the non-forking ite-goal decomposition; there is no
-            // case split beyond it.
+            // Then the non-forking ite-goal decomposition, and finally Z3, which
+            // adds arithmetic and real case splits.
             probe.find(goal) == probe.find(true_p)
                 || self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated)
+                || self.prove_by_z3(goal, pc_lits)
         };
 
         // Persist the result so future identical obligations hit the `memo` tier.
@@ -829,6 +833,40 @@ impl<'a> VerifyContext<'a> {
             work.rebuild();
             rung = Rung::Rebuilt;
             goal = branch;
+        }
+    }
+
+
+    fn prove_by_z3(
+        &mut self,
+        goal: egg::Id,
+        pc_lits: &[(egg::Id, Polarity)],
+    ) -> bool {
+        if !self.use_z3 {
+            return false;
+        }
+        let solver = z3::Solver::new();
+
+        let facts = crate::verify::z3::build_facts(self);
+
+        let goal_z3 = crate::verify::z3::build_goal(self, goal);
+
+        // The block's cube is ambient (assumed by the scratch, not in `pc_lits`),
+        // so it has to be added here for its guarded facts to apply.
+        let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
+        let pc_cond = crate::verify::z3::build_pc(self, &pc);
+
+        facts.iter().for_each(|fact| solver.assert(fact));
+        pc_cond.iter().for_each(|pc_cond| solver.assert(pc_cond));
+
+        solver.assert(!goal_z3);
+
+        let res = solver.check();
+
+        match res {
+            SatResult::Unsat => true,
+            SatResult::Unknown => false,
+            SatResult::Sat => false
         }
     }
 

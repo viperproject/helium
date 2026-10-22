@@ -1,3 +1,4 @@
+use std::process::id;
 use itertools::Itertools;
 use crate::verify::lang::{FuncId, Symbolic};
 
@@ -5,7 +6,7 @@ use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Sort};
 use z3::ast::{Ast, Bool, Dynamic, Int};
 use crate::verify::context::VerifyContext;
 use crate::{vmir, HashMap, HashSet};
-use crate::vmir::{BinOp, Literal, MemberId, Type};
+use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
 use crate::verify::func_registry::{FuncKind, BUILTIN_OPTION_NONE, BUILTIN_OPTION_SOME, BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE, BUILTIN_OPTION_VALUE, BUILTIN_OPTION_HEAD};
 use egg::Id;
 
@@ -120,6 +121,21 @@ pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
         }
     }
     facts
+}
+
+pub(crate) fn build_goal(ctxt: &mut VerifyContext, id: egg::Id) -> Bool {
+    let node = ctxt.egraph.find(id);
+    class_const(ctxt, node).as_bool().unwrap()
+}
+
+pub(crate) fn build_pc(ctxt: &mut VerifyContext, pc: &[(egg::Id, Polarity)]) -> Vec<Bool> {
+    pc.iter().map(|(id, p)| {
+        let c_const = class_const(ctxt, *id);
+        match p {
+            Polarity::Positive => c_const.as_bool().unwrap(),
+            Polarity::Negative => !c_const.as_bool().unwrap(),
+        }
+    }).collect()
 }
 
 pub(crate) fn option<'c>(ctxt: &'c mut VerifyContext, ty: &Type, inner: &Type) -> &'c DatatypeSort {
