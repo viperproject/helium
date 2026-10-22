@@ -663,18 +663,9 @@ pub(super) fn run_rules_until<'r>(
     // deterministic for a fixed rule set + input") for any program whose
     // saturation approaches it. Disabled outright — the node and iteration limits
     // are the real backstops, and unlike a clock they are reproducible.
-    //
-    // Both are termination bounds on *this run*: the rule set is not terminating
-    // in general (axioms, quantifier instantiation), and a run stops after a
-    // bounded number of iterations or once it has grown the graph by a bounded
-    // number of nodes. The node bound is a growth bound, not a size bound: a graph
-    // that is large on entry (a working graph holding a long path, ground on a big
-    // unit) gets the same room to work as a small one, so whether a run is cut off
-    // depends on what the run derives and not on the history it inherited.
-    let growth = 100_000;
     let mut runner = egg::Runner::default()
         .with_scheduler(egg::SimpleScheduler)
-        .with_node_limit(egraph.total_size() + growth)
+        .with_node_limit(100_000)
         .with_iter_limit(iter_limit.unwrap_or(100))
         .with_time_limit(std::time::Duration::MAX)
         .with_egraph(egraph)
