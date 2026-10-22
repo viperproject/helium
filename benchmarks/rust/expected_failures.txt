@@ -16,3 +16,13 @@
 
 # Previously here: shape_area's `m_shape_grow` and `m_shape_translate`,
 # fixed 2026-08-14 by splitting a gate amount in `sufficient_leaf`.
+
+# Node cap, not a missing fact (2026-10-22, fix-zero-permission-value-agreement): main
+# verified this member partly through an unsound value merge (a summarized consume
+# equated the `&mut` payload given back to `e` with the stale value of the zero-
+# permission chunk left at the original payload) while its block scratch sat at
+# ~96.8k of the absolute 100k node limit of `run_rules_until`. Keeping the two values
+# apart grows that graph ~8% past the limit; saturation stops after one iteration and
+# a pc-alias partner is missed. It verifies (22.5 s) when the limit does not truncate,
+# so it returns when the node backstop bounds per-run growth rather than graph size.
+enum_v8_p3 m_e_guarded
