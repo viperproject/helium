@@ -207,9 +207,52 @@ fn intern(
                 res,
             });
             table.by_key.insert(key, id);
+            crate::trace::trace_event!(
+                Quant,
+                "recipe",
+                recipe = id.0,
+                bound = q.bound.len(),
+                captures = n_caps,
+                triggers = describe_triggers(alloc, names, &table.recipes[id].groups),
+            );
             id
         }
     };
     table.by_forall.insert(q.clone(), (id, free.into()));
     Ok(id)
+}
+
+/// A recipe's trigger groups for the trace, e.g. `{f(x0), g(c0)} {h(x0)}`: binders
+/// are `x<i>`, captures `c<i>`.
+fn describe_triggers(
+    alloc: &FuncRegistry,
+    names: &dyn Fn(vmir::MemberId) -> String,
+    groups: &[Vec<PreparedTerm>],
+) -> String {
+    fn term(
+        t: &PreparedTerm,
+        alloc: &FuncRegistry,
+        names: &dyn Fn(vmir::MemberId) -> String,
+    ) -> String {
+        match t {
+            PreparedTerm::Bound(i) => format!("x{i}"),
+            PreparedTerm::Capture(i) => format!("c{i}"),
+            PreparedTerm::Lit(l) => l.to_string(),
+            PreparedTerm::App { func, args, .. } => {
+                let head = alloc
+                    .name(*func)
+                    .map_or_else(|| names(vmir::MemberId::from(func.0)), str::to_string);
+                let args: Vec<String> = args.iter().map(|a| term(a, alloc, names)).collect();
+                format!("{head}({})", args.join(", "))
+            }
+        }
+    }
+    let groups: Vec<String> = groups
+        .iter()
+        .map(|g| {
+            let terms: Vec<String> = g.iter().map(|t| term(t, alloc, names)).collect();
+            format!("{{{}}}", terms.join(", "))
+        })
+        .collect();
+    groups.join(" ")
 }

@@ -233,6 +233,8 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         for (rid, caps) in &quants {
             let recipe = table.get(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
+            // Complete trigger matches, and how many of them were new instances.
+            let (mut matches, mut new) = (0u64, 0u64);
             for group in &recipe.groups {
                 let Some((anchor, rest)) = group.split_first() else {
                     continue;
@@ -254,14 +256,24 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                     let Some(sigma): Option<Vec<Id>> = sigma.into_iter().collect() else {
                         continue;
                     };
+                    matches += 1;
                     // The seed is the body's leading temps: captures then binders.
                     let mut vals = caps.clone();
                     vals.extend(sigma);
                     if self.memo.insert((*rid, vals.clone())) {
+                        new += 1;
                         instances.push((*rid, vals));
                     }
                 }
             }
+            crate::trace::trace_tally!(
+                Quant,
+                "inst",
+                [recipe = rid.0],
+                visits = 1,
+                matches = matches,
+                new = new
+            );
         }
 
         let mut changed = Vec::new();

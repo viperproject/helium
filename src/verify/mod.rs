@@ -1,3 +1,4 @@
+use crate::trace::{self, trace_event};
 use crate::vmir;
 
 // Declared first: `#[macro_use]` scoping is textual, so every module below
@@ -96,16 +97,18 @@ pub fn verify_with_stats(
                     unreachable!("analyze guarantees a recursive SCC contains only functions");
                 };
                 let start = std::time::Instant::now();
-                let outcome = match declaration::verify_function(
-                    program,
-                    &name,
-                    id,
-                    f,
-                    &certs,
-                    &fn_certs,
-                    Some(&scc),
-                    &mut alloc,
-                ) {
+                let outcome = match traced(&name, "function", || {
+                    declaration::verify_function(
+                        program,
+                        &name,
+                        id,
+                        f,
+                        &certs,
+                        &fn_certs,
+                        Some(&scc),
+                        &mut alloc,
+                    )
+                }) {
                     Ok(None) => None,
                     Ok(Some(cert)) => {
                         batch_defs.push((id, cert));
@@ -129,8 +132,9 @@ pub fn verify_with_stats(
         let start = std::time::Instant::now();
         let outcome = match &program.decls[id] {
             vmir::Declaration::Resource(r) => {
-                match declaration::verify_resource(program, &name, r, &certs, &fn_certs, &mut alloc)
-                {
+                match traced(&name, "resource", || {
+                    declaration::verify_resource(program, &name, r, &certs, &fn_certs, &mut alloc)
+                }) {
                     Ok(cert) => {
                         certs.insert(id, cert);
                         Some(Ok(()))
@@ -139,9 +143,11 @@ pub fn verify_with_stats(
                 }
             }
             vmir::Declaration::Function(f) => {
-                match declaration::verify_function(
-                    program, &name, id, f, &certs, &fn_certs, None, &mut alloc,
-                ) {
+                match traced(&name, "function", || {
+                    declaration::verify_function(
+                        program, &name, id, f, &certs, &fn_certs, None, &mut alloc,
+                    )
+                }) {
                     Ok(None) => None,
                     Ok(Some(cert)) => {
                         fn_certs.insert(id, cert);
@@ -152,9 +158,9 @@ pub fn verify_with_stats(
                     Err(e) => Some(Err(e)),
                 }
             }
-            vmir::Declaration::Method(m) => Some(declaration::verify_method(
-                program, &name, m, &certs, &fn_certs, &mut alloc,
-            )),
+            vmir::Declaration::Method(m) => Some(traced(&name, "method", || {
+                declaration::verify_method(program, &name, m, &certs, &fn_certs, &mut alloc)
+            })),
             _ => None,
         };
         let elapsed = start.elapsed();
@@ -165,4 +171,31 @@ pub fn verify_with_stats(
     }
     let stats = stats::take_stats();
     (results, member_times, stats)
+}
+
+/// Verify one unit inside its trace scope: a `member`/`begin` event, then
+/// `member`/`end` with the verdict and the work the unit cost, then the unit's
+/// tallies.
+fn traced<T>(
+    name: &str,
+    kind: &'static str,
+    f: impl FnOnce() -> Result<T, VerifyError>,
+) -> Result<T, VerifyError> {
+    trace::in_member(name, || {
+        trace_event!(Member, "begin", kind = kind);
+        let clock = trace::clock();
+        let work = trace::enabled(trace::Category::Member).then(stats::work_now);
+        let out = f();
+        if let Some(work) = work {
+            let mut fields = vec![
+                ("kind", kind.into()),
+                ("ok", out.is_ok().into()),
+                ("error", out.as_ref().err().map(|e| e.to_string()).into()),
+            ];
+            fields.extend(stats::work_since(&work));
+            fields.push(("secs", trace::secs(clock).into()));
+            trace::emit(trace::Category::Member, "end", fields);
+        }
+        out
+    })
 }
