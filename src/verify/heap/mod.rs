@@ -694,4 +694,35 @@ mod tests {
         let order = |h: &Heap| h.kinds().cloned().collect::<Vec<_>>();
         assert_eq!(order(&build()), order(&build()));
     }
+
+    /// A value read takes its chunk from the demanded kind only. Two kinds at one
+    /// address class cannot arise from Viper on main (each group has its own
+    /// address head and nothing unions address classes), so the collision is built
+    /// directly: a field `f` and a predicate `P` whose addresses are made equal.
+    #[test]
+    fn chunk_canon_is_kind_scoped() {
+        let mut rodeo = lasso::Rodeo::default();
+        let mut kind = |name: &str| LocationKind {
+            group: rodeo.get_or_intern(name),
+            value: Type::Int,
+            bound: Bound::Unbounded,
+        };
+        let (field, pred, other) = (kind("f"), kind("P"), kind("g"));
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let fresh =
+            |ctx: &mut VerifyContext<'_>, i| ctx.add(crate::verify::lang::Symbolic::Fresh(i));
+        let (a_f, a_p) = (fresh(&mut ctx, 0), fresh(&mut ctx, 1));
+        let (v_f, v_p, one) = (fresh(&mut ctx, 2), fresh(&mut ctx, 3), fresh(&mut ctx, 4));
+        let h = Heap::empty()
+            .with_chunk(&pred, Chunk::new(a_p, one, v_p))
+            .with_chunk(&field, Chunk::new(a_f, one, v_f));
+        ctx.union(a_f, a_p);
+        ctx.egraph.rebuild();
+
+        let value_of = |k: &LocationKind, addr| h.chunk_canon(&ctx, k, addr).map(|c| c.value);
+        assert_eq!(value_of(&field, a_p), Some(v_f));
+        assert_eq!(value_of(&pred, a_f), Some(v_p));
+        assert_eq!(value_of(&other, a_f), None);
+    }
 }
