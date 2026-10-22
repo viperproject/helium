@@ -28,6 +28,17 @@ use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
 
+#[derive(Debug, Clone, Copy)]
+pub enum FuncKind {
+    Decl(MemberId),
+    Cons { head: MemberId, variant: usize },
+    Proj { head: MemberId, variant: usize, field: usize },
+    IsVariant { head: MemberId, variant: usize },
+    Limited(MemberId),
+    PreToken(MemberId),
+}
+
+
 /// Allocates and names the verifier ids for polymorphic ADT constructors /
 /// testers / projections, and accumulates their reduction rules.
 pub struct FuncRegistry {
@@ -380,6 +391,48 @@ impl FuncRegistry {
             .get(&adt)
             .cloned()
             .unwrap_or_else(|| format!("d{}", adt.0))
+    }
+
+    /// Inefficient way to lookup what kind of a function the FuncId is.
+    /// TODO: add a special lookup for this
+    pub fn kind(&self, f_id: FuncId) -> FuncKind {
+        // Check if they are functions belonging to builtin option type
+        match f_id {
+            BUILTIN_OPTION_SOME => return FuncKind::Cons {
+                head: BUILTIN_OPTION_HEAD,
+                variant: 0
+            },
+            BUILTIN_OPTION_NONE => return FuncKind::Cons {
+                head: BUILTIN_OPTION_HEAD,
+                variant: 1
+            },
+            BUILTIN_OPTION_VALUE => return FuncKind::Proj { head : BUILTIN_OPTION_HEAD, variant: 0, field: 0 },
+            BUILTIN_OPTION_IS_SOME => return FuncKind::IsVariant { head : BUILTIN_OPTION_HEAD, variant: 0 },
+            BUILTIN_OPTION_IS_NONE => return FuncKind::IsVariant { head : BUILTIN_OPTION_HEAD, variant: 1 },
+            _ => {}
+        }
+
+        // Check if it is an adt constructor
+        if let Some((&(head, variant), _)) = self.cons.iter().find(|&(_, &id)| id == f_id) {
+            return FuncKind::Cons { head, variant };
+        }
+        // adt projection
+        if let Some((&(head, variant, field), _)) = self.proj.iter().find(|&(_, &id)| id == f_id) {
+            return FuncKind::Proj { head, variant, field };
+        }
+        // adt tester
+        if let Some((&(head, variant), _)) = self.adt_is.iter().find(|&(_, &id)| id == f_id) {
+            return FuncKind::IsVariant { head, variant };
+        }
+        // recursive (limited)
+        if let Some((&m, _)) = self.limited.iter().find(|&(_, &id)| id == f_id) {
+            return FuncKind::Limited(m);
+        }
+        // pre token
+        if let Some((&m, _)) = self.fn_pre_token.iter().find(|&(_, &id)| id == f_id) {
+            return FuncKind::PreToken(m);
+        }
+        FuncKind::Decl(MemberId(f_id.0))
     }
 }
 
