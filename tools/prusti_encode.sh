@@ -4,13 +4,20 @@
 # Usage: prusti_encode.sh <source_file.rs> <output_file.vpr>
 #
 # Environment:
-#   PRUSTI_RUSTC             prusti-rustc executable (default: `prusti-rustc` from PATH)
+#   PRUSTI_RUSTC             prusti-rustc executable (required; there is deliberately no
+#                            PATH fallback, which could silently pick up classic Prusti)
 #   PRUSTI_CHECK_OVERFLOWS   encode overflow checks (default: false; panic_free/ sets true)
 #   PRUSTI_ENCODE_VERIFY     set to true to let Prusti verify the program with Silicon
 #                            (default: false, encode only)
 #
 # Prusti runs in a scratch directory and dumps the whole crate as a single program to
 # log/viper_program/program-check.vpr, which is moved to <output_file.vpr>.
+#
+# The .vpr starts with `// prusti-encode:` comment lines recording which Prusti made it:
+# its `--version` line, `git describe` of the checkout holding the executable, and the
+# sha256 of prusti-driver (the binary that encodes). The first two can be stale (the
+# version is baked in at build time; the checkout may have moved since), the hash
+# cannot: two encodings are from the same encoder only if their driver hashes match.
 #
 # Prusti has no encode-only mode: no_verify / skip_verification skip the encoder too,
 # and the dump is written just before the program is handed to Silicon. So unless
@@ -37,12 +44,29 @@ SRC_FILE="$(realpath "$1")"
 OUT_FILE="$(realpath -m "$2")"
 mkdir -p "$(dirname "$OUT_FILE")"
 
-PRUSTI_RUSTC="${PRUSTI_RUSTC:-prusti-rustc}"
-if ! command -v "$PRUSTI_RUSTC" &> /dev/null; then
-    echo "Error: prusti-rustc not found ('$PRUSTI_RUSTC')." >&2
-    echo "Set PRUSTI_RUSTC to the prusti-rustc executable, or put it on PATH." >&2
+if [ -z "${PRUSTI_RUSTC:-}" ]; then
+    echo "Error: PRUSTI_RUSTC is not set." >&2
+    echo "Set it to the prusti-next prusti-rustc executable (not one from PATH)." >&2
     exit 1
 fi
+if ! command -v "$PRUSTI_RUSTC" &> /dev/null; then
+    echo "Error: prusti-rustc not found ('$PRUSTI_RUSTC')." >&2
+    exit 1
+fi
+
+PRUSTI_BIN_DIR="$(dirname "$(command -v "$PRUSTI_RUSTC")")"
+PRUSTI_DRIVER="$PRUSTI_BIN_DIR/prusti-driver"
+[ -f "$PRUSTI_DRIVER" ] || PRUSTI_DRIVER="$PRUSTI_DRIVER.exe"
+if [ ! -f "$PRUSTI_DRIVER" ]; then
+    echo "Error: no prusti-driver next to '$PRUSTI_RUSTC'." >&2
+    exit 1
+fi
+# awk reads all of the output: `grep -m1` closed the pipe early, and under pipefail the
+# writer's SIGPIPE then appended "unknown" to the header as a stray line.
+PROV_VERSION="$(env -u PRUSTI_RUSTC -u PRUSTI_ENCODE -u PRUSTI_ENCODE_VERIFY \
+    "$PRUSTI_RUSTC" --version 2>&1 | awk '/^Prusti version/ && !v { v = $0 } END { print (v ? v : "unknown") }')"
+PROV_CHECKOUT="$(git -C "$PRUSTI_BIN_DIR" describe --always --dirty --abbrev=11 2>/dev/null || echo unknown)"
+PROV_DRIVER="$(sha256sum "$PRUSTI_DRIVER" | cut -c1-16)"
 
 echo "Encoding: $1 -> $2"
 
@@ -69,13 +93,21 @@ status=0
 
 VPR_FILE="$TMP_DIR/log/viper_program/program-check.vpr"
 if [ -f "$VPR_FILE" ]; then
-    mv "$VPR_FILE" "$OUT_FILE"
+    {
+        echo "// prusti-encode: $PROV_VERSION"
+        echo "// prusti-encode: checkout $PROV_CHECKOUT, prusti-driver sha256 $PROV_DRIVER"
+        echo "// prusti-encode: PRUSTI_CHECK_OVERFLOWS=${PRUSTI_CHECK_OVERFLOWS:-false}"
+        cat "$VPR_FILE"
+    } > "$OUT_FILE"
     if [ "$status" -ne 0 ] && [ "$VERIFY" = "true" ]; then
         echo "Note: prusti-rustc exited with $status (program rejected), but the encoding was dumped."
     fi
     echo "Successfully generated: $2"
 else
     echo "Error: Prusti did not dump a .vpr for $1 (exit $status). Prusti output:" >&2
+    if [ -d "$TMP_DIR/log/viper_program" ]; then
+        echo "(it dumped $(ls "$TMP_DIR/log/viper_program" | head -1) instead: classic Prusti, not prusti-next?)" >&2
+    fi
     tail -n 40 "$LOG_FILE" >&2
     exit 1
 fi

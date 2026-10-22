@@ -1,3 +1,76 @@
+// prusti-encode: Prusti version: 0.3.0, commit ae6032113e3 2026-10-06 13:49:33 UTC, built on 2026-10-13 13:50:15 UTC
+// prusti-encode: checkout ae6032113e3, prusti-driver sha256 16a13eb208c6440e
+// prusti-encode: PRUSTI_CHECK_OVERFLOWS=true
+domain ParamTyp  {
+
+  function s_Param_typ(arg0: s_Param): Type
+
+  function s_Param_has_typ(arg0: s_Param, arg1: Type): Bool
+
+  axiom s_Param_has_typ_own {
+    (forall p: s_Param ::
+      { s_Param_typ(p) }
+      s_Param_has_typ(p, s_Param_typ(p)))
+  }
+}
+
+domain ParamTyp_make_generic_s_Array  {
+
+  axiom s_Param_typ_def_make_generic_s_Array {
+    (forall x: s_Array, U$1: Type, M$0: s_UInt_usize ::
+      { make_generic_s_Array(x, U$1, M$0) }
+      s_Param_typ(make_generic_s_Array(x, U$1, M$0)) ==
+      s_Array_type(U$1, M$0))
+  }
+
+  axiom s_Param_typ_variant_make_generic_s_Array {
+    (forall p: s_Param ::
+      { p.make_concrete_s_Array, s_Param_typ(p) }
+      s_Param_typ(p) ==
+      s_Array_type(s_Param_typ(p).s_Array_typaram_U$1, s_Param_typ(p).s_Array_constparam_M$0) ==>
+      make_generic_s_Array(p.make_concrete_s_Array, s_Param_typ(p).s_Array_typaram_U$1, s_Param_typ(p).s_Array_constparam_M$0) ==
+      p)
+  }
+}
+
+domain ParamTyp_make_generic_s_0_Tuple  {
+
+  axiom s_Param_typ_def_make_generic_s_0_Tuple {
+    (forall x: s_0_Tuple ::
+      { make_generic_s_0_Tuple(x) }
+      s_Param_typ(make_generic_s_0_Tuple(x)) == s_0_Tuple_type())
+  }
+
+  axiom s_Param_typ_variant_make_generic_s_0_Tuple {
+    (forall p: s_Param ::
+      { s_Param_has_typ(p, s_0_Tuple_type()) }
+      s_Param_typ(p) == s_0_Tuple_type() ==>
+      make_generic_s_0_Tuple(s_0_Tuple_cons()) == p)
+  }
+
+  axiom make_generic_s_0_Tuple_unit {
+    (forall p: s_Param ::
+      { p.make_concrete_s_0_Tuple }
+      p.make_concrete_s_0_Tuple == s_0_Tuple_cons())
+  }
+}
+
+domain ParamTyp_make_generic_s_Int_i32  {
+
+  axiom s_Param_typ_def_make_generic_s_Int_i32 {
+    (forall x: s_Int_i32 ::
+      { make_generic_s_Int_i32(x) }
+      s_Param_typ(make_generic_s_Int_i32(x)) == s_Int_i32_type())
+  }
+
+  axiom s_Param_typ_variant_make_generic_s_Int_i32 {
+    (forall p: s_Param ::
+      { p.make_concrete_s_Int_i32, s_Param_typ(p) }
+      s_Param_typ(p) == s_Int_i32_type() ==>
+      make_generic_s_Int_i32(p.make_concrete_s_Int_i32) == p)
+  }
+}
+
 domain s_Int_i32  {
   
   function s_Int_i32_cons(arg0: Int): s_Int_i32 
@@ -22,11 +95,6 @@ domain s_Int_i32  {
       -2147483648 <= value && value <= 2147483647 ==>
       s_Int_i32_value(s_Int_i32_cons(value)) == value)
   }
-}
-
-domain s_Param  {
-  
-  
 }
 
 domain s_UInt_usize  {
@@ -63,95 +131,165 @@ domain s_Array  {
   function s_Array_index_ref(arg0: Ref, arg1: Int, arg2: Type): Ref 
 }
 
-domain s_Bool  {
-  
-  function s_Bool_cons(arg0: Bool): s_Bool 
-  
-  function s_Bool_value(arg0: s_Bool): Bool 
-  
-  axiom s_Bool_ax_cons {
-    (forall s: s_Bool ::
-      { s_Bool_value(s) }
-      s_Bool_cons(s_Bool_value(s)) == s)
+domain Inhabited  {
+
+  function inhabited(arg0: Type): Bool
+
+  axiom inhabited_Int_i32 {
+    inhabited(s_Int_i32_type()) == true
   }
-  
-  axiom s_Bool_ax_value {
-    (forall value: Bool ::
-      { s_Bool_cons(value) }
-      s_Bool_value(s_Bool_cons(value)) == value)
+
+  axiom inhabited_Ref_immutable {
+    (forall U$1: Type ::
+      { inhabited(s_Ref_immutable_type(U$1)) }
+      inhabited(s_Ref_immutable_type(U$1)) == inhabited(U$1))
+  }
+
+  axiom inhabited_Array {
+    (forall U$1: Type, M$0: s_UInt_usize ::
+      { inhabited(s_Array_type(U$1, M$0)) }
+      inhabited(s_Array_type(U$1, M$0)) ==
+      (M$0 == s_UInt_usize_cons(0) || inhabited(U$1)))
+  }
+
+  axiom inhabited_UInt_usize {
+    inhabited(s_UInt_usize_type()) == true
+  }
+
+  axiom inhabited_Bool {
+    inhabited(s_Bool_type()) == true
   }
 }
 
-domain TypeOf  {
-  
-  function s_Array_typeof(arg0: s_Array): Type 
-  
-  function s_Int_i32_typeof(arg0: s_Int_i32): Type 
-  
-  function s_Param_typeof(arg0: s_Param): Type 
-  
-  function s_0_Tuple_typeof(arg0: s_0_Tuple): Type 
+domain ReadPerm  {
+
+  function read(): Perm
+
+  axiom read_bounds {
+    none < read() && read() < write
+  }
 }
 
-domain trait_Pointee  {
+domain trait_std$col$$col$marker$col$$col$Sized  {
+
+  function std$col$$col$marker$col$$col$Sized_impl(arg0: Type): Bool
+}
+
+domain trait_std$col$$col$marker$col$$col$MetaSized  {
+
+  function std$col$$col$marker$col$$col$MetaSized_impl(arg0: Type): Bool
+}
+
+domain trait_std$col$$col$ptr$col$$col$Pointee  {
   
-  function Pointee_assoc_type_Metadata(arg0: Type): Type 
+  function std$col$$col$ptr$col$$col$Pointee_assoc_type_std$col$$col$ptr$col$$col$Pointee$col$$col$Metadata(arg0: Type): Type
   
-  function impl_Pointee(arg0: Type): Bool 
+  function std$col$$col$ptr$col$$col$Pointee_impl(arg0: Type): Bool
+}
+
+domain sizedness_Int_i32  {
+  
+  axiom s_Int_i32_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_Int_i32_type())
+  }
+  
+  axiom s_Int_i32_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_Int_i32_type())
+  }
+}
+
+domain sizedness_Ref_immutable  {
+
+  axiom s_Ref_immutable_Sized {
+    (forall U$1: Type ::
+      { std$col$$col$marker$col$$col$Sized_impl(s_Ref_immutable_type(U$1)) }
+      std$col$$col$marker$col$$col$Sized_impl(s_Ref_immutable_type(U$1)))
+  }
+  
+  axiom s_Ref_immutable_MetaSized {
+    (forall U$1: Type ::
+      { std$col$$col$marker$col$$col$MetaSized_impl(s_Ref_immutable_type(U$1)) }
+      std$col$$col$marker$col$$col$MetaSized_impl(s_Ref_immutable_type(U$1)))
+  }
+}
+
+domain sizedness_Array  {
+  
+  axiom s_Array_Sized {
+    (forall U$1: Type, M$0: s_UInt_usize ::
+      { std$col$$col$marker$col$$col$Sized_impl(s_Array_type(U$1, M$0)) }
+      std$col$$col$marker$col$$col$Sized_impl(s_Array_type(U$1, M$0)))
+  }
+  
+  axiom s_Array_MetaSized {
+    (forall U$1: Type, M$0: s_UInt_usize ::
+      { std$col$$col$marker$col$$col$MetaSized_impl(s_Array_type(U$1, M$0)) }
+      std$col$$col$marker$col$$col$MetaSized_impl(s_Array_type(U$1, M$0)))
+  }
+}
+
+domain sizedness_0_Tuple  {
+  
+  axiom s_0_Tuple_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_0_Tuple_type())
+  }
+  
+  axiom s_0_Tuple_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_0_Tuple_type())
+  }
+}
+
+domain sizedness_UInt_usize  {
+
+  axiom s_UInt_usize_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_UInt_usize_type())
+  }
+
+  axiom s_UInt_usize_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_UInt_usize_type())
+  }
+}
+
+domain sizedness_Bool  {
+
+  axiom s_Bool_Sized {
+    std$col$$col$marker$col$$col$Sized_impl(s_Bool_type())
+  }
+
+  axiom s_Bool_MetaSized {
+    std$col$$col$marker$col$$col$MetaSized_impl(s_Bool_type())
+  }
 }
 
 field p_Int_i32_val: s_Int_i32
 
-field p_Ref_immutable_val: s_Ref_immutable
+field p_Ref_immutable_addr: Ref
+
+field p_Ref_immutable_metadata: s_Param
 
 field p_UInt_usize_val: s_UInt_usize
 
-field p_Bool_val: s_Bool
+field p_Bool_val: Bool
 
-function mir_binop_Lt_UInt_usize_UInt_usize(arg1: s_UInt_usize, arg2: s_UInt_usize): s_Bool
+function mir_binop_Lt_UInt_usize_UInt_usize(arg1: s_UInt_usize, arg2: s_UInt_usize): Bool
 {
-  s_Bool_cons(s_UInt_usize_value(arg1) < s_UInt_usize_value(arg2))
+  s_UInt_usize_value(arg1) < s_UInt_usize_value(arg2)
 }
-
-function make_generic_s_Array(self: s_Array, U$1: Type, M$0: s_UInt_usize): s_Param
-  ensures s_Param_typeof(result) ==
-    s_Array_type(s_Array_typeof(self).s_Array_typaram_U$1, s_Array_typeof(self).s_Array_constparam_M$0)
-  ensures make_concrete_s_Array(result, s_Array_typeof(self).s_Array_typaram_U$1,
-    s_Array_typeof(self).s_Array_constparam_M$0) ==
-    self
-
-
-function make_concrete_s_Array(snap: s_Param, U$1: Type, M$0: s_UInt_usize): s_Array
-  ensures make_generic_s_Array(result, U$1, M$0) == snap
-
-
-function make_generic_s_0_Tuple(self: s_0_Tuple): s_Param
-  ensures s_Param_typeof(result) == s_0_Tuple_type()
-  ensures make_concrete_s_0_Tuple(result) == self
-
-
-function make_concrete_s_0_Tuple(snap: s_Param): s_0_Tuple
-  ensures make_generic_s_0_Tuple(result) == snap
-
-
-function make_generic_s_Int_i32(self: s_Int_i32): s_Param
-  ensures s_Param_typeof(result) == s_Int_i32_type()
-  ensures make_concrete_s_Int_i32(result) == self
-
-
-function make_concrete_s_Int_i32(snap: s_Param): s_Int_i32
-  ensures make_generic_s_Int_i32(result) == snap
-
 
 function s_Int_i32_unreachable(): s_Int_i32
   ensures false
 
 
-function s_Param_unreachable(T$0: Type): s_Param
+function s_Ref_immutable_unreachable(U$1: Type): s_Ref_immutable
   ensures false
 
 
-function s_Ref_immutable_unreachable(U$1: Type): s_Ref_immutable
+function s_Ref_immutable_value_snap_of(immref_snap: s_Ref_immutable): s_Ref_immutable
+{
+  s_Ref_immutable_cons(null, immref_snap.s_Ref_immutable_1, immref_snap.s_Ref_immutable_2)
+}
+
+function s_Param_unreachable(T$0: Type): s_Param
   ensures false
 
 
@@ -167,7 +305,7 @@ function s_0_Tuple_unreachable(): s_0_Tuple
   ensures false
 
 
-function s_Bool_unreachable(): s_Bool
+function s_Bool_unreachable(): Bool
   ensures false
 
 
@@ -177,16 +315,21 @@ function p_Int_i32_snap(self: Ref): s_Int_i32
   (unfolding acc(p_Int_i32(self), write) in self.p_Int_i32_val)
 }
 
-function p_Param_snap(self: Ref, T$0: Type): s_Param
-  requires acc(p_Param(self, T$0), write)
-
-
 function p_Ref_immutable_snap(self: Ref, U$1: Type): s_Ref_immutable
   requires acc(p_Ref_immutable(self, U$1), write)
+  ensures s_Param_typ(result.s_Ref_immutable_1) ==
+    std$col$$col$ptr$col$$col$Pointee_assoc_type_std$col$$col$ptr$col$$col$Pointee$col$$col$Metadata(U$1)
+  ensures s_Param_typ(result.s_Ref_immutable_2) == U$1
 {
   (unfolding acc(p_Ref_immutable(self, U$1), write) in
-    self.p_Ref_immutable_val)
+    s_Ref_immutable_cons(self.p_Ref_immutable_addr, self.p_Ref_immutable_metadata, p_Param_snap(self.p_Ref_immutable_addr,
+    U$1)))
 }
+
+function p_Param_snap(self: Ref, T$0: Type): s_Param
+  requires acc(p_Param(self, T$0), write)
+  ensures s_Param_typ(result) == T$0
+
 
 function p_Array_index_frame(self: Ref, index: Int, U$1: Type, M$0: s_UInt_usize): s_Array
   requires acc(p_Array_index(self, index, U$1, M$0), write)
@@ -202,7 +345,7 @@ function p_UInt_usize_snap(self: Ref): s_UInt_usize
   (unfolding acc(p_UInt_usize(self), write) in self.p_UInt_usize_val)
 }
 
-function p_Bool_snap(self: Ref): s_Bool
+function p_Bool_snap(self: Ref): Bool
   requires acc(p_Bool(self), write)
 {
   (unfolding acc(p_Bool(self), write) in self.p_Bool_val)
@@ -212,11 +355,15 @@ predicate p_Int_i32(self: Ref) {
   acc(self.p_Int_i32_val, write)
 }
 
-predicate p_Param(self: Ref, T$0: Type) 
-
 predicate p_Ref_immutable(self: Ref, U$1: Type) {
-  acc(self.p_Ref_immutable_val, write)
+  acc(self.p_Ref_immutable_addr, write) &&
+  acc(self.p_Ref_immutable_metadata, write) &&
+  (s_Param_typ(self.p_Ref_immutable_metadata) ==
+  std$col$$col$ptr$col$$col$Pointee_assoc_type_std$col$$col$ptr$col$$col$Pointee$col$$col$Metadata(U$1) &&
+  acc(p_Param(self.p_Ref_immutable_addr, U$1), read()))
 }
+
+predicate p_Param(self: Ref, T$0: Type)
 
 predicate p_Array(self: Ref, U$1: Type, M$0: s_UInt_usize) 
 
@@ -231,13 +378,16 @@ predicate p_Bool(self: Ref) {
 }
 
 method m_index_const(_0p: Ref, _1p: Ref)
-  requires acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
-  ensures acc(p_Int_i32(_0p), write)
+  requires inhabited(s_Ref_immutable_type(s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8)))) &&
+    acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
+  ensures inhabited(s_Int_i32_type()) && acc(p_Int_i32(_0p), write)
 {
   var _2p: Ref
   var _3p: Ref
   var _from_bb0_to_bb1: Bool
-  var _tmp0: s_Bool
+  var _tmp0: s_UInt_usize
+  var _tmp1: Bool
+  var _tmp2: s_Int_i32
   label start
   // var _2p
   // var _3p
@@ -260,10 +410,11 @@ method m_index_const(_0p: Ref, _1p: Ref)
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> })), label: None })
   // (ignoring) LabelPlace(LabelPlaceAction { place: (*_1), location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreOperands }), reason: Collapse, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: Some(Future), phantom: PhantomData<&()> })), label: None })
+  // var _tmp0
+  _tmp0 := p_UInt_usize_snap(_2p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Bool_assign(_3p, mir_binop_Lt_UInt_usize_UInt_usize(p_UInt_usize_snap(_2p),
-    s_UInt_usize_cons(8)))
+  p_Bool_assign(_3p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp0, s_UInt_usize_cons(8)))
   label _before_0_4
   // [MIR] bb0[4]: assert(move _3, "index out of bounds: the length is {} but the index is {}", const 8_usize, copy _2) -> [success: bb1, unwind: bb2]
   // PCG (T) pre_operands
@@ -272,11 +423,12 @@ method m_index_const(_0p: Ref, _1p: Ref)
   // PCG (T) post_operands
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // PCG (T) pre_main
+  // var _tmp1
+  _tmp1 := p_Bool_snap(_3p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_3p), write)
+  exhale _tmp1 == true
   // PCG (T) post_main
-  // var _tmp0
-  _tmp0 := p_Bool_snap(_3p)
-  exhale acc(p_Bool(_3p), write)
-  exhale s_Bool_value(_tmp0) == true
+  label _after_0
   _from_bb0_to_bb1 := true
   goto bb_1
   label bb_1
@@ -284,11 +436,12 @@ method m_index_const(_0p: Ref, _1p: Ref)
   // [MIR] bb1[0]: _0 = copy (*_1)[_2]
   // (PCG) handled edge Add: {a} -> {*a}
   // (PCG) handled edge Add: {*a} -> {(*a)[_2]}
+  // var _tmp2
+  _tmp2 := s_Array_index(p_Ref_immutable_snap(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2.make_concrete_s_Array,
+    s_UInt_usize_value(p_UInt_usize_snap(_2p))).make_concrete_s_Int_i32
   // (ignoring) LabelPlace(LabelPlaceAction { place: _0, location: Before(AnalysisLocation { location: bb1[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_0), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Int_i32_assign(_0p, make_concrete_s_Int_i32(s_Array_index(make_concrete_s_Array(p_Ref_immutable_snap(_1p,
-    s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2,
-    s_Int_i32_type(), s_UInt_usize_cons(8)), s_UInt_usize_value(p_UInt_usize_snap(_2p)))))
+  p_Int_i32_assign(_0p, _tmp2)
   label _before_1_1
   // [MIR] bb1[1]: StorageDead(_2)
   // (PCG) handled edge Remove: {*a} -> {(*a)[_2]}
@@ -301,7 +454,7 @@ method m_index_const(_0p: Ref, _1p: Ref)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _2, location: Before(AnalysisLocation { location: bb1[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_2), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
   // [PCG] Weaken(Weaken { place: _2, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
-  // Weaken(E, W) for _2 (skipped exhale: StorageDead)
+  // Weaken to Write for _2 (skipped exhale: StorageDead)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _2, location: Before(AnalysisLocation { location: bb1[1], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
   label _before_1_2
   // [MIR] bb1[2]: return
@@ -310,7 +463,6 @@ method m_index_const(_0p: Ref, _1p: Ref)
   // ignored repack op: RegainLoanedCapability(RegainedCapability { place: _1, capability: E })
   // PCG (T) post_operands
   // PCG (T) pre_main
-  // PCG (T) post_main
   label package_post0
   goto end
   label bb_2
@@ -322,9 +474,10 @@ method m_index_const(_0p: Ref, _1p: Ref)
 }
 
 method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
-  requires acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
-  requires acc(p_UInt_usize(_2p), write)
-  ensures acc(p_Int_i32(_0p), write)
+  requires inhabited(s_Ref_immutable_type(s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8)))) &&
+    acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
+  requires inhabited(s_UInt_usize_type()) && acc(p_UInt_usize(_2p), write)
+  ensures inhabited(s_Int_i32_type()) && acc(p_Int_i32(_0p), write)
 {
   var _3p: Ref
   var _4p: Ref
@@ -336,8 +489,13 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   var _from_bb0_to_bb1: Bool
   var _from_bb0_to_bb3: Bool
   var _tmp0: s_UInt_usize
-  var _tmp1: s_Bool
-  var _tmp2: s_Bool
+  var _tmp1: s_UInt_usize
+  var _tmp2: Bool
+  var _tmp3: Bool
+  var _tmp4: s_UInt_usize
+  var _tmp5: s_UInt_usize
+  var _tmp6: Bool
+  var _tmp7: s_Int_i32
   label start
   // var _3p
   // var _4p
@@ -356,29 +514,34 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // [MIR] bb0[1]: StorageLive(_4)
   label _before_0_2
   // [MIR] bb0[2]: _4 = copy _2
+  // var _tmp0
+  _tmp0 := p_UInt_usize_snap(_2p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb0[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_4), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_UInt_usize_assign(_4p, p_UInt_usize_snap(_2p))
+  p_UInt_usize_assign(_4p, _tmp0)
   label _before_0_3
   // [MIR] bb0[3]: _3 = Lt(move _4, const 8_usize)
+  // var _tmp1
+  _tmp1 := p_UInt_usize_snap(_4p)
+  exhale inhabited(s_UInt_usize_type()) && acc(p_UInt_usize(_4p), write)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  // var _tmp0
-  _tmp0 := p_UInt_usize_snap(_4p)
-  exhale acc(p_UInt_usize(_4p), write)
-  p_Bool_assign(_3p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp0, s_UInt_usize_cons(8)))
+  p_Bool_assign(_3p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp1, s_UInt_usize_cons(8)))
   label _before_0_4
   // [MIR] bb0[4]: switchInt(move _3) -> [0: bb3, otherwise: bb1]
   // PCG (T) pre_operands
   // PCG (T) post_operands
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // PCG (T) pre_main
+  // var _tmp2
+  _tmp2 := p_Bool_snap(_3p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_3p), write)
+  // var _tmp3
+  _tmp3 := _tmp2
   // PCG (T) post_main
-  // var _tmp1
-  _tmp1 := p_Bool_snap(_3p)
-  exhale acc(p_Bool(_3p), write)
-  if (s_Bool_value(_tmp1) == false) {
+  label _after_0
+  if (_tmp3 == false) {
     _from_bb0_to_bb3 := true
     goto bb_3
   } else {
@@ -404,6 +567,7 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // PCG (T) pre_main
   // PCG (T) post_main
+  label _after_3
   _from_bb3_to_bb4 := true
   goto bb_4
   label bb_1
@@ -416,9 +580,11 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // [MIR] bb1[1]: StorageLive(_5)
   label _before_1_2
   // [MIR] bb1[2]: _5 = copy _2
+  // var _tmp4
+  _tmp4 := p_UInt_usize_snap(_2p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb1[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_5), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_UInt_usize_assign(_5p, p_UInt_usize_snap(_2p))
+  p_UInt_usize_assign(_5p, _tmp4)
   label _before_1_3
   // [MIR] bb1[3]: FakeRead(ForIndex, (*_1))
   // (PCG) handled edge Add: {a} -> {*a}
@@ -428,10 +594,11 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> })), label: None })
   // (ignoring) LabelPlace(LabelPlaceAction { place: (*_1), location: Before(AnalysisLocation { location: bb1[4], eval_stmt_phase: PreOperands }), reason: Collapse, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: Some(Future), phantom: PhantomData<&()> })), label: None })
+  // var _tmp5
+  _tmp5 := p_UInt_usize_snap(_5p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb1[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_6), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Bool_assign(_6p, mir_binop_Lt_UInt_usize_UInt_usize(p_UInt_usize_snap(_5p),
-    s_UInt_usize_cons(8)))
+  p_Bool_assign(_6p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp5, s_UInt_usize_cons(8)))
   label _before_1_5
   // [MIR] bb1[5]: assert(move _6, "index out of bounds: the length is {} but the index is {}", const 8_usize, copy _5) -> [success: bb2, unwind: bb5]
   // PCG (T) pre_operands
@@ -440,37 +607,25 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb1[5], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // PCG (T) pre_main
+  // var _tmp6
+  _tmp6 := p_Bool_snap(_6p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_6p), write)
+  exhale _tmp6 == true
   // PCG (T) post_main
-  // var _tmp2
-  _tmp2 := p_Bool_snap(_6p)
-  exhale acc(p_Bool(_6p), write)
-  exhale s_Bool_value(_tmp2) == true
+  label _after_1
   _from_bb1_to_bb2 := true
   goto bb_2
-  label bb_4
-  label _before_4_0
-  // [MIR] bb4[0]: StorageDead(_3)
-  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
-  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
-  label _before_4_1
-  // [MIR] bb4[1]: return
-  // PCG (T) pre_operands
-  // PCG (T) post_operands
-  // PCG (T) pre_main
-  // PCG (T) post_main
-  label package_post0
-  goto end
   label bb_2
   label _before_2_0
   // [MIR] bb2[0]: _0 = copy (*_1)[_5]
   // (PCG) handled edge Add: {a} -> {*a}
   // (PCG) handled edge Add: {*a} -> {(*a)[_5]}
+  // var _tmp7
+  _tmp7 := s_Array_index(p_Ref_immutable_snap(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2.make_concrete_s_Array,
+    s_UInt_usize_value(p_UInt_usize_snap(_5p))).make_concrete_s_Int_i32
   // (ignoring) LabelPlace(LabelPlaceAction { place: _0, location: Before(AnalysisLocation { location: bb2[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_0), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Int_i32_assign(_0p, make_concrete_s_Int_i32(s_Array_index(make_concrete_s_Array(p_Ref_immutable_snap(_1p,
-    s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2,
-    s_Int_i32_type(), s_UInt_usize_cons(8)), s_UInt_usize_value(p_UInt_usize_snap(_5p)))))
+  p_Int_i32_assign(_0p, _tmp7)
   label _before_2_1
   // [MIR] bb2[1]: StorageDead(_5)
   // (PCG) handled edge Remove: {*a} -> {(*a)[_5]}
@@ -483,7 +638,7 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb2[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_5), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
   // [PCG] Weaken(Weaken { place: _5, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
-  // Weaken(E, W) for _5 (skipped exhale: StorageDead)
+  // Weaken to Write for _5 (skipped exhale: StorageDead)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb2[1], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
   label _before_2_2
   // [MIR] bb2[2]: goto -> bb4
@@ -493,8 +648,22 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // PCG (T) pre_main
   // PCG (T) post_main
+  label _after_2
   _from_bb2_to_bb4 := true
   goto bb_4
+  label bb_4
+  label _before_4_0
+  // [MIR] bb4[0]: StorageDead(_3)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_4_1
+  // [MIR] bb4[1]: return
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  label package_post0
+  goto end
   label bb_5
   // cleanup block
   assert false
@@ -504,9 +673,10 @@ method m_index_guard_lt_len(_0p: Ref, _1p: Ref, _2p: Ref)
 }
 
 method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
-  requires acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
-  requires acc(p_UInt_usize(_2p), write)
-  ensures acc(p_Int_i32(_0p), write)
+  requires inhabited(s_Ref_immutable_type(s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8)))) &&
+    acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
+  requires inhabited(s_UInt_usize_type()) && acc(p_UInt_usize(_2p), write)
+  ensures inhabited(s_Int_i32_type()) && acc(p_Int_i32(_0p), write)
 {
   var _3p: Ref
   var _4p: Ref
@@ -518,8 +688,13 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   var _from_bb0_to_bb1: Bool
   var _from_bb0_to_bb3: Bool
   var _tmp0: s_UInt_usize
-  var _tmp1: s_Bool
-  var _tmp2: s_Bool
+  var _tmp1: s_UInt_usize
+  var _tmp2: Bool
+  var _tmp3: Bool
+  var _tmp4: s_UInt_usize
+  var _tmp5: s_UInt_usize
+  var _tmp6: Bool
+  var _tmp7: s_Int_i32
   label start
   // var _3p
   // var _4p
@@ -538,29 +713,34 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // [MIR] bb0[1]: StorageLive(_4)
   label _before_0_2
   // [MIR] bb0[2]: _4 = copy _2
+  // var _tmp0
+  _tmp0 := p_UInt_usize_snap(_2p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb0[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_4), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_UInt_usize_assign(_4p, p_UInt_usize_snap(_2p))
+  p_UInt_usize_assign(_4p, _tmp0)
   label _before_0_3
   // [MIR] bb0[3]: _3 = Lt(move _4, const 16_usize)
+  // var _tmp1
+  _tmp1 := p_UInt_usize_snap(_4p)
+  exhale inhabited(s_UInt_usize_type()) && acc(p_UInt_usize(_4p), write)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  // var _tmp0
-  _tmp0 := p_UInt_usize_snap(_4p)
-  exhale acc(p_UInt_usize(_4p), write)
-  p_Bool_assign(_3p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp0, s_UInt_usize_cons(16)))
+  p_Bool_assign(_3p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp1, s_UInt_usize_cons(16)))
   label _before_0_4
   // [MIR] bb0[4]: switchInt(move _3) -> [0: bb3, otherwise: bb1]
   // PCG (T) pre_operands
   // PCG (T) post_operands
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // PCG (T) pre_main
+  // var _tmp2
+  _tmp2 := p_Bool_snap(_3p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_3p), write)
+  // var _tmp3
+  _tmp3 := _tmp2
   // PCG (T) post_main
-  // var _tmp1
-  _tmp1 := p_Bool_snap(_3p)
-  exhale acc(p_Bool(_3p), write)
-  if (s_Bool_value(_tmp1) == false) {
+  label _after_0
+  if (_tmp3 == false) {
     _from_bb0_to_bb3 := true
     goto bb_3
   } else {
@@ -586,6 +766,7 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // PCG (T) pre_main
   // PCG (T) post_main
+  label _after_3
   _from_bb3_to_bb4 := true
   goto bb_4
   label bb_1
@@ -598,9 +779,11 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // [MIR] bb1[1]: StorageLive(_5)
   label _before_1_2
   // [MIR] bb1[2]: _5 = copy _2
+  // var _tmp4
+  _tmp4 := p_UInt_usize_snap(_2p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb1[2], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_5), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_UInt_usize_assign(_5p, p_UInt_usize_snap(_2p))
+  p_UInt_usize_assign(_5p, _tmp4)
   label _before_1_3
   // [MIR] bb1[3]: FakeRead(ForIndex, (*_1))
   // (PCG) handled edge Add: {a} -> {*a}
@@ -610,10 +793,11 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> })), label: None })
   // (ignoring) LabelPlace(LabelPlaceAction { place: (*_1), location: Before(AnalysisLocation { location: bb1[4], eval_stmt_phase: PreOperands }), reason: Collapse, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: Some(Future), phantom: PhantomData<&()> })), label: None })
+  // var _tmp5
+  _tmp5 := p_UInt_usize_snap(_5p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb1[4], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_6), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Bool_assign(_6p, mir_binop_Lt_UInt_usize_UInt_usize(p_UInt_usize_snap(_5p),
-    s_UInt_usize_cons(8)))
+  p_Bool_assign(_6p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp5, s_UInt_usize_cons(8)))
   label _before_1_5
   // [MIR] bb1[5]: assert(move _6, "index out of bounds: the length is {} but the index is {}", const 8_usize, copy _5) -> [success: bb2, unwind: bb5]
   // PCG (T) pre_operands
@@ -622,37 +806,25 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // (ignoring) LabelPlace(LabelPlaceAction { place: _6, location: Before(AnalysisLocation { location: bb1[5], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // PCG (T) pre_main
+  // var _tmp6
+  _tmp6 := p_Bool_snap(_6p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_6p), write)
+  exhale _tmp6 == true
   // PCG (T) post_main
-  // var _tmp2
-  _tmp2 := p_Bool_snap(_6p)
-  exhale acc(p_Bool(_6p), write)
-  exhale s_Bool_value(_tmp2) == true
+  label _after_1
   _from_bb1_to_bb2 := true
   goto bb_2
-  label bb_4
-  label _before_4_0
-  // [MIR] bb4[0]: StorageDead(_3)
-  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
-  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
-  label _before_4_1
-  // [MIR] bb4[1]: return
-  // PCG (T) pre_operands
-  // PCG (T) post_operands
-  // PCG (T) pre_main
-  // PCG (T) post_main
-  label package_post0
-  goto end
   label bb_2
   label _before_2_0
   // [MIR] bb2[0]: _0 = copy (*_1)[_5]
   // (PCG) handled edge Add: {a} -> {*a}
   // (PCG) handled edge Add: {*a} -> {(*a)[_5]}
+  // var _tmp7
+  _tmp7 := s_Array_index(p_Ref_immutable_snap(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2.make_concrete_s_Array,
+    s_UInt_usize_value(p_UInt_usize_snap(_5p))).make_concrete_s_Int_i32
   // (ignoring) LabelPlace(LabelPlaceAction { place: _0, location: Before(AnalysisLocation { location: bb2[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_0), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Int_i32_assign(_0p, make_concrete_s_Int_i32(s_Array_index(make_concrete_s_Array(p_Ref_immutable_snap(_1p,
-    s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2,
-    s_Int_i32_type(), s_UInt_usize_cons(8)), s_UInt_usize_value(p_UInt_usize_snap(_5p)))))
+  p_Int_i32_assign(_0p, _tmp7)
   label _before_2_1
   // [MIR] bb2[1]: StorageDead(_5)
   // (PCG) handled edge Remove: {*a} -> {(*a)[_5]}
@@ -665,7 +837,7 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb2[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_5), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
   // [PCG] Weaken(Weaken { place: _5, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
-  // Weaken(E, W) for _5 (skipped exhale: StorageDead)
+  // Weaken to Write for _5 (skipped exhale: StorageDead)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _5, location: Before(AnalysisLocation { location: bb2[1], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
   label _before_2_2
   // [MIR] bb2[2]: goto -> bb4
@@ -675,8 +847,22 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // PCG (T) pre_main
   // PCG (T) post_main
+  label _after_2
   _from_bb2_to_bb4 := true
   goto bb_4
+  label bb_4
+  label _before_4_0
+  // [MIR] bb4[0]: StorageDead(_3)
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
+  // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
+  // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb4[0], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
+  label _before_4_1
+  // [MIR] bb4[1]: return
+  // PCG (T) pre_operands
+  // PCG (T) post_operands
+  // PCG (T) pre_main
+  label package_post0
+  goto end
   label bb_5
   // cleanup block
   assert false
@@ -686,14 +872,18 @@ method m_index_guard_too_loose(_0p: Ref, _1p: Ref, _2p: Ref)
 }
 
 method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
-  requires acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
-  requires acc(p_UInt_usize(_2p), write)
-  ensures acc(p_Int_i32(_0p), write)
+  requires inhabited(s_Ref_immutable_type(s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8)))) &&
+    acc(p_Ref_immutable(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))), write)
+  requires inhabited(s_UInt_usize_type()) && acc(p_UInt_usize(_2p), write)
+  ensures inhabited(s_Int_i32_type()) && acc(p_Int_i32(_0p), write)
 {
   var _3p: Ref
   var _4p: Ref
   var _from_bb0_to_bb1: Bool
-  var _tmp0: s_Bool
+  var _tmp0: s_UInt_usize
+  var _tmp1: s_UInt_usize
+  var _tmp2: Bool
+  var _tmp3: s_Int_i32
   label start
   // var _3p
   // var _4p
@@ -704,9 +894,11 @@ method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
   // [MIR] bb0[0]: StorageLive(_3)
   label _before_0_1
   // [MIR] bb0[1]: _3 = copy _2
+  // var _tmp0
+  _tmp0 := p_UInt_usize_snap(_2p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb0[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_UInt_usize_assign(_3p, p_UInt_usize_snap(_2p))
+  p_UInt_usize_assign(_3p, _tmp0)
   label _before_0_2
   // [MIR] bb0[2]: FakeRead(ForIndex, (*_1))
   // (PCG) handled edge Add: {a} -> {*a}
@@ -716,10 +908,11 @@ method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: None, phantom: PhantomData<&()> })), label: None })
   // (ignoring) LabelPlace(LabelPlaceAction { place: (*_1), location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreOperands }), reason: Collapse, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: Equals(LifetimeProjection(LifetimeProjection { base: Place(Local(Current(_1))), region_idx: LifetimeProjectionIdx(0, PhantomData<pcg::borrow_pcg::region_projection::Region>), label: Some(Future), phantom: PhantomData<&()> })), label: None })
+  // var _tmp1
+  _tmp1 := p_UInt_usize_snap(_3p)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb0[3], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_4), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Bool_assign(_4p, mir_binop_Lt_UInt_usize_UInt_usize(p_UInt_usize_snap(_3p),
-    s_UInt_usize_cons(8)))
+  p_Bool_assign(_4p, mir_binop_Lt_UInt_usize_UInt_usize(_tmp1, s_UInt_usize_cons(8)))
   label _before_0_4
   // [MIR] bb0[4]: assert(move _4, "index out of bounds: the length is {} but the index is {}", const 8_usize, copy _3) -> [success: bb1, unwind: bb2]
   // PCG (T) pre_operands
@@ -728,11 +921,12 @@ method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
   // PCG (T) post_operands
   // (ignoring) LabelPlace(LabelPlaceAction { place: _4, location: Before(AnalysisLocation { location: bb0[4], eval_stmt_phase: PostOperands }), reason: MoveOut, _marker: PhantomData<&()> })
   // PCG (T) pre_main
+  // var _tmp2
+  _tmp2 := p_Bool_snap(_4p)
+  exhale inhabited(s_Bool_type()) && acc(p_Bool(_4p), write)
+  exhale _tmp2 == true
   // PCG (T) post_main
-  // var _tmp0
-  _tmp0 := p_Bool_snap(_4p)
-  exhale acc(p_Bool(_4p), write)
-  exhale s_Bool_value(_tmp0) == true
+  label _after_0
   _from_bb0_to_bb1 := true
   goto bb_1
   label bb_1
@@ -740,11 +934,12 @@ method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
   // [MIR] bb1[0]: _0 = copy (*_1)[_3]
   // (PCG) handled edge Add: {a} -> {*a}
   // (PCG) handled edge Add: {*a} -> {(*a)[_3]}
+  // var _tmp3
+  _tmp3 := s_Array_index(p_Ref_immutable_snap(_1p, s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2.make_concrete_s_Array,
+    s_UInt_usize_value(p_UInt_usize_snap(_3p))).make_concrete_s_Int_i32
   // (ignoring) LabelPlace(LabelPlaceAction { place: _0, location: Before(AnalysisLocation { location: bb1[0], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_0), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
-  p_Int_i32_assign(_0p, make_concrete_s_Int_i32(s_Array_index(make_concrete_s_Array(p_Ref_immutable_snap(_1p,
-    s_Array_type(s_Int_i32_type(), s_UInt_usize_cons(8))).s_Ref_immutable_2,
-    s_Int_i32_type(), s_UInt_usize_cons(8)), s_UInt_usize_value(p_UInt_usize_snap(_3p)))))
+  p_Int_i32_assign(_0p, _tmp3)
   label _before_1_1
   // [MIR] bb1[1]: StorageDead(_3)
   // (PCG) handled edge Remove: {*a} -> {(*a)[_3]}
@@ -757,7 +952,7 @@ method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb1[1], eval_stmt_phase: PreMain }), reason: Write, _marker: PhantomData<&()> })
   // (ignoring) LabelLifetimeProjection(LabelLifetimeProjectionAction { predicate: And([PlaceEquals(_3), InSourceNodes, EdgeType(BorrowFlow { future_edge_kind: Some(FromExpansion) })]), label: None })
   // [PCG] Weaken(Weaken { place: _3, from: E, to: W, for_storage_dead: true, _marker: PhantomData<&()> })
-  // Weaken(E, W) for _3 (skipped exhale: StorageDead)
+  // Weaken to Write for _3 (skipped exhale: StorageDead)
   // (ignoring) LabelPlace(LabelPlaceAction { place: _3, location: Before(AnalysisLocation { location: bb1[1], eval_stmt_phase: PreMain }), reason: StorageDead, _marker: PhantomData<&()> })
   label _before_1_2
   // [MIR] bb1[2]: return
@@ -766,7 +961,6 @@ method m_index_unguarded(_0p: Ref, _1p: Ref, _2p: Ref)
   // ignored repack op: RegainLoanedCapability(RegainedCapability { place: _1, capability: E })
   // PCG (T) post_operands
   // PCG (T) pre_main
-  // PCG (T) post_main
   label package_post0
   goto end
   label bb_2
@@ -810,14 +1004,14 @@ method p_Int_i32_assign(self: Ref, value: s_Int_i32)
   ensures p_Int_i32_snap(self) == value
 
 
-method p_Param_assign(self: Ref, T$0: Type, value: s_Param)
-  ensures acc(p_Param(self, T$0), write)
-  ensures p_Param_snap(self, T$0) == value
-
-
 method p_Ref_immutable_assign(self: Ref, U$1: Type, value: s_Ref_immutable)
   ensures acc(p_Ref_immutable(self, U$1), write)
   ensures p_Ref_immutable_snap(self, U$1) == value
+
+
+method p_Param_assign(self: Ref, T$0: Type, value: s_Param)
+  ensures acc(p_Param(self, T$0), write)
+  ensures p_Param_snap(self, T$0) == value
 
 
 method p_Array_assign(self: Ref, U$1: Type, M$0: s_UInt_usize, value: s_Array)
@@ -825,15 +1019,47 @@ method p_Array_assign(self: Ref, U$1: Type, M$0: s_UInt_usize, value: s_Array)
   ensures p_Array_snap(self, U$1, M$0) == value
 
 
+method p_Array_fold_index(index: Int, self: Ref, U$1: Type, M$0: s_UInt_usize)
+  requires inhabited(U$1) &&
+    acc(p_Param(s_Array_index_ref(self, index, U$1), U$1), write)
+  requires acc(p_Array_index(self, index, U$1, M$0), write)
+  ensures acc(p_Array(self, U$1, M$0), write)
+  ensures (forall idx: Int ::
+      { s_Array_index(p_Array_snap(self, U$1, M$0), idx) }
+      s_Array_index(p_Array_snap(self, U$1, M$0), idx) ==
+      (idx == index ?
+        old(p_Param_snap(s_Array_index_ref(self, index, U$1), U$1)) :
+        old(s_Array_index(p_Array_index_frame(self, index, U$1, M$0), idx))))
+
+
+method p_Array_unfold_index(index: Int, self: Ref, U$1: Type, M$0: s_UInt_usize)
+  requires acc(p_Array(self, U$1, M$0), write)
+  ensures inhabited(U$1) &&
+    acc(p_Param(s_Array_index_ref(self, index, U$1), U$1), write)
+  ensures acc(p_Array_index(self, index, U$1, M$0), write)
+  ensures p_Param_snap(s_Array_index_ref(self, index, U$1), U$1) ==
+    old(s_Array_index(p_Array_snap(self, U$1, M$0), index))
+  ensures p_Array_index_frame(self, index, U$1, M$0) ==
+    old(p_Array_snap(self, U$1, M$0))
+
+
 method p_UInt_usize_assign(self: Ref, value: s_UInt_usize)
   ensures acc(p_UInt_usize(self), write)
   ensures p_UInt_usize_snap(self) == value
 
 
-method p_Bool_assign(self: Ref, value: s_Bool)
+method p_Bool_assign(self: Ref, value: Bool)
   ensures acc(p_Bool(self), write)
   ensures p_Bool_snap(self) == value
 
+
+adt s_Param {
+  make_generic_s_Array(make_concrete_s_Array: s_Array, make_generic_s_Array_typaram_U$1: Type,
+  make_generic_s_Array_constparam_M$0: s_UInt_usize)
+  make_generic_s_0_Tuple(make_concrete_s_0_Tuple: s_0_Tuple)
+  make_generic_s_Int_i32(make_concrete_s_Int_i32: s_Int_i32)
+  s_Param_Unknown(s_Param_Unknown_id: Int)
+}
 
 adt s_Ref_immutable {
   s_Ref_immutable_cons(s_Ref_immutable_0: Ref, s_Ref_immutable_1: s_Param, s_Ref_immutable_2: s_Param)
@@ -844,8 +1070,11 @@ adt s_0_Tuple {
 }
 
 adt Type {
-  s_Array_type(s_Array_typaram_U$1: Type, s_Array_constparam_M$0: s_UInt_usize)
   s_Int_i32_type()
+  s_Ref_immutable_type(s_Ref_immutable_typaram_U$1: Type)
+  s_Array_type(s_Array_typaram_U$1: Type, s_Array_constparam_M$0: s_UInt_usize)
   s_0_Tuple_type()
-  Unknown_type(non_unit: Int)
+  s_UInt_usize_type()
+  s_Bool_type()
+  Unknown_type(id: Int)
 }

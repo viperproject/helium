@@ -104,7 +104,7 @@ These go in a new `benchmarks/scaling/` directory. `rust/` has a strict no-loops
 | `gen_arith.py` | checked operations per block | 5–80 |
 | `gen_struct.py` | struct nesting depth (fold/unfold load) | 1–6 |
 
-The existing `gen_depth` (nested if/else) and `gen_enum` (match arms) cover the remaining axes.
+The existing `gen_depth` (nested if/else) and `gen_enum` (match arms) cover the remaining axes. Both later moved from `rust/` into `scaling/` with their families (stems unchanged), so `rust/` holds only the hand-written corpus; their results before the move are recorded under `rust/<stem>`.
 
 **Controlled families are the main evidence.** In the hand-written corpus, lines of code correlate with nearly every other metric, so a regression fit there only backs up what the generated families show.
 
@@ -297,7 +297,7 @@ The 20 slowest members, with their features, are listed on the overview and doub
 
 Decisions made while implementing:
 
-- **Several families per suite.** `suite.json` also accepts `"families": [...]` (each with a `name`), since `scaling/` holds seven generators and `rust/` has two families next to hand-written files. A single `family` still requires every stem to match; with `families`, each must match some stem, and `"exhaustive": true` restores the every-stem rule.
+- **Several families per suite.** `suite.json` also accepts `"families": [...]` (each with a `name`), since `scaling/` holds many generators (and `rust/` then had two families next to hand-written files). A single `family` still requires every stem to match; with `families`, each must match some stem, and `"exhaustive": true` restores the every-stem rule.
 - **`helium_verify` is `verify`'s own pipeline total** (no process startup), the fair counterpart of `silicon_verify`; the process wall time is kept as `helium_wall`.
 - **rustc is cached like Silicon.** `rustc_check` depends only on the `.rs`, the compiler and its arguments, never on the Helium commit, so each successful timing is measured once and reused (`rustc_cache.json`, marked `cached` in the run file). The Rust and Viper metrics are not cached: they take seconds for the whole corpus, and a cache would go stale whenever their extractors change.
 - **rustc is timed without the rustup proxy.** The runner resolves the toolchain's own `rustc` from its sysroot once (the proxy added ~80 ms to a ~100 ms `rustc_check`). The toolchain is `rust-toolchain.toml`'s unless `rustc_toolchain` pins one in `tools/bench/config.json`; the version is recorded either way.

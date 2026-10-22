@@ -1,0 +1,20 @@
+# Members of the scaling families that main does not verify. Format: <stem> <member>
+#
+# A failing member stops at its failing instruction, so its file's cost is not the
+# cost of the whole shape: read the timings of a family with entries here as a gap
+# family's, not as a scaling curve.
+
+# loops: every point writes through `&mut` inside the loop, the shape of
+# `../loops/mutate_in_loop.rs::m_bump_n`, which Silicon rejects too (Prusti's inferred
+# permission invariant does not carry a written-through borrow across the back edge).
+# Here the postcondition's exhale fails for want of permission. Silicon rejects all
+# 8 files the same way, and only there ("Postcondition of m_run might not hold ...
+# insufficient permission to access p_Param(...)"; checked 2026-10-07).
+loops_n1_b5 m_run
+loops_n1_b20 m_run
+loops_n2_b5 m_run
+loops_n2_b20 m_run
+loops_n3_b5 m_run
+loops_n3_b20 m_run
+loops_n4_b5 m_run
+loops_n4_b20 m_run
