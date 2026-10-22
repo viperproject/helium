@@ -20,8 +20,9 @@ use crate::vmir;
 pub(crate) struct AdtInfo {
     /// A constructor's `Spur` to `(owning ADT `Spur`, tag index)`.
     pub ctor_tag: HashMap<Spur, (Spur, usize)>,
-    /// A destructor's `Spur` to the `(adt id, variant, field)` it projects.
-    pub dtor_sem: HashMap<Spur, (vmir::MemberId, usize, usize)>,
+    /// `(owning ADT, destructor)` `Spur`s to the `(adt id, variant, field)` it
+    /// projects. Keyed by the ADT too: different ADTs may share a field name.
+    pub dtor_sem: HashMap<(Spur, Spur), (vmir::MemberId, usize, usize)>,
 }
 
 /// A member's contract ids (`#requires` / `#ensures`), absent when the member

@@ -300,9 +300,7 @@ pub(crate) fn lower<Ext: PureExt>(
             // Type args come from the scrutinee's type (`base.ty`).
             let type_args = adt_type_args(b, &base.ty);
             let base_v = lower(b, env, sink, hctx, base)?;
-            let &(adt, variant, field) = b.adt.dtor_sem.get(&field.0).ok_or_else(|| {
-                TranslationError::UnknownIdent(b.interner.resolve(&field.0).to_string())
-            })?;
+            let (adt, variant, field) = dtor_projection(b, &base.ty, field)?;
             Ok(sink.emit_pure(
                 ty,
                 PureInst::AdtProj {
@@ -345,6 +343,26 @@ pub(crate) fn lower<Ext: PureExt>(
 /// The type arguments of an ADT/domain-typed expression — its head's type
 /// parameters at this use site. `Domain(_, args)` → lower each; any other type
 /// (a non-generic / non-ADT result) → empty.
+/// The `(adt id, variant, field)` that destructor `field` projects on a
+/// receiver of type `base_ty`. The receiver's ADT is part of the key: several
+/// ADTs may declare a field of the same name.
+fn dtor_projection(
+    b: &TranslationContext<'_>,
+    base_ty: &typed::Type,
+    field: &typed::Ident,
+) -> Result<(vmir::MemberId, usize, usize), TranslationError> {
+    let typed::Type::Domain(adt, _) = base_ty else {
+        return Err(TranslationError::UnknownIdent(
+            b.interner.resolve(&field.0).to_string(),
+        ));
+    };
+    b.adt
+        .dtor_sem
+        .get(&(adt.0, field.0))
+        .copied()
+        .ok_or_else(|| TranslationError::UnknownIdent(b.interner.resolve(&field.0).to_string()))
+}
+
 fn adt_type_args(b: &TranslationContext<'_>, ty: &typed::Type) -> Vec<vmir::Type> {
     match ty {
         typed::Type::Domain(_, args) => args.iter().map(|t| b.lower_type(t)).collect(),
@@ -834,9 +852,7 @@ fn lower_trig_term(
             })
         }
         P::AdtDestructor(base, field) => {
-            let &(adt, variant, field) = b.adt.dtor_sem.get(&field.0).ok_or_else(|| {
-                TranslationError::UnknownIdent(b.interner.resolve(&field.0).to_string())
-            })?;
+            let (adt, variant, field) = dtor_projection(b, &base.ty, field)?;
             Ok(vmir::TrigTerm::App {
                 head: vmir::TrigHead::AdtProj {
                     adt,

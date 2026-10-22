@@ -23,12 +23,23 @@ pub enum ViperTcType {
     Top,
 }
 
+/// Why a meet or construction failed. Kept structural (not a message) so the
+/// clashing types can be named once an interner is at hand — see
+/// `TypeError::with_names`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcTypeErr(pub String);
+pub enum TcTypeErr {
+    /// Two variants that have no common subtype.
+    Mismatch(ViperTcType, ViperTcType),
+    /// A key nothing constrained, so no concrete type can be built for it.
+    Abstract,
+}
 
 impl std::fmt::Display for TcTypeErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Type error: {}", self.0)
+        match self {
+            TcTypeErr::Mismatch(t1, t2) => write!(f, "Cannot unify {t1:?} and {t2:?}"),
+            TcTypeErr::Abstract => write!(f, "Cannot construct abstract type"),
+        }
     }
 }
 
@@ -61,7 +72,7 @@ impl Variant for ViperTcType {
             (Domain(a, n), Domain(b, m)) if a == b && n == m => Domain(a, n),
             (Generic(a), Generic(b)) if a == b => Generic(a),
             (t1, t2) => {
-                return Err(TcTypeErr(format!("Cannot unify {:?} and {:?}", t1, t2)));
+                return Err(TcTypeErr::Mismatch(t1, t2));
             }
         };
         // A `Domain(_, n)` has fixed arity `n`, so its `least_arity` must be `n`;
@@ -92,7 +103,7 @@ impl Constructable for ViperTcType {
             ViperTcType::Domain(id, _) => Type::Domain(*id, children.to_vec()),
             ViperTcType::Generic(id) => Type::Generic(*id),
             ViperTcType::Top => {
-                return Err(TcTypeErr("Cannot construct abstract type".to_string()));
+                return Err(TcTypeErr::Abstract);
             }
         })
     }

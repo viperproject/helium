@@ -103,6 +103,11 @@ pub enum GlobalKind {
     AdtConstructor,
     ExpMacro,
     StmtMacro,
+    /// The kinds below have no [`GlobalSignature`]: they only take part in
+    /// Silver's duplicate-identifier check.
+    AdtField,
+    Axiom,
+    TypeParam,
 }
 
 impl fmt::Display for GlobalKind {
@@ -118,6 +123,9 @@ impl fmt::Display for GlobalKind {
             Self::AdtConstructor => "ADT constructor",
             Self::ExpMacro => "macro",
             Self::StmtMacro => "macro",
+            Self::AdtField => "ADT field",
+            Self::Axiom => "axiom",
+            Self::TypeParam => "type parameter",
         };
         write!(f, "{}", name)
     }
@@ -260,9 +268,10 @@ pub struct Globals {
     /// that only hold a `RodeoResolver` (no string lookup) resolve a
     /// discriminator `is<Ctor>` back to the constructor.
     pub ctor_by_name: HashMap<String, Spur>,
-    /// Destructor (constructor field) name `Spur` → its info. Lets `e.f` be
-    /// classified as an ADT destructor.
-    pub dtor_by_name: HashMap<Spur, DtorInfo>,
+    /// Destructor (constructor field) name `Spur` → one entry per ADT
+    /// declaring it. Lets `e.f` be classified as an ADT destructor. Different
+    /// ADTs may share a field name; the receiver's type picks the entry.
+    pub dtor_by_name: HashMap<Spur, Vec<DtorInfo>>,
 }
 
 /// A lightweight view into a successfully resolved global symbol.
@@ -328,9 +337,16 @@ pub struct GlobalsCollector<'i> {
     signatures: TiVec<MemberId, GlobalSignature>,
     symbol_table: HashMap<Spur, MemberId>,
     ctor_by_name: HashMap<String, Spur>,
-    dtor_by_name: HashMap<Spur, DtorInfo>,
+    /// ADT field names are global identifiers in Silver, with one exception:
+    /// different ADTs may share one (resolved through the receiver's type).
+    dtor_by_name: HashMap<Spur, Vec<DtorInfo>>,
     /// Running per-ADT constructor counter, for assigning tag indices.
     adt_ctor_count: HashMap<Spur, usize>,
+    /// Named domain axioms. Global identifiers in Silver, unique program-wide.
+    axiom_names: HashSet<Spur>,
+    /// Every ADT's type parameters. Scoped to their ADT, but like a local they
+    /// may not reuse a global name.
+    adt_type_params: Vec<Spur>,
     errors: Vec<DuplicateGlobalError>,
 }
 
@@ -343,11 +359,33 @@ impl<'i> GlobalsCollector<'i> {
             ctor_by_name: HashMap::default(),
             dtor_by_name: HashMap::default(),
             adt_ctor_count: HashMap::default(),
+            axiom_names: HashSet::default(),
+            adt_type_params: Vec::new(),
             errors: Vec::new(),
         }
     }
 
-    pub fn finalize(self) -> Result<Globals, Vec<DuplicateGlobalError>> {
+    pub fn finalize(mut self) -> Result<Globals, Vec<DuplicateGlobalError>> {
+        // The names outside `symbol_table` clash with any global declared
+        // anywhere in the file, so they can only be checked once all are in.
+        let mut late: Vec<(Spur, GlobalKind)> = Vec::new();
+        late.extend(self.dtor_by_name.keys().map(|&f| (f, GlobalKind::AdtField)));
+        late.extend(self.axiom_names.iter().map(|&a| (a, GlobalKind::Axiom)));
+        late.extend(
+            self.adt_type_params
+                .iter()
+                .map(|&t| (t, GlobalKind::TypeParam)),
+        );
+        for (id, this) in late {
+            let other = match self.symbol_table.get(&id) {
+                Some(&mid) => self.signatures[mid].kind(),
+                None if this == GlobalKind::Axiom && self.dtor_by_name.contains_key(&id) => {
+                    GlobalKind::AdtField
+                }
+                None => continue,
+            };
+            self.duplicate(id, this, other);
+        }
         if self.errors.is_empty() {
             Ok(Globals {
                 signatures: self.signatures,
@@ -360,14 +398,19 @@ impl<'i> GlobalsCollector<'i> {
         }
     }
 
+    fn duplicate(&mut self, id: Spur, this: GlobalKind, other: GlobalKind) {
+        self.errors.push(DuplicateGlobalError {
+            name: self.interner.resolve(&id).to_string(),
+            this,
+            other,
+        });
+    }
+
     fn register(&mut self, name: &IdnDecl, sig: GlobalSignature) -> Option<MemberId> {
         let id = name.0.id();
         if let Some(&mid) = self.symbol_table.get(&id) {
-            self.errors.push(DuplicateGlobalError {
-                name: self.interner.resolve(&id).to_string(),
-                this: sig.kind(),
-                other: self.signatures[mid].kind(),
-            });
+            let other = self.signatures[mid].kind();
+            self.duplicate(id, sig.kind(), other);
             None
         } else {
             let mid = self.signatures.push_and_get_key(sig);
@@ -438,6 +481,14 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
     }
 
     fn walk_adt(&mut self, adt: &'ast super::Adt) {
+        let mut seen = HashSet::default();
+        for p in &adt.params {
+            let id = p.0.id();
+            if !seen.insert(id) {
+                self.duplicate(id, GlobalKind::TypeParam, GlobalKind::TypeParam);
+            }
+            self.adt_type_params.push(id);
+        }
         let sig = AdtSig {
             type_arity: adt.params.len(),
             params: adt.params.iter().map(|p| p.0.id()).collect(),
@@ -471,11 +522,16 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
         let name_spur = adt_cons.signature.name.0.id();
         self.ctor_by_name
             .insert(self.interner.resolve(&name_spur).to_string(), name_spur);
-        // Register each field as a destructor (first registration wins on a
-        // name clash; full overload handling is deferred).
+        // Register each field as a destructor. A name repeated within one ADT
+        // is a duplicate; one shared with another ADT is legal Silver.
         for (index, field) in adt_cons.destructors().enumerate() {
             let field_spur = field.idn.0.id();
-            self.dtor_by_name.entry(field_spur).or_insert(DtorInfo {
+            let owners = self.dtor_by_name.entry(field_spur).or_default();
+            if owners.iter().any(|d| d.adt == adt) {
+                self.duplicate(field_spur, GlobalKind::AdtField, GlobalKind::AdtField);
+                continue;
+            }
+            owners.push(DtorInfo {
                 adt,
                 ctor: name_spur,
                 index,
@@ -491,8 +547,16 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
     fn walk_domain_element(&mut self, elem: &'ast super::DomainElement) {
         let func = match &elem.kind {
             super::DomainElementKind::Function(func) => func,
-            // Axioms are not top-level globals.
-            super::DomainElementKind::Axiom(_) => return,
+            // An axiom is not a callable global, but its name is an identifier.
+            super::DomainElementKind::Axiom(ax) => {
+                if let Some(name) = &ax.name {
+                    let id = name.0.id();
+                    if !self.axiom_names.insert(id) {
+                        self.duplicate(id, GlobalKind::Axiom, GlobalKind::Axiom);
+                    }
+                }
+                return;
+            }
         };
         // The owning domain (registered before its elements) supplies the bound
         // type parameters, so generic arg/return types lower to `Generic`.
@@ -525,5 +589,112 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
         };
 
         self.register(&define.name, sig_enum);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::viper::{IdentCollector, viper_parser, walk::AstWalkable};
+
+    fn collect(input: &str) -> Result<Globals, Vec<DuplicateGlobalError>> {
+        let mut program = viper_parser::vpr_program(input).expect("parse failed");
+        let mut ident_collector = IdentCollector::default();
+        program.walk_mut(&mut ident_collector);
+        let interner = ident_collector.finalize();
+        let mut collector = GlobalsCollector::new(&interner);
+        program.walk(&mut collector);
+        collector.finalize()
+    }
+
+    fn assert_duplicate(input: &str, name: &str, this: GlobalKind) {
+        let errs = collect(input).expect_err("expected a duplicate identifier");
+        assert!(
+            errs.iter().any(|e| e.name == name && e.this == this),
+            "{input}: unexpected errors {errs:?}"
+        );
+    }
+
+    #[test]
+    fn adt_field_repeated_within_one_adt_is_duplicate() {
+        // futures-util: two constructors of one (merged) ADT share a field name,
+        // which Silicon reports as a duplicate and, at each use, as ambiguous.
+        assert_duplicate(
+            "adt s_Projection_dis26 {\n\
+             s_Projection_dis26_cons(s_Projection_dis26_0: Int, s_Projection_dis26_1: Bool)\n\
+             s_Projection_dis26_cons__a1(s_Projection_dis26_0: Bool)\n}",
+            "s_Projection_dis26_0",
+            GlobalKind::AdtField,
+        );
+        assert_duplicate("adt A { A1(f: Int, f: Int) }", "f", GlobalKind::AdtField);
+    }
+
+    #[test]
+    fn adt_field_clashing_with_a_global_is_duplicate() {
+        for (src, name, other) in [
+            ("adt A { A1(f: Int) }\nfield f: Int", "f", GlobalKind::Field),
+            (
+                "adt A { A1(f: Int) }\nfunction f(): Int",
+                "f",
+                GlobalKind::Function,
+            ),
+            (
+                "adt A { A1(f: Int) }\npredicate f(x: Ref)",
+                "f",
+                GlobalKind::Predicate,
+            ),
+            (
+                "domain D { function f(): Int }\nadt A { A1(f: Int) }",
+                "f",
+                GlobalKind::DomainFunction,
+            ),
+            ("adt A { A1(A: Int) }", "A", GlobalKind::Adt),
+            ("adt A { f(f: Int) }", "f", GlobalKind::AdtConstructor),
+        ] {
+            let errs = collect(src).expect_err("expected a duplicate identifier");
+            let expected = DuplicateGlobalError {
+                name: name.to_string(),
+                this: GlobalKind::AdtField,
+                other,
+            };
+            assert!(
+                errs.contains(&expected),
+                "{src}: unexpected errors {errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adt_field_shared_between_adts_is_legal() {
+        assert!(collect("adt A { A1(f: Int) }\nadt B { B1(f: Bool) }").is_ok());
+    }
+
+    #[test]
+    fn axiom_names_are_global() {
+        assert_duplicate(
+            "domain D { function d(): Int  axiom a { d() == 0 } }\n\
+             domain E { function e(): Int  axiom a { e() == 0 } }",
+            "a",
+            GlobalKind::Axiom,
+        );
+        assert_duplicate(
+            "function f(): Int\ndomain D { function d(): Int  axiom f { d() == 0 } }",
+            "f",
+            GlobalKind::Axiom,
+        );
+        // Unnamed axioms take no name.
+        assert!(collect("domain D { function d(): Int  axiom { true } axiom { true } }").is_ok());
+    }
+
+    #[test]
+    fn adt_type_parameter_clashes_are_duplicates() {
+        assert_duplicate("adt A[T, T] { A1(x: T) }", "T", GlobalKind::TypeParam);
+        assert_duplicate(
+            "function T(): Int\nadt A[T] { A1(x: T) }",
+            "T",
+            GlobalKind::TypeParam,
+        );
+        // Each ADT scopes its own parameters.
+        assert!(collect("adt A[T] { A1(x: T) }\nadt B[T] { B1(y: T) }").is_ok());
     }
 }

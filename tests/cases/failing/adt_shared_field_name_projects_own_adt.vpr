@@ -1,0 +1,11 @@
+// `b.f` is B's field, not A's, though both ADTs declare an `f` (Silicon
+// reports this assertion as `!get_B_f(b)`, which might not hold).
+
+adt A { A1(f: Bool) }
+adt B { B1(f: Bool) }
+
+method projects_b() {
+  var a: A := A1(false)
+  var b: B := B1(true)
+  assert !b.f
+}
