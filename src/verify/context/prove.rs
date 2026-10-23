@@ -90,11 +90,17 @@ struct Scope {
     dirty_reduce: bool,
 }
 
-/// Dominance over a method's blocks, in walk (stored, topological) order.
+/// Dominance over a method's blocks, in walk (stored, topological) order, and
+/// which blocks the walk has entered so far.
 pub(crate) struct BlockOrder {
     /// Preorder number and the last preorder number of the subtree, per block, in
     /// the dominator tree.
     interval: Vec<(usize, usize)>,
+    /// Entered blocks, counted by preorder number (a Fenwick tree), so the
+    /// entered part of any dominator subtree is a range count.
+    entered: Vec<usize>,
+    /// Blocks entered so far.
+    n_entered: usize,
 }
 
 impl BlockOrder {
@@ -144,7 +150,43 @@ impl BlockOrder {
             stack.push((b, true));
             stack.extend(children[b].iter().rev().map(|&c| (c, false)));
         }
-        BlockOrder { interval }
+        BlockOrder {
+            interval,
+            entered: vec![0; n + 1],
+            n_entered: 0,
+        }
+    }
+
+    /// Record that the walk entered `block`. Blocks are entered in walk order,
+    /// each once.
+    pub(crate) fn enter(&mut self, block: usize) {
+        let mut i = self.interval[block].0 + 1;
+        while i < self.entered.len() {
+            self.entered[i] += 1;
+            i += i.isolate_lowest_one();
+        }
+        self.n_entered += 1;
+    }
+
+    /// Entered blocks with preorder number below `pre`.
+    fn entered_below(&self, pre: usize) -> usize {
+        let (mut i, mut n) = (pre, 0);
+        while i > 0 {
+            n += self.entered[i];
+            i -= i.isolate_lowest_one();
+        }
+        n
+    }
+
+    /// Blocks of `root`'s dominator subtree (`None`: all blocks) not yet entered.
+    fn remaining(&self, root: Option<usize>) -> usize {
+        match root {
+            None => self.interval.len() - self.n_entered,
+            Some(r) => {
+                let (lo, hi) = self.interval[r];
+                (hi + 1 - lo) - (self.entered_below(hi + 1) - self.entered_below(lo))
+            }
+        }
     }
 
     /// Whether `a` dominates `b` (reflexive).
@@ -153,13 +195,15 @@ impl BlockOrder {
         (lo..=hi).contains(&self.interval[b].0)
     }
 
-    /// Whether `block`, entered with the innermost open scope belonging to `outer`
-    /// (`None`: the base), needs a scope of its own: whether a block walked after
-    /// it would still be walked inside `outer`'s scope without being dominated by
-    /// `block`.
+    /// Whether `block`, just entered with the innermost open scope belonging to
+    /// `outer` (`None`: the base), needs a scope of its own: whether a block walked
+    /// after it would still be walked inside `outer`'s scope without being
+    /// dominated by `block`. The blocks `block` dominates all follow it in a
+    /// topological order, so the question is whether `outer`'s subtree has more
+    /// blocks left to walk than `block`'s own: two range counts.
     fn needs_scope(&self, block: usize, outer: Option<usize>) -> bool {
-        (block + 1..self.interval.len())
-            .any(|z| outer.is_none_or(|o| self.dominates(o, z)) && !self.dominates(block, z))
+        let (lo, hi) = self.interval[block];
+        self.remaining(outer) > hi - lo
     }
 }
 
@@ -386,20 +430,20 @@ impl<'a> VerifyContext<'a> {
         self.current_cube.clear();
         self.in_block = false;
         self.block_dead = false;
+        self.blocks.as_mut().unwrap().enter(block);
         if self.work.is_none() {
             return;
         }
         // Scopes nest along the dominator tree, so the ones to close are a suffix:
-        // everything from the outermost whose block does not dominate this one.
+        // everything above the innermost whose block dominates this one. Scanned
+        // from the top, so the scan costs what it closes.
         let blocks = self.blocks.as_ref().unwrap();
-        let first = self
-            .work
-            .as_ref()
-            .unwrap()
-            .scopes
-            .iter()
-            .position(|s| !blocks.dominates(s.block, block));
-        if let Some(first) = first {
+        let scopes = &self.work.as_ref().unwrap().scopes;
+        let mut first = scopes.len();
+        while first > 0 && !blocks.dominates(scopes[first - 1].block, block) {
+            first -= 1;
+        }
+        if first < scopes.len() {
             self.close_scopes(first);
         }
         self.open_scope_if_needed(block);
@@ -1219,18 +1263,46 @@ mod tests {
 
     #[test]
     fn only_arms_need_a_scope() {
-        let o = two_diamonds();
-        // The entry and the joins dominate everything walked after them inside
-        // their enclosing scope (the base): their facts hold on every later path.
-        assert!(!o.needs_scope(0, None));
-        assert!(!o.needs_scope(3, None));
-        assert!(!o.needs_scope(6, None));
-        // An arm does not dominate its sibling or its join.
+        let mut o = two_diamonds();
+        // Walked in order with the base as the enclosing scope: the entry and the
+        // joins dominate everything walked after them, so their facts hold on
+        // every later path; an arm does not dominate its sibling or its join (the
+        // last arm still does not dominate the join after it).
+        let expect = [false, true, true, false, true, true, false];
+        for (b, &want) in expect.iter().enumerate() {
+            o.enter(b);
+            assert_eq!(o.needs_scope(b, None), want, "block {b}");
+        }
+    }
+
+    /// Inside an arm's scope only what that arm's subtree still has to walk
+    /// counts: a nested diamond's arms need scopes, the arm's own join does not.
+    #[test]
+    fn nested_arms_count_the_enclosing_subtree() {
+        // 0 -> {1, 5}; 1 -> {2, 3} -> 4; {4, 5} -> 6
+        let preds = vec![
+            vec![],
+            vec![0],
+            vec![1],
+            vec![1],
+            vec![2, 3],
+            vec![0],
+            vec![4, 5],
+        ];
+        let mut o = BlockOrder::new(&preds);
+        o.enter(0);
+        o.enter(1);
         assert!(o.needs_scope(1, None));
-        assert!(o.needs_scope(2, None));
-        assert!(o.needs_scope(4, None));
-        // The last arm still does not dominate the join after it.
+        o.enter(2);
+        assert!(o.needs_scope(2, Some(1)));
+        o.enter(3);
+        assert!(o.needs_scope(3, Some(1)));
+        o.enter(4);
+        assert!(!o.needs_scope(4, Some(1)));
+        o.enter(5);
         assert!(o.needs_scope(5, None));
+        o.enter(6);
+        assert!(!o.needs_scope(6, None));
     }
 }
 
