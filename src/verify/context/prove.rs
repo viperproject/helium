@@ -73,6 +73,8 @@ pub(super) struct WorkGraph {
     scopes: Vec<Scope>,
     /// Applier-memo scope of the base; each scope adds its own.
     memo: u64,
+    /// The live memo record up to the copy holds in this graph too.
+    horizon: u64,
     /// Changed since the last saturation / reduction.
     pub(super) dirty: bool,
     pub(super) dirty_reduce: bool,
@@ -232,7 +234,7 @@ impl WorkGraph {
     fn memo_scopes(&self) -> Vec<ScratchScope> {
         std::iter::once(self.memo)
             .chain(self.scopes.iter().map(|s| s.memo))
-            .map(ScratchScope::resume)
+            .map(|id| ScratchScope::resume(id, self.horizon))
             .collect()
     }
 }
@@ -556,6 +558,7 @@ impl<'a> VerifyContext<'a> {
             false_id,
             scopes: Vec::new(),
             memo: rewrite::new_scope_id(),
+            horizon: rewrite::live_horizon(),
             dirty: true,
             dirty_reduce: true,
         });
