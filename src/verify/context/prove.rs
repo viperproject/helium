@@ -65,8 +65,10 @@ pub(super) struct WorkGraph {
     map_log: Vec<egg::Id>,
     /// Ground id-space size when the copy was taken.
     watermark: usize,
-    /// The `true` literal (same id in both graphs). Canonicalize with `find`.
+    /// The `true` / `false` literals (same ids in both graphs when the copy was
+    /// taken). Canonicalize with `find`.
     pub(super) true_id: egg::Id,
+    false_id: egg::Id,
     /// The open scopes, outermost first.
     scopes: Vec<Scope>,
     /// Applier-memo scope of the base; each scope adds its own.
@@ -216,19 +218,45 @@ impl<'a> VerifyContext<'a> {
     /// otherwise the ground term at `g` is imported (its children translated,
     /// then re-added).
     pub(super) fn tr(&mut self, g: egg::Id) -> egg::Id {
+        self.tr_with(g, true)
+    }
+
+    /// [`Self::tr`] without the literal exception for `g` itself: the term `g`
+    /// was minted as, even when it is now the root of ground's `true` or `false`
+    /// class. Its children are translated by [`Self::tr`].
+    fn tr_term(&mut self, g: egg::Id) -> egg::Id {
+        self.tr_with(g, false)
+    }
+
+    fn tr_with(&mut self, g: egg::Id, literal_roots: bool) -> egg::Id {
         // NB: **no** ground `find` here. Ground canonicalization is not
         // meaning-preserving for the working graph: the first union that merges a
         // term into the `true` class makes ground `find` return the `true` leader
         // for it, so canonicalizing first would translate *every* such term to the
         // working graph's `true` — silently turning each mirrored union/assume into
         // `true == true`.
-        match self.work.as_ref() {
-            None => return g,
-            Some(w) => {
-                if let Some(s) = w.fast_translate(g) {
-                    return s;
-                }
+        let Some(w) = self.work.as_ref() else {
+            return g;
+        };
+        // The one exception: the literals. `expr!(ctx, true)` is the canonical id
+        // of ground's `true` class, i.e. whichever node the class's root was
+        // minted as, and the root moves when a union makes another class the
+        // larger one. Translated as that node, it would be a class W need not know
+        // is `true`. So the current root of ground's `true` (`false`) class is
+        // W's `true` (`false`). Everything in that class holds unconditionally, so
+        // this is sound. It translates the root as the literal, not as its term:
+        // a fact about the term itself goes through [`Self::mirror_union`], which
+        // learns it with `tr_term`.
+        if literal_roots && g == self.egraph.find(g) {
+            if g == self.egraph.find(w.true_id) {
+                return w.true_id;
             }
+            if g == self.egraph.find(w.false_id) {
+                return w.false_id;
+            }
+        }
+        if let Some(s) = w.fast_translate(g) {
+            return s;
         }
         // Miss: an unmirrored ground mint (recipe `build`s and rule runs add
         // straight to `ctx.egraph`). Import it **faithfully** via `id_to_node(g)`,
@@ -302,17 +330,12 @@ impl<'a> VerifyContext<'a> {
         w.dirty_reduce = true;
     }
 
-    /// Mirror a ground `add` of `node` (which produced ground id `ground_id`) into
-    /// the working graph, translating its children through [`Self::tr`].
-    /// Idempotent per ground id.
+    /// Mirror a ground `add` that minted `node` at the fresh ground id
+    /// `ground_id` into the working graph, translating its children through
+    /// [`Self::tr`]. Only a fresh id names `node` itself: an `add` that finds the
+    /// node already present returns its class's canonical id, which may have been
+    /// minted as a different node (see [`Self::tr`]), so it is not mirrored.
     pub(super) fn mirror_add(&mut self, ground_id: egg::Id, node: Symbolic) {
-        // Key on the id `add` returned, raw — see the `find` note in [`Self::tr`].
-        if self.work.as_ref().unwrap().map.contains_key(&ground_id) {
-            let w = self.work.as_mut().unwrap();
-            w.dirty = true;
-            w.dirty_reduce = true;
-            return;
-        }
         let wnode = self.tr_children(node);
         let w = self.work.as_mut().unwrap();
         let s = w.egraph.add(wnode);
@@ -324,17 +347,50 @@ impl<'a> VerifyContext<'a> {
     /// Mirror a ground union into the working graph. A same-typed conflict there
     /// folds to `Inconsistent`, not a panic — that just makes the block's goals
     /// vacuously provable.
+    ///
+    /// A side in ground's `true` (`false`) class makes the other side's own term
+    /// `true` (`false`) in W, translated by [`Self::tr_term`]: [`Self::tr`] would
+    /// turn a term that has become the root of that class into the literal and
+    /// the union into `true == true`. That happens to a released token a build
+    /// made the root, and to a replayed fact whose literal side was the root when
+    /// it was recorded but no longer is (the root has moved since). Ground's
+    /// `true` and `false` classes hold unconditionally, so this is sound.
     pub(super) fn mirror_union(&mut self, a: egg::Id, b: egg::Id) {
-        let (ta, tb) = (self.tr(a), self.tr(b));
+        let (lit_a, lit_b) = (self.literal_class(a), self.literal_class(b));
+        let unions = if lit_a.is_none() && lit_b.is_none() {
+            [Some((self.tr_term(a), self.tr_term(b))), None]
+        } else {
+            [
+                lit_b.map(|l| (self.tr_term(a), l)),
+                lit_a.map(|l| (self.tr_term(b), l)),
+            ]
+        };
         let w = self.work.as_mut().unwrap();
-        w.egraph.union(ta, tb);
+        for (x, y) in unions.into_iter().flatten() {
+            w.egraph.union(x, y);
+        }
         w.dirty = true;
         w.dirty_reduce = true;
     }
 
+    /// W's `true` (`false`) when `g` is in ground's `true` (`false`) class.
+    fn literal_class(&self, g: egg::Id) -> Option<egg::Id> {
+        let w = self.work.as_ref().unwrap();
+        let root = self.egraph.find(g);
+        if root == self.egraph.find(w.true_id) {
+            Some(w.true_id)
+        } else if root == self.egraph.find(w.false_id) {
+            Some(w.false_id)
+        } else {
+            None
+        }
+    }
+
     /// Record that a certificate build unioned each of `released` with `true` in
     /// ground (a recipe build adds to `ctx.egraph` directly, past the `union`
-    /// hook): a fact like any other, so the working graph gets it too.
+    /// hook): a fact like any other, so the working graph gets it too, also for a
+    /// token the build made the root of ground's `true` class (see
+    /// [`Self::mirror_union`]).
     pub(crate) fn note_released(&mut self, released: &[egg::Id]) {
         if self.work.is_none() {
             return;
@@ -493,6 +549,9 @@ impl<'a> VerifyContext<'a> {
             return;
         }
         let t_clone = std::time::Instant::now();
+        // The literals, minted before the copy so both graphs have them.
+        let true_id = expr!(self, true);
+        let false_id = expr!(self, false);
         let egraph = self.egraph.clone();
         // Id-space boundary = the size of the *id-indexed* node vector, i.e. the
         // number of ids ever minted. Not `total_size()` (= `memo.len()`, which
@@ -500,13 +559,13 @@ impl<'a> VerifyContext<'a> {
         // pre-copy ids onto `tr`'s import path, and importing rebuilds an
         // **unmerged** copy of a class whose ground merges the copy already had.
         let watermark = egraph.nodes().len();
-        let true_id = expr!(self, true);
         self.work = Some(WorkGraph {
             egraph,
             map: HashMap::default(),
             map_log: Vec::new(),
             watermark,
             true_id,
+            false_id,
             scopes: Vec::new(),
             memo: rewrite::new_scope_id(),
             dirty: true,
@@ -1240,7 +1299,7 @@ impl<'a> VerifyContext<'a> {
 mod tests {
     use super::BlockOrder;
     use crate::verify::lang::Symbolic;
-    use crate::vmir::Polarity;
+    use crate::vmir::{Literal, Polarity};
 
     /// `0 → {1, 2} → 3 → {4, 5} → 6` (two diamonds in sequence, and 6, the join
     /// of 4 and 5).
@@ -1300,5 +1359,113 @@ mod tests {
         let tx = ctx.tr(x);
         let w = ctx.work.as_ref().unwrap();
         assert_eq!(w.egraph.find(tx), w.egraph.find(w.true_id));
+    }
+
+    /// Give the boolean `x` one more parent, so a union with a class of fewer
+    /// parents makes it the root; `flip` picks one of two distinct parents.
+    fn add_parent(ctx: &mut crate::verify::context::VerifyContext<'_>, x: egg::Id, flip: bool) {
+        let y = ctx.add(Symbolic::Fresh(100));
+        let z = ctx.add(Symbolic::Fresh(101));
+        let (y, z) = if flip { (z, y) } else { (y, z) };
+        ctx.add(Symbolic::Ite([x, y, z]));
+    }
+
+    /// The working graph's translation of `g` is known `true` there.
+    fn true_in_work(ctx: &mut crate::verify::context::VerifyContext<'_>, g: egg::Id) -> bool {
+        let tg = ctx.tr_term(g);
+        let w = ctx.work.as_ref().unwrap();
+        w.egraph.find(tg) == w.egraph.find(w.true_id)
+    }
+
+    /// A build unions a released token with `true` straight on ground, and the
+    /// token, having more parents, becomes the class's root before it is noted.
+    #[test]
+    fn a_released_root_of_true_is_learned_true() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        ctx.begin_method(BlockOrder::new(&[vec![]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.ensure_work();
+        let tok = ctx.add(Symbolic::Fresh(0));
+        add_parent(&mut ctx, tok, false);
+        ctx.egraph.union(tok, t);
+        ctx.egraph.rebuild();
+        assert_eq!(ctx.egraph.find(t), tok);
+        ctx.note_released(&[tok]);
+        assert!(true_in_work(&mut ctx, tok));
+    }
+
+    /// A fact recorded in an arm's scope against the root of ground's `true`
+    /// class is replayed when the scope closes, after the root has moved on: the
+    /// recorded root is then an ordinary member, translated as its own term.
+    #[test]
+    fn a_replayed_fact_survives_a_moved_true_root() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(0));
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        // 0 -> {1, 2} -> 3
+        ctx.begin_method(BlockOrder::new(&[vec![], vec![0], vec![0], vec![1, 2]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.ensure_work();
+        let p = ctx.add(Symbolic::Fresh(1));
+        // Ground learns `r` outside the hooks (as a rule run would): W does not.
+        let r = ctx.add(Symbolic::Fresh(2));
+        add_parent(&mut ctx, r, false);
+        ctx.egraph.union(r, t);
+        ctx.egraph.rebuild();
+        ctx.enter_block(1);
+        ctx.begin_block(vec![(c, Polarity::Positive)]);
+        let true_ = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        assert_eq!(true_, r);
+        ctx.union(p, true_);
+        ctx.egraph.rebuild();
+        // The root moves on to a class with more parents.
+        let s = ctx.add(Symbolic::Fresh(3));
+        add_parent(&mut ctx, s, false);
+        add_parent(&mut ctx, s, true);
+        ctx.egraph.union(s, t);
+        ctx.egraph.rebuild();
+        assert_eq!(ctx.egraph.find(t), s);
+        ctx.enter_block(2);
+        assert!(true_in_work(&mut ctx, p));
+    }
+
+    /// Ground's `true` class translates to W's `true` even once the class's root
+    /// is a node W does not know is true: here ground learns `x` outside the
+    /// hooks (as a rule run would), its root moves, and a re-`add` of `x` returns
+    /// that root after the scope the working graph was built in has closed.
+    #[test]
+    fn true_stays_true_in_the_working_graph() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(0));
+        let x = ctx.add(Symbolic::Fresh(1));
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        // 0 -> {1, 2} -> 3
+        ctx.begin_method(BlockOrder::new(&[vec![], vec![0], vec![0], vec![1, 2]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.enter_block(1);
+        ctx.begin_block(vec![(c, Polarity::Positive)]);
+        ctx.ensure_work();
+        ctx.egraph.union(x, t);
+        ctx.egraph.rebuild();
+        ctx.enter_block(2);
+        ctx.begin_block(vec![(c, Polarity::Negative)]);
+        let again = ctx.add(Symbolic::Fresh(1));
+        assert_eq!(ctx.egraph.find(again), ctx.egraph.find(t));
+        for id in [again, ctx.egraph.find(t)] {
+            let tw = ctx.tr(id);
+            let w = ctx.work.as_ref().unwrap();
+            assert_eq!(w.egraph.find(tw), w.egraph.find(w.true_id));
+        }
+        // The cube of block 2 (`!c`) reached W's `false`, not some other class.
+        let tc = ctx.tr(c);
+        let w = ctx.work.as_ref().unwrap();
+        assert_eq!(w.egraph.find(tc), w.egraph.find(w.false_id));
     }
 }

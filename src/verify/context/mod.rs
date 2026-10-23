@@ -248,13 +248,15 @@ impl<'a> VerifyContext<'a> {
     /// batch of unions.
     /// If a working graph exists, then the fact is also added there.
     pub(crate) fn union(&mut self, a: egg::Id, b: egg::Id) -> bool {
-        let merged = self.egraph.union(a, b);
-        if merged {
-            self.clean = None;
-        }
+        // Mirror first: the mirror reads ground's `true` and `false` classes and
+        // their roots (see `mirror_union`), which this union may change.
         if self.work.is_some() {
             self.record_fact(a, b);
             self.mirror_union(a, b);
+        }
+        let merged = self.egraph.union(a, b);
+        if merged {
+            self.clean = None;
         }
         merged
     }
@@ -434,12 +436,15 @@ impl<'a> VerifyContext<'a> {
         // Keep `node` for the mirror only when a working graph is live (the
         // clone is not free — most adds happen with none and pay nothing).
         if self.work.is_some() {
-            let id = self.egraph.add(node.clone());
+            let fresh = egg::Id::from(self.egraph.nodes().len());
+            let raw = self.egraph.add_uncanonical(node.clone());
             if self.egraph.total_size() != before {
                 self.clean = None;
             }
-            self.mirror_add(id, node);
-            id
+            if raw == fresh {
+                self.mirror_add(raw, node);
+            }
+            self.egraph.find(raw)
         } else {
             let id = self.egraph.add(node);
             if self.egraph.total_size() != before {
