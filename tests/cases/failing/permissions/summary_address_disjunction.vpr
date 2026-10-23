@@ -1,0 +1,13 @@
+// REGRESSION (soundness). `z` is `x` or `y`; the summarized exhale's agreement
+// facts must stay conditional on `z == x`, resp. `z == y`.
+//
+// Must FAIL.
+field f: Int
+
+method summary_address_disjunction(x: Ref, y: Ref, z: Ref)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && x.f == 5 && y.f == 4 && x != y
+  requires z == x || z == y
+{
+  exhale acc(z.f, 1/2)
+  assert false
+}

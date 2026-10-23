@@ -1,0 +1,14 @@
+// REGRESSION (soundness). A pc-alias consume under an intra-block condition `b`
+// (an implication, not a branch): its agreement fact was guarded by `b`, which the
+// block scratch dropped, so `x.f == y.f` held on the `!b` path too.
+//
+// Must FAIL.
+field f: Int
+
+method pc_alias_intra_block_literal(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+  requires b ==> x == y
+{
+  exhale b ==> acc(x.f)
+  assert !b ==> x.f == y.f
+}
