@@ -65,8 +65,10 @@ pub(super) struct WorkGraph {
     map_log: Vec<egg::Id>,
     /// Ground id-space size when the copy was taken.
     watermark: usize,
-    /// The `true` literal (same id in both graphs). Canonicalize with `find`.
+    /// The `true` / `false` literals (same ids in both graphs when the copy was
+    /// taken). Canonicalize with `find`.
     pub(super) true_id: egg::Id,
+    false_id: egg::Id,
     /// The open scopes, outermost first.
     scopes: Vec<Scope>,
     /// Applier-memo scope of the base; each scope adds its own.
@@ -219,13 +221,26 @@ impl<'a> VerifyContext<'a> {
         // for it, so canonicalizing first would translate *every* such term to the
         // working graph's `true` — silently turning each mirrored union/assume into
         // `true == true`.
-        match self.work.as_ref() {
-            None => return g,
-            Some(w) => {
-                if let Some(s) = w.fast_translate(g) {
-                    return s;
-                }
+        let Some(w) = self.work.as_ref() else {
+            return g;
+        };
+        // The one exception: the literals. `expr!(ctx, true)` is the canonical id
+        // of ground's `true` class, i.e. whichever node the class's root was
+        // minted as, and the root moves when a union makes another class the
+        // larger one. Translated as that node, it would be a class W need not know
+        // is `true`. So the current root of ground's `true` (`false`) class is
+        // W's `true` (`false`). Everything in that class holds unconditionally, so
+        // this is sound; a term that became the root is learned only as `true`.
+        if g == self.egraph.find(g) {
+            if g == self.egraph.find(w.true_id) {
+                return w.true_id;
             }
+            if g == self.egraph.find(w.false_id) {
+                return w.false_id;
+            }
+        }
+        if let Some(s) = w.fast_translate(g) {
+            return s;
         }
         // Miss: an unmirrored ground mint (recipe `build`s and rule runs add
         // straight to `ctx.egraph`). Import it **faithfully** via `id_to_node(g)`,
@@ -298,17 +313,12 @@ impl<'a> VerifyContext<'a> {
         w.dirty_reduce = true;
     }
 
-    /// Mirror a ground `add` of `node` (which produced ground id `ground_id`) into
-    /// the working graph, translating its children through [`Self::tr`].
-    /// Idempotent per ground id.
+    /// Mirror a ground `add` that minted `node` at the fresh ground id
+    /// `ground_id` into the working graph, translating its children through
+    /// [`Self::tr`]. Only a fresh id names `node` itself: an `add` that finds the
+    /// node already present returns its class's canonical id, which may have been
+    /// minted as a different node (see [`Self::tr`]), so it is not mirrored.
     pub(super) fn mirror_add(&mut self, ground_id: egg::Id, node: Symbolic) {
-        // Key on the id `add` returned, raw — see the `find` note in [`Self::tr`].
-        if self.work.as_ref().unwrap().map.contains_key(&ground_id) {
-            let w = self.work.as_mut().unwrap();
-            w.dirty = true;
-            w.dirty_reduce = true;
-            return;
-        }
         let kids: Vec<egg::Id> = node.children().to_vec();
         let tkids: Vec<egg::Id> = kids.iter().map(|c| self.tr(*c)).collect();
         let mut wnode = node;
@@ -483,6 +493,9 @@ impl<'a> VerifyContext<'a> {
             return;
         }
         let t_clone = std::time::Instant::now();
+        // The literals, minted before the copy so both graphs have them.
+        let true_id = expr!(self, true);
+        let false_id = expr!(self, false);
         let egraph = self.egraph.clone();
         // Id-space boundary = the size of the *id-indexed* node vector, i.e. the
         // number of ids ever minted. Not `total_size()` (= `memo.len()`, which
@@ -490,13 +503,13 @@ impl<'a> VerifyContext<'a> {
         // pre-copy ids onto `tr`'s import path, and importing rebuilds an
         // **unmerged** copy of a class whose ground merges the copy already had.
         let watermark = egraph.nodes().len();
-        let true_id = expr!(self, true);
         self.work = Some(WorkGraph {
             egraph,
             map: HashMap::default(),
             map_log: Vec::new(),
             watermark,
             true_id,
+            false_id,
             scopes: Vec::new(),
             memo: rewrite::new_scope_id(),
             dirty: true,
@@ -1218,5 +1231,47 @@ mod tests {
         assert!(o.needs_scope(4, None));
         // The last arm still does not dominate the join after it.
         assert!(o.needs_scope(5, None));
+    }
+}
+
+#[cfg(test)]
+mod working_graph_tests {
+    use super::BlockOrder;
+    use crate::verify::lang::Symbolic;
+    use crate::vmir::{Literal, Polarity};
+
+    /// Ground's `true` class translates to W's `true` even once the class's root
+    /// is a node W does not know is true: here ground learns `x` outside the
+    /// hooks (as a rule run would), its root moves, and a re-`add` of `x` returns
+    /// that root after the scope the working graph was built in has closed.
+    #[test]
+    fn true_stays_true_in_the_working_graph() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(0));
+        let x = ctx.add(Symbolic::Fresh(1));
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        // 0 -> {1, 2} -> 3
+        ctx.begin_method(BlockOrder::new(&[vec![], vec![0], vec![0], vec![1, 2]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.enter_block(1);
+        ctx.begin_block(vec![(c, Polarity::Positive)]);
+        ctx.ensure_work();
+        ctx.egraph.union(x, t);
+        ctx.egraph.rebuild();
+        ctx.enter_block(2);
+        ctx.begin_block(vec![(c, Polarity::Negative)]);
+        let again = ctx.add(Symbolic::Fresh(1));
+        assert_eq!(ctx.egraph.find(again), ctx.egraph.find(t));
+        for id in [again, ctx.egraph.find(t)] {
+            let tw = ctx.tr(id);
+            let w = ctx.work.as_ref().unwrap();
+            assert_eq!(w.egraph.find(tw), w.egraph.find(w.true_id));
+        }
+        // The cube of block 2 (`!c`) reached W's `false`, not some other class.
+        let tc = ctx.tr(c);
+        let w = ctx.work.as_ref().unwrap();
+        assert_eq!(w.egraph.find(tc), w.egraph.find(w.false_id));
     }
 }

@@ -239,13 +239,15 @@ impl<'a> VerifyContext<'a> {
     /// (invalidates the fixpoint cache). Callers still `rebuild()` after a
     /// batch of unions.
     pub(crate) fn union(&mut self, a: egg::Id, b: egg::Id) -> bool {
-        let merged = self.egraph.union(a, b);
-        if merged {
-            self.clean = None;
-        }
+        // Mirror first: translation reads ground's `true` root (see `tr`), which
+        // this union may move onto `a` or `b`.
         if self.work.is_some() {
             self.facts.push((a, b));
             self.mirror_union(a, b);
+        }
+        let merged = self.egraph.union(a, b);
+        if merged {
+            self.clean = None;
         }
         merged
     }
@@ -428,12 +430,15 @@ impl<'a> VerifyContext<'a> {
         // Keep `node` for the mirror only when a working graph is live (the
         // clone is not free — most adds happen with none and pay nothing).
         if self.work.is_some() {
-            let id = self.egraph.add(node.clone());
+            let fresh = egg::Id::from(self.egraph.nodes().len());
+            let raw = self.egraph.add_uncanonical(node.clone());
             if self.egraph.total_size() != before {
                 self.clean = None;
             }
-            self.mirror_add(id, node);
-            id
+            if raw == fresh {
+                self.mirror_add(raw, node);
+            }
+            self.egraph.find(raw)
         } else {
             let id = self.egraph.add(node);
             if self.egraph.total_size() != before {
