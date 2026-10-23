@@ -1,0 +1,16 @@
+// From the PR 4 review (nested.vpr, `n3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+method n3(x: Int, z: Int, a: Int, b: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (b) {
+    if (a == 0) { inhale x == 0; assert f(x) == f(0) }
+    elseif (a == 1) { inhale x == 1; assert f(x) == f(1) }
+    else { inhale x == 2; assert f(x) == f(2) }
+    assert x <= 2
+  }
+  assert b ==> x <= 2
+  assert x <= 2
+}

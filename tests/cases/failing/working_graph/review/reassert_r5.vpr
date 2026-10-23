@@ -1,0 +1,25 @@
+// From the PR 4 review (reassert.vpr, `r5`): must FAIL.
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int
+  requires x > 0
+{ x + 1 }
+function h(x: Int): Bool
+{ x > 3 }
+
+
+
+
+
+// heap: arm inhales permission + value; after join use under arm cond (PASS)
+field val: Int
+
+method r5(r: Ref, x: Int, z: Int, c: Bool)
+  requires acc(r.val)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { r.val := 5; assert f(r.val) == f(5) } else { r.val := 6 }
+  assert c ==> r.val == 5
+  assert !c ==> r.val == 6
+  assert r.val == 5
+}

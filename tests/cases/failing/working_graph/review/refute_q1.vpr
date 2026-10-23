@@ -1,0 +1,13 @@
+// From the PR 4 review (refute.vpr, `q1`): must FAIL, as on main (its Z3 rung
+// proves the refuted fact from both arms, Silicon rejects too).
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int requires x > 0 { x + 1 }
+
+// each refute is of a fact that holds: Silicon rejects every method.
+method q1(x: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { inhale x == 1; assert f(x) == f(1) } else { inhale x == 1 }
+  refute x == 1
+}

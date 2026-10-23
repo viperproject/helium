@@ -1,0 +1,26 @@
+// From the PR 4 review (reassert.vpr, `r3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int
+  requires x > 0
+{ x + 1 }
+function h(x: Int): Bool
+{ x > 3 }
+
+
+
+
+
+// heap: arm inhales permission + value; after join use under arm cond (PASS)
+field val: Int
+
+// arm proof must not be exported unguarded. FAIL expected (last assert)
+method r3(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale h(x)
+    if (d) { assert x > 3 } else { assert x > 2 }
+  }
+  assert x > 3
+}

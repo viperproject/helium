@@ -1,0 +1,18 @@
+// From the PR 4 review (goto1.vpr, `g4`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+// arm fact leaking to a later goto-reached block that is a sibling's descendant
+method g4(x: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { goto A }
+  goto B
+  label A
+  inhale x == 7
+  assert f(x) == f(7)
+  goto E
+  label B
+  assert x == 7
+  label E
+}

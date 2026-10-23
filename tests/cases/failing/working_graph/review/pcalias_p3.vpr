@@ -1,0 +1,11 @@
+// From the PR 4 review (pcalias.vpr, `p3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method p3(a: Ref, b: Ref, c: Bool, x: Int)
+  requires acc(a.v) && acc(b.v, 1/2) && (c ==> a == b) 
+{
+  var t: Int := c ? b.v : 0
+  assert c
+}

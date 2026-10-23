@@ -1,0 +1,20 @@
+// From the PR 4 review (goto1.vpr, `g2`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+// P must see the arm's fact (dominated); the FAIL must be at the end.
+method g2(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == 1
+    assert f(x) == f(1)
+    if (d) { goto P }
+  }
+  goto E
+  label P
+  assert x == 1
+  assert c
+  label E
+  assert x == 1
+}

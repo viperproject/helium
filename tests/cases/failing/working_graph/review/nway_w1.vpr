@@ -1,0 +1,19 @@
+// From the PR 4 review (nway.vpr, `w1`): must FAIL.
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+// 3-way goto merge: synthetic joins
+method w1(x: Int, z: Int, a: Int)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (a == 0) { inhale x == 0; assert f(x) == f(0); goto L }
+  if (a == 1) { inhale x == 1; assert f(x) == f(1); goto L }
+  inhale x == 2
+  assert f(x) == f(2)
+  label L
+  assert a == 0 ==> x == 0
+  assert a == 1 ==> x == 1
+  assert (a != 0 && a != 1) ==> x == 2
+  assert x == 1
+}

@@ -1,0 +1,14 @@
+// From the PR 4 review (nway.vpr, `w3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+// arm with heap facts, joined by goto; perm must not leak
+method w3(r: Ref, x: Int, z: Int, c: Bool)
+  requires acc(r.v, 1/2)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { inhale acc(r.v, 1/2); r.v := 3; goto L }
+  label L
+  r.v := 4
+}
