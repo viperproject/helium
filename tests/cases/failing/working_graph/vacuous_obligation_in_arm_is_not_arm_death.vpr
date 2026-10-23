@@ -1,0 +1,17 @@
+// An obligation in an arm that holds vacuously (its condition `x == 2`
+// contradicts `x == 1`) does not make the arm dead. The first `if` builds the
+// working graph before the branch.
+//
+// Must FAIL (the last assert in the arm).
+
+domain D { function f(x: Int): Int }
+
+method v2(x: Int, z: Int, c: Bool)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    assert (x == 2) ==> f(x) == 3
+    assert f(x) == 3
+  }
+}

@@ -1,0 +1,13 @@
+// A read under an intra-block condition (`c ? b.v : 0`), framed through the
+// alias `a == b` that holds under `c`, does not assume `c`.
+//
+// Must FAIL (the assert).
+
+field v: Int
+
+method p3(a: Ref, b: Ref, c: Bool, x: Int)
+  requires acc(a.v) && acc(b.v, 1/2) && (c ==> a == b) 
+{
+  var t: Int := c ? b.v : 0
+  assert c
+}

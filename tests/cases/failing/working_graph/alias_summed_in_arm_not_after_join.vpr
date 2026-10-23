@@ -1,0 +1,16 @@
+// Two halves summed in an arm through an alias the arm assumes (`a == b`) do
+// not make the alias hold after the join.
+//
+// Must FAIL (the assert after the join).
+
+field v: Int
+
+method p4(a: Ref, b: Ref, c: Bool)
+  requires acc(a.v, 1/2) && acc(b.v, 1/2)
+{
+  if (c) {
+    inhale a == b
+    exhale acc(b.v, 1/1)
+  }
+  assert a == b
+}

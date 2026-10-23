@@ -1,0 +1,13 @@
+// Reading `b.v` under `c`, through the alias `a == b` that holds there, does
+// not make `a == b` hold where `c` does not.
+//
+// Must FAIL (the assert after the join).
+
+field v: Int
+
+method p1(a: Ref, b: Ref, c: Bool)
+  requires acc(a.v) && (c ==> a == b)
+{
+  if (c) { var t: Int := b.v }
+  assert a == b
+}

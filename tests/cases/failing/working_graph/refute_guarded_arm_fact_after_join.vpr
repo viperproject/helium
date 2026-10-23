@@ -1,0 +1,14 @@
+// An arm's fact holds after the join guarded by the arm's condition, so a
+// `refute` of the guarded fact fails. The first `if` builds the working graph
+// before the branch.
+//
+// Must FAIL (the `refute`).
+
+domain D { function f(x: Int): Int }
+
+method q2(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { inhale x == 1; assert f(x) == f(1) }
+  if (d) { refute c ==> x == 1 }
+}

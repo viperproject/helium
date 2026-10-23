@@ -1,0 +1,19 @@
+// Heap values written in the arms hold after the join under their arm's
+// condition (the guarded asserts verify), not unguarded. The first `if` builds
+// the working graph before the branch.
+//
+// Must FAIL (the last assert).
+
+domain D { function f(x: Int): Int }
+
+field val: Int
+
+method r5(r: Ref, x: Int, z: Int, c: Bool)
+  requires acc(r.val)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { r.val := 5; assert f(r.val) == f(5) } else { r.val := 6 }
+  assert c ==> r.val == 5
+  assert !c ==> r.val == 6
+  assert r.val == 5
+}
