@@ -1,0 +1,14 @@
+// From the PR 4 review (vac1.vpr, `v4`): must FAIL.
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method v4(x: Int, z: Int, r: Ref, c: Bool)
+  requires x == 1 && acc(r.v)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    exhale (x == 2) ==> acc(r.v, 2/1)
+  }
+  assert false
+}

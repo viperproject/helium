@@ -1,0 +1,15 @@
+// From the PR 4 review (loop1.vpr, `l2`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+method l2(x: Int, z: Int, n: Int)
+{
+  var i: Int := 0
+  if (x == z) { assert f(x) == f(z) }
+  while (i < n) invariant 0 <= i
+  {
+    if (i == 3) { inhale x == 5; assert f(x) == f(5) }
+    assert x == 5
+    i := i + 1
+  }
+}

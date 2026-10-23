@@ -1,0 +1,13 @@
+// From the PR 4 review (intra1.vpr, `i1`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+// intra-block guard stays a guard in dominated blocks
+method i1(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  inhale c ==> x == 1
+  assert f(x) == f(x)
+  if (d) { assert f(1) == f(1) } else { assert f(2) == f(2) }
+  assert x == 1
+}

@@ -1,0 +1,13 @@
+// From the PR 4 review (refute.vpr, `q4`): must verify.
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int requires x > 0 { x + 1 }
+
+method q4(x: Int, z: Int, a: Int)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (a == 0) { inhale x == 0; assert f(x) == f(0) }
+  elseif (a == 1) { inhale x == 0; assert f(x) == f(0) }
+  else { inhale x == 0; assert f(x) == f(0) }
+  refute x == 0
+}

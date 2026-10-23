@@ -1,0 +1,21 @@
+// From the PR 4 review (goto1.vpr, `g3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+// a block reached from both arms via goto, walked after a sibling
+method g3(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == 1
+    assert f(x) == f(1)
+    goto Q
+  } else {
+    if (d) { goto Q }
+    inhale x == 2
+  }
+  goto E
+  label Q
+  assert x == 1
+  label E
+}

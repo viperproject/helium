@@ -1,0 +1,13 @@
+// From the PR 4 review (intra1.vpr, `i3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+method i3(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (d) {
+    assert c ==> (x == 1 ==> f(x) == f(1))
+    inhale c ==> x == 1
+  }
+  assert x == 1
+}

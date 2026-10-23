@@ -1,0 +1,20 @@
+// From the PR 4 review (goto1.vpr, `g1`): must FAIL.
+
+domain D { function f(x: Int): Int }
+
+// panic-like block dominated by the then-arm, emitted at the end; the join
+// must not see the arm's fact. FAIL expected on `assert x == 1` after join.
+method g1(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == 1
+    assert f(x) == f(1)
+    if (d) { goto P }
+  }
+  assert x == 1
+  goto E
+  label P
+  assert x == 1
+  label E
+}

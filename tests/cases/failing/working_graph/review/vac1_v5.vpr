@@ -1,0 +1,17 @@
+// From the PR 4 review (vac1.vpr, `v5`): must FAIL.
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method v5(x: Int, z: Int, c: Bool)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale (x == 2) ==> false
+    assert f(x) == f(1)
+  } else {
+    assert c ==> false
+  }
+  assert false
+}

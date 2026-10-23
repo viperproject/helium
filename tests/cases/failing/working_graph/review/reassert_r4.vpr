@@ -1,0 +1,32 @@
+// From the PR 4 review (reassert.vpr, `r4`): must FAIL.
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int
+  requires x > 0
+{ x + 1 }
+function h(x: Int): Bool
+{ x > 3 }
+
+
+
+
+
+// heap: arm inhales permission + value; after join use under arm cond (PASS)
+field val: Int
+
+// quantifier inhaled in nested arm; sibling arm and after join
+method r4(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    if (d) {
+      inhale forall i: Int :: { f(i) } f(i) > 0
+      assert f(x) > 0
+    } else {
+      assert f(z) == f(z)
+    }
+    assert d ==> f(x + 1) > 0
+  } else {
+    assert f(x) > 0
+  }
+}

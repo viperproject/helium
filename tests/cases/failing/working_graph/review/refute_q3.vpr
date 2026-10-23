@@ -1,0 +1,11 @@
+// From the PR 4 review (refute.vpr, `q3`): must FAIL.
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int requires x > 0 { x + 1 }
+
+method q3(x: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { inhale x > 0; assert g(x) == x + 1 }
+  refute c ==> g(x) == x + 1
+}
