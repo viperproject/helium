@@ -20,7 +20,9 @@ pub(crate) mod timing;
 pub use adt::{accessor_rule, is_rule, proj_rule, variant_narrow_rule};
 pub(crate) use forall::{PreparedTerm, TermHead, forall_rule};
 pub(crate) use function::{function_post_rule, function_rule, post_rule};
-pub(crate) use memo::{Memo, ScratchScope, new_memo_unit, new_scope_id, retire_scope};
+pub(crate) use memo::{
+    Memo, ScratchScope, live_horizon, new_memo_unit, new_scope_id, retire_scope,
+};
 pub(crate) use recipe::{
     AxiomInst, AxiomPure, build_instance_releasing_tokens, build_instance_vals_guarded,
 };
