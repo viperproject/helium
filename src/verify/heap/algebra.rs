@@ -2839,9 +2839,16 @@ pub(crate) fn read_location(
                     let pos = expr!(ctx, (0 / 1) < r { *h });
                     expr!(ctx, if {pos} then {c.value} else {acc})
                 });
+            // No recipe: a recipe must denote exactly the value, and the chain's
+            // conditions are permission amounts that have no recipe-space term. Any
+            // single member's recipe would name its slot, which is the location's
+            // value only where that member holds a share -- a function whose body
+            // read through such a recipe got a definitional axiom disagreeing with
+            // what its body and postcondition were checked against. A certificate
+            // walk reports the read as unsupported instead.
             Taken {
                 value,
-                recipe: first.recipe.clone(),
+                recipe: None,
             }
         }
     };
