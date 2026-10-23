@@ -1,0 +1,37 @@
+// Controls for `failing/permissions/alias_set_read_recipe_*.vpr`; Silicon verifies
+// every member here. The functions read `x.f` where two chunks may sit, each held
+// only under its own guard, and no member is known to hold a share, so the read's
+// value is a choice by positivity that no single footprint slot denotes. A function
+// body cannot express that choice in its definitional axiom, so the read is
+// unsupported there (the base rejects the same functions, failing their framing).
+// It verifies once the recipe can carry the positivity chain.
+
+field f: Int
+
+function h1(x: Ref, y0: Ref, y1: Ref, c: Bool): Int
+  requires (!c ==> acc(y1.f)) && (c ==> acc(y0.f))
+  ensures (x == y0 && x == y1 && !c) ==> result == y1.f
+{ (x == y0 && x == y1) ? x.f : 0 }
+
+function h(x: Ref, y0: Ref, y1: Ref, c: Bool): Int
+  requires (c ==> acc(y0.f)) && (!c ==> acc(y1.f))
+  ensures (x == y0 && x == y1 && !c) ==> result == y1.f
+{ (x == y0 && x == y1) ? x.f : 0 }
+
+method m4(y: Ref, z: Ref)
+  requires acc(y.f) && acc(z.f)
+{
+  y.f := 5
+  z.f := 6
+  var a: Int := h1(y, y, y, false)
+  var b: Int := h1(z, z, z, false)
+  assert a == 5 && b == 6
+}
+
+method m5(y: Ref, z: Ref)
+  requires acc(y.f) && acc(z.f)
+{
+  y.f := 5
+  var a: Int := h(y, y, y, false)
+  assert a == 5
+}
