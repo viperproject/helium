@@ -1744,6 +1744,17 @@ pub(crate) fn heap_subtract_summarized(
     Ok((out, taken))
 }
 
+/// Split `cube` into the literals of the block's own cube (ambient: the block
+/// scratch has assumed them) and the rest.
+fn split_ambient(
+    ctx: &VerifyContext<'_>,
+    cube: &[(egg::Id, Polarity)],
+) -> (Vec<(egg::Id, Polarity)>, Vec<(egg::Id, Polarity)>) {
+    cube.iter().partition(|lit| {
+        crate::verify::heap::cube_entails(ctx, ctx.current_cube(), std::slice::from_ref(*lit))
+    })
+}
+
 /// Whether `cube` holds wherever `pc_lits` does: each literal is in the pc, or its
 /// class is already decided with the literal's polarity (a Σ-ite address gate the
 /// sufficiency proof has since settled).
@@ -1807,18 +1818,28 @@ pub(crate) fn summarized_value(
         None => Taken::fresh(ctx, kind),
     };
     let zero = num::BigRational::from(num::BigInt::from(0));
+    let (_, delta) = split_ambient(ctx, pc_lits);
     for (i, ((chunk, cube), (hold, positive))) in set.iter().zip(holds).enumerate() {
         if Some(i) == holder || known_real(ctx, hold).is_some_and(|r| r == zero) {
             continue;
         }
         let agree = expr!(ctx, { chunk.value } == { taken.value });
-        let agree = if positive {
-            agree
-        } else {
-            let held = expr!(ctx, (0 / 1) < r { hold });
-            ctx.implication(agree, std::iter::once((held, Polarity::Positive)))
-        };
-        ctx.assume_guarded(agree, cube.iter().rev().copied());
+        // The fact describes this block's heap, so it holds only on the block's path
+        // and where the instruction runs. The guard is the block's cube, which the
+        // scratch already assumes and drops. Everything else -- the member's own
+        // condition (an address equality, a presence guard), `0 < hold` and the
+        // instruction's pc -- has to sit inside the fact: left to the guard, the
+        // scratch equated the values of every member, aliased or not; left out,
+        // ground stated the agreement on paths where this heap does not exist.
+        let (_, own) = split_ambient(ctx, cube);
+        let held = (!positive).then(|| (expr!(ctx, (0 / 1) < r { hold }), Polarity::Positive));
+        let antecedents = held
+            .into_iter()
+            .chain(own.into_iter().rev())
+            .chain(delta.iter().rev().copied());
+        let agree = ctx.implication(agree, antecedents);
+        let cube = ctx.current_cube().to_vec();
+        ctx.assume_guarded(agree, cube.into_iter().rev());
     }
     taken
 }

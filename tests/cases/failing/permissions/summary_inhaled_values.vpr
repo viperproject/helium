@@ -1,0 +1,14 @@
+// REGRESSION (soundness). The disjunction shape with `x != y` left implicit
+// (both values inhaled at half permission each).
+//
+// Must FAIL.
+field f: Int
+
+method summary_inhaled_values(x: Ref, y: Ref, z: Ref)
+  requires acc(y.f, 1/2) && y.f == 4
+{
+  inhale acc(x.f, 1/2) && x.f == 5
+  inhale z == x || z == y
+  exhale acc(z.f, 1/2)
+  assert false
+}

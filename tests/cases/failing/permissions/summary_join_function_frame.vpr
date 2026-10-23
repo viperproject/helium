@@ -1,0 +1,20 @@
+// REGRESSION (soundness). After a join `z` is `x` on one arm and `y` on the other,
+// so the frame check of `rd(z)` resolves through the group summary over the `x`
+// and `y` chunks, each under its address equality. The agreement facts kept that
+// equality in the guard, which the block scratch drops: both values were equated
+// with the snapshot and `x.f == y.f` verified.
+//
+// Must FAIL.
+field f: Int
+function rd(r: Ref): Int
+  requires acc(r.f)
+{ r.f }
+
+method summary_join_function_frame(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && acc(y.f)
+{
+  var z: Ref := x
+  if (b) { z := y }
+  var t: Int := rd(z)
+  assert x.f == y.f
+}
