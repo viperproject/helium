@@ -849,19 +849,43 @@ fn no_match_lost(
             .collect();
         lost.push((rule, rest));
     }
+    // In a scratch scope the memos only know what was instantiated since the
+    // graph was copied, so an applier may rebuild an instance the copy inherited
+    // in a redundant variant (a function's post replayed under the call's token,
+    // where the copy holds it unguarded). There only merges of classes that
+    // already existed count as lost; in a live run any change does.
+    let live = rewrite::in_live_scope();
+    let classes: Vec<egg::Id> = egraph.classes().map(|c| c.id).collect();
     let mut g = egraph.clone();
-    let size = |g: &egg::EGraph<Symbolic, ConstFold>| (g.total_size(), g.number_of_classes());
-    let before = size(&g);
-    let mut missed = Vec::new();
-    for (rule, rest) in lost {
-        let at = size(&g);
-        if !rule.apply(&mut g, &rest).is_empty() || size(&g) != at {
-            missed.push(rule.name);
-        }
+    let changed = |g: &mut egg::EGraph<Symbolic, ConstFold>, before: (usize, usize)| {
+        g.rebuild();
+        let merged = {
+            let mut roots: Vec<egg::Id> = classes.iter().map(|&c| g.find(c)).collect();
+            roots.sort_unstable();
+            roots.dedup();
+            roots.len() != classes.len()
+        };
+        merged || (live && (g.total_size(), g.number_of_classes()) != before)
+    };
+    let before = (g.total_size(), g.number_of_classes());
+    for (rule, rest) in &lost {
+        rule.apply(&mut g, rest);
     }
-    g.rebuild();
+    let mut missed = Vec::new();
+    if changed(&mut g, before) {
+        // name the rules: again, one at a time
+        let mut g = egraph.clone();
+        for (rule, rest) in &lost {
+            let before = (g.total_size(), g.number_of_classes());
+            rule.apply(&mut g, rest);
+            if changed(&mut g, before) {
+                missed.push(rule.name);
+            }
+        }
+        missed.push("(together)".into());
+    }
     assert!(
-        missed.is_empty() && size(&g) == before,
+        missed.is_empty(),
         "semi-naive matching lost matches of {missed:?}"
     );
     true

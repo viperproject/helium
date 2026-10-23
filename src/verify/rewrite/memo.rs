@@ -54,6 +54,12 @@ impl ScratchScope {
     }
 }
 
+/// Whether rules run outside every scratch scope, on the live graph, whose memos
+/// know every instance it holds.
+pub(crate) fn in_live_scope() -> bool {
+    SCRATCH_STACK.with(|s| s.borrow().is_empty())
+}
+
 /// While alive, memos answer as they would but record nothing: for a debug check
 /// that re-applies rules to a copy of a graph and must see what the live run's
 /// memos remember (an applier may legitimately skip an instance it built under
