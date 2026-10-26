@@ -1,14 +1,17 @@
-use std::process::id;
-use itertools::Itertools;
 use crate::verify::lang::{FuncId, Symbolic};
+use itertools::Itertools;
 
-use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Sort};
-use z3::ast::{Ast, Bool, Dynamic, Int};
 use crate::verify::context::VerifyContext;
-use crate::{vmir, HashMap, HashSet};
+use crate::verify::func_registry::{
+    BUILTIN_OPTION_HEAD, FuncKind,
+};
 use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
-use crate::verify::func_registry::{FuncKind, BUILTIN_OPTION_NONE, BUILTIN_OPTION_SOME, BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE, BUILTIN_OPTION_VALUE, BUILTIN_OPTION_HEAD};
+use crate::{HashMap, vmir};
 use egg::Id;
+use std::borrow::Cow;
+use z3::ast::{Ast, Bool, Dynamic, Int};
+use z3::datatype_builder::create_datatypes;
+use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Sort};
 
 /// The translator's caches, kept in `VerifyContext::z3translator` so sorts and
 /// datatypes are created once per context. The translation itself is the free
@@ -17,19 +20,39 @@ use egg::Id;
 pub(crate) struct Z3Translation {
     sorts: HashMap<Type, Sort>,
     adts: HashMap<Type, DatatypeSort>,
-    // which adts we are currently building
-    building: HashSet<Type>,
 }
 
 /// Parameter and return types of function declaration `func` at instantiation
 /// `tys`. Every declared `FuncId` is a `vmir::Function`: ordinary, domain, and
 /// field/predicate address functions alike.
 fn function_signature(ctxt: &VerifyContext, func: MemberId, tys: &[Type]) -> (Vec<Type>, Type) {
-    let vmir::Declaration::Function(fun) = &ctxt.decls[func] else {
-        unreachable!("FuncApp of declaration {} that is not a function", func.0);
-    };
-    let params = fun.params.iter().map(|t| t.subst_generics(tys)).collect();
-    (params, fun.ret.subst_generics(tys))
+    match &ctxt.decls[func] {
+        vmir::Declaration::Domain(_) => {
+            unreachable!("the domain declaration only holds the name of the declaration. It can never be a function.")
+        }
+        vmir::Declaration::Axiom(_) => {
+            unreachable!("the axiom declaration only holds the axiom. It can never be a function.")
+        }
+        vmir::Declaration::Function(fun) => {
+            let params = fun.params.iter().map(|t| t.subst_generics(tys)).collect();
+            (params, fun.ret.subst_generics(tys))
+        }
+        vmir::Declaration::Method(_) => {
+            unreachable!("methods are lowered to exhale/inhale. A method is never called.")
+        }
+        vmir::Declaration::Resource(r) => {
+            let params = r.params.iter().map(|t| t.subst_generics(tys)).collect();
+            let group = ctxt
+                .groups
+                .get(ctxt.interner.resolve(&r.name))
+                .expect("predicate group tag");
+            let ret = r.derive_location(func, group).ret;
+            (params, ret)
+        }
+        vmir::Declaration::Adt(_) => {
+            unreachable!("adt are lowered to specific pure instructions and not to a function call")
+        }
+    }
 }
 
 /// The type of e-class `id` (translation.typ, "Class sorts"). Exact or a panic:
@@ -86,16 +109,16 @@ fn exact_node_type(
         Symbolic::RealCast(_) => Some(Type::Real),
         Symbolic::Forall(..) => Some(Type::Bool),
         Symbolic::Ite([_, then, _]) => exact_class_type(ctxt, *then, memo),
-        Symbolic::FuncApp(f, tys, _) => match *f {
-            BUILTIN_OPTION_SOME | BUILTIN_OPTION_NONE => Some(Type::Option(Box::new(tys[0].clone()))),
-            BUILTIN_OPTION_VALUE => Some(tys[0].clone()),
-            BUILTIN_OPTION_IS_SOME | BUILTIN_OPTION_IS_NONE => Some(Type::Bool),
-            // The return type is a function of `(f, tys)`. With no type
-            // arguments `f` has exactly one instantiation, so the type
-            // `func_ret_types` recorded for it is the right one. With type
-            // arguments it may be another instantiation's: uncertain.
-            _ if tys.is_empty() => ctxt.func_ret_types.get(f).cloned(),
-            _ => None,
+        Symbolic::FuncApp(f, tys, _) => match ctxt.alloc.kind(*f) {
+            FuncKind::Decl(m) | FuncKind::Limited(m) => Some(function_signature(ctxt, m, tys).1),
+            FuncKind::PreToken(_) => Some(Type::Bool),
+            FuncKind::Cons { head, .. } => Some(adt_type(ctxt, head, tys)),
+            FuncKind::Proj {
+                head,
+                variant,
+                field,
+            } => Some(field_types(ctxt, head, variant, tys).swap_remove(field)),
+            FuncKind::IsVariant { .. } => Some(Type::Bool),
         },
     }
 }
@@ -115,7 +138,10 @@ pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
         // A `Forall` gets no equation: its class constant stays a free
         // `Bool`, and its instances are already in the e-graph as
         // `ite(forall, body, true) == true` (translation.typ, "The e-graph").
-        for node in nodes.iter().filter(|node| !matches!(node, Symbolic::Forall(..))) {
+        for node in nodes
+            .iter()
+            .filter(|node| !matches!(node, Symbolic::Forall(..)))
+        {
             let node_expression = symbol_to_z3(ctxt, node);
             facts.push(class_const.eq(node_expression));
         }
@@ -129,29 +155,15 @@ pub(crate) fn build_goal(ctxt: &mut VerifyContext, id: egg::Id) -> Bool {
 }
 
 pub(crate) fn build_pc(ctxt: &mut VerifyContext, pc: &[(egg::Id, Polarity)]) -> Vec<Bool> {
-    pc.iter().map(|(id, p)| {
-        let c_const = class_const(ctxt, *id);
-        match p {
-            Polarity::Positive => c_const.as_bool().unwrap(),
-            Polarity::Negative => !c_const.as_bool().unwrap(),
-        }
-    }).collect()
-}
-
-pub(crate) fn option<'c>(ctxt: &'c mut VerifyContext, ty: &Type, inner: &Type) -> &'c DatatypeSort {
-    if !ctxt.z3translator.adts.contains_key(ty) {
-        let inner_sort = sort(ctxt, inner);
-        let name = format!("adt@{ty}"); // `adt@Option<Int>`
-        let dt = DatatypeBuilder::new(name.as_str())
-            .variant(
-                &format!("{name}.Some"),
-                vec![(&format!("{name}.Some.0"), DatatypeAccessor::sort(inner_sort))],
-            )
-            .variant(&format!("{name}.None"), vec![])
-            .finish();
-        ctxt.z3translator.adts.insert(ty.clone(), dt);
-    }
-    &ctxt.z3translator.adts[ty]
+    pc.iter()
+        .map(|(id, p)| {
+            let c_const = class_const(ctxt, *id);
+            match p {
+                Polarity::Positive => c_const.as_bool().unwrap(),
+                Polarity::Negative => !c_const.as_bool().unwrap(),
+            }
+        })
+        .collect()
 }
 
 fn class_const_given_sort(ctxt: &VerifyContext, id: Id, sort: &Sort) -> Dynamic {
@@ -181,23 +193,16 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
                 debug_assert!(args.is_empty(), "domains are monomorphic");
                 Sort::uninterpreted(format!("dom@{}", interner.resolve(&d.name)).into())
             }
-            vmir::Declaration::Adt(a) => adt(ctxt, ty, a, args).sort.clone(),
+            vmir::Declaration::Adt(_) => datatype(ctxt, ty).sort.clone(),
             _ => unreachable!("Type::Domain must name a domain or an ADT"),
         },
-        Type::Snap(id) => {
-            let vmir::Declaration::Resource(r) = &decls[*id] else {
-                unreachable!("Type::Snap must name a resource");
-            };
-
-            Sort::uninterpreted(format!("snap@{}", interner.resolve(&r.name)).into())
-        },
-        Type::Option(inner) => option(ctxt, ty, inner).sort.clone(),
+        Type::Snap(_) | Type::Option(_) => datatype(ctxt, ty).sort.clone(),
         // `addr@[g] T` (translation.typ). The bound is not part of the name: the
         // group already fixes it (fields are 1/1, predicates unbounded).
-        Type::Addr { group, value, .. } => Sort::uninterpreted(
-            format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into(),
-        ),
-        Type::Generic(_) => unreachable!("generics are substituted before reaching Z3"),
+        Type::Addr { group, value, .. } => {
+            Sort::uninterpreted(format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into())
+        }
+        Type::Generic(_) => unreachable!("generics are currently not supported"),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -206,7 +211,11 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
 fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
     match symbol {
         Symbolic::Fresh(i) => {
-            let ty = ctxt.fresh_types.get(i).expect("fresh type not found").clone();
+            let ty = ctxt
+                .fresh_types
+                .get(i)
+                .expect("fresh type not found")
+                .clone();
             Dynamic::new_const(format!("fresh{i}"), &sort(ctxt, &ty))
         }
         Symbolic::Lit(literal) => match literal {
@@ -231,7 +240,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
                         BinOp::DivI => l.div(&r).into(),
                         BinOp::Mod => l.modulo(&r).into(),
                         BinOp::LtI => l.lt(&r).into(),
-                        _ => unreachable!(),
+                        _ => unreachable!("excluded by outer matching"),
                     }
                 }
                 BinOp::AddR | BinOp::SubR | BinOp::MulR | BinOp::DivR | BinOp::LtR => {
@@ -242,7 +251,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
                         BinOp::MulR => (l * r).into(),
                         BinOp::DivR => l.div(&r).into(),
                         BinOp::LtR => l.lt(&r).into(),
-                        _ => unreachable!(),
+                        _ => unreachable!("excluded by outer matching"),
                     }
                 }
             }
@@ -250,39 +259,44 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
         Symbolic::Ite([cond, then, els]) => {
             let then_ty = class_type(ctxt, *then);
             let sort = sort(ctxt, &then_ty);
-            let cond = class_const_given_sort(ctxt, *cond, &Sort::bool()).as_bool().unwrap();
+            let cond = class_const_given_sort(ctxt, *cond, &Sort::bool())
+                .as_bool()
+                .unwrap();
             let then = class_const_given_sort(ctxt, *then, &sort);
             let els = class_const_given_sort(ctxt, *els, &sort);
             cond.ite(&then, &els)
-        },
+        }
         Symbolic::FuncApp(id, ty, args) => translate_function(ctxt, id, ty, args),
         Symbolic::RealCast(id) => {
             let ty = class_type(ctxt, *id);
             let sort = sort(ctxt, &ty);
             let class = class_const_given_sort(ctxt, *id, &sort).as_int().unwrap();
             class.to_real().into()
-        },
-        Symbolic::Forall(_, _) => todo!(),
+        }
+        Symbolic::Forall(_, _) => todo!("implement translation for forall nodes"),
     }
 }
-
 
 // the type build by heads constructor at instantiation typs
 fn adt_type(ctxt: &VerifyContext, head: MemberId, tys: &[Type]) -> Type {
     if head == BUILTIN_OPTION_HEAD {
-        return Type::Option(Box::new(tys[0].clone()))
+        return Type::Option(Box::new(tys[0].clone()));
     }
 
     match &ctxt.decls[head] {
         vmir::Declaration::Adt(_) => Type::Domain(head, tys.into()),
         vmir::Declaration::Resource(_) => Type::Snap(head),
-        _ => unreachable!("an ADT head is an ADT, a predicate (snapshot), or Option")
+        _ => unreachable!("an ADT head is an ADT, a predicate (snapshot), or Option"),
     }
 }
 
 fn field_types(ctxt: &VerifyContext, head: MemberId, variant: usize, tys: &[Type]) -> Vec<Type> {
     if head == BUILTIN_OPTION_HEAD {
-        return if variant == 0 { vec![tys[0].clone()] } else { vec![] }; // Some(T) / None
+        return if variant == 0 {
+            vec![tys[0].clone()]
+        } else {
+            vec![]
+        }; // Some(T) / None
     }
     match &ctxt.decls[head] {
         vmir::Declaration::Adt(adt) => adt.variants[variant]
@@ -311,7 +325,12 @@ fn uninterpreted_app(
     ret: &Type,
     args: &[Id],
 ) -> Dynamic {
-    assert_eq!(params.len(), args.len(), "arity mismatch applying fn{}", f.0);
+    assert_eq!(
+        params.len(),
+        args.len(),
+        "arity mismatch applying fn{}",
+        f.0
+    );
     let domain: Vec<Sort> = params.iter().map(|t| sort(ctxt, t)).collect();
     let arg_consts: Vec<Dynamic> = args
         .iter()
@@ -329,129 +348,190 @@ fn uninterpreted_app(
     FuncDecl::new(name, &domain_refs, &range).apply(&arg_refs)
 }
 
-fn translate_function(ctxt: &mut VerifyContext, f_id: &FuncId, ty: &Box<[Type]>, args: &Box<[Id]>) -> Dynamic {
-
+fn translate_function(
+    ctxt: &mut VerifyContext,
+    f_id: &FuncId,
+    ty: &Box<[Type]>,
+    args: &Box<[Id]>,
+) -> Dynamic {
     let function_type = ctxt.alloc.kind(*f_id);
 
     match function_type {
         // A function, a domain function, or a field/predicate address
+        // or a resource function
         // function: all are `vmir::Function`s.
         FuncKind::Decl(id) => {
             let (params, ret) = function_signature(ctxt, id, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &ret, args)
-        },
+        }
         // ADT construction
-        FuncKind::Cons {
-            variant,
-            head
-        } => {
+        FuncKind::Cons { variant, head } => {
             let adt_ty = adt_type(ctxt, head, ty);
             let field_tys = field_types(ctxt, head, variant, ty);
-
-            // Snapshots use the uninterpreted encoding (translation.typ,
-            // "ADTs and snapshots"); ADTs and Option are datatypes.
-            if let Type::Snap(_) = adt_ty {
-                uninterpreted_app(ctxt, *f_id, ty, &field_tys, &adt_ty, args)
-            } else {
-                let fields = args.iter().zip(&field_tys).map(|(arg, ty)| {
+            let fields = args
+                .iter()
+                .zip(&field_tys)
+                .map(|(arg, ty)| {
                     let s = sort(ctxt, ty);
                     class_const_given_sort(ctxt, *arg, &s)
-                }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
-                let field_refs = fields.iter().map(|f| f as &dyn Ast).collect::<Vec<&dyn Ast>>();
+            let field_refs = fields
+                .iter()
+                .map(|f| f as &dyn Ast)
+                .collect::<Vec<&dyn Ast>>();
 
-                sort(ctxt, &adt_ty); // builds and caches the datatype
-                ctxt.z3translator.adts[&adt_ty].variants[variant].constructor.apply(&field_refs)
-            }
-        },
+            sort(ctxt, &adt_ty); // builds and caches the datatype
+            ctxt.z3translator.adts[&adt_ty].variants[variant]
+                .constructor
+                .apply(&field_refs)
+        }
         // ADT projection
         FuncKind::Proj {
             head,
             variant,
-            field
+            field,
         } => {
             let adt_ty = adt_type(ctxt, head, ty);
-            // TODO: bad performance building the whole vec for nothing
-            let field_ty = field_types(ctxt, head, variant, ty).swap_remove(field);
-
-            // Snapshots use the uninterpreted encoding (translation.typ,
-            // "ADTs and snapshots"); ADTs and Option are datatypes.
-            if let Type::Snap(_) = adt_ty {
-                uninterpreted_app(ctxt, *f_id, ty, &[adt_ty.clone()], &field_ty, args)
-            } else {
-                let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
-                let base = class_const_given_sort(ctxt, args[0], &adt_sort);
-                ctxt.z3translator.adts[&adt_ty].variants[variant].accessors[field].apply(&[&base])
-            }
-        },
-        // ADT tester `Adt::Ctor?`
-        FuncKind::IsVariant {
-            head,
-            variant
-        } => {
+            let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
+            let base = class_const_given_sort(ctxt, args[0], &adt_sort);
+            ctxt.z3translator.adts[&adt_ty].variants[variant].accessors[field].apply(&[&base])
+        }
+        // ADT tester `Adt::Ctor?`: the datatype's own recognizer for `variant`.
+        FuncKind::IsVariant { head, variant } => {
             let adt_ty = adt_type(ctxt, head, ty);
-            if let Type::Snap(_) = adt_ty {
-                // Snapshot: uninterpreted tester, `snap -> Bool`.
-                uninterpreted_app(ctxt, *f_id, ty, &[adt_ty.clone()], &Type::Bool, args)
-            } else {
-                let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
-                let base = class_const_given_sort(ctxt, args[0], &adt_sort);
-                ctxt.z3translator.adts[&adt_ty].variants[variant].tester.apply(&[&base])
-            }
-        },
+            let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
+            let base = class_const_given_sort(ctxt, args[0], &adt_sort);
+            ctxt.z3translator.adts[&adt_ty].variants[variant].tester.apply(&[&base])
+        }
         // `f#lim`: same signature as `f`, only the id (and so the name) differs.
         // `f(x) == f#lim(x)` reaches Z3 only where the e-graph already has it.
         FuncKind::Limited(func) => {
             let (params, ret) = function_signature(ctxt, func, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &ret, args)
-        },
+        }
         // `f%pre`: over `f`'s own parameters, returning `Bool`.
         FuncKind::PreToken(func) => {
             let (params, _) = function_signature(ctxt, func, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &Type::Bool, args)
-        },
+        }
     }
 }
 
-pub(crate) fn adt<'c>(
-    ctxt: &'c mut VerifyContext,
-    ty: &Type,
-    adt: &vmir::Adt,
-    args: &[Type],
-) -> &'c DatatypeSort {
-    if !ctxt.z3translator.adts.contains_key(ty) {
-        ctxt.z3translator.building.insert(ty.clone());
-        let base = format!("adt@{}", ctxt.interner.resolve(&adt.name));
-        let name = if args.is_empty() {
-            base.to_string()
-        } else {
-            format!("{base}<{}>", args.iter().join(","))
-        };
-        let mut builder = DatatypeBuilder::new(name.as_str());
-        for (v, variant) in adt.variants.iter().enumerate() {
-            let ctor = match variant.name {
-                Some(n) => format!("{name}.{}", ctxt.interner.resolve(&n)),
-                None => format!("{name}#{v}"),
-            };
-            let mut acc_names = Vec::new();
-            let mut accs = Vec::new();
-            for (i, field) in variant.field_types.iter().enumerate() {
-                let field = field.subst_generics(args);
-                acc_names.push(format!("{ctor}.{i}"));
-                accs.push(if field == *ty {
-                    // Self-reference: the sort doesn't exist yet, refer by name.
-                    DatatypeAccessor::datatype(name.as_str())
-                } else if ctxt.z3translator.building.contains(&field) {
-                    todo!("mutually recursive ADTs need datatype_builder::create_datatypes")
-                } else {
-                    DatatypeAccessor::sort(sort(ctxt, &field))
-                });
-            }
-            let fields = acc_names.iter().map(String::as_str).zip(accs).collect();
-            builder = builder.variant(&ctor, fields);
+/// A datatype's declaration before Z3 sees it: the builder name and, per
+/// constructor, its name and its `(accessor name, field type)`s.
+struct DatatypeShape {
+    name: String,
+    variants: Vec<(String, Vec<(String, Type)>)>,
+}
+
+/// The shape of `ty` if it is a datatype (an ADT, a snapshot, or `Option`);
+/// `None` for every other sort.
+fn datatype_shape(ctxt: &VerifyContext, ty: &Type) -> Option<DatatypeShape> {
+    let interner = ctxt.interner;
+    let (adt, args): (Cow<vmir::Adt>, &[Type]) = match ty {
+        Type::Option(inner) => {
+            let name = format!("adt@{ty}"); // `adt@Option<Int>`
+            return Some(DatatypeShape {
+                variants: vec![
+                    (
+                        format!("{name}.Some"),
+                        vec![(format!("{name}.Some.0"), (**inner).clone())],
+                    ),
+                    (format!("{name}.None"), vec![]),
+                ],
+                name,
+            });
         }
-        ctxt.z3translator.building.swap_remove(ty);
-        ctxt.z3translator.adts.insert(ty.clone(), builder.finish());
+        Type::Domain(id, args) => match &ctxt.decls[*id] {
+            vmir::Declaration::Adt(a) => (Cow::Borrowed(a), &args[..]),
+            _ => return None,
+        },
+        Type::Snap(id) => match &ctxt.decls[*id] {
+            vmir::Declaration::Resource(r) => (
+                Cow::Owned(r.derive_snapshot().expect("adt of resource")),
+                &[],
+            ),
+            _ => unreachable!("snapshot can only be taken from resources.")
+        },
+        _ => return None,
+    };
+    let base = format!("adt@{}", interner.resolve(&adt.name));
+    let name = if args.is_empty() {
+        base
+    } else {
+        format!("{base}<{}>", args.iter().join(","))
+    };
+    let mut variants = Vec::new();
+    for (v, variant) in adt.variants.iter().enumerate() {
+        let ctor = match variant.name {
+            Some(n) => format!("{name}.{}", interner.resolve(&n)),
+            None => format!("{name}#{v}"),
+        };
+        let fields = variant
+            .field_types
+            .iter()
+            .enumerate()
+            .map(|(i, field)| (format!("{ctor}.{i}"), field.subst_generics(args)))
+            .collect();
+        variants.push((ctor, fields));
+    }
+    Some(DatatypeShape { name, variants })
+}
+
+/// The Z3 datatype for `ty`, declared on first use.
+pub(crate) fn datatype<'c>(ctxt: &'c mut VerifyContext, ty: &Type) -> &'c DatatypeSort {
+    if !ctxt.z3translator.adts.contains_key(ty) {
+        declare_datatypes(ctxt, ty);
     }
     &ctxt.z3translator.adts[ty]
+}
+
+/// Declare `root` together with every not-yet-declared datatype reachable from
+/// it through constructor fields, in one `create_datatypes` call. Inside the
+/// group a field refers to another member by name, so recursion through another
+/// datatype (a snapshot holding `Option` of itself, mutually recursive ADTs)
+/// never needs a sort that does not exist yet.
+fn declare_datatypes(ctxt: &mut VerifyContext, root: &Type) {
+    let mut group: HashMap<Type, DatatypeShape> = HashMap::default();
+    let mut pending = vec![root.clone()];
+    while let Some(ty) = pending.pop() {
+        if group.contains_key(&ty) || ctxt.z3translator.adts.contains_key(&ty) {
+            continue;
+        }
+        let Some(shape) = datatype_shape(ctxt, &ty) else {
+            continue;
+        };
+        for (_, fields) in &shape.variants {
+            pending.extend(fields.iter().map(|(_, field)| field.clone()));
+        }
+        group.insert(ty, shape);
+    }
+
+    // A field outside the group is not a datatype or is already declared, so
+    // `sort` on it never comes back here.
+    let mut builders = Vec::new();
+    for shape in group.values() {
+        let mut builder = DatatypeBuilder::new(shape.name.as_str());
+        for (ctor, fields) in &shape.variants {
+            let mut accs = Vec::new();
+            for (acc, field) in fields {
+                accs.push((
+                    acc.as_str(),
+                    match group.get(field) {
+                        Some(member) => DatatypeAccessor::datatype(member.name.as_str()),
+                        None => DatatypeAccessor::sort(sort(ctxt, field)),
+                    },
+                ));
+            }
+            builder = builder.variant(ctor, accs);
+        }
+        builders.push(builder);
+    }
+
+    // `create_datatypes` returns the sorts in builder order.
+    for (ty, dt) in group.into_keys().zip(create_datatypes(builders)) {
+        ctxt.z3translator.adts.insert(ty, dt);
+    }
 }
