@@ -2071,6 +2071,7 @@ pub(crate) fn prepare_trig_term(
                     field,
                 } => alloc.proj(*adt, *variant, *field),
                 vmir::TrigHead::AdtTag { adt } => alloc.tag(*adt),
+                vmir::TrigHead::AdtIs { adt, variant } => alloc.adt_is(*adt, *variant),
             };
             PreparedTerm::App {
                 func,

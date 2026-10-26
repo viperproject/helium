@@ -868,16 +868,34 @@ fn lower_trig_term(
         // `{ e.isCons }` triggers on the tag application the discriminator reads
         // (the `== tag` comparison around it is not a matchable shape).
         P::AdtDiscriminator(base, variant) => {
-            let &(adt_spur, _) = b.adt.ctor_tag.get(&variant.0).ok_or_else(|| {
-                TranslationError::UnknownIdent(b.interner.resolve(&variant.0).to_string())
-            })?;
-            Ok(vmir::TrigTerm::App {
-                head: vmir::TrigHead::AdtTag {
-                    adt: b.name_map[&adt_spur],
-                },
-                type_args: adt_type_args(b, &base.ty),
-                args: Box::new([lower_trig_term(b, base, env)?]),
-            })
+
+            let use_tag = std::env::var_os("SILVER_OXIDE_ADT_IS").is_none();
+
+            if use_tag {
+                let &(adt_spur, _) = b.adt.ctor_tag.get(&variant.0).ok_or_else(|| {
+                    TranslationError::UnknownIdent(b.interner.resolve(&variant.0).to_string())
+                })?;
+                Ok(vmir::TrigTerm::App {
+                    head: vmir::TrigHead::AdtTag {
+                        adt: b.name_map[&adt_spur],
+                    },
+                    type_args: adt_type_args(b, &base.ty),
+                    args: Box::new([lower_trig_term(b, base, env)?]),
+                })
+            } else {
+                let &(adt_spur, variant) = b.adt.ctor_tag.get(&variant.0).ok_or_else(|| {
+                    TranslationError::UnknownIdent(b.interner.resolve(&variant.0).to_string())
+                })?;
+                Ok(vmir::TrigTerm::App {
+                    head: vmir::TrigHead::AdtIs {
+                        adt: b.name_map[&adt_spur],
+                        variant
+                    },
+                    type_args: adt_type_args(b, &base.ty),
+                    args: Box::new([lower_trig_term(b, base, env)?]),
+                })
+            }
+
         }
         P::Unary(..)
         | P::Binary(..)

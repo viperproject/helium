@@ -23,6 +23,7 @@ use crate::dhash::HashMap;
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{inj_rule, proj_rule, tag_rule};
+use crate::verify::rewrite::adt::is_rule;
 use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
@@ -321,7 +322,8 @@ impl FuncRegistry {
     /// instantiation; the ground type args live in the `FuncApp` discriminant, so
     /// the reductions are instantiation-agnostic.
     fn ensure(&mut self, adt: MemberId) {
-        if self.tag.contains_key(&adt) {
+        let use_tag = std::env::var_os("SILVER_OXIDE_ADT_IS").is_none();
+        if self.tag.contains_key(&adt) || self.adt_is.contains_key(&(adt, 0usize)) {
             return;
         }
         let counts = self
@@ -331,8 +333,12 @@ impl FuncRegistry {
             .clone();
         let label = self.label(adt);
 
-        let tag_id = self.mint(format!("{label}@tag"));
-        self.tag.insert(adt, tag_id);
+        let mut tag_id = FuncId(42);
+        if use_tag {
+            tag_id = self.mint(format!("{label}@tag"));
+            self.tag.insert(adt, tag_id);
+        }
+
 
         let mut ctor_tags = HashMap::default();
         for (variant, &fields) in counts.iter().enumerate() {
@@ -345,9 +351,13 @@ impl FuncRegistry {
             self.adt_is.insert((adt, variant), is_id);
 
             let cons_id = self.mint(cons_label.clone());
+            self.rules.push(is_rule(is_id, cons_id));
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);
-            ctor_tags.insert(cons_id, variant);
+            if use_tag {
+                ctor_tags.insert(cons_id, variant);
+            }
+
             if fields > 0 {
                 self.rules.push(inj_rule(cons_id));
             }
@@ -357,7 +367,14 @@ impl FuncRegistry {
                 self.rules.push(proj_rule(proj_id, cons_id, field));
             }
         }
-        self.rules.push(tag_rule(tag_id, ctor_tags));
+
+
+
+        if use_tag {
+            self.rules.push(tag_rule(tag_id, ctor_tags));
+
+        }
+
     }
 
     /// The source constructor name of `adt`'s `variant`, if any.

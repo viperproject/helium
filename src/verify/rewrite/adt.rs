@@ -5,7 +5,7 @@ use crate::dhash::HashMap;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
-use crate::verify::analysis::ConstFold;
+use crate::verify::analysis::{ConstFold, Data};
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
 use crate::vmir::{Literal, Type};
 
@@ -54,6 +54,20 @@ pub fn tag_rule(tag_fn: FuncId, ctor_tags: HashMap<FuncId, usize>) -> Rule {
             TagApplier { ctor_tags },
         )
         .expect("valid tag rewrite"),
+    )
+}
+
+/// Build the tester reduction `is_C(D(..)) ⇒ (C == D)` for the tester of variant
+/// `variant`. `ctor_tags` maps each constructor of the head to its variant index,
+/// as for [`tag_rule`].
+pub fn is_rule(is_fn: FuncId, ctor : FuncId) -> Rule {
+    timed(
+        Rewrite::new(
+            format!("is-{}", is_fn.0),
+            UnaryAppSearcher { func: is_fn },
+            IsApplier { ctor },
+        )
+            .expect("valid is rewrite"),
     )
 }
 
@@ -171,6 +185,25 @@ impl Applier<Symbolic, ConstFold> for TagApplier {
     fn vars(&self) -> Vec<Var> {
         vec![tag_x()]
     }
+}
+
+
+/// Applier for [`is_rule`]: if the argument class holds a constructor, unions
+/// the tester with `true` when it is variant `variant` and `false` otherwise.
+pub(super) struct IsApplier {
+    /// The constructor this tester tests for (`cons(adt, variant)`).
+    pub(super) ctor: FuncId,
+}
+
+impl Applier<Symbolic, ConstFold> for IsApplier {
+    fn apply_one(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id,
+                 subst: &Subst, _: Option<&PatternAst<Symbolic>>, _: Symbol) -> Vec<Id> {
+        let xc = egraph.find(subst[tag_x()]);
+        let Data::Ctor(c, _) = &egraph[xc].data else { return vec![] };
+        let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));
+        if egraph.union(eclass, lit) { vec![egraph.find(eclass)] } else { vec![] }
+    }
+    fn vars(&self) -> Vec<Var> { vec![tag_x()] }
 }
 
 /// Applier for [`inj_rule`]: unions the arguments of every pair of same-ctor
