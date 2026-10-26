@@ -41,6 +41,7 @@ pub struct FuncRegistry {
     cons: HashMap<(MemberId, usize), FuncId>,
     proj: HashMap<(MemberId, usize, usize), FuncId>,
     tag: HashMap<MemberId, FuncId>,
+    adt_is: HashMap<(MemberId, usize), FuncId>,
     /// Limited-function twin id per recursive function (see
     /// [`FuncRegistry::limited`]): an uninterpreted `f'` with no unfold rule,
     /// used to break recursive unfolding.
@@ -149,6 +150,7 @@ impl FuncRegistry {
             cons: HashMap::default(),
             proj: HashMap::default(),
             tag: HashMap::default(),
+            adt_is: Default::default(),
             limited: HashMap::default(),
             fn_pre_token: HashMap::default(),
             names,
@@ -204,6 +206,7 @@ impl FuncRegistry {
             cons: HashMap::default(),
             proj: HashMap::default(),
             tag: HashMap::default(),
+            adt_is: Default::default(),
             limited: HashMap::default(),
             fn_pre_token: HashMap::default(),
             names,
@@ -228,6 +231,11 @@ impl FuncRegistry {
     pub fn proj(&mut self, adt: MemberId, variant: usize, field: usize) -> FuncId {
         self.ensure(adt);
         self.proj[&(adt, variant, field)]
+    }
+
+    pub fn adt_is(&mut self, adt: MemberId, variant: usize) -> FuncId {
+        self.ensure(adt);
+        self.adt_is[&(adt, variant)]
     }
 
     /// Discriminator-tag id of `adt`.
@@ -333,6 +341,9 @@ impl FuncRegistry {
                 Some(name) => format!("{label}::{name}"),
                 None => format!("{label}::#{variant}"),
             };
+            let is_id = self.mint(format!("{cons_label}?"));
+            self.adt_is.insert((adt, variant), is_id);
+
             let cons_id = self.mint(cons_label.clone());
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);

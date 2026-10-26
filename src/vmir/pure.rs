@@ -171,6 +171,14 @@ pub enum PureInst {
         type_args: Vec<crate::vmir::Type>,
         base: Val,
     },
+
+    AdtIs {
+        adt: crate::vmir::MemberId,
+        type_args: Vec<crate::vmir::Type>,
+        variant: usize,
+        base: Val
+    },
+
     /// An inline, nestable pure `forall` (see [`Forall`](crate::vmir::Forall)).
     /// Produces the quantified `Bool`. Its body shares *this* temp space —
     /// capture is implicit, so a free occurrence is just the enclosing temp.
@@ -202,6 +210,7 @@ impl PureInst {
             PureInst::OptionUnwrap(v) => f(v),
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
+            PureInst::AdtIs { base, .. } => f(base),
         }
     }
 }
@@ -292,6 +301,9 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 write!(f, "{}@tag({base})", self.member(*adt))
             }
             PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
+            PureInst::AdtIs {
+                adt, variant, base, ..
+            } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
         }
     }
 }

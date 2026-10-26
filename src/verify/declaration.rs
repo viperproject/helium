@@ -655,6 +655,29 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
+        PureInst::AdtIs {
+            adt,
+            type_args,
+            variant,
+            base
+        } => {
+            let tag = ctx.alloc.adt_is(*adt, *variant);
+            let base_id = state.get_val(ctx, base);
+            let id = ctx.add_func_app_id(tag, type_args.clone().into(), ty.clone(), Box::from(vec![base_id]));
+
+            let recipe = if ctx.recipe.is_some() {
+                let base = state.require_recipe(base, OPERAND_RECIPE)?;
+                let rb = ctx.recipe.as_mut().unwrap();
+                Some(rb.emit(AxiomPure::App {
+                    func: tag,
+                    type_args: type_args.clone(),
+                    args: vec![base],
+                }))
+            } else {
+                None
+            };
+            (id, recipe)
+        }
     })
 }
 
@@ -2137,6 +2160,16 @@ pub(crate) fn prepare_body(
                 } => AxiomPure::App {
                     func: alloc.proj(*adt, *variant, *field),
                     type_args: type_args.clone(),
+                    args: vec![base.clone()],
+                },
+                PureInst::AdtIs {
+                    adt,
+                    type_args,
+                    variant,
+                    base
+                } => AxiomPure::App {
+                    func : alloc.adt_is(*adt, *variant),
+                    type_args : type_args.clone(),
                     args: vec![base.clone()],
                 },
                 PureInst::AdtTag {
