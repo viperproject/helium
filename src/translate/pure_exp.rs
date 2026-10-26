@@ -323,20 +323,38 @@ pub(crate) fn lower<Ext: PureExt>(
             let &(adt_spur, tag) = b.adt.ctor_tag.get(&variant.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&variant.0).to_string())
             })?;
-            let adt = b.name_map[&adt_spur];
-            let tag_call = sink.emit_pure(
-                vmir::Type::Int,
-                PureInst::AdtTag {
-                    adt,
-                    type_args,
-                    base: base_v,
-                },
-            );
-            let idx = Val::Literal(Literal::Int(num::BigInt::from(tag)));
-            Ok(sink.emit_pure(
-                vmir::Type::Bool,
-                PureInst::Binary(vmir::BinOp::Eq, tag_call, idx),
-            ))
+
+            // Opt-in: `SILVER_OXIDE_ADT_IS` lowers to one `Bool` tester `AdtIs`
+            // instead (discriminators option C). The tag index is the variant index.
+            let use_tag = std::env::var_os("SILVER_OXIDE_ADT_IS").is_none();
+
+            if use_tag {
+                let adt = b.name_map[&adt_spur];
+                let tag_call = sink.emit_pure(
+                    vmir::Type::Int,
+                    PureInst::AdtTag {
+                        adt,
+                        type_args,
+                        base: base_v,
+                    },
+                );
+                let idx = Val::Literal(Literal::Int(num::BigInt::from(tag)));
+                Ok(sink.emit_pure(
+                    vmir::Type::Bool,
+                    PureInst::Binary(vmir::BinOp::Eq, tag_call, idx),
+                ))
+            } else {
+                let adt = b.name_map[&adt_spur];
+                Ok(sink.emit_pure(
+                    vmir::Type::Bool,
+                    PureInst::AdtIs {
+                        adt,
+                        type_args,
+                        variant: tag,
+                        base: base_v,
+                    }
+                ))
+            }
         }
         P::Ext(ext) => Ext::lower_ext(b, env, sink, hctx, ty, ext),
     }
