@@ -128,6 +128,8 @@ pub struct VerifyStats {
     pub timing: TimingTrend,
     /// Per-e-graph wall clock (ground vs block scratch vs probes vs clones).
     pub graph_timing: GraphTimingTrend,
+    /// Z3 rung wall clock: problem building vs solving.
+    pub z3_timing: Z3TimingTrend,
     /// Per-rule search/apply wall clock (excluded from `Eq` / the snapshot).
     pub rule_timing: RuleTimingTrend,
 }
@@ -169,6 +171,28 @@ impl PartialEq for GraphTimingTrend {
     }
 }
 impl Eq for GraphTimingTrend {}
+
+/// Wall-clock seconds spent in the Z3 rung (`prove_by_z3`), split into building
+/// the problem and solving it. Non-deterministic — a trend, never gated.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Z3Timing {
+    /// Creating the problem: translating the e-graph, goal and path condition
+    /// to Z3 terms and asserting them on a fresh solver.
+    pub build: f64,
+    /// `Solver::check`.
+    pub solve: f64,
+}
+
+/// [`Z3Timing`] wrapper, `Eq`-transparent like [`TimingTrend`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Z3TimingTrend(pub Z3Timing);
+
+impl PartialEq for Z3TimingTrend {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for Z3TimingTrend {}
 
 /// Wall-clock seconds one rule spent in its searcher/applier over the whole
 /// run. Non-deterministic — a trend, never gated.
@@ -271,6 +295,7 @@ impl VerifyStats {
             prove_ite_decompose,
             timing,
             graph_timing,
+            z3_timing,
             rule_timing,
         } = self;
         let n = |v: &u64| Json::from(*v);
@@ -317,6 +342,13 @@ impl VerifyStats {
                     ("scratch", Json::from(graph_timing.0.scratch)),
                     ("probe", Json::from(graph_timing.0.probe)),
                     ("scratch_clone", Json::from(graph_timing.0.scratch_clone)),
+                ]),
+            ),
+            (
+                "z3_timing",
+                Json::obj([
+                    ("build", Json::from(z3_timing.0.build)),
+                    ("solve", Json::from(z3_timing.0.solve)),
                 ]),
             ),
             (

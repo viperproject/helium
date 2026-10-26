@@ -840,6 +840,7 @@ impl<'a> VerifyContext<'a> {
         if !self.use_z3 {
             return false;
         }
+        let t_build = std::time::Instant::now();
         let solver = z3::Solver::new();
 
         let facts = crate::verify::z3::build_facts(self);
@@ -855,8 +856,11 @@ impl<'a> VerifyContext<'a> {
         pc_cond.iter().for_each(|pc_cond| solver.assert(pc_cond));
 
         solver.assert(!goal_z3);
+        stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
 
+        let t_solve = std::time::Instant::now();
         let res = solver.check();
+        stats::bump(|s| s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64());
 
         match res {
             SatResult::Unsat => true,
