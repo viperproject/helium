@@ -55,13 +55,13 @@ fn function_signature(ctxt: &VerifyContext, func: MemberId, tys: &[Type]) -> (Ve
     }
 }
 
-/// The type of e-class `id` (translation.typ, "Class sorts"). Exact or a panic:
-/// every node whose type is certain must agree, and at least one must exist.
-/// Unlike `types::infer_type` this never guesses.
-fn class_type(ctxt: &VerifyContext, id: Id) -> Type {
+/// The type of e-class `id` (translation.typ, "Class sorts"), or `None` when no
+/// node of the class has a certain type. Every node whose type is certain must
+/// agree. Unlike `types::infer_type` this never guesses: without a sort the
+/// class cannot be declared to Z3, so its facts are left out instead.
+fn class_type(ctxt: &VerifyContext, id: Id) -> Option<Type> {
     let mut memo = crate::dhash::HashMap::default();
     exact_class_type(ctxt, id, &mut memo)
-        .unwrap_or_else(|| panic!("e-class {id} has no node with a certain type"))
 }
 
 /// `None` when no node of the class has a certain type. `memo` maps a class to
@@ -124,6 +124,8 @@ fn exact_node_type(
 }
 
 /// One equation `c_{class} == ⟦node⟧` per e-node (translation.typ, "The e-graph").
+/// An equation that needs a sort we cannot determine is dropped with a warning:
+/// leaving out an assumption only weakens what Z3 knows, so it stays sound.
 pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
     // Snapshot the classes first: translating needs `ctxt` mutably (the sort
     // cache), so the e-graph cannot stay borrowed while we iterate it.
@@ -134,7 +136,12 @@ pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
         .collect();
     let mut facts = Vec::new();
     for (id, nodes) in classes {
-        let class_const = class_const(ctxt, id);
+        let Some(class_const) = class_const(ctxt, id) else {
+            eprintln!(
+                "[z3] warning: e-class {id} has no node with a certain type; dropping its facts"
+            );
+            continue;
+        };
         // A `Forall` gets no equation: its class constant stays a free
         // `Bool`, and its instances are already in the e-graph as
         // `ite(forall, body, true) == true` (translation.typ, "The e-graph").
@@ -142,7 +149,12 @@ pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
             .iter()
             .filter(|node| !matches!(node, Symbolic::Forall(..)))
         {
-            let node_expression = symbol_to_z3(ctxt, node);
+            let Some(node_expression) = symbol_to_z3(ctxt, node) else {
+                eprintln!(
+                    "[z3] warning: an operand of `{node}` in e-class {id} has no certain type; dropping its fact"
+                );
+                continue;
+            };
             facts.push(class_const.eq(node_expression));
         }
     }
@@ -150,17 +162,20 @@ pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
 }
 
 pub(crate) fn build_goal(ctxt: &mut VerifyContext, id: egg::Id) -> Bool {
-    let node = ctxt.egraph.find(id);
-    class_const(ctxt, node).as_bool().unwrap()
+    class_const_given_sort(ctxt, id, &Sort::bool())
+        .as_bool()
+        .unwrap()
 }
 
 pub(crate) fn build_pc(ctxt: &mut VerifyContext, pc: &[(egg::Id, Polarity)]) -> Vec<Bool> {
     pc.iter()
         .map(|(id, p)| {
-            let c_const = class_const(ctxt, *id);
+            let c_const = class_const_given_sort(ctxt, *id, &Sort::bool())
+                .as_bool()
+                .unwrap();
             match p {
-                Polarity::Positive => c_const.as_bool().unwrap(),
-                Polarity::Negative => !c_const.as_bool().unwrap(),
+                Polarity::Positive => c_const,
+                Polarity::Negative => !c_const,
             }
         })
         .collect()
@@ -170,10 +185,11 @@ fn class_const_given_sort(ctxt: &VerifyContext, id: Id, sort: &Sort) -> Dynamic 
     Dynamic::new_const(format!("c_{}", ctxt.egraph.find(id)), sort)
 }
 
-fn class_const(ctxt: &mut VerifyContext, id: Id) -> Dynamic {
-    let typ = class_type(ctxt, id);
+/// `None` when the class's type is not certain (see [`class_type`]).
+fn class_const(ctxt: &mut VerifyContext, id: Id) -> Option<Dynamic> {
+    let typ = class_type(ctxt, id)?;
     let sort = sort(ctxt, &typ);
-    class_const_given_sort(ctxt, id, &sort)
+    Some(class_const_given_sort(ctxt, id, &sort))
 }
 
 pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
@@ -208,8 +224,9 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
     sort
 }
 
-fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
-    match symbol {
+/// `⟦symbol⟧`, or `None` when an operand's sort is not certain.
+fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> {
+    Some(match symbol {
         Symbolic::Fresh(i) => {
             let ty = ctxt
                 .fresh_types
@@ -225,7 +242,12 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
             Literal::Real(value) => z3::ast::Real::from_big_rational(value).into(),
         },
         Symbolic::Binary(op, [l, r]) => {
-            let operand_ty = op.sort().unwrap_or_else(|| class_type(ctxt, *l));
+            // `Eq` is the only operator without a fixed operand sort; either
+            // side fixes it.
+            let operand_ty = match op.sort() {
+                Some(ty) => ty,
+                None => class_type(ctxt, *l).or_else(|| class_type(ctxt, *r))?,
+            };
             let sort = sort(ctxt, &operand_ty);
             let l = class_const_given_sort(ctxt, *l, &sort);
             let r = class_const_given_sort(ctxt, *r, &sort);
@@ -257,7 +279,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
             }
         }
         Symbolic::Ite([cond, then, els]) => {
-            let then_ty = class_type(ctxt, *then);
+            let then_ty = class_type(ctxt, *then).or_else(|| class_type(ctxt, *els))?;
             let sort = sort(ctxt, &then_ty);
             let cond = class_const_given_sort(ctxt, *cond, &Sort::bool())
                 .as_bool()
@@ -268,13 +290,13 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Dynamic {
         }
         Symbolic::FuncApp(id, ty, args) => translate_function(ctxt, id, ty, args),
         Symbolic::RealCast(id) => {
-            let ty = class_type(ctxt, *id);
+            let ty = class_type(ctxt, *id)?;
             let sort = sort(ctxt, &ty);
             let class = class_const_given_sort(ctxt, *id, &sort).as_int().unwrap();
             class.to_real().into()
         }
         Symbolic::Forall(_, _) => todo!("implement translation for forall nodes"),
-    }
+    })
 }
 
 // the type build by heads constructor at instantiation typs
