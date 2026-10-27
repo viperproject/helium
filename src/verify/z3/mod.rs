@@ -351,8 +351,8 @@ fn uninterpreted_app(
 fn translate_function(
     ctxt: &mut VerifyContext,
     f_id: &FuncId,
-    ty: &Box<[Type]>,
-    args: &Box<[Id]>,
+    ty: &[Type],
+    args: &[Id],
 ) -> Dynamic {
     let function_type = ctxt.alloc.kind(f_id);
 
@@ -403,7 +403,9 @@ fn translate_function(
             let adt_ty = adt_type(ctxt, head, ty);
             let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
             let base = class_const_given_sort(ctxt, args[0], &adt_sort);
-            ctxt.z3translator.adts[&adt_ty].variants[variant].tester.apply(&[&base])
+            ctxt.z3translator.adts[&adt_ty].variants[variant]
+                .tester
+                .apply(&[&base])
         }
         // `f#lim`: same signature as `f`, only the id (and so the name) differs.
         // `f(x) == f#lim(x)` reaches Z3 only where the e-graph already has it.

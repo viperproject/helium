@@ -452,10 +452,10 @@ impl FuncRegistry {
 
     /// Looks up the function kind
     pub fn kind(&self, f_id: &FuncId) -> FuncKind {
-        self.kind
+        *self
+            .kind
             .get(f_id)
-            .expect(&format!("unknown FuncId {f_id:?}"))
-            .clone()
+            .unwrap_or_else(|| panic!("unknown FuncId {f_id:?}"))
     }
 }
 
