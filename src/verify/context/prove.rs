@@ -838,7 +838,6 @@ impl<'a> VerifyContext<'a> {
 
     fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
         let t_build = std::time::Instant::now();
-        let solver = z3::Solver::new();
 
         crate::verify::z3::sync_facts(self);
 
@@ -854,7 +853,7 @@ impl<'a> VerifyContext<'a> {
         stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
 
         let t_solve = std::time::Instant::now();
-        let res = solver.check_assumptions(&query);
+        let res = self.z3translator.solver.check_assumptions(&query);
         stats::bump(|s| s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64());
 
         match res {

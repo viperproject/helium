@@ -22,7 +22,7 @@ pub(crate) struct Z3Translation {
     func_cache : HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
     max_node_id: usize,
     max_merges_is: usize,
-    solver : Solver,
+    pub(crate) solver : Solver,
 }
 
 /// Parameter and return types of function declaration `func` at instantiation
@@ -272,11 +272,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
 fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> {
     Some(match symbol {
         Symbolic::Fresh(i) => {
-            let ty = ctxt
-                .fresh_types
-                .get(i)
-                .expect("fresh type not found")
-                .clone();
+            let ty = ctxt.fresh_types.get(i)?.clone();
             Dynamic::new_const(format!("fresh{i}"), &sort(ctxt, &ty))
         }
         Symbolic::Lit(literal) => match literal {
