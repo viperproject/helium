@@ -18,12 +18,13 @@
 //! appears — required for a resource certificate's grafted nodes to
 //! congruence-match the caller.
 
+use std::sync::Arc;
 use crate::dhash::HashMap;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{inj_rule, proj_rule, tag_rule};
-use crate::verify::rewrite::adt::is_rule;
+use crate::verify::rewrite::adt::{is_excl_rule, is_rule};
 use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
@@ -88,6 +89,9 @@ pub const BUILTIN_OPTION_SOME: FuncId = FuncId(usize::MAX - 1);
 pub const BUILTIN_OPTION_NONE: FuncId = FuncId(usize::MAX - 2);
 pub const BUILTIN_OPTION_VALUE: FuncId = FuncId(usize::MAX - 3);
 pub const BUILTIN_OPTION_TAG: FuncId = FuncId(usize::MAX - 4);
+
+pub const BUILTIN_OPTION_IS_SOME: FuncId = FuncId(usize::MAX - 5);
+pub const BUILTIN_OPTION_IS_NONE: FuncId = FuncId(usize::MAX - 6);
 /// Synthetic ADT head for the builtin `Option` (which has no `Adt` declaration).
 pub const BUILTIN_OPTION_HEAD: MemberId = MemberId(usize::MAX);
 
@@ -134,10 +138,13 @@ impl FuncRegistry {
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
         names.insert(BUILTIN_OPTION_TAG, "Option@tag".to_string());
+        names.insert(BUILTIN_OPTION_IS_SOME, "Option::Some?".to_string());
+        names.insert(BUILTIN_OPTION_IS_NONE, "Option::None?".to_string());
 
         let mut rules = Vec::new();
         rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
         rules.push(inj_rule(BUILTIN_OPTION_SOME));
+        rules.push(is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])));
         let mut option_tags = HashMap::default();
         option_tags.insert(BUILTIN_OPTION_SOME, 0);
         option_tags.insert(BUILTIN_OPTION_NONE, 1);
@@ -372,7 +379,9 @@ impl FuncRegistry {
 
         if use_tag {
             self.rules.push(tag_rule(tag_id, ctor_tags));
-
+        } else {
+            let testers: Arc<[FuncId]> = (0..counts.len()).map(|v| self.adt_is[&(adt, v)]).collect();
+            self.rules.push(is_excl_rule(testers));
         }
 
     }
