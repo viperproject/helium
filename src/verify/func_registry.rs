@@ -162,6 +162,17 @@ impl FuncRegistry {
             variant_names,
             ..Self::empty()
         };
+        // Declaration-backed ids are never minted: `func_id_for_member` reuses the
+        // member index. Every `Function` (plain, domain, contract) and every
+        // `Resource` (its field/predicate location function) can be applied, so
+        // each gets its `Decl` kind here.
+        for (id, decl) in program.decls.iter_enumerated() {
+            if let Declaration::Function(_) | Declaration::Resource(_) = decl {
+                registry
+                    .kind
+                    .insert(func_id_for_member(id), FuncKind::Decl(id));
+            }
+        }
         // Mint every head up front. Lazily minting on first use would leave
         // `ctor_head` incomplete for any `ConstFold` built before that use, and
         // the analysis is handed an immutable snapshot of the table.

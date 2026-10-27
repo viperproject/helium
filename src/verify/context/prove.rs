@@ -837,9 +837,6 @@ impl<'a> VerifyContext<'a> {
     }
 
     fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
-        if !self.use_z3 {
-            return false;
-        }
         let t_build = std::time::Instant::now();
         let solver = z3::Solver::new();
 

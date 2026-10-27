@@ -105,9 +105,6 @@ pub(crate) struct VerifyContext<'a> {
     /// where the set memoizes the *verdict* alone. Empty-pc goals still union
     /// (productive: `eq-true-union`/congruence off a proven `Eq`).
     oob_memo: bool,
-    /// `SILVER_OXIDE_Z3`: run the Z3 rung (`prove_by_z3`) when every e-graph
-    /// tier has failed. Off by default.
-    use_z3: bool,
     /// Canonical class ids of implications already proven `true`, consulted at
     /// the `memo` tier when `oob_memo` is on. Keyed by `egraph.find(imp)`: two distinct
     /// obligations only share a class via congruence — which means their goals
@@ -202,7 +199,6 @@ impl<'a> VerifyContext<'a> {
             clean: None,
             has_wildcard: decls_have_wildcard(decls),
             oob_memo: std::env::var_os("SILVER_OXIDE_OOB_MEMO").is_some(),
-            use_z3: std::env::var_os("SILVER_OXIDE_Z3").is_some(),
             proven_imps: crate::dhash::HashSet::default(),
             current_cube: Vec::new(),
             in_block: false,
