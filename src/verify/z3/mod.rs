@@ -18,6 +18,7 @@ use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Sort};
 pub(crate) struct Z3Translation {
     sorts: HashMap<Type, Sort>,
     adts: HashMap<Type, DatatypeSort>,
+    class_types: HashMap<Id, Type>,
 }
 
 /// Parameter and return types of function declaration `func` at instantiation
@@ -56,48 +57,69 @@ fn function_signature(ctxt: &VerifyContext, func: MemberId, tys: &[Type]) -> (Ve
 }
 
 /// The type of e-class `id` (translation.typ, "Class sorts"), or `None` when no
-/// node of the class has a certain type. Every node whose type is certain must
-/// agree. Unlike `types::infer_type` this never guesses: without a sort the
-/// class cannot be declared to Z3, so its facts are left out instead.
-fn class_type(ctxt: &VerifyContext, id: Id) -> Option<Type> {
-    let mut memo = crate::dhash::HashMap::default();
-    exact_class_type(ctxt, id, &mut memo)
+/// node of the class has a certain type. Unlike `types::infer_type` this never
+/// guesses: without a sort the class cannot be declared to Z3, so its facts are
+/// left out instead.
+///
+/// Cached per canonical id. Only `Some` is cached: a type survives merges,
+/// "unknown" may not.
+fn class_type(ctxt: &mut VerifyContext, id: Id) -> Option<Type> {
+    // Take the cache out so `ctxt` can be borrowed immutably (and the class's
+    // nodes iterated in place) while the cache is filled.
+    let mut cache = std::mem::take(&mut ctxt.z3translator.class_types);
+    let ty = cached_class_type(ctxt, &mut cache, &mut Vec::new(), id);
+    ctxt.z3translator.class_types = cache;
+    ty
 }
 
-/// `None` when no node of the class has a certain type. `memo` maps a class to
-/// its result; `None` is pre-seeded so an `Ite` cycle back into a class still
-/// being resolved counts as uncertain rather than looping.
-fn exact_class_type(
+/// `visiting` holds the classes whose `Ite` nodes are being followed, so an
+/// `Ite` cycle back into one of them counts as uncertain instead of looping.
+fn cached_class_type(
     ctxt: &VerifyContext,
+    cache: &mut HashMap<Id, Type>,
+    visiting: &mut Vec<Id>,
     id: Id,
-    memo: &mut crate::dhash::HashMap<Id, Option<Type>>,
 ) -> Option<Type> {
     let id = ctxt.egraph.find(id);
-    if let Some(ty) = memo.get(&id) {
-        return ty.clone();
+    if let Some(ty) = cache.get(&id) {
+        return Some(ty.clone());
     }
-    memo.insert(id, None);
-    let mut found: Option<Type> = None;
-    for node in &ctxt.egraph[id].nodes {
-        let Some(ty) = exact_node_type(ctxt, node, memo) else {
-            continue;
-        };
-        match &found {
-            None => found = Some(ty),
-            Some(prev) if *prev == ty => {}
-            Some(prev) => panic!("e-class {id} mixes types {prev} and {ty}"),
-        }
+    if visiting.contains(&id) {
+        return None;
     }
-    memo.insert(id, found.clone());
-    found
+    let nodes = &ctxt.egraph[id].nodes;
+    // Nodes with a type of their own first: no recursion, and nearly every
+    // class has one.
+    let ty = nodes
+        .iter()
+        .find_map(|n| local_node_type(ctxt, n))
+        .or_else(|| {
+            visiting.push(id);
+            let ty = nodes.iter().find_map(|n| match n {
+                Symbolic::Ite([_, then, els]) => cached_class_type(ctxt, cache, visiting, *then)
+                    .or_else(|| cached_class_type(ctxt, cache, visiting, *els)),
+                _ => None,
+            });
+            visiting.pop();
+            ty
+        });
+    debug_assert!(
+        ty.as_ref().is_none_or(|ty| nodes
+            .iter()
+            .filter_map(|n| local_node_type(ctxt, n))
+            .all(|other| other == *ty)),
+        "e-class {id} mixes types"
+    );
+    if let Some(ty) = &ty {
+        cache.insert(id, ty.clone());
+    }
+    ty
 }
 
-/// The type of one e-node, or `None` when it is not certain.
-fn exact_node_type(
-    ctxt: &VerifyContext,
-    node: &Symbolic,
-    memo: &mut crate::dhash::HashMap<Id, Option<Type>>,
-) -> Option<Type> {
+/// The type of one e-node from the node alone, or `None` when it is not
+/// certain. An `Ite` takes its branches' type, so it is `None` here and left to
+/// [`cached_class_type`].
+fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
     match node {
         Symbolic::Lit(lit) => Some(crate::verify::types::lit_type(lit)),
         Symbolic::Fresh(u) => ctxt.fresh_types.get(u).cloned(),
@@ -108,7 +130,7 @@ fn exact_node_type(
         },
         Symbolic::RealCast(_) => Some(Type::Real),
         Symbolic::Forall(..) => Some(Type::Bool),
-        Symbolic::Ite([_, then, _]) => exact_class_type(ctxt, *then, memo),
+        Symbolic::Ite(_) => None,
         Symbolic::FuncApp(f, tys, _) => match ctxt.alloc.kind(f) {
             FuncKind::Decl(m) | FuncKind::Limited(m) => Some(function_signature(ctxt, m, tys).1),
             FuncKind::PreToken(_) => Some(Type::Bool),
@@ -290,9 +312,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
         }
         Symbolic::FuncApp(id, ty, args) => translate_function(ctxt, id, ty, args),
         Symbolic::RealCast(id) => {
-            let ty = class_type(ctxt, *id)?;
-            let sort = sort(ctxt, &ty);
-            let class = class_const_given_sort(ctxt, *id, &sort).as_int().unwrap();
+            let class = class_const(ctxt, *id)?.as_int().unwrap();
             class.to_real().into()
         }
         Symbolic::Forall(_, _) => todo!("implement translation for forall nodes"),
