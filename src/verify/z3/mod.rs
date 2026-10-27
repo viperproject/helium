@@ -19,6 +19,7 @@ pub(crate) struct Z3Translation {
     sorts: HashMap<Type, Sort>,
     adts: HashMap<Type, DatatypeSort>,
     class_types: HashMap<Id, Type>,
+    func_cache : HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>
 }
 
 /// Parameter and return types of function declaration `func` at instantiation
@@ -373,21 +374,29 @@ fn uninterpreted_app(
         "arity mismatch applying fn{}",
         f.0
     );
+
     let domain: Vec<Sort> = params.iter().map(|t| sort(ctxt, t)).collect();
     let arg_consts: Vec<Dynamic> = args
         .iter()
         .zip(&domain)
         .map(|(a, s)| class_const_given_sort(ctxt, *a, s))
         .collect();
-    let range = sort(ctxt, ret);
-    let name = if tys.is_empty() {
-        format!("fn{}", f.0)
-    } else {
-        format!("fn{}<{}>", f.0, tys.iter().join(","))
-    };
-    let domain_refs: Vec<&Sort> = domain.iter().collect();
     let arg_refs: Vec<&dyn Ast> = arg_consts.iter().map(|a| a as &dyn Ast).collect();
-    FuncDecl::new(name, &domain_refs, &range).apply(&arg_refs)
+    if let Some(decl) = ctxt.z3translator.func_cache.get(&f).and_then(|m| m.get(tys)) {
+        decl.apply(&arg_refs)
+    } else {
+        let range = sort(ctxt, ret);
+        let name = if tys.is_empty() {
+            format!("fn{}", f.0)
+        } else {
+            format!("fn{}<{}>", f.0, tys.iter().join(","))
+        };
+        let domain_refs: Vec<&Sort> = domain.iter().collect();
+        let func_decl = FuncDecl::new(name, &domain_refs, &range);
+        let res = func_decl.apply(&arg_refs);
+        ctxt.z3translator.func_cache.entry(f).or_default().insert(tys.into(), func_decl);
+        res
+    }
 }
 
 fn translate_function(
