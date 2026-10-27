@@ -1,0 +1,28 @@
+// Reasoning from discriminators on an opaque value, which needs the testers'
+// exclusivity and last-variant rule (`is-excl`), not a known constructor.
+// A negative test (`!s.isCircle`) is a tester merged with `false`, an equality
+// the e-graph can use; an integer tag would make it an unusable disequality.
+adt Shape {
+    Circle(r: Int)
+    Square(s: Int)
+    Tri(a: Int, b: Int)
+}
+
+method positive_excludes_others(s: Shape)
+{
+    assume s.isCircle
+    assert !s.isSquare
+    assert !s.isTri
+}
+
+method last_variant(s: Shape)
+{
+    assume !s.isCircle
+    assume !s.isSquare
+    assert s.isTri
+}
+
+method exhaustive(s: Shape)
+{
+    assert s.isCircle || s.isSquare || s.isTri
+}
