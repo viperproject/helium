@@ -4,6 +4,7 @@ use prove::BlockScratch;
 
 use crate::dhash::HashMap;
 
+use crate::verify::z3::Z3Translation;
 use crate::{
     verify::{
         analysis::ConstFold,
@@ -16,7 +17,6 @@ use crate::{
 };
 use lasso::{Rodeo, Spur};
 use typed_index_collections::TiVec;
-use crate::verify::z3::Z3Translation;
 
 /// Display name for a member id, off a bare `(interner, decls)` pair — the same
 /// resolution [`VerifyContext::member_name`] does, callable where only the two
@@ -135,7 +135,7 @@ pub(crate) struct VerifyContext<'a> {
     block_dead: bool,
 
     /// Sort and datatype caches of the Z3 translation (`verify::z3`).
-    pub(crate) z3translator: Z3Translation
+    pub(crate) z3translator: Z3Translation,
 }
 
 /// Whether any declaration uses a `wildcard` permission. Scanned once per unit at
@@ -208,7 +208,7 @@ impl<'a> VerifyContext<'a> {
             in_block: false,
             scratch: None,
             block_dead: false,
-            z3translator : Z3Translation::default()
+            z3translator: Z3Translation::default(),
         }
     }
 

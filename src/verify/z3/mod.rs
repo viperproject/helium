@@ -2,14 +2,12 @@ use crate::verify::lang::{FuncId, Symbolic};
 use itertools::Itertools;
 
 use crate::verify::context::VerifyContext;
-use crate::verify::func_registry::{
-    BUILTIN_OPTION_HEAD, FuncKind,
-};
+use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
 use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
-use z3::ast::{Ast, Bool, Dynamic, Int};
+use z3::ast::{Ast, Bool, Dynamic};
 use z3::datatype_builder::create_datatypes;
 use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Sort};
 
@@ -28,7 +26,9 @@ pub(crate) struct Z3Translation {
 fn function_signature(ctxt: &VerifyContext, func: MemberId, tys: &[Type]) -> (Vec<Type>, Type) {
     match &ctxt.decls[func] {
         vmir::Declaration::Domain(_) => {
-            unreachable!("the domain declaration only holds the name of the declaration. It can never be a function.")
+            unreachable!(
+                "the domain declaration only holds the name of the declaration. It can never be a function."
+            )
         }
         vmir::Declaration::Axiom(_) => {
             unreachable!("the axiom declaration only holds the axiom. It can never be a function.")
@@ -109,7 +109,7 @@ fn exact_node_type(
         Symbolic::RealCast(_) => Some(Type::Real),
         Symbolic::Forall(..) => Some(Type::Bool),
         Symbolic::Ite([_, then, _]) => exact_class_type(ctxt, *then, memo),
-        Symbolic::FuncApp(f, tys, _) => match ctxt.alloc.kind(*f) {
+        Symbolic::FuncApp(f, tys, _) => match ctxt.alloc.kind(f) {
             FuncKind::Decl(m) | FuncKind::Limited(m) => Some(function_signature(ctxt, m, tys).1),
             FuncKind::PreToken(_) => Some(Type::Bool),
             FuncKind::Cons { head, .. } => Some(adt_type(ctxt, head, tys)),
@@ -354,7 +354,7 @@ fn translate_function(
     ty: &Box<[Type]>,
     args: &Box<[Id]>,
 ) -> Dynamic {
-    let function_type = ctxt.alloc.kind(*f_id);
+    let function_type = ctxt.alloc.kind(f_id);
 
     match function_type {
         // A function, a domain function, or a field/predicate address
@@ -453,7 +453,7 @@ fn datatype_shape(ctxt: &VerifyContext, ty: &Type) -> Option<DatatypeShape> {
                 Cow::Owned(r.derive_snapshot().expect("adt of resource")),
                 &[],
             ),
-            _ => unreachable!("snapshot can only be taken from resources.")
+            _ => unreachable!("snapshot can only be taken from resources."),
         },
         _ => return None,
     };

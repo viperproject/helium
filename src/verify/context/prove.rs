@@ -11,8 +11,6 @@
 
 use crate::dhash::HashMap;
 
-use egg::Language as _;
-use z3::SatResult;
 use crate::{
     verify::{
         analysis::ConstFold,
@@ -23,6 +21,8 @@ use crate::{
     },
     vmir::{Literal, Polarity},
 };
+use egg::Language as _;
+use z3::SatResult;
 
 /// A parallel "scratch" e-graph for one method block: a clone of ground taken at
 /// build time with the block cube assumed, kept in sync with ground through the
@@ -836,12 +836,7 @@ impl<'a> VerifyContext<'a> {
         }
     }
 
-
-    fn prove_by_z3(
-        &mut self,
-        goal: egg::Id,
-        pc_lits: &[(egg::Id, Polarity)],
-    ) -> bool {
+    fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
         if !self.use_z3 {
             return false;
         }
@@ -866,7 +861,7 @@ impl<'a> VerifyContext<'a> {
         match res {
             SatResult::Unsat => true,
             SatResult::Unknown => false,
-            SatResult::Sat => false
+            SatResult::Sat => false,
         }
     }
 
