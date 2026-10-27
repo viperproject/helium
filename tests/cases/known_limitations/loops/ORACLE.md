@@ -36,7 +36,7 @@ rejects `while`. Promote each to `passing/loops/` as it starts verifying — the
 
 ## Structural (Peano) loops — `passing/loops/`
 
-Peano naturals drive the loop by a **tag check**, so the cut is exercised with
+Peano naturals drive the loop by a **discriminator check**, so the cut is exercised with
 no integer reasoning anywhere. This is what isolates loop correctness from the
 arithmetic gap that blocks the integer cases above.
 

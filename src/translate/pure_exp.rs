@@ -267,13 +267,13 @@ pub(crate) fn lower<Ext: PureExt>(
             ))
         }
         // A constructor lowers to the semantic `AdtCons`; its type arguments are
-        // its result type (`exp.ty`), the variant tag from `ctor_tag`.
+        // its result type (`exp.ty`), the variant index from `ctor_variant`.
         P::AdtConstructor(call) => {
             let mut args = Vec::with_capacity(call.args.len());
             for a in &call.args {
                 args.push(lower(b, env, sink, hctx, a)?);
             }
-            let &(adt_spur, variant) = b.adt.ctor_tag.get(&call.name.0).ok_or_else(|| {
+            let &(adt_spur, variant) = b.adt.ctor_variant.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
             let adt = b.name_map[&adt_spur];
@@ -315,27 +315,23 @@ pub(crate) fn lower<Ext: PureExt>(
             ))
         }
         P::AdtDiscriminator(base, variant) => {
-            // `e.is<Ctor>` ⇒ `AdtTag{adt}(e) == tag_index`. The verifier's tag
-            // reduction folds this to a literal when `e` is a known constructor.
+            // `e.is<Ctor>` ⇒ the `Bool` tester `AdtIs{adt, variant}(e)`. The
+            // verifier's `is` reduction folds it to a literal when `e` is a known
+            // constructor; `is-excl` relates the testers of one value.
             // Type args come from the scrutinee's type (`base.ty`).
             let type_args = adt_type_args(b, &base.ty);
             let base_v = lower(b, env, sink, hctx, base)?;
-            let &(adt_spur, tag) = b.adt.ctor_tag.get(&variant.0).ok_or_else(|| {
+            let &(adt_spur, variant) = b.adt.ctor_variant.get(&variant.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&variant.0).to_string())
             })?;
-            let adt = b.name_map[&adt_spur];
-            let tag_call = sink.emit_pure(
-                vmir::Type::Int,
-                PureInst::AdtTag {
-                    adt,
-                    type_args,
-                    base: base_v,
-                },
-            );
-            let idx = Val::Literal(Literal::Int(num::BigInt::from(tag)));
             Ok(sink.emit_pure(
                 vmir::Type::Bool,
-                PureInst::Binary(vmir::BinOp::Eq, tag_call, idx),
+                PureInst::AdtIs {
+                    adt: b.name_map[&adt_spur],
+                    type_args,
+                    variant,
+                    base: base_v,
+                },
             ))
         }
         P::Ext(ext) => Ext::lower_ext(b, env, sink, hctx, ty, ext),
@@ -821,7 +817,7 @@ fn lower_trig_term(
             })
         }
         P::AdtConstructor(call) => {
-            let &(adt_spur, variant) = b.adt.ctor_tag.get(&call.name.0).ok_or_else(|| {
+            let &(adt_spur, variant) = b.adt.ctor_variant.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
             Ok(vmir::TrigTerm::App {
@@ -847,15 +843,17 @@ fn lower_trig_term(
                 args: Box::new([lower_trig_term(b, base, env)?]),
             })
         }
-        // `{ e.isCons }` triggers on the tag application the discriminator reads
-        // (the `== tag` comparison around it is not a matchable shape).
+        // `{ e.isCons }` triggers on the tester the discriminator lowers to, the
+        // same `AdtIs` head a body builds, so it fires only on a test of that
+        // variant.
         P::AdtDiscriminator(base, variant) => {
-            let &(adt_spur, _) = b.adt.ctor_tag.get(&variant.0).ok_or_else(|| {
+            let &(adt_spur, variant) = b.adt.ctor_variant.get(&variant.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&variant.0).to_string())
             })?;
             Ok(vmir::TrigTerm::App {
-                head: vmir::TrigHead::AdtTag {
+                head: vmir::TrigHead::AdtIs {
                     adt: b.name_map[&adt_spur],
+                    variant,
                 },
                 type_args: adt_type_args(b, &base.ty),
                 args: Box::new([lower_trig_term(b, base, env)?]),

@@ -14,7 +14,7 @@ use crate::vmir;
 /// An ADT's `declare` reserves only the stub id (+ type-param count) — no
 /// variant computation, since a variant field type or constructor may reference
 /// *any* ADT by id (including one declared later in the source). `meta`
-/// publishes the constructor (`ctor_tag`) / destructor (`dtor_sem`) metadata
+/// publishes the constructor (`ctor_variant`) / destructor (`dtor_sem`) metadata
 /// once every ADT stub id is in `name_map`; `define` recomputes the variant
 /// shapes and fills the `DeclSlot`.
 pub(crate) struct AdtTranslator<'a, P = Declared> {
@@ -44,14 +44,16 @@ impl<'a> AdtTranslator<'a, Declared> {
     }
 
     /// Publish constructor/destructor metadata. A constructor/destructor is not
-    /// itself a declaration: `ctor_tag` maps a constructor name to its
-    /// `(owning ADT, tag)`, `dtor_sem` maps a field name to its
+    /// itself a declaration: `ctor_variant` maps a constructor name to its
+    /// `(owning ADT, variant)`, `dtor_sem` maps a field name to its
     /// `(adt id, variant, field)` projection.
     pub(crate) fn meta(self, ctx: &mut TranslationContext<'_>) -> AdtTranslator<'a, Metaed> {
-        for (tag, v) in self.src.variants.iter().enumerate() {
-            ctx.adt.ctor_tag.insert(v.name.0, (self.silver_name, tag));
+        for (variant, v) in self.src.variants.iter().enumerate() {
+            ctx.adt
+                .ctor_variant
+                .insert(v.name.0, (self.silver_name, variant));
             for (field, p) in v.params.iter().enumerate() {
-                ctx.adt.dtor_sem.insert(p.name.0, (self.id, tag, field));
+                ctx.adt.dtor_sem.insert(p.name.0, (self.id, variant, field));
             }
         }
         AdtTranslator {
@@ -73,23 +75,23 @@ impl AdtTranslator<'_, Metaed> {
         // Variant field types may mention the ADT's type parameters (→ `Generic`).
         let type_params: Vec<Spur> = self.src.type_params.iter().map(|i| i.0).collect();
         let mut variants: Vec<vmir::AdtVariant> = Vec::new();
-        for (tag, v) in self.src.variants.iter().enumerate() {
+        for (variant, v) in self.src.variants.iter().enumerate() {
             let ctor_name = definer.intern_name(ctx.interner.resolve(&v.name.0));
             let field_types: Vec<vmir::Type> = v
                 .params
                 .iter()
                 .map(|p| lower_type(&ctx.name_map, &type_params, &p.ty))
                 .collect();
-            if variants.len() <= tag {
+            if variants.len() <= variant {
                 variants.resize(
-                    tag + 1,
+                    variant + 1,
                     vmir::AdtVariant {
                         name: None,
                         field_types: Vec::new(),
                     },
                 );
             }
-            variants[tag] = vmir::AdtVariant {
+            variants[variant] = vmir::AdtVariant {
                 name: Some(ctor_name),
                 field_types,
             };

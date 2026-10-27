@@ -402,7 +402,7 @@ impl Applier<Symbolic, ConstFold> for DistinguishingObsApplier {
 
 /// Applier for `eq-false-then`/`eq-false-else`: **unit propagation through an
 /// `ite` operand** of a **disproven** equality. From `(ite c x y) == z` proven
-/// `false` (an assumed `d != tag`) with one arm already equal to `z`:
+/// `false` (an assumed `d != k`, e.g. a Prusti enum discriminant) with one arm already equal to `z`:
 ///
 /// - `then_side` (`x ≡ z`) ⟹ `c = false` (taking the true branch would
 ///   satisfy the equality) `∧ (y == z) = false` (the value is the false

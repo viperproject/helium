@@ -1,6 +1,6 @@
 // The frame — everything the invariant does NOT mention — must come back at
 // the loop exit, permission and value intact. `b.f` is never named in the
-// invariant and never touched by the body. Driven by a tag check, so no
+// invariant and never touched by the body. Driven by a discriminator check, so no
 // integer reasoning is involved.
 adt Nat { Zero() Succ(pred: Nat) }
 field f: Int
