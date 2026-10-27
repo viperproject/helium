@@ -21,6 +21,7 @@ pub(crate) struct Z3Translation {
     class_types: HashMap<Id, Type>,
     func_cache : HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
     max_node_id: usize,
+    max_merges_is: usize,
     solver : Solver,
 }
 
@@ -151,7 +152,7 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
 /// One equation `c_{class} == ⟦node⟧` per e-node (translation.typ, "The e-graph").
 /// An equation that needs a sort we cannot determine is dropped with a warning:
 /// leaving out an assumption only weakens what Z3 knows, so it stays sound.
-pub(crate) fn sync_facts(ctxt: &mut VerifyContext, class_merges: &Vec<(Id, Id)>) {
+pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
 
     let start = ctxt.z3translator.max_node_id;
     let end = ctxt.egraph.nodes().len();
@@ -176,12 +177,16 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext, class_merges: &Vec<(Id, Id)>)
     }
     ctxt.z3translator.max_node_id = end;
 
-    class_merges.iter().for_each(|(a, b)| {
-        match (class_const(ctxt, *a), class_const(ctxt, *b)) {
+    let start = ctxt.z3translator.max_merges_is;
+    let end = ctxt.egraph.union_log().len();
+    for i in start..end {
+        let (a,b) = ctxt.egraph.union_log()[i];
+        match (logged_class_const(ctxt, a), logged_class_const(ctxt, b)) {
             (Some(c_a), Some(c_b)) => ctxt.z3translator.solver.assert(c_a.eq(c_b)),
             (_, _) => eprintln!("[z3] warning: could not find class_const for {a} or {b}"),
         }
-    });
+    }
+    ctxt.z3translator.max_merges_is = end;
 }
 
 pub(crate) fn build_goal(ctxt: &mut VerifyContext, id: Id) -> Bool {
@@ -204,8 +209,24 @@ pub(crate) fn build_pc(ctxt: &mut VerifyContext, pc: &[(egg::Id, Polarity)]) -> 
         .collect()
 }
 
+/// The constant for `id` itself, *not* its current root.
+fn raw_class_const(id: Id, sort: &Sort) -> Dynamic {
+    Dynamic::new_const(format!("c_{id}"), sort)
+}
+
 fn class_const_given_sort(ctxt: &VerifyContext, id: Id, sort: &Sort) -> Dynamic {
-    Dynamic::new_const(format!("c_{}", ctxt.egraph.find(id)), sort)
+    raw_class_const(ctxt.egraph.find(id), sort)
+}
+
+/// The constant of a root recorded in the union log, named by that id and not
+/// by its current root: by now both sides of a merge share one root, so
+/// `find` would turn every logged merge into `c_r == c_r`. Facts were asserted
+/// under the root at sync time, and the log links every former root to its
+/// absorber, so these equations connect them to the current root.
+fn logged_class_const(ctxt: &mut VerifyContext, id: Id) -> Option<Dynamic> {
+    let typ = class_type(ctxt, id)?;
+    let sort = sort(ctxt, &typ);
+    Some(raw_class_const(id, &sort))
 }
 
 /// `None` when the class's type is not certain (see [`class_type`]).

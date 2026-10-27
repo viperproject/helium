@@ -840,7 +840,7 @@ impl<'a> VerifyContext<'a> {
         let t_build = std::time::Instant::now();
         let solver = z3::Solver::new();
 
-        crate::verify::z3::sync_facts(self, &vec![]);
+        crate::verify::z3::sync_facts(self);
 
         let goal_z3 = crate::verify::z3::build_goal(self, goal);
 
