@@ -139,13 +139,12 @@ pub enum TrigHead {
         variant: usize,
         field: usize,
     },
-    AdtTag {
-        adt: crate::vmir::MemberId,
-    },
+    /// The tester of variant `variant`: a trigger `{x.isC}` fires only on
+    /// `x.isC`, not on a test of another variant of the same value.
     AdtIs {
         adt: crate::vmir::MemberId,
         variant: usize,
-    }
+    },
 }
 
 /// A trigger term, rendered in the enclosing temp syntax: every variable is an
@@ -172,7 +171,6 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
                         variant,
                         field,
                     } => write!(f, "{}.{field}", self.adt_variant(*adt, *variant))?,
-                    TrigHead::AdtTag { adt } => write!(f, "{}@tag", self.member(*adt))?,
                     TrigHead::AdtIs { adt, variant } => write!(f, "{}?", self.adt_variant(*adt, *variant))?,
                 }
                 if !type_args.is_empty() {

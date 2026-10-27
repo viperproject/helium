@@ -571,9 +571,9 @@ fn eval_pure_inst(
             (id, None)
         }
         // Semantic ADT nodes. Each is a `FuncApp` over a verifier-minted **concept**
-        // id (one per `(head, variant[, field])`, see `verify::mono`); the ground
-        // `type_args` ride in the node's operator identity (the discriminant), so
-        // distinct instantiations never merge and the cons/proj/tag reductions fire
+        // id (one per `(head, variant[, field])`, see `verify::func_registry`); the
+        // ground `type_args` ride in the node's operator identity (the discriminant),
+        // so distinct instantiations never merge and the ADT reductions fire
         // per concept regardless of instantiation.
         PureInst::AdtCons {
             adt,
@@ -629,47 +629,27 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
-        PureInst::AdtTag {
+        // A discriminator is the tester `Adt::Ctor?(base)`, a `Bool` application;
+        // the `is` / `is-excl` rules give it its meaning.
+        PureInst::AdtIs {
             adt,
             type_args,
+            variant,
             base,
         } => {
-            let tag = ctx.alloc.tag(*adt);
+            let tester = ctx.alloc.adt_is(*adt, *variant);
             let base_id = state.get_val(ctx, base);
             let id = ctx.add_func_app_id(
-                tag,
+                tester,
                 type_args.clone().into(),
-                Type::Int,
+                Type::Bool,
                 Box::new([base_id]),
             );
             let recipe = if ctx.recipe.is_some() {
                 let base = state.require_recipe(base, OPERAND_RECIPE)?;
                 let rb = ctx.recipe.as_mut().unwrap();
                 Some(rb.emit(AxiomPure::App {
-                    func: tag,
-                    type_args: type_args.clone(),
-                    args: vec![base],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::AdtIs {
-            adt,
-            type_args,
-            variant,
-            base
-        } => {
-            let tag = ctx.alloc.adt_is(*adt, *variant);
-            let base_id = state.get_val(ctx, base);
-            let id = ctx.add_func_app_id(tag, type_args.clone().into(), ty.clone(), Box::from(vec![base_id]));
-
-            let recipe = if ctx.recipe.is_some() {
-                let base = state.require_recipe(base, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: tag,
+                    func: tester,
                     type_args: type_args.clone(),
                     args: vec![base],
                 }))
@@ -2070,7 +2050,6 @@ pub(crate) fn prepare_trig_term(
                     variant,
                     field,
                 } => alloc.proj(*adt, *variant, *field),
-                vmir::TrigHead::AdtTag { adt } => alloc.tag(*adt),
                 vmir::TrigHead::AdtIs { adt, variant } => alloc.adt_is(*adt, *variant),
             };
             PreparedTerm::App {
@@ -2167,18 +2146,9 @@ pub(crate) fn prepare_body(
                     adt,
                     type_args,
                     variant,
-                    base
-                } => AxiomPure::App {
-                    func : alloc.adt_is(*adt, *variant),
-                    type_args : type_args.clone(),
-                    args: vec![base.clone()],
-                },
-                PureInst::AdtTag {
-                    adt,
-                    type_args,
                     base,
                 } => AxiomPure::App {
-                    func: alloc.tag(*adt),
+                    func: alloc.adt_is(*adt, *variant),
                     type_args: type_args.clone(),
                     args: vec![base.clone()],
                 },

@@ -14,7 +14,7 @@ use crate::vmir::{BinOp, Literal, MemberId, Type};
 /// - `Unknown`: not (yet) a constant.
 /// - `Known(lit)`: folds to `lit`.
 /// - `Ctor(f, tys)`: the e-class holds an application of ADT constructor `f` at
-///   instantiation `tys`. This gives **constructor distinctness** with no `tag`
+///   instantiation `tys`. This gives **constructor distinctness** with no tester
 ///   term and no O(variants) axioms — a variant clash is a lattice conflict, and
 ///   it is detected even when the program never mentions a discriminator.
 /// - `Inconsistent`: two **same-typed** literals of differing value were merged
@@ -161,11 +161,10 @@ impl Analysis<Symbolic> for ConstFold {
 
             Symbolic::Binary(op, [l, r]) => match (&egraph[*l].data, &egraph[*r].data) {
                 (Inconsistent, _) | (_, Inconsistent) => Inconsistent,
-                // Disequality, the other half of what the SMT `tag` encoding buys:
-                // distinct constructors of one ADT are distinct values, so an `==`
-                // between them folds to `false` outright. No `tag` term and no
-                // `tag_bounds` axiom needed — the constructor identity is right
-                // there in the operand's e-class.
+                // Disequality of constructors: distinct constructors of one ADT
+                // are distinct values, so an `==` between them folds to `false`
+                // outright. No tester term and no distinctness axiom needed — the
+                // constructor identity is right there in the operand's e-class.
                 (Ctor(f, ftys), Ctor(g, gtys))
                     if *op == BinOp::Eq
                         && f != g

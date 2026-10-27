@@ -1,5 +1,6 @@
-//! ADT rules: constructor/destructor/tag reductions, minted per concept as the
-//! `FuncRegistry` grows, and the shared op-indexed searcher they use.
+//! ADT rules: projection, injectivity and tester reductions plus tester
+//! exclusivity, minted per concept by the `FuncRegistry`, and the shared
+//! op-indexed searcher they use.
 
 use std::sync::Arc;
 use crate::dhash::{HashMap, HashSet};
@@ -45,22 +46,10 @@ pub fn inj_rule(ctor: FuncId) -> Rule {
     )
 }
 
-/// Build the discriminator reduction `tag_fn(ctor_C(..)) ⇒ index_C` for a single
-/// (possibly synthesised) tag function. Companion to [`proj_rule`].
-pub fn tag_rule(tag_fn: FuncId, ctor_tags: HashMap<FuncId, usize>) -> Rule {
-    timed(
-        Rewrite::new(
-            format!("tag-{}", tag_fn.0),
-            UnaryAppSearcher { func: tag_fn },
-            TagApplier { ctor_tags },
-        )
-        .expect("valid tag rewrite"),
-    )
-}
-
-/// Build the tester reduction `is_C(D(..)) ⇒ (C == D)` for the tester of variant
-/// `variant`. `ctor_tags` maps each constructor of the head to its variant index,
-/// as for [`tag_rule`].
+/// Build the tester reduction `is_C(D(..)) ⇒ (C == D)` for the tester `is_fn`
+/// of constructor `ctor`: a tester applied to a value whose class holds a
+/// constructor of the head folds to `true` or `false`. Sound because ADT
+/// constructors are free.
 pub fn is_rule(is_fn: FuncId, ctor : FuncId) -> Rule {
     timed(
         Rewrite::new(
@@ -72,15 +61,15 @@ pub fn is_rule(is_fn: FuncId, ctor : FuncId) -> Rule {
     )
 }
 
-/// The pattern variable bound to a tag call's argument.
-pub(super) fn tag_x() -> Var {
+/// The pattern variable bound to the argument of a unary application.
+pub(super) fn arg_x() -> Var {
     var("?x")
 }
 
 /// Searcher for a unary application `func(base)`: matches any `FuncApp(func, _,
 /// [base])` node (its ground type args live in the discriminant and are ignored
 /// here) and binds `?x` to the single value arg. FuncApp isn't string-matchable,
-/// so this is hand-written. Shared by the tag and projection reductions.
+/// so this is hand-written. Shared by the tester and projection reductions.
 pub(super) struct UnaryAppSearcher {
     pub(super) func: FuncId,
 }
@@ -126,7 +115,7 @@ impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
                 && args.len() == 1
             {
                 let mut subst = Subst::default();
-                subst.insert(tag_x(), args[0]);
+                subst.insert(arg_x(), args[0]);
                 substs.push(subst);
                 if substs.len() >= limit {
                     break;
@@ -145,52 +134,13 @@ impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
     }
 
     fn vars(&self) -> Vec<Var> {
-        vec![tag_x()]
+        vec![arg_x()]
     }
 }
 
-/// Applier for the tag reduction: if the argument's e-class holds a constructor
-/// of this ADT, union the `tag(..)` e-class with the constructor's tag literal.
-pub(super) struct TagApplier {
-    pub(super) ctor_tags: HashMap<FuncId, usize>,
-}
-
-impl Applier<Symbolic, ConstFold> for TagApplier {
-    fn apply_one(
-        &self,
-        egraph: &mut EGraph<Symbolic, ConstFold>,
-        eclass: Id,
-        subst: &Subst,
-        _searcher_ast: Option<&PatternAst<Symbolic>>,
-        _rule_name: Symbol,
-    ) -> Vec<Id> {
-        let xc = egraph.find(subst[tag_x()]);
-        let mut tag = None;
-        for node in &egraph[xc].nodes {
-            if let Symbolic::FuncApp(c, _, _) = node
-                && let Some(&t) = self.ctor_tags.get(c)
-            {
-                tag = Some(t);
-                break;
-            }
-        }
-        let Some(t) = tag else { return vec![] };
-        let lit = egraph.add(Symbolic::Lit(Literal::Int(num::BigInt::from(t))));
-        if egraph.union(eclass, lit) {
-            vec![egraph.find(eclass)]
-        } else {
-            vec![]
-        }
-    }
-
-    fn vars(&self) -> Vec<Var> {
-        vec![tag_x()]
-    }
-}
-
-
-/// Applier for [`is_rule`]: if the argument class holds a constructor, unions
-/// the tester with `true` when it is variant `variant` and `false` otherwise.
+/// Applier for [`is_rule`]: if the argument class holds a constructor (read
+/// from its `ConstFold` data, no node scan), unions the tester with `true` when
+/// that constructor is `ctor` and with `false` otherwise.
 pub(super) struct IsApplier {
     /// The constructor this tester tests for (`cons(adt, variant)`).
     pub(super) ctor: FuncId,
@@ -199,12 +149,12 @@ pub(super) struct IsApplier {
 impl Applier<Symbolic, ConstFold> for IsApplier {
     fn apply_one(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id,
                  subst: &Subst, _: Option<&PatternAst<Symbolic>>, _: Symbol) -> Vec<Id> {
-        let xc = egraph.find(subst[tag_x()]);
+        let xc = egraph.find(subst[arg_x()]);
         let Data::Ctor(c, _) = &egraph[xc].data else { return vec![] };
         let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));
         if egraph.union(eclass, lit) { vec![egraph.find(eclass)] } else { vec![] }
     }
-    fn vars(&self) -> Vec<Var> { vec![tag_x()] }
+    fn vars(&self) -> Vec<Var> { vec![arg_x()] }
 }
 
 
@@ -509,7 +459,7 @@ impl Applier<Symbolic, ConstFold> for ProjApplier {
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
-        let xc = egraph.find(subst[tag_x()]);
+        let xc = egraph.find(subst[arg_x()]);
         let (Some(field), _) = self.project(egraph, xc, &mut HashMap::default(), &mut Vec::new())
         else {
             return vec![];
@@ -522,7 +472,7 @@ impl Applier<Symbolic, ConstFold> for ProjApplier {
     }
 
     fn vars(&self) -> Vec<Var> {
-        vec![tag_x()]
+        vec![arg_x()]
     }
 }
 
@@ -694,7 +644,7 @@ mod bench {
                     && args.len() == 1
                 {
                     let mut subst = Subst::default();
-                    subst.insert(tag_x(), args[0]);
+                    subst.insert(arg_x(), args[0]);
                     substs.push(subst);
                     if substs.len() >= limit {
                         break;
@@ -713,7 +663,7 @@ mod bench {
         }
 
         fn vars(&self) -> Vec<Var> {
-            vec![tag_x()]
+            vec![arg_x()]
         }
     }
 

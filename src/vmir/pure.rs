@@ -164,19 +164,14 @@ pub enum PureInst {
         field: usize,
         base: Val,
     },
-    /// The discriminator tag (variant index) of `base : adt[type_args]`.
-    /// Replaces a synthetic `@tag` `FunctionCall`.
-    AdtTag {
-        adt: crate::vmir::MemberId,
-        type_args: Vec<crate::vmir::Type>,
-        base: Val,
-    },
-
+    /// The discriminator `base.isC`: whether `base : adt[type_args]` was built
+    /// by variant `variant`. A `Bool`, printed `Adt::C?(base)`; a negative test
+    /// is this tester being `false`, so it is an equality the verifier can use.
     AdtIs {
         adt: crate::vmir::MemberId,
         type_args: Vec<crate::vmir::Type>,
         variant: usize,
-        base: Val
+        base: Val,
     },
 
     /// An inline, nestable pure `forall` (see [`Forall`](crate::vmir::Forall)).
@@ -205,12 +200,11 @@ impl PureInst {
             | PureInst::Deref(_, v)
             | PureInst::Perm(_, v)
             | PureInst::AdtProj { base: v, .. }
-            | PureInst::AdtTag { base: v, .. } => f(v),
+            | PureInst::AdtIs { base: v, .. } => f(v),
             PureInst::FunctionCall(fc) => fc.args.iter().for_each(&mut *f),
             PureInst::OptionUnwrap(v) => f(v),
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
-            PureInst::AdtIs { base, .. } => f(base),
         }
     }
 }
@@ -297,13 +291,10 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 base,
                 ..
             } => write!(f, "{}.{field}({base})", self.adt_variant(*adt, *variant)),
-            PureInst::AdtTag { adt, base, .. } => {
-                write!(f, "{}@tag({base})", self.member(*adt))
-            }
-            PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
             PureInst::AdtIs {
                 adt, variant, base, ..
             } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
+            PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
         }
     }
 }
