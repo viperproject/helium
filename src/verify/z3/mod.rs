@@ -9,7 +9,7 @@ use egg::Id;
 use std::borrow::Cow;
 use z3::ast::{Ast, Bool, Dynamic};
 use z3::datatype_builder::create_datatypes;
-use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Sort};
+use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Solver, Sort};
 
 /// The translator's caches, kept in `VerifyContext::z3translator` so sorts and
 /// datatypes are created once per context. The translation itself is the free
@@ -19,7 +19,9 @@ pub(crate) struct Z3Translation {
     sorts: HashMap<Type, Sort>,
     adts: HashMap<Type, DatatypeSort>,
     class_types: HashMap<Id, Type>,
-    func_cache : HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>
+    func_cache : HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
+    max_node_id: usize,
+    solver : Solver,
 }
 
 /// Parameter and return types of function declaration `func` at instantiation
@@ -149,42 +151,40 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
 /// One equation `c_{class} == ⟦node⟧` per e-node (translation.typ, "The e-graph").
 /// An equation that needs a sort we cannot determine is dropped with a warning:
 /// leaving out an assumption only weakens what Z3 knows, so it stays sound.
-pub(crate) fn build_facts(ctxt: &mut VerifyContext) -> Vec<Bool> {
-    // Snapshot the classes first: translating needs `ctxt` mutably (the sort
-    // cache), so the e-graph cannot stay borrowed while we iterate it.
-    let classes: Vec<(Id, Vec<Symbolic>)> = ctxt
-        .egraph
-        .classes()
-        .map(|class| (class.id, class.nodes.clone()))
-        .collect();
-    let mut facts = Vec::new();
-    for (id, nodes) in classes {
-        let Some(class_const) = class_const(ctxt, id) else {
-            eprintln!(
-                "[z3] warning: e-class {id} has no node with a certain type; dropping its facts"
-            );
+pub(crate) fn sync_facts(ctxt: &mut VerifyContext, class_merges: &Vec<(Id, Id)>) {
+
+    let start = ctxt.z3translator.max_node_id;
+    let end = ctxt.egraph.nodes().len();
+    for i in start..end {
+        let id = Id::from(i);
+        // Clone just this node: translating needs `ctxt` mutably (the caches),
+        // so the node list cannot stay borrowed across the call.
+        let node = ctxt.egraph.id_to_node(id).clone();
+        if matches!(node, Symbolic::Forall(..)) {
+            continue;
+        }
+        let Some(expr) = symbol_to_z3(ctxt, &node) else {
+            eprintln!("[z3] warning: an operand of `{node}` has no certain type; dropping its fact");
             continue;
         };
-        // A `Forall` gets no equation: its class constant stays a free
-        // `Bool`, and its instances are already in the e-graph as
-        // `ite(forall, body, true) == true` (translation.typ, "The e-graph").
-        for node in nodes
-            .iter()
-            .filter(|node| !matches!(node, Symbolic::Forall(..)))
-        {
-            let Some(node_expression) = symbol_to_z3(ctxt, node) else {
-                eprintln!(
-                    "[z3] warning: an operand of `{node}` in e-class {id} has no certain type; dropping its fact"
-                );
-                continue;
-            };
-            facts.push(class_const.eq(node_expression));
-        }
+        let class = ctxt.egraph.find(id);
+        let Some(c) = class_const(ctxt, class) else {
+            eprintln!("[z3] warning: could not create the class_const for {class}");
+            continue;
+        };
+        ctxt.z3translator.solver.assert(c.eq(expr));
     }
-    facts
+    ctxt.z3translator.max_node_id = end;
+
+    class_merges.iter().for_each(|(a, b)| {
+        match (class_const(ctxt, *a), class_const(ctxt, *b)) {
+            (Some(c_a), Some(c_b)) => ctxt.z3translator.solver.assert(c_a.eq(c_b)),
+            (_, _) => eprintln!("[z3] warning: could not find class_const for {a} or {b}"),
+        }
+    });
 }
 
-pub(crate) fn build_goal(ctxt: &mut VerifyContext, id: egg::Id) -> Bool {
+pub(crate) fn build_goal(ctxt: &mut VerifyContext, id: Id) -> Bool {
     class_const_given_sort(ctxt, id, &Sort::bool())
         .as_bool()
         .unwrap()

@@ -840,7 +840,7 @@ impl<'a> VerifyContext<'a> {
         let t_build = std::time::Instant::now();
         let solver = z3::Solver::new();
 
-        let facts = crate::verify::z3::build_facts(self);
+        crate::verify::z3::sync_facts(self, &vec![]);
 
         let goal_z3 = crate::verify::z3::build_goal(self, goal);
 
@@ -849,14 +849,12 @@ impl<'a> VerifyContext<'a> {
         let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
         let pc_cond = crate::verify::z3::build_pc(self, &pc);
 
-        facts.iter().for_each(|fact| solver.assert(fact));
-        pc_cond.iter().for_each(|pc_cond| solver.assert(pc_cond));
+        let query = [pc_cond, vec![!goal_z3]].concat();
 
-        solver.assert(!goal_z3);
         stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
 
         let t_solve = std::time::Instant::now();
-        let res = solver.check();
+        let res = solver.check_assumptions(&query);
         stats::bump(|s| s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64());
 
         match res {
