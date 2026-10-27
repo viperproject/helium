@@ -171,7 +171,9 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
                         variant,
                         field,
                     } => write!(f, "{}.{field}", self.adt_variant(*adt, *variant))?,
-                    TrigHead::AdtIs { adt, variant } => write!(f, "{}?", self.adt_variant(*adt, *variant))?,
+                    TrigHead::AdtIs { adt, variant } => {
+                        write!(f, "{}?", self.adt_variant(*adt, *variant))?
+                    }
                 }
                 if !type_args.is_empty() {
                     write!(f, "<")?;

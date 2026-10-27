@@ -18,8 +18,8 @@
 //! appears — required for a resource certificate's grafted nodes to
 //! congruence-match the caller.
 
-use std::sync::Arc;
 use crate::dhash::HashMap;
+use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
@@ -138,10 +138,11 @@ impl FuncRegistry {
         names.insert(BUILTIN_OPTION_IS_SOME, "Option::Some?".to_string());
         names.insert(BUILTIN_OPTION_IS_NONE, "Option::None?".to_string());
 
-        let mut rules = Vec::new();
-        rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
-        rules.push(inj_rule(BUILTIN_OPTION_SOME));
-        rules.push(is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])));
+        let rules = vec![
+            proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
+            inj_rule(BUILTIN_OPTION_SOME),
+            is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
+        ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
@@ -189,9 +190,10 @@ impl FuncRegistry {
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
 
-        let mut rules = Vec::new();
-        rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
-        rules.push(inj_rule(BUILTIN_OPTION_SOME));
+        let rules = vec![
+            proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
+            inj_rule(BUILTIN_OPTION_VALUE),
+        ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
@@ -350,7 +352,8 @@ impl FuncRegistry {
         }
 
         if !counts.is_empty() {
-            let testers: Arc<[FuncId]> = (0..counts.len()).map(|v| self.adt_is[&(adt, v)]).collect();
+            let testers: Arc<[FuncId]> =
+                (0..counts.len()).map(|v| self.adt_is[&(adt, v)]).collect();
             self.rules.push(is_excl_rule(testers));
         }
     }

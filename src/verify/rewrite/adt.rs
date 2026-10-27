@@ -2,8 +2,8 @@
 //! exclusivity, minted per concept by the `FuncRegistry`, and the shared
 //! op-indexed searcher they use.
 
-use std::sync::Arc;
 use crate::dhash::{HashMap, HashSet};
+use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
@@ -50,14 +50,14 @@ pub fn inj_rule(ctor: FuncId) -> Rule {
 /// of constructor `ctor`: a tester applied to a value whose class holds a
 /// constructor of the head folds to `true` or `false`. Sound because ADT
 /// constructors are free.
-pub fn is_rule(is_fn: FuncId, ctor : FuncId) -> Rule {
+pub fn is_rule(is_fn: FuncId, ctor: FuncId) -> Rule {
     timed(
         Rewrite::new(
             format!("is-{}", is_fn.0),
             UnaryAppSearcher { func: is_fn },
             IsApplier { ctor },
         )
-            .expect("valid is rewrite"),
+        .expect("valid is rewrite"),
     )
 }
 
@@ -147,16 +147,29 @@ pub(super) struct IsApplier {
 }
 
 impl Applier<Symbolic, ConstFold> for IsApplier {
-    fn apply_one(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id,
-                 subst: &Subst, _: Option<&PatternAst<Symbolic>>, _: Symbol) -> Vec<Id> {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        subst: &Subst,
+        _: Option<&PatternAst<Symbolic>>,
+        _: Symbol,
+    ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let Data::Ctor(c, _) = &egraph[xc].data else { return vec![] };
+        let Data::Ctor(c, _) = &egraph[xc].data else {
+            return vec![];
+        };
         let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));
-        if egraph.union(eclass, lit) { vec![egraph.find(eclass)] } else { vec![] }
+        if egraph.union(eclass, lit) {
+            vec![egraph.find(eclass)]
+        } else {
+            vec![]
+        }
     }
-    fn vars(&self) -> Vec<Var> { vec![arg_x()] }
+    fn vars(&self) -> Vec<Var> {
+        vec![arg_x()]
+    }
 }
-
 
 /// Exclusivity / last-variant for the testers of one ADT head: `is_C(x) = true`
 /// makes every other existing `is_D(x)` false; all-but-one false makes the last
@@ -171,10 +184,15 @@ pub fn is_excl_rule(testers: Arc<[FuncId]>) -> Rule {
     timed(
         Rewrite::new(
             format!("is-excl-{}", testers[0].0),
-            DecidedTesterSearcher { testers: testers.clone() },
-            IsExclApplier { testers, variant_of },
+            DecidedTesterSearcher {
+                testers: testers.clone(),
+            },
+            IsExclApplier {
+                testers,
+                variant_of,
+            },
         )
-            .expect("valid is-excl rewrite"),
+        .expect("valid is-excl rewrite"),
     )
 }
 
@@ -249,14 +267,20 @@ impl IsExclApplier {
     /// cost `|class|` per match, so `|class|²` per iteration. Here each node is
     /// read once and carries its own variant, type args and argument.
     fn apply_class(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id) -> Vec<Id> {
-        let Some(&Literal::Bool(holds)) = egraph[eclass].data.known() else { return vec![] };
+        let Some(&Literal::Bool(holds)) = egraph[eclass].data.known() else {
+            return vec![];
+        };
         // Collect first: the lookups and unions below need `&mut egraph`.
-        let apps: Vec<(usize, Box<[Type]>, Id)> = egraph[eclass].nodes.iter().filter_map(|n| match n {
-            Symbolic::FuncApp(f, tys, args) => {
-                self.variant_of.get(f).map(|&v| (v, tys.clone(), args[0]))
-            }
-            _ => None,
-        }).collect();
+        let apps: Vec<(usize, Box<[Type]>, Id)> = egraph[eclass]
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Symbolic::FuncApp(f, tys, args) => {
+                    self.variant_of.get(f).map(|&v| (v, tys.clone(), args[0]))
+                }
+                _ => None,
+            })
+            .collect();
         let mut changed = vec![];
         for (variant, tys, x) in apps {
             self.apply_app(egraph, holds, variant, tys, x, &mut changed);
@@ -266,33 +290,56 @@ impl IsExclApplier {
 
     /// The rule for one tester application `is_C[tys](x)`, `C` the `variant`-th,
     /// known to be `holds`.
-    fn apply_app(&self, egraph: &mut EGraph<Symbolic, ConstFold>, holds: bool,
-                 variant: usize, tys: Box<[Type]>, x: Id, changed: &mut Vec<Id>) {
+    fn apply_app(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        holds: bool,
+        variant: usize,
+        tys: Box<[Type]>,
+        x: Id,
+        changed: &mut Vec<Id>,
+    ) {
         // Existing sibling tester classes, by variant (None = not in the graph).
         // One probe node re-pointed at each tester, so a lookup allocates nothing.
         let mut probe = Symbolic::FuncApp(self.testers[variant], tys, Box::new([x]));
-        let sib: Vec<Option<Id>> = self.testers.iter().map(|&t| {
-            if let Symbolic::FuncApp(f, ..) = &mut probe { *f = t; }
-            egraph.lookup(&mut probe)
-        }).collect();
+        let sib: Vec<Option<Id>> = self
+            .testers
+            .iter()
+            .map(|&t| {
+                if let Symbolic::FuncApp(f, ..) = &mut probe {
+                    *f = t;
+                }
+                egraph.lookup(&mut probe)
+            })
+            .collect();
 
         let mut union_lit = |eg: &mut EGraph<_, _>, id: Id, b: bool| {
             let lit = eg.add(Symbolic::Lit(Literal::Bool(b)));
-            if eg.union(id, lit) { changed.push(eg.find(id)); }
+            if eg.union(id, lit) {
+                changed.push(eg.find(id));
+            }
         };
 
         if holds {
             // Exclusivity.
             for (d, id) in sib.iter().enumerate() {
-                if d != variant && let Some(id) = id { union_lit(egraph, *id, false); }
+                if d != variant
+                    && let Some(id) = id
+                {
+                    union_lit(egraph, *id, false);
+                }
             }
         } else {
             // Last variant: every other variant has a tester known false.
-            let is_false = |eg: &EGraph<_, ConstFold>, id: Id| eg[id].data.known() == Some(&Literal::Bool(false));
+            let is_false = |eg: &EGraph<_, ConstFold>, id: Id| {
+                eg[id].data.known() == Some(&Literal::Bool(false))
+            };
             let open: Vec<usize> = (0..sib.len())
                 .filter(|&d| !sib[d].is_some_and(|id| is_false(egraph, id)))
                 .collect();
-            if let [e] = open[..] && let Some(id) = sib[e] {
+            if let [e] = open[..]
+                && let Some(id) = sib[e]
+            {
                 union_lit(egraph, id, true);
             }
         }
@@ -302,8 +349,12 @@ impl IsExclApplier {
 impl Applier<Symbolic, ConstFold> for IsExclApplier {
     /// One [`IsExclApplier::apply_class`] per matched class. Matches that an
     /// earlier rule of this iteration merged into one class are walked once.
-    fn apply_matches(&self, egraph: &mut EGraph<Symbolic, ConstFold>,
-                     matches: &[SearchMatches<Symbolic>], _: Symbol) -> Vec<Id> {
+    fn apply_matches(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        matches: &[SearchMatches<Symbolic>],
+        _: Symbol,
+    ) -> Vec<Id> {
         let mut walked = HashSet::default();
         let mut changed = vec![];
         for m in matches {
@@ -314,11 +365,19 @@ impl Applier<Symbolic, ConstFold> for IsExclApplier {
         changed
     }
 
-    fn apply_one(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id,
-                 _: &Subst, _: Option<&PatternAst<Symbolic>>, _: Symbol) -> Vec<Id> {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        _: &Subst,
+        _: Option<&PatternAst<Symbolic>>,
+        _: Symbol,
+    ) -> Vec<Id> {
         self.apply_class(egraph, eclass)
     }
-    fn vars(&self) -> Vec<Var> { vec![] }
+    fn vars(&self) -> Vec<Var> {
+        vec![]
+    }
 }
 
 /// Applier for [`inj_rule`]: unions the arguments of every pair of same-ctor
