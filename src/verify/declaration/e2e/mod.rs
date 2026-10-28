@@ -570,8 +570,8 @@ fn verify_named_function(program: &vmir::Program, name: &str) -> Result<(), Veri
 
 #[test]
 fn adt_discriminator_on_known_constructor() {
-    // `one()` is a known constructor, so `tag(one()) ⇒ 0`; the `istwo`
-    // discriminator desugars to `tag(x) == 1`, which folds to `false`.
+    // `one()` is a known constructor, so the `istwo` discriminator, the tester
+    // `MyAdt::two?(one())`, reduces to `false` by the `is` rule.
     let input = r#"
 adt MyAdt { one() two() }
 method m()
@@ -3593,10 +3593,10 @@ method components(p: Pair)
 
 #[test]
 fn distinct_adt_constructors_are_disequal() {
-    // Constructor distinctness with no `tag` term anywhere: the `ConstFold`
+    // Constructor distinctness with no tester term anywhere: the `ConstFold`
     // lattice reads the constructor identity straight off the operand's e-class,
     // so `Nil() == Cons(..)` folds to `false`. In an SMT encoding this needs an
-    // O(variants) family of `tag` axioms plus a term to trigger them.
+    // O(variants) family of distinctness axioms plus a term to trigger them.
     let input = r#"
 adt List {
     Nil()

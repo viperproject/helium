@@ -1,0 +1,13 @@
+// Soundness check for the last-variant rule: with two variants still open,
+// ruling out one of three says nothing about which of the other two holds.
+adt Shape {
+    Circle(r: Int)
+    Square(s: Int)
+    Tri(a: Int, b: Int)
+}
+
+method two_open_variants(s: Shape)
+{
+    assume !s.isCircle
+    assert s.isTri
+}

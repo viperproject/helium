@@ -1,11 +1,11 @@
 //! Verifier-side ADT id allocator.
 //!
-//! ADT operations (`PureInst::{AdtCons,AdtProj,AdtTag}` and predicate snapshots)
+//! ADT operations (`PureInst::{AdtCons,AdtProj,AdtIs}` and predicate snapshots)
 //! are interpreted as `Symbolic::FuncApp`s over **verifier-minted** function ids,
-//! distinct from any VMIR declaration id — so no synthetic `@tag`/`@dtor`/
-//! constructor declarations exist. Ids are allocated **lazily on first use** of a
-//! **concept** `(adt-head)`; minting one mints its whole concept (tag + every
-//! constructor + every projection) and appends its reduction rules.
+//! distinct from any VMIR declaration id — so no synthetic tester/`@dtor`/
+//! constructor declarations exist. Ids are allocated per **concept**
+//! `(adt-head)`; minting one mints its whole concept (every constructor, tester
+//! and projection) and appends its reduction rules.
 //!
 //! The e-graph is **polymorphic**, not monomorphized: a generic op gets **one** id
 //! per concept, and its ground type arguments ride in the `FuncApp` operator
@@ -19,28 +19,31 @@
 //! congruence-match the caller.
 
 use crate::dhash::HashMap;
+use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
-use crate::verify::rewrite::{inj_rule, proj_rule, tag_rule};
+use crate::verify::rewrite::{inj_rule, is_excl_rule, is_rule, proj_rule};
 use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
 
-/// Lazily allocates and names the verifier ids for polymorphic ADT
-/// constructors / projections / tags, and accumulates their reduction rules.
+/// Allocates and names the verifier ids for polymorphic ADT constructors /
+/// testers / projections, and accumulates their reduction rules.
 pub struct FuncRegistry {
     /// Next func id to mint (starts past every real declaration id, so a minted
     /// id never collides with a plain function reusing its declaration index).
     next: usize,
     /// Keyed by **concept**, not by type instantiation: one id per `(head,
-    /// variant)` / `(head, variant, field)` / `head`. The e-graph is polymorphic —
+    /// variant)` / `(head, variant, field)`. The e-graph is polymorphic —
     /// the ground type args ride in the `FuncApp` discriminant, so a single id
     /// serves every instantiation (distinctness comes from the differing
     /// discriminant, not from per-instance ids or type e-classes).
     cons: HashMap<(MemberId, usize), FuncId>,
     proj: HashMap<(MemberId, usize, usize), FuncId>,
-    tag: HashMap<MemberId, FuncId>,
+    /// The tester `Adt::Ctor?` of each `(head, variant)`: the discriminator
+    /// `x.isCtor`, one `Bool` function per variant.
+    adt_is: HashMap<(MemberId, usize), FuncId>,
     /// Limited-function twin id per recursive function (see
     /// [`FuncRegistry::limited`]): an uninterpreted `f'` with no unfold rule,
     /// used to break recursive unfolding.
@@ -85,7 +88,8 @@ pub struct FuncRegistry {
 pub const BUILTIN_OPTION_SOME: FuncId = FuncId(usize::MAX - 1);
 pub const BUILTIN_OPTION_NONE: FuncId = FuncId(usize::MAX - 2);
 pub const BUILTIN_OPTION_VALUE: FuncId = FuncId(usize::MAX - 3);
-pub const BUILTIN_OPTION_TAG: FuncId = FuncId(usize::MAX - 4);
+pub const BUILTIN_OPTION_IS_SOME: FuncId = FuncId(usize::MAX - 4);
+pub const BUILTIN_OPTION_IS_NONE: FuncId = FuncId(usize::MAX - 5);
 /// Synthetic ADT head for the builtin `Option` (which has no `Adt` declaration).
 pub const BUILTIN_OPTION_HEAD: MemberId = MemberId(usize::MAX);
 
@@ -131,15 +135,14 @@ impl FuncRegistry {
         names.insert(BUILTIN_OPTION_SOME, "Option::Some".to_string());
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
-        names.insert(BUILTIN_OPTION_TAG, "Option@tag".to_string());
+        names.insert(BUILTIN_OPTION_IS_SOME, "Option::Some?".to_string());
+        names.insert(BUILTIN_OPTION_IS_NONE, "Option::None?".to_string());
 
-        let mut rules = Vec::new();
-        rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
-        rules.push(inj_rule(BUILTIN_OPTION_SOME));
-        let mut option_tags = HashMap::default();
-        option_tags.insert(BUILTIN_OPTION_SOME, 0);
-        option_tags.insert(BUILTIN_OPTION_NONE, 1);
-        rules.push(tag_rule(BUILTIN_OPTION_TAG, option_tags));
+        let rules = vec![
+            proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
+            inj_rule(BUILTIN_OPTION_SOME),
+            is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
+        ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
@@ -148,7 +151,7 @@ impl FuncRegistry {
             next: program.decls.len(),
             cons: HashMap::default(),
             proj: HashMap::default(),
-            tag: HashMap::default(),
+            adt_is: Default::default(),
             limited: HashMap::default(),
             fn_pre_token: HashMap::default(),
             names,
@@ -186,15 +189,11 @@ impl FuncRegistry {
         names.insert(BUILTIN_OPTION_SOME, "Option::Some".to_string());
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
-        names.insert(BUILTIN_OPTION_TAG, "Option@tag".to_string());
 
-        let mut rules = Vec::new();
-        rules.push(proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0));
-        rules.push(inj_rule(BUILTIN_OPTION_SOME));
-        let mut option_tags = HashMap::default();
-        option_tags.insert(BUILTIN_OPTION_SOME, 0);
-        option_tags.insert(BUILTIN_OPTION_NONE, 1);
-        rules.push(tag_rule(BUILTIN_OPTION_TAG, option_tags));
+        let rules = vec![
+            proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
+            inj_rule(BUILTIN_OPTION_VALUE),
+        ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
@@ -203,7 +202,7 @@ impl FuncRegistry {
             next: 0,
             cons: HashMap::default(),
             proj: HashMap::default(),
-            tag: HashMap::default(),
+            adt_is: Default::default(),
             limited: HashMap::default(),
             fn_pre_token: HashMap::default(),
             names,
@@ -230,10 +229,11 @@ impl FuncRegistry {
         self.proj[&(adt, variant, field)]
     }
 
-    /// Discriminator-tag id of `adt`.
-    pub fn tag(&mut self, adt: MemberId) -> FuncId {
+    /// Tester id `Adt::Ctor?` of variant `variant` of `adt`: the `Bool`
+    /// discriminator a VMIR `AdtIs` / `TrigHead::AdtIs` lowers to.
+    pub fn adt_is(&mut self, adt: MemberId, variant: usize) -> FuncId {
         self.ensure(adt);
-        self.tag[&adt]
+        self.adt_is[&(adt, variant)]
     }
 
     /// The limited-function twin id `f'` of recursive function `func` (minting it
@@ -308,12 +308,16 @@ impl FuncRegistry {
         self.names.get(&f).map(String::as_str)
     }
 
-    /// Mint the **concept** `adt` (tag + all constructors + all projections +
-    /// reduction rules) if not already present. One concept covers every
-    /// instantiation; the ground type args live in the `FuncApp` discriminant, so
-    /// the reductions are instantiation-agnostic.
+    /// Mint the **concept** `adt` (every constructor, tester and projection,
+    /// plus their reduction rules) if not already present. One concept covers
+    /// every instantiation; the ground type args live in the `FuncApp`
+    /// discriminant, so the reductions are instantiation-agnostic.
+    ///
+    /// Rules per head: `is` per variant (a tester applied to a constructor
+    /// reduces to a literal), `inj` per variant with fields, `proj` per field,
+    /// and one `is-excl` relating the head's testers to each other.
     fn ensure(&mut self, adt: MemberId) {
-        if self.tag.contains_key(&adt) {
+        if self.adt_is.contains_key(&(adt, 0usize)) {
             return;
         }
         let counts = self
@@ -323,20 +327,20 @@ impl FuncRegistry {
             .clone();
         let label = self.label(adt);
 
-        let tag_id = self.mint(format!("{label}@tag"));
-        self.tag.insert(adt, tag_id);
-
-        let mut ctor_tags = HashMap::default();
         for (variant, &fields) in counts.iter().enumerate() {
             // `Adt::Ctor` for a named constructor, `Adt::#i` for an anonymous one.
             let cons_label = match self.variant_name(adt, variant) {
                 Some(name) => format!("{label}::{name}"),
                 None => format!("{label}::#{variant}"),
             };
+            let is_id = self.mint(format!("{cons_label}?"));
+            self.adt_is.insert((adt, variant), is_id);
+
             let cons_id = self.mint(cons_label.clone());
+            self.rules.push(is_rule(is_id, cons_id));
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);
-            ctor_tags.insert(cons_id, variant);
+
             if fields > 0 {
                 self.rules.push(inj_rule(cons_id));
             }
@@ -346,7 +350,12 @@ impl FuncRegistry {
                 self.rules.push(proj_rule(proj_id, cons_id, field));
             }
         }
-        self.rules.push(tag_rule(tag_id, ctor_tags));
+
+        if !counts.is_empty() {
+            let testers: Arc<[FuncId]> =
+                (0..counts.len()).map(|v| self.adt_is[&(adt, v)]).collect();
+            self.rules.push(is_excl_rule(testers));
+        }
     }
 
     /// The source constructor name of `adt`'s `variant`, if any.
