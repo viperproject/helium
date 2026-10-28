@@ -3,8 +3,8 @@ use itertools::Itertools;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
-use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
 use crate::verify::stats;
+use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
@@ -19,10 +19,10 @@ pub(crate) struct Z3Translation {
     sorts: HashMap<Type, Sort>,
     adts: HashMap<Type, DatatypeSort>,
     class_types: HashMap<Id, Type>,
-    func_cache : HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
+    func_cache: HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
     max_node_id: usize,
     max_merges_is: usize,
-    pub(crate) solver : Solver,
+    pub(crate) solver: Solver,
 }
 
 impl Default for Z3Translation {
@@ -235,7 +235,6 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
 /// An equation that needs a sort we cannot determine is dropped with a warning:
 /// leaving out an assumption only weakens what Z3 knows, so it stays sound.
 pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
-
     let start = ctxt.z3translator.max_node_id;
     let end = ctxt.egraph.nodes().len();
     for i in start..end {
@@ -247,7 +246,9 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
             continue;
         }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {
-            eprintln!("[z3] warning: an operand of `{node}` has no certain type; dropping its fact");
+            eprintln!(
+                "[z3] warning: an operand of `{node}` has no certain type; dropping its fact"
+            );
             continue;
         };
         let class = ctxt.egraph.find(id);
@@ -262,7 +263,7 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
     let start = ctxt.z3translator.max_merges_is;
     let end = ctxt.egraph.union_log().len();
     for i in start..end {
-        let (a,b) = ctxt.egraph.union_log()[i];
+        let (a, b) = ctxt.egraph.union_log()[i];
         match (logged_class_const(ctxt, a), logged_class_const(ctxt, b)) {
             (Some(c_a), Some(c_b)) => assert_fact(&ctxt.z3translator.solver, &c_a.eq(c_b)),
             (_, _) => eprintln!("[z3] warning: could not find class_const for {a} or {b}"),
@@ -481,7 +482,12 @@ fn uninterpreted_app(
         .map(|(a, s)| class_const_given_sort(ctxt, *a, s))
         .collect();
     let arg_refs: Vec<&dyn Ast> = arg_consts.iter().map(|a| a as &dyn Ast).collect();
-    if let Some(decl) = ctxt.z3translator.func_cache.get(&f).and_then(|m| m.get(tys)) {
+    if let Some(decl) = ctxt
+        .z3translator
+        .func_cache
+        .get(&f)
+        .and_then(|m| m.get(tys))
+    {
         decl.apply(&arg_refs)
     } else {
         let range = sort(ctxt, ret);
@@ -493,7 +499,11 @@ fn uninterpreted_app(
         let domain_refs: Vec<&Sort> = domain.iter().collect();
         let func_decl = FuncDecl::new(name, &domain_refs, &range);
         let res = func_decl.apply(&arg_refs);
-        ctxt.z3translator.func_cache.entry(f).or_default().insert(tys.into(), func_decl);
+        ctxt.z3translator
+            .func_cache
+            .entry(f)
+            .or_default()
+            .insert(tys.into(), func_decl);
         res
     }
 }
