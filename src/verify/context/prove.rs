@@ -1009,7 +1009,9 @@ impl<'a> VerifyContext<'a> {
         let clean = self.clean;
         let scratch = self.scratch.take();
         let in_block = std::mem::replace(&mut self.in_block, false);
+        let solver_state = crate::verify::z3::enter_scratch(self);
         let out = f(self);
+        crate::verify::z3::leave_scratch(self, solver_state);
         self.in_block = in_block;
         self.scratch = scratch;
         self.egraph = live;

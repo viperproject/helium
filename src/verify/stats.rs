@@ -193,6 +193,9 @@ pub struct Z3Timing {
     pub unknown: u64,
     /// Facts passed to `Solver::assert`, path condition and goal included.
     pub facts: u64,
+    /// Throwaway-graph scopes (`with_scratch_graph`) in which Z3 learned
+    /// something that had to be discarded afterwards.
+    pub scratch_scopes: u64,
 }
 
 /// [`Z3Timing`] wrapper, `Eq`-transparent like [`TimingTrend`].
@@ -368,6 +371,7 @@ impl VerifyStats {
                     ("sat", n(&z3_timing.0.sat)),
                     ("unknown", n(&z3_timing.0.unknown)),
                     ("facts", n(&z3_timing.0.facts)),
+                    ("scratch_scopes", n(&z3_timing.0.scratch_scopes)),
                 ]),
             ),
             (

@@ -4,6 +4,7 @@ use itertools::Itertools;
 use crate::verify::context::VerifyContext;
 use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
 use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
+use crate::verify::stats;
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
@@ -45,6 +46,41 @@ pub(crate) fn new_solver() -> Solver {
     let solver = Solver::new();
     crate::verify::stats::bump(|s| s.z3_timing.0.init += t.elapsed().as_secs_f64());
     solver
+}
+
+/// The translator state that names e-graph ids, saved while a throwaway graph
+/// stands in for the live one (`VerifyContext::with_scratch_graph`).
+pub(crate) struct ScratchScope {
+    max_node_id: usize,
+    max_merges_is: usize,
+    class_types: HashMap<Id, Type>,
+}
+
+/// Open a solver scope before the live graph is swapped for a throwaway clone.
+/// The clone hands out ids past the live graph's, and those ids are handed out
+/// again once the live graph is back, for different terms. Everything Z3 learns
+/// about them has to go with the clone.
+pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
+    ctxt.z3translator.solver.push();
+    let tr = &ctxt.z3translator;
+    ScratchScope {
+        max_node_id: tr.max_node_id,
+        max_merges_is: tr.max_merges_is,
+        class_types: tr.class_types.clone(),
+    }
+}
+
+/// Drop what Z3 learned on the throwaway graph: its facts (`pop`), the
+/// watermarks past the live graph, and the sorts cached for its ids.
+pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
+    let tr = &mut ctxt.z3translator;
+    tr.solver.pop(1);
+    if tr.max_node_id != scope.max_node_id || tr.max_merges_is != scope.max_merges_is {
+        stats::bump(|s| s.z3_timing.0.scratch_scopes += 1);
+    }
+    tr.max_node_id = scope.max_node_id;
+    tr.max_merges_is = scope.max_merges_is;
+    tr.class_types = scope.class_types;
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
