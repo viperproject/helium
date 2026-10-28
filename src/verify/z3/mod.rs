@@ -41,9 +41,20 @@ impl Default for Z3Translation {
 
 /// The solver one context keeps for all its queries; its creation is counted as
 /// `z3_timing.init`.
+///
+/// Every check is limited to `SILVER_OXIDE_Z3_TIMEOUT_MS` (default 2000 ms).
+/// The persistent solver can get stuck on one query for minutes; a timeout ends
+/// it as `unknown`, which the rung treats as "not proven".
 pub(crate) fn new_solver() -> Solver {
     let t = std::time::Instant::now();
     let solver = Solver::new();
+    let ms = std::env::var("SILVER_OXIDE_Z3_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let mut params = z3::Params::new();
+    params.set_u32("timeout", ms);
+    solver.set_params(&params);
     crate::verify::stats::bump(|s| s.z3_timing.0.init += t.elapsed().as_secs_f64());
     solver
 }
