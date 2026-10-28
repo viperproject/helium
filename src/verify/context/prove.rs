@@ -854,7 +854,16 @@ impl<'a> VerifyContext<'a> {
 
         let t_solve = std::time::Instant::now();
         let res = self.z3translator.solver.check_assumptions(&query);
-        stats::bump(|s| s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64());
+        stats::bump(|s| {
+            s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64();
+            s.z3_timing.0.calls += 1;
+            s.z3_timing.0.facts += query.len() as u64;
+            match res {
+                SatResult::Unsat => s.z3_timing.0.unsat += 1,
+                SatResult::Sat => s.z3_timing.0.sat += 1,
+                SatResult::Unknown => s.z3_timing.0.unknown += 1,
+            }
+        });
 
         match res {
             SatResult::Unsat => true,

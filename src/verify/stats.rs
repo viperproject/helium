@@ -173,7 +173,8 @@ impl PartialEq for GraphTimingTrend {
 impl Eq for GraphTimingTrend {}
 
 /// Wall-clock seconds spent in the Z3 rung (`prove_by_z3`), split into building
-/// the problem and solving it. Non-deterministic — a trend, never gated.
+/// the problem and solving it, plus how often the rung ran and what Z3 answered.
+/// Non-deterministic — a trend, never gated.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Z3Timing {
     /// Creating the problem: translating the e-graph, goal and path condition
@@ -181,6 +182,17 @@ pub struct Z3Timing {
     pub build: f64,
     /// `Solver::check`.
     pub solve: f64,
+    /// Creating solvers (and the tactics they are built from). Outside `build`.
+    pub init: f64,
+    /// The `Solver::assert` calls alone. Part of `build`.
+    pub assert: f64,
+    /// Queries that reached Z3, and its answers to them.
+    pub calls: u64,
+    pub unsat: u64,
+    pub sat: u64,
+    pub unknown: u64,
+    /// Facts passed to `Solver::assert`, path condition and goal included.
+    pub facts: u64,
 }
 
 /// [`Z3Timing`] wrapper, `Eq`-transparent like [`TimingTrend`].
@@ -349,6 +361,13 @@ impl VerifyStats {
                 Json::obj([
                     ("build", Json::from(z3_timing.0.build)),
                     ("solve", Json::from(z3_timing.0.solve)),
+                    ("init", Json::from(z3_timing.0.init)),
+                    ("assert", Json::from(z3_timing.0.assert)),
+                    ("calls", n(&z3_timing.0.calls)),
+                    ("unsat", n(&z3_timing.0.unsat)),
+                    ("sat", n(&z3_timing.0.sat)),
+                    ("unknown", n(&z3_timing.0.unknown)),
+                    ("facts", n(&z3_timing.0.facts)),
                 ]),
             ),
             (

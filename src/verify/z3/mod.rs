@@ -14,7 +14,6 @@ use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Solver, Sort
 /// The translator's caches, kept in `VerifyContext::z3translator` so sorts and
 /// datatypes are created once per context. The translation itself is the free
 /// functions below, which reach these through the context.
-#[derive(Default)]
 pub(crate) struct Z3Translation {
     sorts: HashMap<Type, Sort>,
     adts: HashMap<Type, DatatypeSort>,
@@ -23,6 +22,39 @@ pub(crate) struct Z3Translation {
     max_node_id: usize,
     max_merges_is: usize,
     pub(crate) solver : Solver,
+}
+
+impl Default for Z3Translation {
+    fn default() -> Self {
+        Self {
+            sorts: HashMap::default(),
+            adts: HashMap::default(),
+            class_types: HashMap::default(),
+            func_cache: HashMap::default(),
+            max_node_id: 0,
+            max_merges_is: 0,
+            solver: new_solver(),
+        }
+    }
+}
+
+/// The solver one context keeps for all its queries; its creation is counted as
+/// `z3_timing.init`.
+pub(crate) fn new_solver() -> Solver {
+    let t = std::time::Instant::now();
+    let solver = Solver::new();
+    crate::verify::stats::bump(|s| s.z3_timing.0.init += t.elapsed().as_secs_f64());
+    solver
+}
+
+/// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
+pub(crate) fn assert_fact(solver: &Solver, fact: &Bool) {
+    let t = std::time::Instant::now();
+    solver.assert(fact);
+    crate::verify::stats::bump(|s| {
+        s.z3_timing.0.assert += t.elapsed().as_secs_f64();
+        s.z3_timing.0.facts += 1;
+    });
 }
 
 /// Parameter and return types of function declaration `func` at instantiation
@@ -173,7 +205,7 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
             eprintln!("[z3] warning: could not create the class_const for {class}");
             continue;
         };
-        ctxt.z3translator.solver.assert(c.eq(expr));
+        assert_fact(&ctxt.z3translator.solver, &c.eq(expr));
     }
     ctxt.z3translator.max_node_id = end;
 
@@ -182,7 +214,7 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
     for i in start..end {
         let (a,b) = ctxt.egraph.union_log()[i];
         match (logged_class_const(ctxt, a), logged_class_const(ctxt, b)) {
-            (Some(c_a), Some(c_b)) => ctxt.z3translator.solver.assert(c_a.eq(c_b)),
+            (Some(c_a), Some(c_b)) => assert_fact(&ctxt.z3translator.solver, &c_a.eq(c_b)),
             (_, _) => eprintln!("[z3] warning: could not find class_const for {a} or {b}"),
         }
     }
