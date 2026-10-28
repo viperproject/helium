@@ -42,18 +42,21 @@ impl Default for Z3Translation {
 /// The solver one context keeps for all its queries; its creation is counted as
 /// `z3_timing.init`.
 ///
-/// Every check is limited to `SILVER_OXIDE_Z3_TIMEOUT_MS` (default 2000 ms).
-/// The persistent solver can get stuck on one query for minutes; a timeout ends
-/// it as `unknown`, which the rung treats as "not proven".
+/// Every check is limited to `SILVER_OXIDE_Z3_RLIMIT` resource units (default
+/// 1,500,000, about 2 s on the benchmark suite). The persistent solver can get
+/// stuck on one query for minutes; running out of units ends it as `unknown`,
+/// which the rung treats as "not proven". Unlike a timeout, the limit gives the
+/// same verdict on every machine. Z3 applies `rlimit` to each check, although
+/// its `rlimit count` statistic keeps running over the solver's life.
 pub(crate) fn new_solver() -> Solver {
     let t = std::time::Instant::now();
     let solver = Solver::new();
-    let ms = std::env::var("SILVER_OXIDE_Z3_TIMEOUT_MS")
+    let rlimit = std::env::var("SILVER_OXIDE_Z3_RLIMIT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2000);
+        .unwrap_or(1_500_000);
     let mut params = z3::Params::new();
-    params.set_u32("timeout", ms);
+    params.set_u32("rlimit", rlimit);
     solver.set_params(&params);
     crate::verify::stats::bump(|s| s.z3_timing.0.init += t.elapsed().as_secs_f64());
     solver
