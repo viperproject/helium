@@ -1,0 +1,20 @@
+// Same-constructor arms of an ite (see ctor_arm_pins_ite_condition.vpr).
+//
+// `ite-reduce`'s arm-differs pinning fingerprints the constructor's *identity*,
+// not the whole term, so two applications of one constructor never separate it,
+// even though the payloads here are known to differ. The e-graph tiers
+// therefore cannot pin `b`.
+//
+// The assert is still valid: with `!b` the assumption becomes `c1(y) == c1(x)`,
+// injectivity gives `y == x`, and that contradicts `x != y`. The Z3 rung proves
+// it. This case was once a soundness canary in failing/, which was a
+// misclassification: `b` is entailed, so pinning it is not unsound.
+
+adt SH { c0() c1(x: Int) }
+
+method same_ctor_different_payloads(b: Bool, x: Int, y: Int)
+  requires x != y
+{
+  assume (b ? c1(x) : c1(y)) == c1(x)
+  assert b
+}

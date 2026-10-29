@@ -11,8 +11,6 @@
 
 use crate::dhash::HashMap;
 
-use egg::Language as _;
-
 use crate::{
     verify::{
         analysis::ConstFold,
@@ -23,6 +21,8 @@ use crate::{
     },
     vmir::{Literal, Polarity},
 };
+use egg::Language as _;
+use z3::SatResult;
 
 /// A parallel "scratch" e-graph for one method block: a clone of ground taken at
 /// build time with the block cube assumed, kept in sync with ground through the
@@ -287,7 +287,9 @@ impl<'a> VerifyContext<'a> {
         // Functions/resources have no CFG — a whole-body scratch would just equal
         // ground — so they keep the per-obligation clone path below.
         if self.in_block {
-            let proven = self.prove_via_scratch(goal, pc_lits);
+            // Z3 is the last rung: it runs on ground plus the cube, never on the
+            // scratch (translation.typ, "Inputs").
+            let proven = self.prove_via_scratch(goal, pc_lits) || self.prove_by_z3(goal, pc_lits);
             if proven {
                 // Export under the **full** path condition. `pc_lits` is only the
                 // instruction's delta; the block's cube is ambient — assumed by the
@@ -322,7 +324,8 @@ impl<'a> VerifyContext<'a> {
             )
         }) {
             let probe = self.egraph.clone();
-            let proven = self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated);
+            let proven = self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated)
+                || self.prove_by_z3(goal, pc_lits);
             if proven {
                 self.record_proven(imp, true_, pc_lits.is_empty());
             }
@@ -354,10 +357,11 @@ impl<'a> VerifyContext<'a> {
             true
         } else {
             let probe = self.run_probe_until(probe, goal);
-            // Last resort is the non-forking ite-goal decomposition; there is no
-            // case split beyond it.
+            // Then the non-forking ite-goal decomposition, and finally Z3, which
+            // adds arithmetic and real case splits.
             probe.find(goal) == probe.find(true_p)
                 || self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated)
+                || self.prove_by_z3(goal, pc_lits)
         };
 
         // Persist the result so future identical obligations hit the `memo` tier.
@@ -832,6 +836,49 @@ impl<'a> VerifyContext<'a> {
         }
     }
 
+    fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
+        let t_build = std::time::Instant::now();
+
+        crate::verify::z3::sync_facts(self);
+
+        let goal_z3 = crate::verify::z3::build_goal(self, goal);
+
+        // The block's cube is ambient (assumed by the scratch, not in `pc_lits`),
+        // so it has to be added here for its guarded facts to apply.
+        let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
+        let pc_cond = crate::verify::z3::build_pc(self, &pc);
+
+        // Asserted in a scope rather than passed as assumptions; the `pop`
+        // drops them again before the next query.
+        let solver = &self.z3translator.solver;
+        solver.push();
+        pc_cond
+            .iter()
+            .for_each(|lit| crate::verify::z3::assert_fact(solver, lit));
+        crate::verify::z3::assert_fact(solver, &!goal_z3);
+
+        stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
+
+        let t_solve = std::time::Instant::now();
+        let res = solver.check();
+        solver.pop(1);
+        stats::bump(|s| {
+            s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64();
+            s.z3_timing.0.calls += 1;
+            match res {
+                SatResult::Unsat => s.z3_timing.0.unsat += 1,
+                SatResult::Sat => s.z3_timing.0.sat += 1,
+                SatResult::Unknown => s.z3_timing.0.unknown += 1,
+            }
+        });
+
+        match res {
+            SatResult::Unsat => true,
+            SatResult::Unknown => false,
+            SatResult::Sat => false,
+        }
+    }
+
     /// Whether e-class `id` folds to the boolean literal `b` in `probe`.
     fn known_bool_class(probe: &egg::EGraph<Symbolic, ConstFold>, id: egg::Id, b: bool) -> bool {
         matches!(probe[probe.find(id)].data.known(), Some(Literal::Bool(v)) if *v == b)
@@ -969,7 +1016,9 @@ impl<'a> VerifyContext<'a> {
         let clean = self.clean;
         let scratch = self.scratch.take();
         let in_block = std::mem::replace(&mut self.in_block, false);
+        let solver_state = crate::verify::z3::enter_scratch(self);
         let out = f(self);
+        crate::verify::z3::leave_scratch(self, solver_state);
         self.in_block = in_block;
         self.scratch = scratch;
         self.egraph = live;
