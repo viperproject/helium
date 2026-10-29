@@ -28,12 +28,36 @@ use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
 
+#[derive(Debug, Clone, Copy)]
+pub enum FuncKind {
+    Decl(MemberId),
+    Cons {
+        head: MemberId,
+        variant: usize,
+    },
+    Proj {
+        head: MemberId,
+        variant: usize,
+        field: usize,
+    },
+    IsVariant {
+        head: MemberId,
+        variant: usize,
+    },
+    Limited(MemberId),
+    PreToken(MemberId),
+}
+
 /// Allocates and names the verifier ids for polymorphic ADT constructors /
 /// testers / projections, and accumulates their reduction rules.
 pub struct FuncRegistry {
     /// Next func id to mint (starts past every real declaration id, so a minted
     /// id never collides with a plain function reusing its declaration index).
     next: usize,
+
+    /// Returns the kind of function.
+    kind: HashMap<FuncId, FuncKind>,
+
     /// Keyed by **concept**, not by type instantiation: one id per `(head,
     /// variant)` / `(head, variant, field)`. The e-graph is polymorphic —
     /// the ground type args ride in the `FuncApp` discriminant, so a single id
@@ -131,37 +155,24 @@ impl FuncRegistry {
             }
         }
 
-        let mut names = HashMap::default();
-        names.insert(BUILTIN_OPTION_SOME, "Option::Some".to_string());
-        names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
-        names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
-        names.insert(BUILTIN_OPTION_IS_SOME, "Option::Some?".to_string());
-        names.insert(BUILTIN_OPTION_IS_NONE, "Option::None?".to_string());
-
-        let rules = vec![
-            proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
-            inj_rule(BUILTIN_OPTION_SOME),
-            is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
-        ];
-        let mut ctor_head = HashMap::default();
-        ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
-        ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
-
         let mut registry = FuncRegistry {
             next: program.decls.len(),
-            cons: HashMap::default(),
-            proj: HashMap::default(),
-            adt_is: Default::default(),
-            limited: HashMap::default(),
-            fn_pre_token: HashMap::default(),
-            names,
-            rules,
             shapes,
             head_names,
             variant_names,
-            ctor_head,
-            quant_table: Default::default(),
+            ..Self::empty()
         };
+        // Declaration-backed ids are never minted: `func_id_for_member` reuses the
+        // member index. Every `Function` (plain, domain, contract) and every
+        // `Resource` (its field/predicate location function) can be applied, so
+        // each gets its `Decl` kind here.
+        for (id, decl) in program.decls.iter_enumerated() {
+            if let Declaration::Function(_) | Declaration::Resource(_) = decl {
+                registry
+                    .kind
+                    .insert(func_id_for_member(id), FuncKind::Decl(id));
+            }
+        }
         // Mint every head up front. Lazily minting on first use would leave
         // `ctor_head` incomplete for any `ConstFold` built before that use, and
         // the analysis is handed an immutable snapshot of the table.
@@ -182,36 +193,82 @@ impl FuncRegistry {
         &self.quant_table
     }
 
-    /// An empty allocator (no ADT heads). For tests / programs without ADTs.
-    #[cfg(test)]
+    /// An allocator with no ADT heads: only the builtin `Option` ids, names and
+    /// rules. The base [`FuncRegistry::new`] builds on; also used directly by
+    /// tests / programs without ADTs.
     pub fn empty() -> Self {
         let mut names = HashMap::default();
         names.insert(BUILTIN_OPTION_SOME, "Option::Some".to_string());
         names.insert(BUILTIN_OPTION_NONE, "Option::None".to_string());
         names.insert(BUILTIN_OPTION_VALUE, "Option::Some.0".to_string());
+        names.insert(BUILTIN_OPTION_IS_SOME, "Option::Some?".to_string());
+        names.insert(BUILTIN_OPTION_IS_NONE, "Option::None?".to_string());
 
         let rules = vec![
             proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
-            inj_rule(BUILTIN_OPTION_VALUE),
+            inj_rule(BUILTIN_OPTION_SOME),
+            is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
         ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
         ctor_head.insert(BUILTIN_OPTION_NONE, BUILTIN_OPTION_HEAD);
 
+        let kind: HashMap<_, _> = [
+            (
+                BUILTIN_OPTION_SOME,
+                FuncKind::Cons {
+                    head: BUILTIN_OPTION_HEAD,
+                    variant: 0,
+                },
+            ),
+            (
+                BUILTIN_OPTION_NONE,
+                FuncKind::Cons {
+                    head: BUILTIN_OPTION_HEAD,
+                    variant: 1,
+                },
+            ),
+            (
+                BUILTIN_OPTION_VALUE,
+                FuncKind::Proj {
+                    head: BUILTIN_OPTION_HEAD,
+                    variant: 0,
+                    field: 0,
+                },
+            ),
+            (
+                BUILTIN_OPTION_IS_SOME,
+                FuncKind::IsVariant {
+                    head: BUILTIN_OPTION_HEAD,
+                    variant: 0,
+                },
+            ),
+            (
+                BUILTIN_OPTION_IS_NONE,
+                FuncKind::IsVariant {
+                    head: BUILTIN_OPTION_HEAD,
+                    variant: 1,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
         FuncRegistry {
             next: 0,
+            kind,
             cons: HashMap::default(),
             proj: HashMap::default(),
-            adt_is: Default::default(),
+            adt_is: HashMap::default(),
             limited: HashMap::default(),
             fn_pre_token: HashMap::default(),
             names,
             rules,
-            quant_table: Default::default(),
             shapes: HashMap::default(),
             head_names: HashMap::default(),
             variant_names: HashMap::default(),
             ctor_head,
+            quant_table: Default::default(),
         }
     }
 
@@ -247,7 +304,7 @@ impl FuncRegistry {
         if let Some(&id) = self.limited.get(&func) {
             return id;
         }
-        let id = self.mint(format!("{name}#lim"));
+        let id = self.mint(format!("{name}#lim"), FuncKind::Limited(func));
         self.limited.insert(func, id);
         id
     }
@@ -262,7 +319,7 @@ impl FuncRegistry {
         if let Some(&id) = self.fn_pre_token.get(&func) {
             return id;
         }
-        let id = self.mint(format!("{name}%pre"));
+        let id = self.mint(format!("{name}%pre"), FuncKind::PreToken(func));
         self.fn_pre_token.insert(func, id);
         id
     }
@@ -333,10 +390,13 @@ impl FuncRegistry {
                 Some(name) => format!("{label}::{name}"),
                 None => format!("{label}::#{variant}"),
             };
-            let is_id = self.mint(format!("{cons_label}?"));
+            let is_id = self.mint(
+                format!("{cons_label}?"),
+                FuncKind::IsVariant { head: adt, variant },
+            );
             self.adt_is.insert((adt, variant), is_id);
 
-            let cons_id = self.mint(cons_label.clone());
+            let cons_id = self.mint(cons_label.clone(), FuncKind::Cons { head: adt, variant });
             self.rules.push(is_rule(is_id, cons_id));
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);
@@ -345,7 +405,14 @@ impl FuncRegistry {
                 self.rules.push(inj_rule(cons_id));
             }
             for field in 0..fields {
-                let proj_id = self.mint(format!("{cons_label}.{field}"));
+                let proj_id = self.mint(
+                    format!("{cons_label}.{field}"),
+                    FuncKind::Proj {
+                        head: adt,
+                        variant,
+                        field,
+                    },
+                );
                 self.proj.insert((adt, variant, field), proj_id);
                 self.rules.push(proj_rule(proj_id, cons_id, field));
             }
@@ -366,10 +433,11 @@ impl FuncRegistry {
             .and_then(|n| n.as_deref())
     }
 
-    fn mint(&mut self, name: String) -> FuncId {
+    fn mint(&mut self, name: String, kind: FuncKind) -> FuncId {
         let id = FuncId(self.next);
         self.next += 1;
         self.names.insert(id, name);
+        self.kind.insert(id, kind);
         id
     }
 
@@ -380,6 +448,14 @@ impl FuncRegistry {
             .get(&adt)
             .cloned()
             .unwrap_or_else(|| format!("d{}", adt.0))
+    }
+
+    /// Looks up the function kind
+    pub fn kind(&self, f_id: &FuncId) -> FuncKind {
+        *self
+            .kind
+            .get(f_id)
+            .unwrap_or_else(|| panic!("unknown FuncId {f_id:?}"))
     }
 }
 
