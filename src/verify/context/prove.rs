@@ -848,16 +848,23 @@ impl<'a> VerifyContext<'a> {
         let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
         let pc_cond = crate::verify::z3::build_pc(self, &pc);
 
-        let query = [pc_cond, vec![!goal_z3]].concat();
+        // Asserted in a scope rather than passed as assumptions; the `pop`
+        // drops them again before the next query.
+        let solver = &self.z3translator.solver;
+        solver.push();
+        pc_cond
+            .iter()
+            .for_each(|lit| crate::verify::z3::assert_fact(solver, lit));
+        crate::verify::z3::assert_fact(solver, &!goal_z3);
 
         stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
 
         let t_solve = std::time::Instant::now();
-        let res = self.z3translator.solver.check_assumptions(&query);
+        let res = solver.check();
+        solver.pop(1);
         stats::bump(|s| {
             s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64();
             s.z3_timing.0.calls += 1;
-            s.z3_timing.0.facts += query.len() as u64;
             match res {
                 SatResult::Unsat => s.z3_timing.0.unsat += 1,
                 SatResult::Sat => s.z3_timing.0.sat += 1,
