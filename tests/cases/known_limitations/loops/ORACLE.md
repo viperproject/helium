@@ -20,19 +20,25 @@ Currently all fail: `viper/cfg.rs:266` rejects the back edge, `typecheck/mod.rs:
 rejects `while`. Promote each to `passing/loops/` as it starts verifying — the
 `known_limitations_still_fail` test breaks the build to force this.
 
+The loop cut itself now works; the cases still here need an order fact between
+two non-constant terms (`i < n` gives `i + 1 <= n`; `i <= n` and `!(i < n)` give
+`i == n`), which integer ranges cannot express. The four promoted by *ranges*
+verify through the integer ranges of the e-class analysis and live in
+`passing/loops/`.
+
 | case | scenario | Silicon | promoted by |
 |---|---|---|---|
 | `scalar_sum.vpr` | S1 scalar accumulator | PASS | stage 4 |
-| `list_walk.vpr` | S2 predicate traversal, no QP | PASS | stage 4 |
+| `list_walk.vpr` | S2 predicate traversal, no QP | PASS | ranges |
 | `loop_under_if.vpr` | S3 loop under a path condition | PASS | stage 4 |
 | `zero_iter.vpr` | S11 zero-iteration loop | PASS | stage 4 |
 | `wildcard_ro.vpr` | S15 read-only framing via wildcard | PASS | stage 4 |
 | `frame_survives.vpr` | frame preserved verbatim across the cut | PASS | stage 4 |
 | `goto_loop.vpr` | Prusti's shape: label-carried invariant | PASS | stage 4 |
-| `no_invariant.vpr` | S12 invariant-less head, still provable | PASS | stage 4 |
+| `no_invariant.vpr` | S12 invariant-less head, still provable | PASS | ranges |
 | `nested.vpr` | S7 nested loops | PASS | stage 7 |
-| `break_simple.vpr` | S4 `break` out of a loop | PASS | stage 6 |
-| `break_state.vpr` | S4 out edge carries live state | PASS | stage 6 |
+| `break_simple.vpr` | S4 `break` out of a loop | PASS | ranges |
+| `break_state.vpr` | S4 out edge carries live state | PASS | ranges |
 
 ## Structural (Peano) loops — `passing/loops/`
 

@@ -1,0 +1,79 @@
+// Integer ranges in the e-class analysis (`src/verify/interval.rs`): each Int
+// class carries an over-approximating `[lo, hi]` from literals, `+ - *`, `ite`
+// hulls and decided comparisons; a comparison the ranges decide folds. With
+// constant folding alone all of these failed while Silicon verifies them
+// (aho-corasick `freq_rank`, base64 `decode_table`).
+// Unsound twins: `tests/cases/failing/intervals/`.
+
+method lt256(v: Int)
+  requires 0 <= v && v <= 255
+{ assert v < 256 }
+
+method sum510(x: Int, y: Int)
+  requires 0 <= x && x <= 255 && 0 <= y && y <= 255
+{ assert x + y <= 510 }
+
+method product(x: Int, y: Int)
+  requires -3 <= x && x <= 2 && 0 <= y && y <= 10
+{ assert -30 <= x * y && x * y <= 20 }
+
+method contradictory_bounds(v: Int)
+  requires 5 < v && v < 3
+{ assert false }
+
+method disjoint_ranges_differ(v: Int, w: Int)
+  requires v < 3 && 5 < w
+{ assert v != w }
+
+// The hull of an undecided `ite`'s arms bounds it.
+method hull(b: Bool, x: Int)
+  requires 0 <= x && x <= 4
+{
+  var r: Int := b ? x + 1 : 9
+  assert 1 <= r && r < 10
+}
+
+// A comparison between two terms narrows each by the other's range, in
+// whichever order the facts arrive: a range that arrives later re-narrows
+// through the comparison already decided.
+method chain(i: Int, n: Int)
+  requires n >= 0 && !(i < n)
+{ assert i >= 0 }
+
+method chain_reversed(i: Int, n: Int)
+  requires !(i < n) && n >= 0
+{ assert i >= 0 }
+
+// A disequality cuts a value off an endpoint, again in either order.
+method endpoints(d: Int)
+  requires 0 <= d && d <= 2 && d != 0 && d != 1
+{ assert d == 2 }
+
+method endpoints_reversed(d: Int)
+  requires 0 <= d && d <= 2 && d != 1 && d != 0
+{ assert d == 2 }
+
+// A class decided by another of its nodes: `b` is both `x < 10` and `y < 3`, and
+// `y`'s range decides it, so `x < 10` holds too.
+method decided_by_sibling(x: Int, y: Int, b: Bool)
+  requires b == (x < 10) && b == (y < 3)
+  requires y == 1
+{ assert x + 1 <= 10 }
+
+// A range derived from operands narrows a class that already had a looser
+// one, exactly: `s`'s bound from the type-range fact is replaced by the
+// sum's. (Prusti's checked arithmetic: `s1 + c` after `s1 = a + b`.)
+method derived_beats_fact(a: Int, b: Int, c: Int, s: Int)
+  requires -2147483648 <= s && s <= 2147483647
+  requires s == a + b
+  requires 0 <= a && a < 1000 && 0 <= b && b < 1000 && 0 <= c && c < 1000
+{ assert s + c < 2998 }
+
+// Bounds at the edge of the representable range, and products that overflow
+// it, stay sound and still decide what they can.
+method edge(x: Int)
+  requires 0 <= x && x <= 170141183460469231731687303715884105726
+{
+  assert x + 1 <= 170141183460469231731687303715884105727
+  assert x * x >= 0
+}

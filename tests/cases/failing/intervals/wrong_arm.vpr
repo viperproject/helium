@@ -1,0 +1,7 @@
+// The else arm of `x < 0 ? 0 : x` is `x`, which nothing bounds from above, so
+// `r <= 100` must be rejected.
+method unbounded_arm(x: Int)
+{
+  var r: Int := x < 0 ? 0 : x
+  assert r <= 100
+}

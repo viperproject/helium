@@ -12,6 +12,7 @@ mod declaration;
 mod error;
 mod func_registry;
 mod heap;
+mod interval;
 pub mod lang;
 mod quant;
 mod rewrite;

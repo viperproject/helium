@@ -1,0 +1,18 @@
+// KNOWN LIMITATION — should verify, currently rejected.
+//
+// The range of an undecided `ite` is the hull of its arms' ranges, each arm
+// taken whole. Here an arm is only reached where the condition holds — `level`
+// in the inner else-arm is `>= 0`, and below `11` under the outer one — but the
+// analysis does not narrow an arm by its condition: that would read the
+// condition's operands, which are not the `ite`'s children, so the range would
+// not be re-derived when they change (order-dependent). Narrowing each arm under
+// its own path condition is the job of a join that evaluates arms in their
+// context. Silicon verifies this (miniz `create_comp_flags_from_zip_params`).
+// Unsound twins: `tests/cases/failing/intervals/clamp_upper.vpr`,
+// `wrong_arm.vpr`.
+
+method clamp(level: Int)
+{
+  var r: Int := level > 10 ? 10 : (level >= 0 ? level : 6)
+  assert 0 <= r && r < 11
+}

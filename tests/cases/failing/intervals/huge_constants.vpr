@@ -1,0 +1,6 @@
+// Bounds beyond the representable range are rounded outward, never inward:
+// `2^127` does not fit an `i128`, and `x` may be `2^127 + 5`.
+method outward(x: Int)
+  requires 170141183460469231731687303715884105728 <= x
+  requires x <= 340282366920938463463374607431768211456
+{ assert x < 170141183460469231731687303715884105733 }
