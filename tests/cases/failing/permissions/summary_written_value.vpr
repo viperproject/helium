@@ -1,0 +1,16 @@
+// REGRESSION (soundness). The disjunction shape where `x.f` was written with full
+// permission before half of it was given away.
+//
+// Must FAIL.
+field f: Int
+
+method summary_written_value(x: Ref, y: Ref, z: Ref)
+  requires acc(y.f, 1/2) && y.f == 4
+{
+  inhale acc(x.f)
+  x.f := 5
+  exhale acc(x.f, 1/2)
+  inhale z == x || z == y
+  exhale acc(z.f, 1/2)
+  assert false
+}

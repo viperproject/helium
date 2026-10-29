@@ -1,0 +1,70 @@
+// Positive controls for `failing/permissions/summary_*` and
+// `pc_alias_intra_block_literal.vpr`: the same consumes and frame checks without the
+// false assertion verify, so the summary still finds the permission.
+field f: Int
+
+function rd(r: Ref): Int
+  requires acc(r.f)
+{ r.f }
+
+function rdw(r: Ref): Int
+  requires acc(r.f, wildcard)
+{ r.f }
+
+method join_function_frame(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && acc(y.f)
+{
+  var z: Ref := x
+  if (b) { z := y }
+  var t: Int := rd(z)
+}
+
+method join_wildcard_frame(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4 && acc(y.f) && y.f == 5
+{
+  var z: Ref := x
+  if (b) { z := y }
+  var t: Int := rdw(z)
+}
+
+method join_exhale(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4 && acc(y.f) && y.f == 5
+{
+  var z: Ref := x
+  if (b) { z := y }
+  exhale acc(z.f)
+}
+
+method address_disjunction(x: Ref, y: Ref, z: Ref)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && x.f == 5 && y.f == 4 && x != y
+  requires z == x || z == y
+{
+  exhale acc(z.f, 1/2)
+}
+
+method address_ternary(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && x.f == 5 && y.f == 4 && x != y
+{
+  exhale acc((c ? x : y).f, 1/2)
+}
+
+method cross_branch(x: Ref, y: Ref, z: Ref, c: Bool)
+  requires acc(y.f, 1/2) && y.f == 4
+{
+  if (c) {
+    inhale acc(x.f)
+    x.f := 5
+    exhale acc(x.f, 1/2)
+    inhale z == x || z == y
+    exhale acc(z.f, 1/2)
+  } else {
+    assume z == x && x == y
+  }
+}
+
+method intra_block_literal(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+  requires b ==> x == y
+{
+  exhale b ==> acc(x.f)
+}

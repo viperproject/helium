@@ -1,0 +1,18 @@
+// REGRESSION (soundness). `summary_join_function_frame.vpr` for a wildcard
+// precondition, framed without a consume: `x.f == 4` and `y.f == 5` met in the
+// block scratch.
+//
+// Must FAIL.
+field f: Int
+function rdw(r: Ref): Int
+  requires acc(r.f, wildcard)
+{ r.f }
+
+method summary_join_wildcard_frame(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4 && acc(y.f) && y.f == 5
+{
+  var z: Ref := x
+  if (b) { z := y }
+  var t: Int := rdw(z)
+  assert false
+}

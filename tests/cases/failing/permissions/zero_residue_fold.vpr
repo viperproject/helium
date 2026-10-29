@@ -1,0 +1,27 @@
+// REGRESSION (soundness). A `fold` builds the snapshot from the values it
+// consumes, not from whichever chunk sits at each slot's address.
+//
+// After `set5(y)` under `y == x`, `x`'s chunk holds zero permission and its old
+// value 4, while the permission (and the value 5) sits at `y`. The fold read the
+// stale 4 into the snapshot and then equated it with 5, which made the branch
+// inconsistent.
+//
+// Must FAIL.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method set5(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && r.f == 5
+
+method zero_residue_fold(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    fold P(x)
+    assert false
+  }
+}
