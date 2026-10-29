@@ -10,7 +10,7 @@ use egg::Id;
 use std::borrow::Cow;
 use z3::ast::{Ast, Bool, Dynamic};
 use z3::datatype_builder::create_datatypes;
-use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Solver, Sort};
+use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Solver, Sort, Tactic};
 
 /// The translator's caches, kept in `VerifyContext::z3translator` so sorts and
 /// datatypes are created once per context. The translation itself is the free
@@ -48,9 +48,17 @@ impl Default for Z3Translation {
 /// which the rung treats as "not proven". Unlike a timeout, the limit gives the
 /// same verdict on every machine. Z3 applies `rlimit` to each check, although
 /// its `rlimit count` statistic keeps running over the solver's life.
+///
+/// It runs `simplify` and `solve-eqs` before `smt` on every check, so the
+/// `c_class == ⟦node⟧` definitions are eliminated as a fresh `Solver::check`
+/// would. A tactic solver is not incremental: each check preprocesses all
+/// assertions again.
 pub(crate) fn new_solver() -> Solver {
     let t = std::time::Instant::now();
-    let solver = Solver::new();
+    let solver = Tactic::new("simplify")
+        .and_then(&Tactic::new("solve-eqs"))
+        .and_then(&Tactic::new("smt"))
+        .solver();
     let rlimit = std::env::var("SILVER_OXIDE_Z3_RLIMIT")
         .ok()
         .and_then(|v| v.parse().ok())
