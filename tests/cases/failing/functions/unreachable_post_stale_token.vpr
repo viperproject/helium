@@ -1,0 +1,24 @@
+domain Ty {
+  function cty(): Ty
+  function k1(): Ty
+  function k2(): Ty
+  function k3(): Ty
+  function a(t: Ty): Ty
+  axiom { k1() == cty() }
+  axiom { k2() == cty() }
+  axiom { k3() == cty() }
+  axiom { forall t: Ty :: { a(t) } a(t) == cty() }
+}
+
+function unreachable(t: Ty): Int
+  ensures false
+
+function f(t: Ty, b: Bool): Int
+{ b ? 0 : unreachable(t) }
+
+method m(s: Ty)
+{
+  var y: Int
+  y := f(a(s), true)   // evaluates to 0; unreachable(..) is never evaluated
+  assert false         // must fail
+}
