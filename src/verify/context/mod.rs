@@ -638,11 +638,9 @@ pub(crate) struct RunIteration {
     pub(crate) rebuild_time: f64,
 }
 
-/// Nodes one run may add before it stops after the current rule: the backstop that
-/// makes a run of non-terminating rules (quantifier matching loops) terminate.
-/// It bounds what the run adds, not the size of the graph, so a large graph does
-/// not stop every run after its first iteration.
-const NODE_GROWTH_LIMIT: usize = 100_000;
+/// Graph size past which a run stops after the current rule (egg's `Runner`
+/// node limit, kept as it was).
+const NODE_LIMIT: usize = 100_000;
 
 /// Saturates `egraph` under `rules`, stopping as soon as `goal` is settled.
 ///
@@ -701,14 +699,13 @@ pub(super) fn run_rules_until<'r>(
     );
     // The limits are explicit and reproducible: iterations (one tower level
     // collapses per iteration, so deep-but-terminating collapses need iterations
-    // ∝ depth) and nodes added. There is deliberately no time limit, which would
+    // ∝ depth) and graph size. There is deliberately no time limit, which would
     // make a *verdict* depend on wall clock.
     let iter_limit = iter_limit.unwrap_or(100);
     egraph.track_changes();
     egraph.rebuild();
-    let node_limit = egraph.total_size() + NODE_GROWTH_LIMIT;
     let mut iterations = Vec::new();
-    while iterations.len() < iter_limit && egraph.total_size() <= node_limit {
+    while iterations.len() < iter_limit && egraph.total_size() <= NODE_LIMIT {
         // Contradiction reached mid-run: every remaining iteration is spent
         // elaborating a graph that already proves everything.
         //
@@ -764,7 +761,7 @@ pub(super) fn run_rules_until<'r>(
             if n > 0 {
                 applied.push((rule.name, n));
             }
-            if egraph.total_size() > node_limit {
+            if egraph.total_size() > NODE_LIMIT {
                 break;
             }
         }
