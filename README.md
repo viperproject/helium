@@ -88,7 +88,7 @@ Useful option:
 cargo run --bin verify -- --breakdown tests/cases/passing/field.vpr
 ```
 
-This prints the verification status of each member and, with `--breakdown`, the slowest verification steps and rule timings.
+This prints the verification status of each member and, with `--breakdown`, the slowest verification steps, rule timings, and the time the Z3 rung spent building and solving its problems (`SILVER_OXIDE_Z3=1`).
 
 For tools, `--json` prints one JSON object instead (statuses, phase timings, per-member times, all verifier counters, peak memory, the build's git commit), and `--viper-metrics` prints shape metrics of the parsed program without verifying:
 
