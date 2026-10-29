@@ -35,8 +35,10 @@ pub(super) struct FunctionUnfoldApplier {
     /// propagation-minted token must still union `f==body`, which `memo` alone
     /// would suppress.
     pub(super) union_memo: Memo<CallKey>,
-    /// The searcher's bindings (see [`FunctionCallSearcher`]).
+    /// The searcher's `?tok` binding: the call's `f%pre(args)` class, bound only
+    /// when the token existed at search time (see [`FunctionCallSearcher`]).
     pub(super) tok_var: Var,
+    /// The searcher's `?a0..?a{n-1}` bindings: the call's value args.
     pub(super) arg_vars: Vec<Var>,
 }
 
@@ -67,8 +69,10 @@ pub(super) struct FunctionPostApplier {
 pub(super) struct FunctionCallSearcher {
     func: FuncId,
     pre_token: FuncId,
-    tok_var: Var,        // e.g. "?tok"
-    arg_vars: Vec<Var>,  // "?a0" .. "?a{n-1}", built once at rule creation
+    /// `?tok`, bound to the `f%pre(args)` class when one exists.
+    tok_var: Var,
+    /// `?a0..?a{n-1}`, one per param, bound to the call's args.
+    arg_vars: Vec<Var>,
 }
 
 impl FunctionCallSearcher {
@@ -77,21 +81,30 @@ impl FunctionCallSearcher {
             func,
             pre_token,
             tok_var: "?tok".parse().unwrap(),
-            arg_vars: (0..n_params).map(|i| format!("?a{i}").parse().unwrap()).collect(),
+            arg_vars: (0..n_params)
+                .map(|i| format!("?a{i}").parse().unwrap())
+                .collect(),
         }
     }
 }
 impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
+    fn vars(&self) -> Vec<Var> {
+        vec![]
+    }
 
-    fn vars(&self) -> Vec<Var> { vec![] }
-
-    fn search_with_limit(&self, egraph: &EGraph<Symbolic, ConstFold>, mut limit: usize) -> Vec<SearchMatches<Symbolic>> {
+    fn search_with_limit(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        mut limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
         let Some(classes) = egraph.classes_for_op(&Discriminant::FuncApp(self.func)) else {
-            return vec![]
+            return vec![];
         };
         let mut out = vec![];
         for eclass in classes {
-            if limit == 0 { break; }
+            if limit == 0 {
+                break;
+            }
             if let Some(m) = self.search_eclass_with_limit(egraph, eclass, limit) {
                 limit = limit.saturating_sub(m.substs.len());
                 out.push(m);
@@ -99,15 +112,26 @@ impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
         }
         out
     }
-    fn search_eclass_with_limit(&self, egraph: &EGraph<Symbolic, ConstFold>, eclass: Id, limit: usize) -> Option<SearchMatches<Symbolic>> {
-        let mut seen : BTreeSet<&Box<[Id]>> = BTreeSet::new();
+    fn search_eclass_with_limit(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        _limit: usize,
+    ) -> Option<SearchMatches<'_, Symbolic>> {
+        let mut seen: BTreeSet<&Box<[Id]>> = BTreeSet::new();
         let mut subst: Vec<Subst> = vec![];
 
         for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, _tys, args) = node else {continue};
-            if *f != self.func {continue}
+            let Symbolic::FuncApp(f, _tys, args) = node else {
+                continue;
+            };
+            if *f != self.func {
+                continue;
+            }
 
-            if seen.contains(args) {continue}
+            if seen.contains(args) {
+                continue;
+            }
             seen.insert(args);
 
             let mut s = Subst::default();
@@ -123,15 +147,16 @@ impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
             }
             subst.push(s)
         }
-        if subst.is_empty() {None} else {
+        if subst.is_empty() {
+            None
+        } else {
             Some(SearchMatches {
                 eclass,
                 substs: subst,
-                ast: None
+                ast: None,
             })
         }
     }
-
 }
 
 /// Wrap `inner` in a guard chain over **live ids**: `guards ==> inner`, as nested
@@ -185,9 +210,11 @@ pub(super) fn fold_guards(
 /// the params and `f(params)`, so nothing here materializes the callee's body.
 /// That is what makes the definitional union's presence gate load-bearing.
 ///
-/// `token` is the callee's `f%pre(args)` class at *this* call, `None` when the
-/// definition has no pre-token (a contract function) or when no token exists for
-/// these args. It is threaded separately rather than folded into the recipe
+/// `token` is the callee's `f%pre(args)` class at *this* call. `None` from a
+/// post-only rule ([`FunctionPostApplier`]), or when [`FunctionCallSearcher`]
+/// found no token for these args on the clean graph — an occurrence no
+/// value-position call produced, e.g. one arriving through another callee's
+/// `ensures`. It is threaded separately rather than folded into the recipe
 /// because the post's `Val`s live in the callee's recipe-temp space, whereas
 /// this is already a caller-side `Id`.
 pub(super) fn replay_post(
@@ -339,7 +366,11 @@ impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
     ) -> Vec<Id> {
         // The call this match names. Re-canonicalized: earlier rules of this
         // iteration may have merged classes since the search.
-        let args: Vec<Id> = self.arg_vars.iter().map(|&v| egraph.find(subst[v])).collect();
+        let args: Vec<Id> = self
+            .arg_vars
+            .iter()
+            .map(|&v| egraph.find(subst[v]))
+            .collect();
         // The token (see `FunctionCallSearcher`) plays two distinct roles,
         // mirroring how a `Forall` e-class does: its **presence** triggers
         // materialization of the callee's body here, and its **truth** releases
