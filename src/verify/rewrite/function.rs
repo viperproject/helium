@@ -1,22 +1,24 @@
 //! Function unfolding: the lazy rule that installs `f(args) == body` and replays
 //! a verified definition's postcondition at a call site.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, Subst, Symbol, Var};
+use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::cert::FunctionDefinition;
-use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::lang::{Discriminant, FuncId, Symbolic};
 use crate::vmir::{Literal, Polarity, Type, Val};
 
 use super::*;
 
-/// Applier: for each ground `FuncApp(self.func, tys, args)` node in the matched
-/// e-class, rebuild the function's **definition recipe** with `build_instance`
-/// (params → args, `Generic(i)` → `tys`) and release `f(args) == body` lazily as
-/// occurrences are seen during saturation — behind the call's `f%pre` token when
-/// the function has one, so the equation lands only on paths that call it.
+/// Applier for the **full** rule (keyed on `f`), paired with
+/// [`FunctionCallSearcher`]: each match names one call `f(args)` and, when the
+/// searcher found one on the clean graph, its `f%pre(args)` token. For that call
+/// it rebuilds the function's **definition recipe** with `build_instance`
+/// (params → args, `Generic(i)` → `tys`) and releases `f(args) == body` behind the
+/// token, so the equation lands only on paths that call it.
 /// **Imports no e-classes** (`build_instance` only adds), so merges derived while
 /// verifying the body itself never ride along. It is not literally add-only: a
 /// body's `AxiomInst::Assume` steps and its propagated callee tokens are merged
@@ -26,25 +28,110 @@ use super::*;
 pub(super) struct FunctionUnfoldApplier {
     pub(super) func: FuncId,
     pub(super) def: Arc<FunctionDefinition>,
-    /// `false`: the full rule (keyed on `f`) — definitional union, limited
-    /// framing, and the post. `true`: the limited-post rule (keyed on `f'`) —
-    /// the post and nothing else, no unions: unfolding a recursive body yields
-    /// `f'(smaller)`, and this is what delivers the postcondition there
-    /// (Silicon's `post` axiom triggering on the limited symbol).
-    pub(super) limited_post: bool,
-    /// Guards the (expensive) body build + post replay: done at most once per call.
+    /// Guards the post replay: done at most once per call.
     pub(super) memo: Memo<CallKey>,
-    /// Guards the definitional union separately from the build: a call first built
-    /// post-only (no token yet) and later reached by a propagation-minted token
-    /// must still union `f==body`, which `memo` alone would suppress.
+    /// Guards the definitional union separately from the post: a call first
+    /// reached without a token (post only) and later reached by a
+    /// propagation-minted token must still union `f==body`, which `memo` alone
+    /// would suppress.
     pub(super) union_memo: Memo<CallKey>,
-    /// The function's uniform pre-token `f%pre` (`FuncRegistry::fn_pre_token`),
-    /// used as a `forall`-style **presence** trigger: the definitional
-    /// `f(fargs)==body` union+build fires only when a `FuncApp(f%pre, fargs)` node
-    /// is present for the *same* `fargs`, i.e. this occurrence came from a genuine
-    /// value-position call. Mirrors Silicon's `f%pre ⟹ f==body`. `None` on the
-    /// post-only rule, where there is no definitional union to gate.
-    pub(super) pre_token: Option<FuncId>,
+    /// The searcher's bindings (see [`FunctionCallSearcher`]).
+    pub(super) tok_var: Var,
+    pub(super) arg_vars: Vec<Var>,
+}
+
+/// Applier for a **post-only** rule (see [`post_rule`]): replays the
+/// definition's post at each call in the matched e-class, ungated, and nothing
+/// else — no body, no unions. Unfolding a recursive body yields `f'(smaller)`,
+/// and this is what delivers the postcondition there (Silicon's `post` axiom
+/// triggering on the limited symbol).
+pub(super) struct FunctionPostApplier {
+    pub(super) func: FuncId,
+    pub(super) def: Arc<FunctionDefinition>,
+    /// Guards the post replay: done at most once per call.
+    pub(super) memo: Memo<CallKey>,
+}
+
+/// Searcher for the full function rule: one match per distinct call `f(args)`
+/// in each e-class, binding `?a0..` to the args and, when `f%pre(args)` exists,
+/// `?tok` to its class. `f%pre` is the function's uniform pre-token
+/// (`FuncRegistry::fn_pre_token`), a `forall`-style **presence** trigger: the
+/// definitional `f(args)==body` release fires only for a genuine value-position
+/// call. Mirrors Silicon's `f%pre ⟹ f==body`.
+///
+/// The token is looked up **here** because the runner searches on a freshly
+/// rebuilt graph, where the hashcons is exact. An applier runs after earlier
+/// rules of the same iteration have merged classes without a rebuild, so a
+/// `lookup` there can miss a token that exists — and a miss releases the post
+/// ungated.
+pub(super) struct FunctionCallSearcher {
+    func: FuncId,
+    pre_token: FuncId,
+    tok_var: Var,        // e.g. "?tok"
+    arg_vars: Vec<Var>,  // "?a0" .. "?a{n-1}", built once at rule creation
+}
+
+impl FunctionCallSearcher {
+    fn new(func: FuncId, pre_token: FuncId, n_params: usize) -> Self {
+        Self {
+            func,
+            pre_token,
+            tok_var: "?tok".parse().unwrap(),
+            arg_vars: (0..n_params).map(|i| format!("?a{i}").parse().unwrap()).collect(),
+        }
+    }
+}
+impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
+
+    fn vars(&self) -> Vec<Var> { vec![] }
+
+    fn search_with_limit(&self, egraph: &EGraph<Symbolic, ConstFold>, mut limit: usize) -> Vec<SearchMatches<Symbolic>> {
+        let Some(classes) = egraph.classes_for_op(&Discriminant::FuncApp(self.func)) else {
+            return vec![]
+        };
+        let mut out = vec![];
+        for eclass in classes {
+            if limit == 0 { break; }
+            if let Some(m) = self.search_eclass_with_limit(egraph, eclass, limit) {
+                limit = limit.saturating_sub(m.substs.len());
+                out.push(m);
+            }
+        }
+        out
+    }
+    fn search_eclass_with_limit(&self, egraph: &EGraph<Symbolic, ConstFold>, eclass: Id, limit: usize) -> Option<SearchMatches<Symbolic>> {
+        let mut seen : BTreeSet<&Box<[Id]>> = BTreeSet::new();
+        let mut subst: Vec<Subst> = vec![];
+
+        for node in &egraph[eclass].nodes {
+            let Symbolic::FuncApp(f, _tys, args) = node else {continue};
+            if *f != self.func {continue}
+
+            if seen.contains(args) {continue}
+            seen.insert(args);
+
+            let mut s = Subst::default();
+
+            for (var, &arg) in self.arg_vars.iter().zip(args.iter()) {
+                s.insert(*var, arg);
+            }
+
+            let probe = Symbolic::FuncApp(self.pre_token, Box::new([]), args.clone());
+
+            if let Some(tok) = egraph.lookup(probe) {
+                s.insert(self.tok_var, tok);
+            }
+            subst.push(s)
+        }
+        if subst.is_empty() {None} else {
+            Some(SearchMatches {
+                eclass,
+                substs: subst,
+                ast: None
+            })
+        }
+    }
+
 }
 
 /// Wrap `inner` in a guard chain over **live ids**: `guards ==> inner`, as nested
@@ -131,118 +218,61 @@ pub(super) fn replay_post(
     }
 }
 
-impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
-    fn apply_one(
+impl FunctionUnfoldApplier {
+    /// Every release for one call `f[tys](args)` in `eclass`, with `tok_id` its
+    /// `f%pre(args)` class (`None`: no token existed when the searcher ran).
+    fn unfold_call(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _subst: &Subst,
-        _searcher_ast: Option<&PatternAst<Symbolic>>,
-        _rule_name: Symbol,
-    ) -> Vec<Id> {
-        // Candidate calls in this e-class (deduped locally; the persistent `memo`
-        // is only consulted once we commit to building — see below).
-        let mut calls: Vec<(Box<[Type]>, Vec<Id>)> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, tys, args) = node else {
-                continue;
-            };
-            if *f != self.func {
-                continue;
-            }
-            let args: Vec<Id> = args.iter().map(|&a| egraph.find(a)).collect();
-            let key = (tys.clone(), args);
-            if !calls.contains(&key) {
-                calls.push(key);
-            }
+        tys: Box<[Type]>,
+        args: &[Id],
+        tok_id: Option<Id>,
+        changed: &mut Vec<Id>,
+    ) {
+        debug_assert_eq!(args.len(), self.def.n_params, "function unfold arity");
+        // The body instance is needed for the definitional union, and for
+        // nothing else: the post is a standalone recipe over the params. So an
+        // occurrence that no value-position call produced — no token, hence no
+        // union — materializes no body at all, which is what the presence gate
+        // was always supposed to buy. It must NOT be union-memoized, so it can
+        // still union later once propagation mints its token mid-saturation.
+        let do_union = tok_id.is_some();
+        let has_post = self.def.post.is_some();
+        if !do_union && !has_post {
+            return;
         }
-        let mut changed = Vec::new();
-        for (tys, args) in calls {
-            debug_assert_eq!(args.len(), self.def.n_params, "function unfold arity");
-            // The token (see `pre_token`) plays two distinct roles, mirroring how a
-            // `Forall` e-class does: its **presence** triggers materialization of
-            // the callee's body here, and its **truth** releases the axioms that
-            // materialization produces. Type args are not in the `FuncApp`
-            // congruence key, so `[]` matches any instantiation.
-            //
-            // The token is assumed at each call site under that call's path
-            // condition (`declaration.rs`, the `FunctionCall` arm), so its class is
-            // an `ite(pc, tok, true)` shape and is unconditionally `true` only for
-            // an unconditional call. `tok_id` therefore doubles as the release
-            // guard below. `pre_token = None` ⇒ released ungated (a contract
-            // `#requires`/`#ensures` boolean, whose role is to inline its formula).
-            let tok_id: Option<Id> = self.pre_token.and_then(|tok| {
-                egraph.lookup(Symbolic::FuncApp(tok, Box::new([]), args.clone().into()))
-            });
-            let has_token = self.pre_token.is_none() || tok_id.is_some();
-            // The body instance is needed for the definitional union, and for
-            // nothing else: the post is a standalone recipe over the params. So an
-            // occurrence that no value-position call produced — no token, hence no
-            // union — materializes no body at all, which is what the presence gate
-            // was always supposed to buy. It must NOT be union-memoized, so it can
-            // still union later once propagation mints its token mid-saturation.
-            let do_union = !self.limited_post && has_token;
-            let has_post = self.def.post.is_some();
-            if !do_union && !has_post {
-                continue;
-            }
-            let key = (tys.clone(), args.clone());
-            // Two independent memos, because the two releases happen at different
-            // times: `memo` says the post has been replayed at this call, and
-            // `do_union` is short-circuited before `union_memo` so the union memo is
-            // only ever touched when the token is present — a fresh union, or a call
-            // that replayed its post earlier and is now reached by a
-            // propagation-minted token.
-            let first_post = has_post && self.memo.insert(key.clone());
-            let do_union_now = do_union && self.union_memo.insert(key);
-            // Nothing new to do: post already replayed and no (new) union due.
-            if !first_post && !do_union_now {
-                continue;
-            }
-            // Seed slots for the body instance. Only built when the union needs it;
-            // otherwise there is no body here and `vals` stays unused.
-            let vals = match do_union_now {
-                true => build_instance_vals_guarded(
-                    egraph,
-                    &self.def.steps,
-                    &args,
-                    &mut changed,
-                    tok_id,
-                ),
-                false => Vec::new(),
-            };
+        let key = (tys.clone(), args.to_vec());
+        // Two independent memos, because the two releases happen at different
+        // times: `memo` says the post has been replayed at this call, and
+        // `do_union` is short-circuited before `union_memo` so the union memo is
+        // only ever touched when the token is present — a fresh union, or a call
+        // that replayed its post earlier and is now reached by a
+        // propagation-minted token.
+        let first_post = has_post && self.memo.insert(key.clone());
+        let do_union_now = do_union && self.union_memo.insert(key);
+        // Nothing new to do: post already replayed and no (new) union due.
+        if !first_post && !do_union_now {
+            return;
+        }
+        if let (true, Some(tok)) = (do_union_now, tok_id) {
+            let vals = build_instance_vals_guarded(egraph, &self.def.steps, args, changed, tok_id);
             // Definitional axiom `tok ==> f(args) == body`. Absent for an abstract
             // function.
             //
-            // With a token this cannot be an e-class merge — a merge is
-            // unconditional and there is no such thing as a conditional one — so it
-            // is stated as a guarded *equality term*: `ite(tok, f(args) == body,
-            // true) == true`. Once the token collapses to `true` (an unconditional
-            // call, or a conditional one inside the probe clone that assumes its
-            // pc), `ite-reduce` exposes `f(args) == body == true` and
-            // `eq-true-union` performs the merge.
-            //
-            // Without a token (`pre_token = None`, a contract function) it stays a
-            // direct union: the body is a total function of the args (Deref became
-            // `unwrap∘proj`, div is total in the e-graph), so the equation holds
-            // even at pre-violating args, and such a formula must inline freely.
-            if do_union_now {
-                if let Some(res) = &self.def.res {
-                    let result = resolve_val(egraph, &vals, res);
-                    match tok_id {
-                        None => {
-                            if egraph.union(eclass, result) {
-                                changed.push(egraph.find(eclass));
-                            }
-                        }
-                        Some(tok) => {
-                            let true_ = expr!(egraph, true);
-                            let rel = expr!(egraph, {tok} ==> ({eclass} == {result}));
-                            if egraph.union(rel, true_) {
-                                changed.push(egraph.find(rel));
-                            }
-                        }
-                    }
+            // This cannot be an e-class merge — a merge is unconditional and there
+            // is no such thing as a conditional one — so it is stated as a guarded
+            // *equality term*: `ite(tok, f(args) == body, true) == true`. Once the
+            // token collapses to `true` (an unconditional call, or a conditional
+            // one inside the probe clone that assumes its pc), `ite-reduce`
+            // exposes `f(args) == body == true` and `eq-true-union` performs the
+            // merge.
+            if let Some(res) = &self.def.res {
+                let result = resolve_val(egraph, &vals, res);
+                let true_ = expr!(egraph, true);
+                let rel = expr!(egraph, {tok} ==> ({eclass} == {result}));
+                if egraph.union(rel, true_) {
+                    changed.push(egraph.find(rel));
                 }
             }
             // Propagated callee tokens: `tok ==> g%pre(gargs)` for each nested
@@ -257,49 +287,130 @@ impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
             // post-only occurrence built no body, so there is no `g(gargs)` node
             // here for a `g%pre` token to activate — and minting one would
             // reintroduce exactly the cascade the presence gate exists to stop.
-            if do_union_now {
-                for ts in &self.def.token_steps {
-                    let tok_node = resolve_val(egraph, &vals, &ts.token);
-                    // `guards` is the body-internal condition guarding the nested
-                    // call; `tok_id` is this call's own token. Folding the former
-                    // inside the latter gives `f%pre(a) ==> (b[x:=a] ==> g%pre(..))`.
-                    let guarded = fold_guards(egraph, &vals, &ts.guards, tok_node);
-                    let true_ = egraph.add(Symbolic::Lit(Literal::Bool(true)));
-                    let rel = match tok_id {
-                        Some(tok) => expr!(egraph, {tok} ==> {guarded}),
-                        None => guarded,
-                    };
-                    if egraph.union(rel, true_) {
-                        changed.push(egraph.find(rel));
-                    }
+            for ts in &self.def.token_steps {
+                let tok_node = resolve_val(egraph, &vals, &ts.token);
+                // `guards` is the body-internal condition guarding the nested
+                // call; `tok` is this call's own token. Folding the former
+                // inside the latter gives `f%pre(a) ==> (b[x:=a] ==> g%pre(..))`.
+                let guarded = fold_guards(egraph, &vals, &ts.guards, tok_node);
+                let true_ = egraph.add(Symbolic::Lit(Literal::Bool(true)));
+                let rel = expr!(egraph, {tok} ==> {guarded});
+                if egraph.union(rel, true_) {
+                    changed.push(egraph.find(rel));
                 }
             }
-            // Recursive function: frame the full occurrence to its limited twin
-            // `f(args) == f'(args)`. `f'` has no unfold rule, so a limited call
-            // produced by unfolding `f`'s body never re-unfolds (bounding
-            // saturation); the frame lets a materialized `f(args)` value flow to
-            // any `f'(args)` a sibling unfold produced.
-            //
-            // **Ungated**, matching Silicon's `limitedAxiom`. It must NOT sit
-            // behind the `f%pre` presence token: the token is minted only at a
-            // value-position call, so gating strands a recursive function's post
-            // fact (stated on `f'`) in limited space whenever the occurrence
-            // arrived via a callee's `ensures` rather than a direct call.
-            //
-            // Cannot reintroduce unbounded unfolding: this mints `f'` *from* an
-            // existing `f` node, never the reverse, and the unfold rule filters
-            // on `FuncApp(f)`.
-            if !self.limited_post {
-                if let Some(lim) = self.def.limited {
-                    let twin = egraph.add(Symbolic::FuncApp(lim, tys.clone(), args.clone().into()));
-                    if egraph.union(eclass, twin) {
-                        changed.push(egraph.find(eclass));
-                    }
-                }
+        }
+        // Recursive function: frame the full occurrence to its limited twin
+        // `f(args) == f'(args)`. `f'` has no unfold rule, so a limited call
+        // produced by unfolding `f`'s body never re-unfolds (bounding
+        // saturation); the frame lets a materialized `f(args)` value flow to
+        // any `f'(args)` a sibling unfold produced.
+        //
+        // **Ungated**, matching Silicon's `limitedAxiom`. It must NOT sit
+        // behind the `f%pre` presence token: the token is minted only at a
+        // value-position call, so gating strands a recursive function's post
+        // fact (stated on `f'`) in limited space whenever the occurrence
+        // arrived via a callee's `ensures` rather than a direct call.
+        //
+        // Cannot reintroduce unbounded unfolding: this mints `f'` *from* an
+        // existing `f` node, never the reverse, and the unfold rule filters
+        // on `FuncApp(f)`.
+        if let Some(lim) = self.def.limited {
+            let twin = egraph.add(Symbolic::FuncApp(lim, tys, args.into()));
+            if egraph.union(eclass, twin) {
+                changed.push(egraph.find(eclass));
             }
-            // Replay the post once per call (idempotent; guarded internally).
-            if first_post {
-                replay_post(egraph, &self.def, &args, tok_id, &mut changed);
+        }
+        // Replay the post once per call (idempotent; guarded internally).
+        if first_post {
+            replay_post(egraph, &self.def, args, tok_id, changed);
+        }
+    }
+}
+
+impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        // The call this match names. Re-canonicalized: earlier rules of this
+        // iteration may have merged classes since the search.
+        let args: Vec<Id> = self.arg_vars.iter().map(|&v| egraph.find(subst[v])).collect();
+        // The token (see `FunctionCallSearcher`) plays two distinct roles,
+        // mirroring how a `Forall` e-class does: its **presence** triggers
+        // materialization of the callee's body here, and its **truth** releases
+        // the axioms that materialization produces.
+        //
+        // The token is assumed at each call site under that call's path
+        // condition (`declaration.rs`, the `FunctionCall` arm), so its class is
+        // an `ite(pc, tok, true)` shape and is unconditionally `true` only for
+        // an unconditional call. `tok_id` therefore doubles as the release
+        // guard.
+        let tok_id = subst.get(self.tok_var).map(|&t| egraph.find(t));
+        // The type instantiations applied at these args (a `Subst` cannot carry
+        // types, so they are re-read from the class).
+        let mut instantiations: Vec<Box<[Type]>> = Vec::new();
+        for node in &egraph[eclass].nodes {
+            let Symbolic::FuncApp(f, tys, nargs) = node else {
+                continue;
+            };
+            if *f != self.func || nargs.len() != args.len() {
+                continue;
+            }
+            let same = nargs.iter().zip(&args).all(|(&a, &b)| egraph.find(a) == b);
+            if same && !instantiations.contains(tys) {
+                instantiations.push(tys.clone());
+            }
+        }
+        let mut changed = Vec::new();
+        for tys in instantiations {
+            self.unfold_call(egraph, eclass, tys, &args, tok_id, &mut changed);
+        }
+        changed
+    }
+
+    fn vars(&self) -> Vec<Var> {
+        vec![]
+    }
+}
+
+impl Applier<Symbolic, ConstFold> for FunctionPostApplier {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        _subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let mut changed = Vec::new();
+        if self.def.post.is_none() {
+            return changed;
+        }
+        // Candidate calls in this e-class (deduped locally; the persistent `memo`
+        // is only consulted once we commit to replaying).
+        let mut calls: Vec<CallKey> = Vec::new();
+        for node in &egraph[eclass].nodes {
+            let Symbolic::FuncApp(f, tys, args) = node else {
+                continue;
+            };
+            if *f != self.func {
+                continue;
+            }
+            let args: Vec<Id> = args.iter().map(|&a| egraph.find(a)).collect();
+            let key = (tys.clone(), args);
+            if !calls.contains(&key) {
+                calls.push(key);
+            }
+        }
+        for (tys, args) in calls {
+            debug_assert_eq!(args.len(), self.def.n_params, "function post arity");
+            if self.memo.insert((tys, args.clone())) {
+                replay_post(egraph, &self.def, &args, None, &mut changed);
             }
         }
         changed
@@ -310,23 +421,22 @@ impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
     }
 }
 
-/// Mint the lazy-unfolding rule for one verified function's definition recipe.
-/// Reuses [`AxiomTriggerSearcher`] as-is — it only checks `FuncApp(f, ..)`
-/// presence, independent of arity/type-args, exactly what's needed here too.
+/// Mint the lazy-unfolding rule for one verified function's definition recipe,
+/// gated on its uniform pre-token `f%pre` (`FuncRegistry::fn_pre_token`).
 pub(crate) fn function_rule(
     name: &str,
     func: FuncId,
     def: Arc<FunctionDefinition>,
-    pre_token: Option<FuncId>,
+    pre_token: FuncId,
 ) -> Rule {
-    let searcher = AxiomTriggerSearcher { func };
+    let searcher = FunctionCallSearcher::new(func, pre_token, def.n_params);
     let applier = FunctionUnfoldApplier {
         func,
+        tok_var: searcher.tok_var,
+        arg_vars: searcher.arg_vars.clone(),
         def,
-        limited_post: false,
         memo: Memo::new(),
         union_memo: Memo::new(),
-        pre_token,
     };
     timed(Rewrite::new(format!("fn-{name}"), searcher, applier).expect("function rule"))
 }
@@ -339,14 +449,10 @@ pub(crate) fn function_rule(
 ///   recursive call work (Silicon's phase-1 `post` axiom).
 pub(crate) fn post_rule(name: &str, func: FuncId, def: Arc<FunctionDefinition>) -> Rule {
     let searcher = AxiomTriggerSearcher { func };
-    let applier = FunctionUnfoldApplier {
+    let applier = FunctionPostApplier {
         func,
         def,
-        limited_post: true,
         memo: Memo::new(),
-        union_memo: Memo::new(),
-        // Post-only rule: no definitional union, so no token gate.
-        pre_token: None,
     };
     timed(Rewrite::new(format!("fn-post-{name}"), searcher, applier).expect("function post rule"))
 }

@@ -1996,7 +1996,7 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
             // `#ensures` occurs only inside a post, which reaches a caller through
             // [`post_fact`] and never through a call — so its token is released by
             // the export instead ([`PostRecipe::token`]).
-            let pre_token = Some(ctx.alloc.fn_pre_token(id, &name));
+            let pre_token = ctx.alloc.fn_pre_token(id, &name);
             ctx.axiom_rules.push(crate::verify::rewrite::function_rule(
                 &name,
                 func,
