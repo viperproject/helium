@@ -39,6 +39,35 @@ impl Default for Z3Translation {
     }
 }
 
+/// The options Silicon sets in its preamble (`z3config.smt2`) that change how
+/// Z3 solves. MBQI is off, so quantifiers are instantiated only through their
+/// triggers, and arithmetic uses the old simplex solver (2) rather than Z3's
+/// default (6). `auto_config false` keeps Z3 from choosing its own settings per
+/// query over these. Silicon's other options only concern its SMT-LIB pipe
+/// (`print-success`, `global-decls`, `type_check`) or how models and numbers
+/// are printed (`model.*`, `pp.*`).
+const SILICON_PARAMS: &[(&str, &str)] = &[
+    ("auto_config", "false"),
+    ("smt.case_split", "3"),
+    ("smt.delay_units", "true"),
+    ("smt.mbqi", "false"),
+    ("smt.qi.eager_threshold", "100"),
+    ("smt.arith.solver", "2"),
+    ("smt.qi.max_multi_patterns", "1000"),
+];
+
+/// Set [`SILICON_PARAMS`] once per process. They are global parameters, and
+/// `auto_config` is read when a context is made, so this has to run before the
+/// first z3 call on any thread creates that thread's context.
+fn set_silicon_params() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for (k, v) in SILICON_PARAMS {
+            z3::set_global_param(k, v);
+        }
+    });
+}
+
 /// A solver for one query (see [`reset_solver`]); its creation is counted as
 /// `z3_timing.init`.
 ///
@@ -50,6 +79,7 @@ impl Default for Z3Translation {
 /// its `rlimit count` statistic keeps running over the solver's life.
 pub(crate) fn new_solver() -> Solver {
     let t = std::time::Instant::now();
+    set_silicon_params();
     let solver = Solver::new();
     let rlimit = std::env::var("SILVER_OXIDE_Z3_RLIMIT")
         .ok()
@@ -708,5 +738,20 @@ fn declare_datatypes(ctxt: &mut VerifyContext, root: &Type) {
     // `create_datatypes` returns the sorts in builder order.
     for (ty, dt) in group.into_keys().zip(create_datatypes(builders)) {
         ctxt.z3translator.adts.insert(ty, dt);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Z3 only warns on stderr about a parameter it does not know, so check
+    /// that every one of Silicon's options took.
+    #[test]
+    fn silicon_params_are_set() {
+        set_silicon_params();
+        for (k, v) in SILICON_PARAMS {
+            assert_eq!(z3::get_global_param(k).as_deref(), Some(*v), "{k}");
+        }
     }
 }
