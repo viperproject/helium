@@ -20,6 +20,7 @@ mod stats;
 pub(crate) mod test_support;
 mod types;
 mod viz;
+mod z3;
 
 pub use error::VerifyError;
 pub use stats::VerifyStats;
