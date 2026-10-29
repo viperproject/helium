@@ -837,6 +837,9 @@ impl<'a> VerifyContext<'a> {
     }
 
     fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
+        // Every query starts from an empty solver and the whole e-graph.
+        crate::verify::z3::reset_solver(self);
+
         let t_build = std::time::Instant::now();
 
         crate::verify::z3::sync_facts(self);
@@ -848,16 +851,21 @@ impl<'a> VerifyContext<'a> {
         let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
         let pc_cond = crate::verify::z3::build_pc(self, &pc);
 
-        let query = [pc_cond, vec![!goal_z3]].concat();
+        // Asserted like the facts: the solver is used for this query only, and
+        // a plain check() on it gets Z3's full preprocessing.
+        let solver = &self.z3translator.solver;
+        pc_cond
+            .iter()
+            .for_each(|lit| crate::verify::z3::assert_fact(solver, lit));
+        crate::verify::z3::assert_fact(solver, &!goal_z3);
 
         stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
 
         let t_solve = std::time::Instant::now();
-        let res = self.z3translator.solver.check_assumptions(&query);
+        let res = solver.check();
         stats::bump(|s| {
             s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64();
             s.z3_timing.0.calls += 1;
-            s.z3_timing.0.facts += query.len() as u64;
             match res {
                 SatResult::Unsat => s.z3_timing.0.unsat += 1,
                 SatResult::Sat => s.z3_timing.0.sat += 1,

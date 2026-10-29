@@ -39,7 +39,7 @@ impl Default for Z3Translation {
     }
 }
 
-/// The solver one context keeps for all its queries; its creation is counted as
+/// A solver for one query (see [`reset_solver`]); its creation is counted as
 /// `z3_timing.init`.
 ///
 /// Every check is limited to `SILVER_OXIDE_Z3_RLIMIT` resource units (default
@@ -70,12 +70,12 @@ pub(crate) struct ScratchScope {
     class_types: HashMap<Id, Type>,
 }
 
-/// Open a solver scope before the live graph is swapped for a throwaway clone.
-/// The clone hands out ids past the live graph's, and those ids are handed out
-/// again once the live graph is back, for different terms. Everything Z3 learns
-/// about them has to go with the clone.
+/// Save the translator state before the live graph is swapped for a throwaway
+/// clone. The clone hands out ids past the live graph's, and those ids are
+/// handed out again once the live graph is back, for different terms. The sorts
+/// cached for them have to go with the clone. No solver scope is needed: every
+/// query starts from a fresh solver anyway.
 pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
-    ctxt.z3translator.solver.push();
     let tr = &ctxt.z3translator;
     ScratchScope {
         max_node_id: tr.max_node_id,
@@ -84,17 +84,30 @@ pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
     }
 }
 
-/// Drop what Z3 learned on the throwaway graph: its facts (`pop`), the
-/// watermarks past the live graph, and the sorts cached for its ids.
+/// Drop what the translator learned on the throwaway graph: the watermarks past
+/// the live graph and the sorts cached for its ids.
 pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     let tr = &mut ctxt.z3translator;
-    tr.solver.pop(1);
     if tr.max_node_id != scope.max_node_id || tr.max_merges_is != scope.max_merges_is {
         stats::bump(|s| s.z3_timing.0.scratch_scopes += 1);
     }
     tr.max_node_id = scope.max_node_id;
     tr.max_merges_is = scope.max_merges_is;
     tr.class_types = scope.class_types;
+}
+
+/// Throw the previous query's solver away and rewind both watermarks, so the
+/// next [`sync_facts`] translates the whole e-graph again into a fresh solver.
+/// Nothing Z3 derived survives from one query to the next.
+pub(crate) fn reset_solver(ctxt: &mut VerifyContext) {
+    let tr = &mut ctxt.z3translator;
+    let old = std::mem::replace(&mut tr.solver, new_solver());
+    // Dropping a solver that holds the whole e-graph is real work too.
+    let t = std::time::Instant::now();
+    drop(old);
+    stats::bump(|s| s.z3_timing.0.init += t.elapsed().as_secs_f64());
+    tr.max_node_id = 0;
+    tr.max_merges_is = 0;
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
