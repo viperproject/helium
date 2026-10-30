@@ -3332,9 +3332,16 @@ function safediv(x: Int, y: Int): Int
 fn recursive_function_postcondition_by_induction() {
     // Induction via the limited encoding: while checking `f`'s body, `f`'s own
     // spec-derived post rule is installed (Silicon's phase-1 `post` axiom), so
-    // the recursive call's post (`f(next(x)) == 0`, guarded by
-    // `ok(next(x))` from the axiom) discharges the exit assert. At the outer
-    // call site the post rides the certificate's post fact.
+    // the recursive call's post (`f(next(x)) == 0`, behind the call's
+    // `f%pre(next(x))` token, whose precondition `ok(next(x))` the axiom
+    // discharges) proves the exit assert. At the outer call site the post rides
+    // the certificate's post fact.
+    //
+    // The recursive call is unconditional (no termination check, as in Silicon
+    // without `decreases`): the token, and with it the hypothesis, holds on every
+    // path. Under a branch, `x == 0 ? 0 : f(next(x))`, the hypothesis holds only on
+    // the call's path, and the exit assert needs a case split Helium does not make:
+    // `known_limitations/goal_needs_case_split_recursive_post.vpr`.
     let input = r#"
 domain D {
     function ok(x: Int): Bool
@@ -3345,7 +3352,7 @@ domain D {
 function f(x: Int): Int
     requires ok(x)
     ensures result == 0
-{ x == 0 ? 0 : f(next(x)) }
+{ f(next(x)) }
 
 method m(x: Int)
     requires ok(x)

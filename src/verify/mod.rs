@@ -70,8 +70,9 @@ pub fn verify_with_stats(
     // Verified function bodies, cached in dependency order (callees before
     // callers). Each unit's `assume_axioms` installs one lazy unfold rule per
     // entry here (see `rewrite::function_rule`), which installs the
-    // definitional equality `f(args) == body` the moment a `FuncApp(f, ..)`
-    // occurrence is seen during that unit's own saturation.
+    // definitional equality `f(args) == body` (behind the call's `f%pre(args)`
+    // token) once a called `FuncApp(f, ..)` occurrence is seen during that
+    // unit's own saturation.
     let mut fn_certs: crate::dhash::HashMap<
         vmir::MemberId,
         std::sync::Arc<cert::FunctionDefinition>,

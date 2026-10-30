@@ -1,0 +1,20 @@
+// A recursive function's post must not be replayed at a recursive call that only
+// exists on a dead branch.
+//
+// Unfolding `f(true)` rebuilds every value of the body, the dead arm included, so it
+// builds the limited twin `f'(!true)`, i.e. `f'(false)`. The post-only rule of the
+// limited twin used to replay the post at every `f'` occurrence ungated: here `b` at
+// `b := false`, i.e. `false`. That proved `assert false`. Silicon only assumes a
+// function's post behind its precondition (`f%pre(x) ==> post(x)`), and nothing makes
+// `f%pre(false)` true: the recursive call is on the branch `b` rules out.
+function f(b: Bool): Int
+  requires b
+  ensures b
+{ b ? 0 : f(!b) }
+
+method m()
+{
+  var y: Int
+  y := f(true)
+  assert false
+}

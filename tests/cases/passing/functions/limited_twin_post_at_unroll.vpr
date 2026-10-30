@@ -1,0 +1,20 @@
+// A recursive function's post must still be available at a recursive unroll whose
+// call is genuinely made.
+//
+// The post at the outer call `f(1)` is vacuous (`1 == 0 ==> ..`), so `y == 7` follows
+// only from the body `f(1) == f'(0)` together with the post at the limited twin
+// `f'(0)`. That post is released behind `f%pre(0)`, which unfolding `f(1)` propagates
+// for its recursive call under the body's own guard: `f%pre(1) ==> (1 != 0 ==>
+// f%pre(0))` (Silicon's `bodyPreconditionPropagation`, which covers recursive calls
+// too). Without that propagation, gating the post on the token would lose this proof.
+function f(k: Int): Int
+  requires k == 0 || k == 1
+  ensures k == 0 ==> result == 7
+{ k == 0 ? 7 : f(0) }
+
+method m()
+{
+  var y: Int
+  y := f(1)
+  assert y == 7
+}
