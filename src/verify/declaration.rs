@@ -423,9 +423,19 @@ fn eval_pure_inst(
             // function-unfold encoding; every axiom above inherits it transitively
             // through the token. `.rev()` because `pc_lits` is outermost-first and
             // `implication` folds innermost-first (cf. `InstKind::Assume`).
-            if ctx
-                .fn_certs
-                .is_none_or(|certs| certs.contains_key(&fc.function))
+            //
+            // A callee in the recursion cycle being verified has no cert yet, but
+            // still gets its token: the spec-derived post rule of the batch
+            // (`rewrite::post_rule`) replays the induction hypothesis only behind
+            // it, i.e. only on the path that makes the call.
+            let in_scc = ctx
+                .recipe
+                .as_ref()
+                .is_some_and(|rb| rb.is_recursive_callee(fc.function));
+            if in_scc
+                || ctx
+                    .fn_certs
+                    .is_none_or(|certs| certs.contains_key(&fc.function))
             {
                 let name = ctx.member_name(fc.function);
                 let tok = ctx.alloc.fn_pre_token(fc.function, &name);
@@ -442,11 +452,9 @@ fn eval_pure_inst(
                 // limited twin `f'` — uninterpreted, so unfolding this recipe
                 // at a call site stops after one level. Every other callee
                 // keeps its full id and unfolds normally.
-                let recursive = ctx
-                    .recipe
-                    .as_ref()
-                    .unwrap()
-                    .is_recursive_callee(fc.function);
+                let rb = ctx.recipe.as_ref().unwrap();
+                let recursive = rb.is_recursive_callee(fc.function);
+                let propagates_recursive = rb.propagates_recursive_token();
                 let func = if recursive {
                     let name = ctx.member_name(fc.function);
                     ctx.alloc.limited(fc.function, &name)
@@ -462,11 +470,16 @@ fn eval_pure_inst(
                 // Which calls those are is the **translator's** call, carried on the
                 // inst as `FunctionCall::export`: a value-position use of a Silver
                 // function exports, an obligation call / a call inside a contract
-                // definition / an `@addr` or domain application does not. A
-                // recursive call is excluded here rather than there, because SCC
-                // membership is a verifier fact: it already targets the limited twin
-                // `f'`, which has no unfold rule for a token to trigger.
-                let propagate = fc.export && !recursive;
+                // definition / an `@addr` or domain application does not.
+                //
+                // A recursive call propagates too, although it targets the limited
+                // twin `f'`, which has no unfold rule for the token to trigger: the
+                // token is what releases `f`'s post at `f'(gargs)`
+                // (`rewrite::function_post_rule`), and nothing else may. Except in a
+                // postcondition, which is a verifier fact (SCC membership) rather
+                // than the translator's: see
+                // `RecipeBuilder::propagates_recursive_token`.
+                let propagate = fc.export && (!recursive || propagates_recursive);
                 let g_pre = propagate.then(|| {
                     let name = ctx.member_name(fc.function);
                     ctx.alloc.fn_pre_token(fc.function, &name)
@@ -2005,12 +2018,15 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
             ));
             // A recursive function's post fact also triggers on its limited
             // twin `f'` — that is what delivers the postcondition at a
-            // recursive unroll (the twin has no unfold rule by design).
+            // recursive unroll (the twin has no unfold rule by design). Behind
+            // the same `f%pre` token, which the unrolled body propagates for its
+            // recursive call.
             if def.limited.is_some() && def.post.is_some() {
                 ctx.axiom_rules
                     .push(crate::verify::rewrite::function_post_rule(
                         &name,
                         std::sync::Arc::clone(def),
+                        pre_token,
                     ));
             }
         }
@@ -2626,15 +2642,26 @@ pub(crate) fn verify_function(
     // `ensures` link once the walk is done (`post_fact`). No precondition guard
     // is prepared: a function's facts are gated by its `f%pre` token, released
     // at the call.
-    ctx.recipe = Some(crate::verify::cert::RecipeBuilder::new(
-        function.params.len(),
-        recursive_scc.cloned(),
-    ));
+    let recipe =
+        crate::verify::cert::RecipeBuilder::new(function.params.len(), recursive_scc.cloned());
+    // A postcondition is the `ensures` link of some function. Only matters for
+    // recursive calls, so only looked for in a recursion cycle.
+    let is_post_contract = recursive_scc.is_some()
+        && program.decls.iter().any(|d| {
+            matches!(d, vmir::Declaration::Function(g)
+                if g.ensures.as_ref().is_some_and(|e| e.member == self_id))
+        });
+    ctx.recipe = Some(match is_post_contract {
+        true => recipe.post_contract(),
+        false => recipe,
+    });
     // Recursive batch: every SCC member's spec-derived post axiom is available
     // while this body is checked (Silicon emits `post` in phase 1, before the
     // phase-2 body check) — this is what lets the exit assert use a recursive
     // call's postcondition (induction; termination is not checked, same as
-    // Silicon without `decreases`).
+    // Silicon without `decreases`). Like any post, it is gated by the call's
+    // `f%pre` token, which the `FunctionCall` arm mints under the call's path
+    // condition.
     if let Some(scc) = recursive_scc {
         for &m in scc {
             let vmir::Declaration::Function(mf) = &program.decls[m] else {
@@ -2643,8 +2670,10 @@ pub(crate) fn verify_function(
             if let Some(post) = contract_post_definition(ctx.alloc, program, m, mf, false) {
                 let name = ctx.member_name(m);
                 let func = crate::verify::func_registry::func_id_for_member(m);
-                ctx.axiom_rules
-                    .push(crate::verify::rewrite::post_rule(&name, func, post));
+                let pre_token = ctx.alloc.fn_pre_token(m, &name);
+                ctx.axiom_rules.push(crate::verify::rewrite::post_rule(
+                    &name, func, post, pre_token,
+                ));
             }
         }
     }
