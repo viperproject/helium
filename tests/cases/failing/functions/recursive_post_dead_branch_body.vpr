@@ -1,0 +1,14 @@
+// A recursive function whose body violates its postcondition must be rejected, even
+// when the recursive call sits on a branch the precondition rules out.
+//
+// `g` returns `0` whenever `b` holds, so `result == 1` is false and Silicon rejects
+// the postcondition. While a recursion cycle is verified, its members' posts are
+// available as an induction hypothesis (`rewrite::post_rule`). That rule used to
+// replay the post at the recursive call `g(!b)` ungated: with `b` assumed, `!b` folds
+// to `false`, and the post `false && ..` made the body's graph inconsistent, so every
+// obligation of the body was discharged without being checked. The hypothesis is now
+// gated by the call's `g%pre` token, which holds only on the path making the call.
+function g(b: Bool): Int
+  requires b
+  ensures b && result == 1
+{ b ? 0 : g(!b) }
