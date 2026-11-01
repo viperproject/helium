@@ -1,0 +1,17 @@
+// REGRESSION (soundness). `scratch_guard_unfolding_ternary.vpr` inside a branch:
+// the ternary's condition `b` is an intra-block literal of the branch's block, and
+// the scratch, which has assumed the branch cube `d` only, must keep it.
+// The leading `exhale c ==> acc(x.f)` is a pc-alias consume, which warms the block
+// scratch.
+//
+// Must FAIL.
+field f: Int
+predicate Q(r: Ref, v: Int) { acc(r.f) && v == 5 }
+
+method scratch_guard_unfolding_branch_ternary(x: Ref, y: Ref, v: Int, b: Bool, c: Bool, d: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && (c ==> x == y)
+  requires (b && d) ==> Q(y, v)
+{ exhale c ==> acc(x.f)
+  if (d) {
+    var t: Int := b ? (unfolding Q(y, v) in 1) : 0
+    assert v == 5 } }

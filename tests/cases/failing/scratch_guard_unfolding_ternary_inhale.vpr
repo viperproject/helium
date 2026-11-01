@@ -1,0 +1,14 @@
+// REGRESSION (soundness). An `unfolding` in one arm of a ternary inside an inhale.
+// The leading `exhale c ==> acc(x.f)` is a pc-alias consume, which warms the block
+// scratch.
+//
+// Must FAIL.
+field f: Int
+predicate Q(r: Ref, v: Int) { acc(r.f) && v == 5 }
+
+method scratch_guard_unfolding_ternary_inhale(x: Ref, y: Ref, v: Int, b: Bool, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && (c ==> x == y)
+  requires b ==> Q(y, v)
+{ exhale c ==> acc(x.f)
+  inhale (b ? (unfolding Q(y, v) in true) : true)
+  assert v == 5 }
