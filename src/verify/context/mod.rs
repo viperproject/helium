@@ -132,6 +132,12 @@ pub(crate) struct VerifyContext<'a> {
     blocks: Option<BlockOrder>,
     /// The method block being walked.
     current_block: Option<usize>,
+    /// Walk steps (instructions) so far; the working graph runs its rules at
+    /// most once per step.
+    step: u64,
+    /// Inside [`Self::with_scratch_graph`] or a ground probe: ground is a
+    /// throwaway, and the method's working graph is out of reach.
+    detached: bool,
     /// Whether the current block's control cube is unsatisfiable — the block is
     /// unreachable, so every obligation in it holds vacuously. Set when the cube is
     /// assumed in the working graph, cleared per block. Unlike
@@ -214,6 +220,8 @@ impl<'a> VerifyContext<'a> {
             facts: Vec::new(),
             blocks: None,
             current_block: None,
+            step: 0,
+            detached: false,
             block_dead: false,
             z3translator: Z3Translation::default(),
         }
@@ -230,6 +238,9 @@ impl<'a> VerifyContext<'a> {
     /// after saturating use this to tell "the graph changed, ask again" from
     /// "nothing moved, the answer cannot differ".
     pub(crate) fn is_saturated(&self) -> bool {
+        if self.rules_on_work() {
+            return self.work.as_ref().is_some_and(|w| !w.dirty);
+        }
         self.is_clean(CleanLevel::Full)
     }
 
@@ -357,6 +368,13 @@ impl<'a> VerifyContext<'a> {
     /// static rules plus the ADT reductions minted so far by the allocator
     /// plus the per-unit axiom/function rules.
     pub(crate) fn saturate(&mut self) {
+        // Once a method has a working graph the rules run there; ground keeps
+        // only its terminating reductions (`reduce`) and stays the store of the
+        // unconditional facts the heap reads (see `rules_on_work`).
+        if self.rules_on_work() {
+            self.saturate_work();
+            return;
+        }
         if self.is_clean(CleanLevel::Full) {
             return;
         }

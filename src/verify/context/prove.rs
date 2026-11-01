@@ -3,8 +3,8 @@
 //! Split out of `context::mod` — same `VerifyContext`, second `impl` block. This is
 //! the piece with real invariants: the working graph is a copy of ground taken once
 //! per method, scoped along the method's dominator tree, kept in sync with ground
-//! through the `add`/`union` hooks, and its id space is related to ground's by
-//! `watermark`/`map`/[`VerifyContext::tr`].
+//! through the `add`/`union` hooks, the graph the rules run on once it exists, and
+//! its id space is related to ground's by `watermark`/`map`/[`VerifyContext::tr`].
 //!
 //! `add` and `union` deliberately stay in `mod.rs`: each touches the e-graph and
 //! the fixpoint cache (engine state) *and* the working graph (prover state), so the
@@ -27,11 +27,15 @@ use z3::SatResult;
 
 type EGraph = egg::EGraph<Symbolic, ConstFold>;
 
-/// The method's **working graph**: where block obligations are proven.
+/// The method's **working graph**: where a method's obligations are proven.
 ///
 /// It is a copy of ground taken once per method, on the first obligation that
-/// needs it, and then kept for the rest of the method. Its contents are organised
-/// by the method's dominator tree:
+/// needs it, and then kept for the rest of the method. From then on the rules run
+/// here and no longer on ground, which keeps only its terminating reductions and
+/// stays the store of the unconditional facts the heap reads (see
+/// [`VerifyContext::rules_on_work`]); what ground's rules would have derived the
+/// heap gets from here as conditional matches, through the pc-alias path. Its
+/// contents are organised by the method's dominator tree:
 ///
 /// - the **base** (no scope) holds ground as it was when the copy was taken, plus
 ///   everything mirrored into it since outside any scope: facts that hold on every
@@ -75,9 +79,10 @@ pub(super) struct WorkGraph {
     memo: u64,
     /// The live memo record up to the copy holds in this graph too.
     horizon: u64,
-    /// Changed since the last saturation / reduction.
+    /// Changed since the last saturation.
     pub(super) dirty: bool,
-    pub(super) dirty_reduce: bool,
+    /// The walk step of the last saturation.
+    saturated_at: Option<u64>,
 }
 
 struct Scope {
@@ -89,7 +94,6 @@ struct Scope {
     facts_len: usize,
     memo: u64,
     dirty: bool,
-    dirty_reduce: bool,
 }
 
 /// Dominance over a method's blocks, in walk (stored, topological) order, and
@@ -304,7 +308,6 @@ impl<'a> VerifyContext<'a> {
         let s = w.egraph.add(wnode);
         w.map_insert(g, s);
         w.dirty = true;
-        w.dirty_reduce = true;
         s
     }
 
@@ -312,6 +315,28 @@ impl<'a> VerifyContext<'a> {
     /// outside one — its cube's reach boolean is materialized *by* the join).
     pub(crate) fn in_block(&self) -> bool {
         self.in_block
+    }
+
+    /// Whether we are walking a method block (its join phase or its body), with
+    /// the method's working graph in reach: where obligations ground's tiers leave
+    /// open are proven on the working graph.
+    pub(crate) fn in_method(&self) -> bool {
+        self.current_block.is_some() && !self.detached
+    }
+
+    /// Whether the rules run on the working graph rather than on ground: in a
+    /// method once it has one. Until a method needs a working graph ground is the
+    /// only graph, and saturating it is what lets ground's cheap tiers answer;
+    /// once there is one, saturating ground too would derive everything twice, so
+    /// ground keeps only its terminating reductions and the working graph — which
+    /// holds all of ground's facts and its own — answers what they leave open.
+    pub(crate) fn rules_on_work(&self) -> bool {
+        self.in_method() && self.work.is_some()
+    }
+
+    /// Start the next walk step (an instruction).
+    pub(crate) fn next_step(&mut self) {
+        self.step += 1;
     }
 
     /// The current block's control cube, as live ids. Empty outside a block body.
@@ -356,7 +381,6 @@ impl<'a> VerifyContext<'a> {
         let w = self.work.as_mut().unwrap();
         w.egraph.union(imp, true_w);
         w.dirty = true;
-        w.dirty_reduce = true;
     }
 
     /// Mirror a ground `add` that minted `node` at the fresh ground id
@@ -375,7 +399,6 @@ impl<'a> VerifyContext<'a> {
         let s = w.egraph.add(wnode);
         w.map_insert(ground_id, s);
         w.dirty = true;
-        w.dirty_reduce = true;
     }
 
     /// Mirror a ground union into the working graph. A same-typed conflict there
@@ -386,7 +409,6 @@ impl<'a> VerifyContext<'a> {
         let w = self.work.as_mut().unwrap();
         w.egraph.union(ta, tb);
         w.dirty = true;
-        w.dirty_reduce = true;
     }
 
     /// Record that a certificate build unioned each of `released` with `true` in
@@ -476,7 +498,6 @@ impl<'a> VerifyContext<'a> {
             facts_len,
             memo: rewrite::new_scope_id(),
             dirty: w.dirty,
-            dirty_reduce: w.dirty_reduce,
         };
         w.scopes.push(scope);
         stats::bump(|s| s.work_scopes += 1);
@@ -499,7 +520,6 @@ impl<'a> VerifyContext<'a> {
             w.map.remove(&g);
         }
         w.dirty = scope.dirty;
-        w.dirty_reduce = scope.dirty_reduce;
         let facts = self.facts[scope.facts_len..].to_vec();
         stats::bump(|s| s.work_replayed_facts += facts.len() as u64);
         for (a, b) in facts {
@@ -560,7 +580,7 @@ impl<'a> VerifyContext<'a> {
             memo: rewrite::new_scope_id(),
             horizon: rewrite::live_horizon(),
             dirty: true,
-            dirty_reduce: true,
+            saturated_at: None,
         });
         self.facts.clear();
         if let Some(block) = self.current_block {
@@ -574,7 +594,12 @@ impl<'a> VerifyContext<'a> {
     /// Saturate the working graph under the full rule set if it changed since the
     /// last saturation.
     pub(super) fn saturate_work(&mut self) {
-        if !self.work.as_ref().is_some_and(|w| w.dirty) {
+        let step = self.step;
+        if !self
+            .work
+            .as_ref()
+            .is_some_and(|w| w.dirty && w.saturated_at != Some(step))
+        {
             return;
         }
         let mut w = self.work.take().expect("working graph");
@@ -585,32 +610,7 @@ impl<'a> VerifyContext<'a> {
         stats::bump(|s| s.block_scratch_saturations += 1);
         stats::bump(|s| s.block_scratch_iterations += s.sat_iterations - before);
         w.dirty = false;
-        w.dirty_reduce = false;
-        stats::bump(|s| s.graph_timing.0.scratch += t.elapsed().as_secs_f64());
-        drop(_scopes);
-        self.work = Some(w);
-    }
-
-    /// Run only the terminating structural reductions on the working graph — what
-    /// **framing** needs: address matching wants snapshot towers collapsed, not the
-    /// full rule set.
-    pub(super) fn reduce_work(&mut self) {
-        if !self.work.as_ref().is_some_and(|w| w.dirty_reduce) {
-            return;
-        }
-        let mut w = self.work.take().expect("working graph");
-        let _scopes = w.memo_scopes();
-        let t = std::time::Instant::now();
-        let (egraph, iterations) = run_rules(
-            std::mem::take(&mut w.egraph),
-            self.static_reduce.iter().chain(self.alloc.rules()),
-            None,
-        );
-        w.egraph = egraph;
-        stats::bump(|s| s.record_run(&iterations));
-        // A reduce is not a saturation: leave `dirty` set so the next obligation
-        // still runs the full rule set.
-        w.dirty_reduce = false;
+        w.saturated_at = Some(step);
         stats::bump(|s| s.graph_timing.0.scratch += t.elapsed().as_secs_f64());
         drop(_scopes);
         self.work = Some(w);
@@ -691,18 +691,30 @@ impl<'a> VerifyContext<'a> {
         }
 
         // `saturate`: saturate the live graph and re-check (no clone). Saturation
-        // can also expose a contradiction, so re-check inconsistency too.
-        self.saturate();
-        if self.is_inconsistent() || self.egraph.find(imp) == self.egraph.find(true_) {
-            stats::bump(|s| s.prove_saturate += 1);
-            return true;
+        // can also expose a contradiction, so re-check inconsistency too. Only
+        // while ground is where the rules run (see `rules_on_work`).
+        if !self.rules_on_work() {
+            self.saturate();
+            if self.is_inconsistent() || self.egraph.find(imp) == self.egraph.find(true_) {
+                stats::bump(|s| s.prove_saturate += 1);
+                return true;
+            }
         }
 
-        // Inside a method block, discharge the `probe` tier against the working
-        // graph: it has the block cube assumed and every dominating block's facts
-        // unguarded, it is kept in sync with ground, and its `tr` imports any ground
-        // operand it is missing.
-        if self.in_block {
+        // In a method, discharge the remaining tiers against the working graph: it
+        // has every dominating block's facts unguarded (and, in a block body, the
+        // block cube), it is kept in sync with ground, and its `tr` imports any
+        // ground operand it is missing.
+        if self.in_method() {
+            // `memo` on the working graph: a proof recorded there (in this block or a
+            // dominating one) needs no run and no probe.
+            self.ensure_work();
+            let ti = self.tr(imp);
+            let w = self.work.as_ref().unwrap();
+            if w.egraph.find(ti) == w.egraph.find(w.true_id) {
+                stats::bump(|s| s.prove_memo += 1);
+                return true;
+            }
             // Z3 is the last rung: it runs on ground plus the cube, never on the
             // working graph (translation.typ, "Inputs").
             let proven = self.prove_in_work(goal, pc_lits) || self.prove_by_z3(goal, pc_lits);
@@ -727,7 +739,7 @@ impl<'a> VerifyContext<'a> {
             return proven;
         }
 
-        // Outside a block: probe ground itself under a checkpoint, with the pc
+        // Outside a method: probe ground itself under a checkpoint, with the pc
         // assumed. The probe never touches live state (its every change is rolled
         // back), so it needs no copy of the graph.
         stats::bump(|s| s.prove_probe += 1);
@@ -792,12 +804,14 @@ impl<'a> VerifyContext<'a> {
     ) -> T {
         let clean = self.clean;
         let work = self.work.take();
+        let detached = std::mem::replace(&mut self.detached, true);
         let mut ground = std::mem::take(&mut self.egraph);
         let checkpoint = ground.checkpoint();
         let (out, mut ground) = f(self, ground);
         ground.rollback(checkpoint);
         self.egraph = ground;
         self.work = work;
+        self.detached = detached;
         self.clean = clean;
         out
     }
@@ -810,6 +824,9 @@ impl<'a> VerifyContext<'a> {
         pc_lits: &[(egg::Id, Polarity)],
         ids: &[egg::Id],
     ) -> Option<Vec<egg::Id>> {
+        if self.rules_on_work() {
+            return self.classes_in_work(pc_lits, ids);
+        }
         self.probe_ground(|ctx, mut probe| {
             for (id, pol) in pc_lits {
                 let want_true = matches!(pol, Polarity::Positive);
@@ -822,6 +839,57 @@ impl<'a> VerifyContext<'a> {
             probe.rebuild();
             let probe = ctx.run_probe(probe);
             let out = ids.iter().map(|&i| probe.find(i)).collect();
+            (Some(out), probe)
+        })
+    }
+
+    /// [`Self::classes_under_pc`] in a method: the classes of `ids` in the working
+    /// graph with the part of `pc_lits` it does not hold yet assumed under a
+    /// checkpoint. The ids returned are working-graph ids, comparable only with
+    /// each other. `None` when a literal is decided against its polarity.
+    fn classes_in_work(
+        &mut self,
+        pc_lits: &[(egg::Id, Polarity)],
+        ids: &[egg::Id],
+    ) -> Option<Vec<egg::Id>> {
+        self.ensure_work();
+        // Translate first: `tr` can import nodes and dirty the graph.
+        let tids: Vec<egg::Id> = ids.iter().map(|&i| self.tr(i)).collect();
+        let tpc: Vec<(egg::Id, Polarity)> = pc_lits.iter().map(|&(i, p)| (self.tr(i), p)).collect();
+        self.saturate_work();
+        let w = self.work.as_ref().unwrap();
+        let known = |id: egg::Id| match w.egraph[w.egraph.find(id)].data.known() {
+            Some(Literal::Bool(b)) => Some(*b),
+            _ => None,
+        };
+        if tpc
+            .iter()
+            .any(|&(id, pol)| known(id) == Some(!matches!(pol, Polarity::Positive)))
+        {
+            return None;
+        }
+        let delta: Vec<(egg::Id, Polarity)> = tpc
+            .into_iter()
+            .filter(|&(id, pol)| known(id) != Some(matches!(pol, Polarity::Positive)))
+            .collect();
+        if delta.is_empty() {
+            let w = self.work.as_ref().unwrap();
+            return Some(tids.iter().map(|&i| w.egraph.find(i)).collect());
+        }
+        self.probe_work(|ctx, mut probe| {
+            for (id, pol) in &delta {
+                let lit = probe.add(Symbolic::Lit(Literal::Bool(matches!(
+                    pol,
+                    Polarity::Positive
+                ))));
+                probe.union(*id, lit);
+            }
+            probe.rebuild();
+            let probe = ctx.run_probe(probe);
+            if graph_inconsistent(&probe) {
+                return (None, probe);
+            }
+            let out = tids.iter().map(|&i| probe.find(i)).collect();
             (Some(out), probe)
         })
     }
@@ -845,14 +913,12 @@ impl<'a> VerifyContext<'a> {
         let tg = self.tr(goal);
         let tpc: Vec<(egg::Id, Polarity)> =
             pc_lits.iter().map(|(id, p)| (self.tr(*id), *p)).collect();
-        // Try the cheap reductions first and saturate only if the goal is still
-        // open: with the cube assumed *unguarded* the `ite` guards no longer
-        // throttle function-unfold / axiom-trigger / forall cascades, so a full run
-        // can grow the graph a lot for a goal the reductions already close.
-        self.reduce_work();
-        if self.work_decided(tg) {
-            return true;
-        }
+        // Saturate (at most once per walk step): once the rules run here this is the
+        // `saturate` tier, which ground no longer runs. Reducing first and
+        // saturating only when the goal stays open defers the run to a later
+        // obligation, when the graph holds every term walked since; measured, that
+        // run costs up to 5x the rule applications of the early ones (struct_w32:
+        // 24 k vs 4.3 k).
         self.saturate_work();
         if self.work_decided(tg) {
             return true;
@@ -1147,9 +1213,9 @@ impl<'a> VerifyContext<'a> {
     }
 
     /// Which held chunk addresses coincide with `addr` in the **working graph** —
-    /// the graph that already has this block's cube assumed. `None` outside a block
-    /// (functions and resources have no CFG); the caller then falls back to a
-    /// ground probe.
+    /// the graph that already has this block's cube assumed — but not on ground.
+    /// `None` while the rules run on ground (outside a method, or before the method
+    /// has a working graph); the caller then falls back to a ground probe.
     ///
     /// This is the pc-alias question [`pc_alias_partners`](crate::verify::heap::algebra::pc_alias_partners)
     /// asks, answered by `find` instead of by a fresh saturation.
@@ -1158,10 +1224,9 @@ impl<'a> VerifyContext<'a> {
         addr: egg::Id,
         chunk_addrs: &[egg::Id],
     ) -> Option<Vec<egg::Id>> {
-        if !self.in_block {
+        if !self.rules_on_work() {
             return None;
         }
-        self.ensure_work();
         if self.block_dead {
             return None;
         }
@@ -1231,7 +1296,7 @@ impl<'a> VerifyContext<'a> {
 
     /// Run only the terminating structural reductions over a probe — the `reduce`
     /// counterpart of [`Self::run_probe`], driving the same rule set as
-    /// [`VerifyContext::reduce`] and [`Self::reduce_work`].
+    /// [`VerifyContext::reduce`].
     ///
     /// This is what an `ite_decompose` link costs between picks: assuming a
     /// condition makes the surviving arm's `ite` collapse by const-fold plus these
@@ -1267,11 +1332,13 @@ impl<'a> VerifyContext<'a> {
         let work = self.work.take();
         let in_block = std::mem::replace(&mut self.in_block, false);
         let solver_state = crate::verify::z3::enter_scratch(self);
+        let detached = std::mem::replace(&mut self.detached, true);
         let checkpoint = self.egraph.checkpoint();
         let out = f(self);
         self.egraph.rollback(checkpoint);
         crate::verify::z3::leave_scratch(self, solver_state);
         self.in_block = in_block;
+        self.detached = detached;
         self.work = work;
         self.clean = clean;
         self.proven_imps = proven_imps;
@@ -1380,6 +1447,8 @@ mod working_graph_tests {
         ctx.enter_block(2);
         ctx.begin_block(vec![(c, Polarity::Negative)]);
         let again = ctx.add(Symbolic::Fresh(1));
+        // Bring the working graph up to the walk, as any question does.
+        ctx.ensure_work();
         assert_eq!(ctx.egraph.find(again), ctx.egraph.find(t));
         for id in [again, ctx.egraph.find(t)] {
             let tw = ctx.tr(id);

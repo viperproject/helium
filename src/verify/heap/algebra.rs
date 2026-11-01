@@ -2535,8 +2535,9 @@ pub(crate) fn chunk_under_pc<'c>(
         return Some(c);
     }
     // No unconditional match. Aliasing under the path condition can only help
-    // if there is one; a truly-unheld location stays a miss.
-    if pc_lits.is_empty() {
+    // if there is one, or where the working graph runs the rules and has derived
+    // what ground does not (see `rules_on_work`).
+    if pc_lits.is_empty() && !ctx.rules_on_work() {
         return None;
     }
     // An unsatisfiable path condition makes every read vacuous — leave the
@@ -2564,7 +2565,11 @@ pub(crate) fn pc_alias_partners(
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Vec<egg::Id> {
-    if pc_lits.is_empty() {
+    // An empty pc adds nothing to a saturated ground. Once rules run on the working
+    // graph, ground is not saturated and the working graph holds what its rules
+    // would have derived, so it is asked even then; what it finds is still
+    // consumed through the guarded, distributed pc-alias debit, never merged.
+    if pc_lits.is_empty() && !ctx.rules_on_work() {
         return Vec::new();
     }
     // Inside a method block the answer is already sitting in the block scratch: it is

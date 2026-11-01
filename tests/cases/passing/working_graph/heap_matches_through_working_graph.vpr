@@ -1,0 +1,43 @@
+// Once a method has a working graph the rules run there and ground keeps only its
+// terminating reductions. Address equalities only ground's rules would have
+// derived reach the heap from the working graph, as conditional (pc-alias)
+// matches, also where the path condition is empty.
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  axiom same_is_identity { forall r: Ref :: { same(r) } same(r) == r }
+}
+
+// The first branch gives the method its working graph. `same(x)` meets `x` only
+// through the axiom, an instance only the working graph builds from then on.
+method unconditional(x: Ref, z: Int)
+  requires acc(x.f)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  exhale acc(same(x).f)
+}
+
+// The read finds the chunk through the working graph although the path
+// condition is empty (main misses it: its ground probe only runs under a pc).
+method unconditional_read(x: Ref, z: Int)
+  requires acc(x.f) && x.f == 4
+{
+  if (z == 3) { assert g(z) == g(3) }
+  assert same(x).f == 4
+}
+
+// The same address meeting only under the branch: consumed through the guarded
+// debit there, so the other path keeps its permission.
+method conditional(x: Ref, y: Ref, c: Bool, z: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    inhale x == y
+    exhale acc(y.f, 1/1)
+  } else {
+    exhale acc(y.f, 1/2)
+  }
+}

@@ -2343,6 +2343,7 @@ fn walk_body(
     mut footprint_ops: Option<&mut Vec<(Val, vmir::PermVal)>>,
 ) -> Result<(), VerifyError> {
     for (inst_idx, inst) in insts.iter().enumerate() {
+        ctx.next_step();
         assert_statement_pc_is_block_cube(ctx, inst);
         if let (
             Some(ops),
