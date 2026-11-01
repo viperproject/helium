@@ -281,13 +281,11 @@ impl<'a> VerifyContext<'a> {
         // is `true`. So the current root of ground's `true` (`false`) class is
         // W's `true` (`false`). Everything in that class holds unconditionally, so
         // this is sound; a term that became the root is learned only as `true`.
-        if g == self.egraph.find(g) {
-            if g == self.egraph.find(w.true_id) {
-                return w.true_id;
-            }
-            if g == self.egraph.find(w.false_id) {
-                return w.false_id;
-            }
+        if g == self.egraph.find(w.true_id) {
+            return w.true_id;
+        }
+        if g == self.egraph.find(w.false_id) {
+            return w.false_id;
         }
         if let Some(s) = w.fast_translate(g) {
             return s;
@@ -794,25 +792,25 @@ impl<'a> VerifyContext<'a> {
         proven
     }
 
-    /// Run `f` on ground under a checkpoint and roll everything it did back:
-    /// the graph, and the fixpoint cache. `f` receives ground by value (it may run
-    /// rules on it) and returns it. The working graph is detached for the extent,
-    /// so nothing `f` does is mirrored into it.
+    /// Run `f` on a copy of ground, which it may run rules on and hands back to be
+    /// dropped; ground and its fixpoint cache stay as they are. The working graph
+    /// is detached for the extent, so nothing `f` does is mirrored into it.
+    ///
+    /// A copy, not a checkpoint of ground itself: these probes saturate, and
+    /// journaling a saturation and undoing it measured slower than copying the
+    /// graph (enum_tag_v128: 7.2 s against 5.8 s). The working graph's own probes
+    /// do use checkpoints ([`Self::probe_work`]): a copy of it would not carry its
+    /// scopes.
     pub(crate) fn probe_ground<T>(
         &mut self,
         f: impl FnOnce(&mut Self, EGraph) -> (T, EGraph),
     ) -> T {
-        let clean = self.clean;
         let work = self.work.take();
         let detached = std::mem::replace(&mut self.detached, true);
-        let mut ground = std::mem::take(&mut self.egraph);
-        let checkpoint = ground.checkpoint();
-        let (out, mut ground) = f(self, ground);
-        ground.rollback(checkpoint);
-        self.egraph = ground;
+        let probe = self.egraph.clone();
+        let (out, _) = f(self, probe);
         self.work = work;
         self.detached = detached;
-        self.clean = clean;
         out
     }
 
