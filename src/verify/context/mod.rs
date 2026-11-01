@@ -239,7 +239,7 @@ impl<'a> VerifyContext<'a> {
     /// "nothing moved, the answer cannot differ".
     pub(crate) fn is_saturated(&self) -> bool {
         if self.rules_on_work() {
-            return self.work.as_ref().is_some_and(|w| !w.dirty);
+            return self.work_settled();
         }
         self.is_clean(CleanLevel::Full)
     }

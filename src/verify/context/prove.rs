@@ -83,6 +83,20 @@ pub(super) struct WorkGraph {
     pub(super) dirty: bool,
     /// The walk step of the last saturation.
     saturated_at: Option<u64>,
+    /// What the walk did since the graph was last asked something, not yet applied
+    /// (see [`VerifyContext::sync_work`]). `None`: up to date.
+    lag: Option<Lag>,
+    /// Whether the current block's cube is assumed.
+    cube_assumed: bool,
+}
+
+/// Block transitions and facts the working graph has not caught up with.
+#[derive(Clone, Copy)]
+struct Lag {
+    /// Close the scopes from this one on (`None`: no scope to close).
+    close_from: Option<usize>,
+    /// `VerifyContext::facts` from here on are not mirrored yet.
+    unmirrored_from: usize,
 }
 
 struct Scope {
@@ -350,7 +364,8 @@ impl<'a> VerifyContext<'a> {
     /// guard, as the fact outlives the instruction in blocks the current one
     /// dominates.
     pub(super) fn work_assume(&mut self, fact: egg::Id, guards: &[(egg::Id, Polarity)]) {
-        if self.work.is_none() {
+        // A lagging graph learns the fact in its guarded form, from the log.
+        if self.work.is_none() || self.work_lags() {
             return;
         }
         let cube = self.current_cube.len();
@@ -387,6 +402,9 @@ impl<'a> VerifyContext<'a> {
     /// node already present returns its class's canonical id, which may have been
     /// minted as a different node (see [`Self::tr`]), so it is not mirrored.
     pub(super) fn mirror_add(&mut self, ground_id: egg::Id, node: Symbolic) {
+        if self.work_lags() {
+            return;
+        }
         let kids: Vec<egg::Id> = node.children().to_vec();
         let tkids: Vec<egg::Id> = kids.iter().map(|c| self.tr(*c)).collect();
         let mut wnode = node;
@@ -403,6 +421,9 @@ impl<'a> VerifyContext<'a> {
     /// folds to `Inconsistent`, not a panic — that just makes the block's goals
     /// vacuously provable.
     pub(super) fn mirror_union(&mut self, a: egg::Id, b: egg::Id) {
+        if self.work_lags() {
+            return;
+        }
         let (ta, tb) = (self.tr(a), self.tr(b));
         let w = self.work.as_mut().unwrap();
         w.egraph.union(ta, tb);
@@ -458,17 +479,24 @@ impl<'a> VerifyContext<'a> {
         }
         // Scopes nest along the dominator tree, so the ones to close are a suffix:
         // everything above the innermost whose block dominates this one. Scanned
-        // from the top, so the scan costs what it closes.
+        // from the top of what is still open, so the scan costs what it closes.
+        // Only recorded: the closes happen at the next question (`sync_work`).
         let blocks = self.blocks.as_ref().unwrap();
-        let scopes = &self.work.as_ref().unwrap().scopes;
-        let mut first = scopes.len();
-        while first > 0 && !blocks.dominates(scopes[first - 1].block, block) {
+        let facts_len = self.facts.len();
+        let w = self.work.as_mut().unwrap();
+        let mut lag = w.lag.unwrap_or(Lag {
+            close_from: None,
+            unmirrored_from: facts_len,
+        });
+        let mut first = lag.close_from.unwrap_or(w.scopes.len());
+        while first > 0 && !blocks.dominates(w.scopes[first - 1].block, block) {
             first -= 1;
         }
-        if first < scopes.len() {
-            self.close_scopes(first);
+        if first < w.scopes.len() {
+            lag.close_from = Some(first);
         }
-        self.open_scope_if_needed(block);
+        w.lag = Some(lag);
+        w.cube_assumed = false;
     }
 
     /// Enter the body of the current block, under its control cube.
@@ -476,9 +504,59 @@ impl<'a> VerifyContext<'a> {
         self.block_dead = false;
         self.current_cube = cube;
         self.in_block = true;
-        if self.work.is_some() {
+        // The cube is assumed at the next question (`sync_work`).
+        let facts_len = self.facts.len();
+        if let Some(w) = self.work.as_mut() {
+            w.lag.get_or_insert(Lag {
+                close_from: None,
+                unmirrored_from: facts_len,
+            });
+            w.cube_assumed = false;
+        }
+    }
+
+    /// Bring the working graph up to the walk: close the scopes the walk has left
+    /// (handing their facts to the enclosing scope), mirror the facts walked since
+    /// the graph was last asked, open the current block's scope if it needs one and
+    /// assume its cube. Between two questions nothing is mirrored, so scopes left
+    /// one after another without a question between them close together and each
+    /// of their facts is handed over once.
+    fn sync_work(&mut self) {
+        let Some(lag) = self.work.as_mut().and_then(|w| w.lag.take()) else {
+            return;
+        };
+        match lag.close_from {
+            Some(first) => self.close_scopes(first),
+            None => {
+                let facts = self.facts[lag.unmirrored_from..].to_vec();
+                for (a, b) in facts {
+                    self.mirror_union(a, b);
+                }
+                self.work.as_mut().unwrap().egraph.rebuild();
+            }
+        }
+        if let Some(block) = self.current_block {
+            let w = self.work.as_ref().unwrap();
+            if w.scopes.last().map(|s| s.block) != Some(block) {
+                self.open_scope_if_needed(block);
+            }
+        }
+        if self.in_block && !self.work.as_ref().unwrap().cube_assumed {
             self.assume_cube();
         }
+    }
+
+    /// Whether the working graph has walk events to catch up with; nothing is
+    /// mirrored into it meanwhile.
+    fn work_lags(&self) -> bool {
+        self.work.as_ref().is_some_and(|w| w.lag.is_some())
+    }
+
+    /// Whether the working graph is up to the walk and at a fixpoint.
+    pub(super) fn work_settled(&self) -> bool {
+        self.work
+            .as_ref()
+            .is_some_and(|w| w.lag.is_none() && !w.dirty)
     }
 
     fn open_scope_if_needed(&mut self, block: usize) {
@@ -542,6 +620,7 @@ impl<'a> VerifyContext<'a> {
         }
         self.current_cube = cube;
         let w = self.work.as_mut().unwrap();
+        w.cube_assumed = true;
         w.egraph.rebuild();
         // `pc ⇒ false`, in its cheap *assume* form: a contradiction among the cube
         // literals has surfaced as `true == false`. Recording it here decides the
@@ -554,6 +633,7 @@ impl<'a> VerifyContext<'a> {
     /// scope if it needs one, assume the block cube.
     pub(super) fn ensure_work(&mut self) {
         if self.work.is_some() {
+            self.sync_work();
             return;
         }
         let t_clone = std::time::Instant::now();
@@ -579,6 +659,8 @@ impl<'a> VerifyContext<'a> {
             horizon: rewrite::live_horizon(),
             dirty: true,
             saturated_at: None,
+            lag: None,
+            cube_assumed: false,
         });
         self.facts.clear();
         if let Some(block) = self.current_block {
@@ -592,6 +674,7 @@ impl<'a> VerifyContext<'a> {
     /// Saturate the working graph under the full rule set if it changed since the
     /// last saturation.
     pub(super) fn saturate_work(&mut self) {
+        self.sync_work();
         let step = self.step;
         if !self
             .work
@@ -707,6 +790,10 @@ impl<'a> VerifyContext<'a> {
             // `memo` on the working graph: a proof recorded there (in this block or a
             // dominating one) needs no run and no probe.
             self.ensure_work();
+            if self.block_dead {
+                stats::bump(|s| s.prove_dead_block += 1);
+                return true;
+            }
             let ti = self.tr(imp);
             let w = self.work.as_ref().unwrap();
             if w.egraph.find(ti) == w.egraph.find(w.true_id) {
@@ -1225,6 +1312,7 @@ impl<'a> VerifyContext<'a> {
         if !self.rules_on_work() {
             return None;
         }
+        self.sync_work();
         if self.block_dead {
             return None;
         }
