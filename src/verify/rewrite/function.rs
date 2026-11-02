@@ -276,6 +276,16 @@ impl FunctionUnfoldApplier {
         changed: &mut Vec<Id>,
     ) {
         debug_assert_eq!(args.len(), self.def.n_params, "function unfold arity");
+        // A postcondition of `false` makes `tok ⟹ post` the unit `¬tok`: no
+        // call is reached with the precondition holding. Stated as soon as
+        // the token exists, which can be after the post was replayed (a
+        // propagation-minted token), so not behind `memo`.
+        if let (Some(tok), Some(true)) = (tok_id, self.def.post.as_ref().map(|p| p.unsatisfiable)) {
+            let false_ = egraph.add(Symbolic::Lit(Literal::Bool(false)));
+            if egraph.union(tok, false_) {
+                changed.push(egraph.find(tok));
+            }
+        }
         // The definitional union and the post are both released behind the
         // token, so an occurrence that no value-position call produced — no
         // token — materializes no body and gets no post, which is what the

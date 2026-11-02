@@ -1,0 +1,132 @@
+// Prusti's match on an enum behind a generic round trip: the discriminant is
+// observed through an `unfolding`, the value goes `make_generic_E` /
+// `make_concrete_E`, and the arm unfolds its variant. The re-minted `p_E` chunk
+// is tied to the old one only through `p_E_snap`, whose case tower ends in
+// `s_E_unreachable(T)` (postcondition `false`), so recovering the variant needs
+// the tower inverted past its unreachable bottom arm
+// (`passing/ctor_ite_unreachable_bottom_arm.vpr` is the plain-Viper form).
+// Every variant, the top and middle ones as well as the bottom one. The shape
+// of futures-channel `try_recv`, smallvec `infallible`, socket2 `as_socket_*`
+// and tokio `try_lock` in Prusti's encoding.
+
+domain s_Int_isize  {
+  function s_Int_isize_cons(arg0: Int): s_Int_isize
+  function s_Int_isize_value(arg0: s_Int_isize): Int
+  axiom s_Int_isize_ax_cons {
+    (forall s: s_Int_isize :: { s_Int_isize_value(s) } s_Int_isize_cons(s_Int_isize_value(s)) == s)
+  }
+  axiom s_Int_isize_ax_value {
+    (forall value: Int :: { s_Int_isize_cons(value) } s_Int_isize_value(s_Int_isize_cons(value)) == value)
+  }
+}
+domain s_Param  {
+  function s_Param_typeof(arg0: s_Param): Type
+}
+domain TypeOf {
+  function s_E_typeof(arg0: s_E): Type
+}
+adt Type {
+  s_Int_type()
+  s_E_type(s_E_typaram_T$0: Type)
+}
+field p_Int_isize_val: s_Int_isize
+predicate p_Int_isize(self: Ref) {
+  acc(self.p_Int_isize_val, write)
+}
+function p_Int_isize_snap(self: Ref): s_Int_isize
+  requires acc(p_Int_isize(self), write)
+{
+  (unfolding acc(p_Int_isize(self), write) in self.p_Int_isize_val)
+}
+predicate p_Param(self: Ref, T$0: Type)
+function p_Param_snap(self: Ref, T$0: Type): s_Param
+  requires acc(p_Param(self, T$0), write)
+function p_E_field_discr(self: Ref): Ref
+  ensures (self == null) == (result == null)
+function s_E_unreachable(T$0: Type): s_E
+  ensures false
+
+adt s_E {
+  s_E_0_cons(s_E_0_0: s_Param)
+  s_E_1_cons()
+  s_E_2_cons(s_E_2_0: s_Param)
+}
+function s_E_0_field_0(self: Ref, T$0: Type): Ref
+  ensures (self == null) == (result == null)
+predicate p_E_0_owned(self: Ref, T$0: Type) {
+  acc(p_Param(s_E_0_field_0(self, T$0), T$0), write)
+}
+predicate p_E_1_owned(self: Ref, T$0: Type) {
+  true
+}
+function s_E_2_field_0(self: Ref, T$0: Type): Ref
+  ensures (self == null) == (result == null)
+predicate p_E_2_owned(self: Ref, T$0: Type) {
+  acc(p_Param(s_E_2_field_0(self, T$0), T$0), write)
+}
+predicate p_E(self: Ref, T$0: Type) {
+  acc(p_Int_isize(p_E_field_discr(self)), write) &&
+  (p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(0) || p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(1) || p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(2)) &&
+  ((p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(0) ==> acc(p_E_0_owned(self, T$0), write)) && (p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(1) ==> acc(p_E_1_owned(self, T$0), write)) && (p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(2) ==> acc(p_E_2_owned(self, T$0), write)))
+}
+function p_E_snap(self: Ref, T$0: Type): s_E
+  requires acc(p_E(self, T$0), write)
+{
+  (unfolding acc(p_E(self, T$0), write) in
+  (p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(2) ?
+    (unfolding acc(p_E_2_owned(self, T$0), write) in s_E_2_cons(p_Param_snap(s_E_2_field_0(self, T$0), T$0))) :
+    (p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(1) ?
+    (unfolding acc(p_E_1_owned(self, T$0), write) in s_E_1_cons()) :
+    (p_Int_isize_snap(p_E_field_discr(self)) == s_Int_isize_cons(0) ?
+    (unfolding acc(p_E_0_owned(self, T$0), write) in s_E_0_cons(p_Param_snap(s_E_0_field_0(self, T$0), T$0))) :
+    s_E_unreachable(T$0)))))
+}
+function make_generic_s_E(self: s_E, T$0: Type): s_Param
+  ensures s_Param_typeof(result) == s_E_type(s_E_typeof(self).s_E_typaram_T$0)
+  ensures make_concrete_s_E(result, s_E_typeof(self).s_E_typaram_T$0) == self
+function make_concrete_s_E(snap: s_Param, T$0: Type): s_E
+  ensures make_generic_s_E(result, T$0) == snap
+method make_generic_E(self: Ref, T$0: Type)
+  requires acc(p_E(self, T$0), write)
+  ensures acc(p_Param(self, s_E_type(T$0)), write)
+  ensures old(make_generic_s_E(p_E_snap(self, T$0), T$0)) == p_Param_snap(self, s_E_type(T$0))
+method make_concrete_E(self: Ref, T$0: Type)
+  requires acc(p_Param(self, s_E_type(T$0)), write)
+  ensures acc(p_E(self, T$0), write)
+  ensures old(p_Param_snap(self, s_E_type(T$0))) == make_generic_s_E(p_E_snap(self, T$0), T$0)
+
+method obs_0(x: Ref, T$0: Type)
+  requires acc(p_E(x, T$0), write)
+{
+  var t: s_Int_isize
+  t := (unfolding acc(p_E(x, T$0), wildcard) in p_Int_isize_snap(p_E_field_discr(x)))
+  assume s_Int_isize_value(t) == 0
+  make_generic_E(x, T$0)
+  make_concrete_E(x, T$0)
+  unfold acc(p_E(x, T$0), write)
+  unfold acc(p_E_0_owned(x, T$0), write)
+}
+
+method obs_1(x: Ref, T$0: Type)
+  requires acc(p_E(x, T$0), write)
+{
+  var t: s_Int_isize
+  t := (unfolding acc(p_E(x, T$0), wildcard) in p_Int_isize_snap(p_E_field_discr(x)))
+  assume s_Int_isize_value(t) == 1
+  make_generic_E(x, T$0)
+  make_concrete_E(x, T$0)
+  unfold acc(p_E(x, T$0), write)
+  unfold acc(p_E_1_owned(x, T$0), write)
+}
+
+method obs_2(x: Ref, T$0: Type)
+  requires acc(p_E(x, T$0), write)
+{
+  var t: s_Int_isize
+  t := (unfolding acc(p_E(x, T$0), wildcard) in p_Int_isize_snap(p_E_field_discr(x)))
+  assume s_Int_isize_value(t) == 2
+  make_generic_E(x, T$0)
+  make_concrete_E(x, T$0)
+  unfold acc(p_E(x, T$0), write)
+  unfold acc(p_E_2_owned(x, T$0), write)
+}

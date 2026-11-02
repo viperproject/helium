@@ -2825,10 +2825,15 @@ fn post_fact(
             args,
         },
     );
+    let unsatisfiable = matches!(
+        &program.decls[en.member],
+        vmir::Declaration::Function(Function { body: Some(b), .. }) if b.res == vmir::FALSE
+    );
     Some(PostRecipe {
         steps,
         res,
         token: Some(token),
+        unsatisfiable,
     })
 }
 
