@@ -1,0 +1,40 @@
+// A callee's post must stay behind its `f%pre` token even when the args were
+// merged earlier in the same saturation iteration. This is the shape of Prusti's
+// `*_unreachable() ensures false` arm, which made Helium accept methods Silicon
+// rejects (chrono, once_cell, regex-automata in cratesTop100Split2000).
+//
+// Unfolding `f` creates `unreachable(a(s))` and, behind `f%pre ==> (!b ==> ..)`,
+// its token `unreachable%pre(a(s))` — vacuous here, since `b` is `true`. In the
+// next iteration the `a(t) == cty()` axiom merges `a(s)` into `cty()`'s class
+// before `unreachable`'s rule applies. Looked up from the applier, the token then
+// missed in the not-yet-rebuilt hashcons, and the post `false` was released
+// ungated, proving `assert false`. The token is now looked up by the searcher, on
+// the clean graph.
+//
+// `k1..k3` are load-bearing: they make `cty()`'s class the larger one, so it
+// becomes the root of the merge and `a(s)`'s id goes stale. Without them the
+// test passes even on the buggy code.
+domain Ty {
+  function cty(): Ty
+  function k1(): Ty
+  function k2(): Ty
+  function k3(): Ty
+  function a(t: Ty): Ty
+  axiom { k1() == cty() }
+  axiom { k2() == cty() }
+  axiom { k3() == cty() }
+  axiom { forall t: Ty :: { a(t) } a(t) == cty() }
+}
+
+function unreachable(t: Ty): Int
+  ensures false
+
+function f(t: Ty, b: Bool): Int
+{ b ? 0 : unreachable(t) }
+
+method m(s: Ty)
+{
+  var y: Int
+  y := f(a(s), true)   // evaluates to 0; unreachable(..) is never evaluated
+  assert false         // must fail
+}

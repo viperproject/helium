@@ -255,6 +255,10 @@ pub(crate) struct RecipeBuilder {
     /// In-SCC callees (a recursion cycle's members), lowered to their limited
     /// twin so a downstream unfold halts after one level.
     recursive_scc: Option<crate::dhash::HashSet<MemberId>>,
+    /// Set when the walked body is a postcondition (`f#ensures`). A recursive
+    /// call there propagates no `f%pre` token (see
+    /// [`Self::propagates_recursive_token`]).
+    post_contract: bool,
     /// Footprint slots recorded by a resource body's `acc`s, in body order:
     /// the slot's location kind, element type, and the recipe temps of its
     /// address and permission (sliced into standalone [`SlotRecipe`]s at the
@@ -280,9 +284,16 @@ impl RecipeBuilder {
             n_params,
             steps: Vec::new(),
             recursive_scc,
+            post_contract: false,
             pending_slots: Vec::new(),
             token_steps: Vec::new(),
         }
+    }
+
+    /// Mark the walked body as a postcondition (`f#ensures`).
+    pub(crate) fn post_contract(mut self) -> Self {
+        self.post_contract = true;
+        self
     }
 
     /// Record an orphan `g%pre` token step so [`Self::slice`] keeps it (see
@@ -322,6 +333,20 @@ impl RecipeBuilder {
 
     pub(crate) fn is_recursive_callee(&self, m: MemberId) -> bool {
         self.recursive_scc.as_ref().is_some_and(|s| s.contains(&m))
+    }
+
+    /// Whether a recursive call in this body propagates its `f%pre` token.
+    ///
+    /// In a function body it must: that token is what gates the post the
+    /// limited twin's rule replays at the recursive unroll (Silicon's
+    /// `bodyPreconditionPropagation` covers recursive calls too). In a
+    /// postcondition it must not: the posts of an SCC whose members mention each
+    /// other in their `ensures` (Prusti's `make_generic_s_T`/`make_concrete_s_T`)
+    /// would then mint each other's tokens without end, building ever deeper
+    /// `g'(f'(g'(..)))` terms wherever the path condition keeps the equalities
+    /// that would collapse them undecided.
+    pub(crate) fn propagates_recursive_token(&self) -> bool {
+        !self.post_contract
     }
 
     /// Consume the builder into a function definition's parts. A function
