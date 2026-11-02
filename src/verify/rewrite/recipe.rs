@@ -30,7 +30,8 @@ pub(crate) enum AxiomPure {
 }
 
 /// One instruction of a prepared body: a value-producing pure step, an
-/// assumption (stitched from a callee's `#ensures`) merged with `true`, or a
+/// assumption merged with `true` (a function body's entry `assume f#requires`;
+/// never in a quantifier body, which `quant::intern` enforces), or a
 /// nested `forall` — materialized as a [`Symbolic::Forall`] node whose capture
 /// children are resolved through the *enclosing* instance's temps, so an outer
 /// instantiation bakes its σ into the inner quantifier and the generic rule picks
