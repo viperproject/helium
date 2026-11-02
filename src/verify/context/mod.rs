@@ -557,8 +557,8 @@ impl<'a> VerifyContext<'a> {
     /// make the callee's facts available on sibling intra-block paths there —
     /// precisely the leak this gating closes.
     ///
-    /// Nothing is lost by skipping it: [`Self::union`] already mirrors the guarded
-    /// implication into the scratch, so the cube prefix of the guard chain
+    /// Nothing is lost by skipping it: the guarded implication's ground union is
+    /// replayed into the scratch ([`Self::sync_scratch`]), so the cube prefix of the guard chain
     /// collapses there via `ite-reduce` (cube literals *are* unguarded in the
     /// scratch), and any residual intra-block guard collapses in the probe clone,
     /// which assumes the obligation's extra pc literals (see

@@ -111,8 +111,10 @@ impl<'a> VerifyContext<'a> {
         // into the `true` class makes ground `find` return the `true` leader for it,
         // so canonicalizing first would translate *every* such term to the scratch's
         // `true` — silently turning each mirrored union/assume into `true == true`.
-        // Under invariant 3 (ground never saturates/reduces in-block) ground grows
-        // only through mirrored ops, so the raw id a caller holds is a stable name.
+        // A raw id names the node minted at it, which no later union changes, so
+        // it stays a stable name even though ground saturates and reduces
+        // in-block; those runs' unions reach the scratch by replay
+        // ([`Self::sync_scratch`]), as raw id pairs translated here.
         match self.scratch.as_ref() {
             None => return g,
             Some(sc) => {
