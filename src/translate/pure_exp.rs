@@ -821,8 +821,9 @@ impl PureExt for typed::HeapExt {
 
 /// Domain axioms: the only extension is a call to a precondition-free Silver
 /// `function` (typecheck-enforced), so `lower_func_app` never touches the
-/// (inert `Empty`) heap in `hctx` — no `Snap`, no `requires` assert; only the
-/// callee's `#ensures` assume is stitched.
+/// (inert `Empty`) heap in `hctx` — no `Snap`, no `requires` assert, and no
+/// `#ensures` assume (the postcondition arrives as a rule gated on the callee's
+/// `%pre` token).
 impl PureExt for typed::AxiomExt {
     fn lower_ext(
         b: &TranslationContext<'_>,
