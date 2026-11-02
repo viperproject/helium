@@ -486,6 +486,7 @@ mod tests {
         let (table, rid) = RecipeTable::of(QuantRecipe {
             n_caps: 0,
             n_bound: 1,
+            bound: Box::new([Type::Int]),
             groups: vec![vec![PreparedTerm::App {
                 head: TermHead::Func {
                     func: f,
