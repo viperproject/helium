@@ -3,7 +3,7 @@
 // the outer invariant's footprint. `b.f` is named by neither invariant and must
 // survive both exits.
 //
-// Driven by tag checks, so no integer reasoning is involved.
+// Driven by discriminator checks, so no integer reasoning is involved.
 adt Nat { Zero() Succ(pred: Nat) }
 field f: Int
 

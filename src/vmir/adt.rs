@@ -35,10 +35,10 @@ impl Display for TyParams {
     }
 }
 
-/// An algebraic data type: a list of variants (constructors), variant index =
-/// discriminator tag. Purely semantic — no synthetic `@tag` / accessor member
-/// ids. The verifier mints its own ids and reduction rules from this structure
-/// (see `verify::mono`).
+/// An algebraic data type: a list of variants (constructors), identified by
+/// their index. Purely semantic — no synthetic tester / accessor member ids.
+/// The verifier mints its own ids and reduction rules from this structure (see
+/// `verify::func_registry`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Adt {
     pub name: Spur,
@@ -50,8 +50,8 @@ pub struct Adt {
 /// (kept from the source for display; only needs to be distinct within the ADT —
 /// `None` for synthetic ADTs like a predicate snapshot) plus its field types in
 /// order. A constructor is not a declaration, so its name is an interner `Spur`,
-/// not a `MemberId`. The constructor / projection / tag operations over it are the
-/// semantic `PureInst::{AdtCons,AdtProj,AdtTag}` nodes.
+/// not a `MemberId`. The constructor / projection / tester operations over it are
+/// the semantic `PureInst::{AdtCons,AdtProj,AdtIs}` nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AdtVariant {
     pub name: Option<Spur>,

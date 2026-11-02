@@ -1,7 +1,7 @@
 // `break` — a goto out of the loop body. The out edge carries the body's LIVE
 // state and does not re-establish the invariant, and it must union the frame
 // back: `b.f` is never named in the invariant, yet is still held after the
-// break. Driven by a tag check, so no integer reasoning is involved.
+// break. Driven by a discriminator check, so no integer reasoning is involved.
 adt Nat { Zero() Succ(pred: Nat) }
 field f: Int
 

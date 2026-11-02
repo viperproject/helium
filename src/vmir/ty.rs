@@ -18,7 +18,7 @@ pub enum Type {
     /// Resource id (the snapshot ADT head). A single-variant ADT whose fields are
     /// the predicate's footprint slot types (`Resource.snapshot.field_types`);
     /// the verifier mints its constructor/projection ids on demand (see
-    /// `verify::mono`). No `@snap` declaration is emitted — this is derived.
+    /// `verify::func_registry`). No `@snap` declaration is emitted — this is derived.
     Snap(MemberId),
     /// `Option[T]` — a builtin parametric type (like `Seq[T]`/`Set[T]` later): a
     /// domain with axiomatized functions. The verifier resolves it to its `Option`

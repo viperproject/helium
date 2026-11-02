@@ -1,6 +1,6 @@
 // The invariant is load-bearing: `s` is written by the body, so it is havoc'd
 // at the cut, and the postcondition is unprovable without carrying `!s.isZero`
-// across. Every step is a constructor/tag reduction — no integer reasoning.
+// across. Every step is a constructor/tester reduction — no integer reasoning.
 adt Nat {
     Zero()
     Succ(pred: Nat)

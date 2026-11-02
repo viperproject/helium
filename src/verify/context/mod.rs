@@ -34,7 +34,7 @@ pub(crate) fn member_name_in(
 
 pub(crate) struct VerifyContext<'a> {
     pub(crate) egraph: egg::EGraph<Symbolic, ConstFold>,
-    /// Static structural rules. The ADT cons/proj/tag reductions are pulled from
+    /// Static structural rules. The ADT cons/proj/tester reductions are pulled from
     /// the [`FuncRegistry`] at saturation time (it grows as ADT concepts are
     /// minted).
     static_rules: Vec<egg::Rewrite<Symbolic, ConstFold>>,
@@ -65,7 +65,7 @@ pub(crate) struct VerifyContext<'a> {
     pub(crate) decls: &'a TiVec<MemberId, Declaration>,
     /// Location group tags (`Type::Addr.group`), for display resolution.
     pub(crate) groups: &'a Rodeo<Spur>,
-    /// Shared verifier function-id registry (ADT cons/proj/tag ids + rules and
+    /// Shared verifier function-id registry (ADT cons/proj/tester ids + rules and
     /// builtin operators).
     /// Owned by `verify::verify`, threaded `&mut` through each unit so ids stay
     /// consistent across certificate grafts.
@@ -459,7 +459,7 @@ impl<'a> VerifyContext<'a> {
     }
 
     /// Add a `FuncApp` over an already-allocated [`FuncId`] (a plain function,
-    /// or an ADT constructor/projection/tag id from the allocator). Also used by
+    /// or an ADT constructor/projection/tester id from the allocator). Also used by
     /// grafting, which carries the id verbatim. `type_args` is the ground type
     /// instantiation — part of the node's operator identity (discriminant), not a
     /// child.

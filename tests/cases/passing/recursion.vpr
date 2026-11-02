@@ -1,5 +1,5 @@
 // Recursive function via the limited-function encoding, on a Peano-nat ADT so
-// the recursion is exercised through tag/constructor reductions with no integer
+// the recursion is exercised through tester/constructor reductions with no integer
 // arithmetic. `double` unfolds once to `Succ(Succ(double'(n.pred)))`; the limited
 // twin `double'` never re-unfolds, bounding saturation. Framing `double(x) ==
 // double'(x)` lets a materialized full value flow to its twin.

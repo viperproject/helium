@@ -69,8 +69,8 @@ pub struct AdtConstructorSig {
     pub ret: Type,
     /// Name `Spur` of the owning ADT.
     pub adt: Spur,
-    /// Position of this constructor among its ADT's variants (its tag index).
-    pub tag: usize,
+    /// Position of this constructor among its ADT's variants (its variant index).
+    pub variant: usize,
 }
 
 /// A destructor (constructor field accessor), e.g. `head` of `Cons`.
@@ -329,7 +329,7 @@ pub struct GlobalsCollector<'i> {
     symbol_table: HashMap<Spur, MemberId>,
     ctor_by_name: HashMap<String, Spur>,
     dtor_by_name: HashMap<Spur, DtorInfo>,
-    /// Running per-ADT constructor counter, for assigning tag indices.
+    /// Running per-ADT constructor counter, for assigning variant indices.
     adt_ctor_count: HashMap<Spur, usize>,
     errors: Vec<DuplicateGlobalError>,
 }
@@ -447,8 +447,8 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
 
     fn walk_adt_constructor(&mut self, adt_cons: &'ast super::AdtConstructor) {
         let adt = adt_cons.adt().id();
-        let tag = *self.adt_ctor_count.entry(adt).or_insert(0);
-        self.adt_ctor_count.insert(adt, tag + 1);
+        let variant = *self.adt_ctor_count.entry(adt).or_insert(0);
+        self.adt_ctor_count.insert(adt, variant + 1);
         // The ADT (registered before its constructors) supplies the set of bound
         // type parameters, so generic field/return types lower to `Generic`.
         let type_params: HashSet<Spur> = self
@@ -466,7 +466,7 @@ impl<'ast, 'i> AstWalker<'ast> for GlobalsCollector<'i> {
                 .collect(),
             ret: genericize(Type::from(adt_cons.signature.ret[0].ty()), &type_params),
             adt,
-            tag,
+            variant,
         };
         let name_spur = adt_cons.signature.name.0.id();
         self.ctor_by_name

@@ -2,7 +2,7 @@
 // batch. Each body calls the *limited* twin of the other (`is_odd'` / `is_even'`,
 // uninterpreted), so unfolding halts after one level; framing `f(x) == f'(x)`
 // links a materialized full value to its twin. Peano-nat ADT keeps it arithmetic-
-// free — the branch is a tag check, no `Int` reasoning.
+// free — the branch is a discriminator check, no `Int` reasoning.
 adt Nat {
     Zero()
     Succ(pred: Nat)

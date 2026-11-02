@@ -7,7 +7,7 @@ use crate::vmir::Type;
 
 /// A verifier-allocated function-application id in the e-graph. **Disconnected
 /// from VMIR `MemberId`**: the verifier assigns these (see `verify::func_registry`) — a
-/// plain function reuses its declaration's index, ADT constructor/projection/tag
+/// plain function reuses its declaration's index, ADT constructor/projection/tester
 /// ops get one freshly-minted index per *concept* (polymorphic; the type
 /// instantiation rides in the `FuncApp` discriminant, not the id).
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]

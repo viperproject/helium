@@ -15,11 +15,11 @@ use crate::viper::{Interner, typed};
 use crate::vmir;
 
 /// ADT shape metadata recorded in `declare`, consumed when lowering `AdtCons` /
-/// `AdtProj` / `AdtTag` use sites.
+/// `AdtProj` / `AdtIs` use sites.
 #[derive(Default)]
 pub(crate) struct AdtInfo {
-    /// A constructor's `Spur` to `(owning ADT `Spur`, tag index)`.
-    pub ctor_tag: HashMap<Spur, (Spur, usize)>,
+    /// A constructor's `Spur` to `(owning ADT `Spur`, variant index)`.
+    pub ctor_variant: HashMap<Spur, (Spur, usize)>,
     /// A destructor's `Spur` to the `(adt id, variant, field)` it projects.
     pub dtor_sem: HashMap<Spur, (vmir::MemberId, usize, usize)>,
 }

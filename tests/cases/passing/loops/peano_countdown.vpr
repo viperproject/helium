@@ -1,4 +1,4 @@
-// Structural looping over Peano naturals: the loop is driven by a tag check,
+// Structural looping over Peano naturals: the loop is driven by a discriminator check,
 // so the cut is exercised with no integer reasoning anywhere.
 adt Nat {
     Zero()
