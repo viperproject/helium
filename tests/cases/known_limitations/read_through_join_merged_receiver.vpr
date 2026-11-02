@@ -1,0 +1,23 @@
+// KNOWN LIMITATION — should verify, currently rejected (insufficient permission).
+//
+// After the `if`, `x` is the join phi `c ? a : b`, so the read is at
+// `f@addr(c ? a : b)`. Both `a.f` and `b.f` are held, but a `Deref`'s framing
+// obligation (`inst_obligations` in verify/declaration.rs) looks for ONE chunk whose
+// address equals the demand, on ground or under the pc (`chunk_under_pc`). Neither
+// chunk's address does without a case split on `c`, and the read has no fallback
+// that sums over the chunks, so it reports insufficient permission. Silicon verifies
+// this.
+//
+// Found 2026-10-30 in the Prusti encodings of binary_search_tree `Node::sorted` and
+// routes `length` (both copies), and in chalice/AVLTree.iterative, where the merged
+// receiver is the loop variable `n`.
+
+field f: Bool
+
+method m(c: Bool, a: Ref, b: Ref) returns (r: Bool)
+  requires acc(a.f) && acc(b.f)
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  r := x.f
+}

@@ -1,0 +1,18 @@
+// KNOWN LIMITATION — should verify, currently rejected (assertion failed).
+//
+// A `forall` is never proven as a goal. Quantifiers are e-nodes that only get
+// instantiated, never introduced: there is no skolemization, so a `forall` goal
+// holds only if the identical `forall` node was assumed earlier. The Z3 rung cannot
+// help either, because `sync_facts` (verify/z3/mod.rs) skips `Forall` nodes and the
+// goal reaches Z3 as an opaque Boolean constant. Here the body is vacuously true
+// (`false ==> ...`). Silicon verifies this.
+//
+// Found 2026-10-30 while analyzing incompleteness against Silicon; see
+// forall_loop_invariant.vpr for the shape it took in the benchmarks.
+
+function get(a: Ref, i: Int): Int
+
+method m(a: Ref, b: Ref)
+{
+  assert forall j: Int :: { get(a, j) } false ==> get(a, j) == get(b, j)
+}

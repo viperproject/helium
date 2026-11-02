@@ -1,0 +1,23 @@
+// KNOWN LIMITATION — should verify, currently rejected (insufficient permission).
+//
+// Same gap as read_through_join_merged_receiver.vpr, showing that the two consume
+// paths disagree about the same location. The `exhale` succeeds: when no chunk
+// matches directly, `heap_subtract_summarized_fallbacks` (verify/heap/algebra.rs)
+// falls back to the Σ-ite summary, which sums every chunk gated by
+// `addr == f@addr(x)`. The read that follows has no such fallback and fails, though
+// `x.f` is still held at 1/2. Silicon verifies this.
+//
+// Found 2026-10-30 in chalice/AVLTree.iterative: `exhale acc(n.root, 4/10)` passes,
+// then the `unfolding acc(valid(n)) in n.root` read of the same location fails.
+
+field f: Int
+
+method m(c: Bool, a: Ref, b: Ref)
+  requires acc(a.f) && acc(b.f)
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  exhale acc(x.f, 1/2)
+  var v: Int
+  v := x.f
+}

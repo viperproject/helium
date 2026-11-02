@@ -1,0 +1,22 @@
+// KNOWN LIMITATION — should verify, currently rejected (assertion failed).
+//
+// Same gap as forall_goal_vacuous.vpr, as it appears in practice: a quantified loop
+// invariant is a `forall` goal at loop entry (vacuous here, since `i == 0`) and
+// again on the back edge. The entry check already fails. Silicon verifies this.
+//
+// Found 2026-10-30 in mpp/toplas_p3_no_heap pldi16_so_ArrayInt_true and
+// pldi16_so_PokerHand_true, whose product-program loops carry an invariant of the
+// form `forall j :: (p ==> 0 <= j && j < i ==> ...)`.
+
+function get(a: Ref, i: Int): Int
+
+method m(a: Ref, b: Ref)
+{
+  var i: Int := 0
+  while (i < 10)
+    invariant forall j: Int :: { get(a, j) } 0 <= j && j < i ==> get(a, j) == get(b, j)
+  {
+    assume get(a, i) == get(b, i)
+    i := i + 1
+  }
+}
