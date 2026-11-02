@@ -379,6 +379,7 @@ impl<'a> VerifyContext<'a> {
     ///
     pub(crate) fn begin_block(&mut self, cube: Vec<(egg::Id, Polarity)>) {
         self.scratch = None;
+        *self.egraph.analysis.pair_log.borrow_mut() = None;
         self.block_dead = false;
         self.current_cube = cube;
         self.in_block = true;
@@ -390,14 +391,17 @@ impl<'a> VerifyContext<'a> {
         self.current_cube.clear();
         self.in_block = false;
         self.scratch = None;
+        *self.egraph.analysis.pair_log.borrow_mut() = None;
         self.block_dead = false;
     }
 
     /// Build the block scratch if absent: clone ground, assume the block cube.
     /// Ids present now are identical in both graphs (clone preserves them), so
-    /// the translation map starts empty.
+    /// the translation map starts empty. From then on ground logs its unions,
+    /// and a live scratch is brought up to date here ([`Self::sync_scratch`]).
     pub(super) fn ensure_scratch(&mut self) {
         if self.scratch.is_some() {
+            self.sync_scratch();
             return;
         }
         let true_id = expr!(self, true);
@@ -442,6 +446,7 @@ impl<'a> VerifyContext<'a> {
             );
         }
         self.current_cube = cube;
+        *self.egraph.analysis.pair_log.borrow_mut() = Some(Vec::new());
         self.scratch = Some(BlockScratch {
             egraph,
             map: HashMap::default(),
@@ -453,6 +458,30 @@ impl<'a> VerifyContext<'a> {
         });
         stats::bump(|s| s.graph_timing.0.scratch_clone += t_clone.elapsed().as_secs_f64());
         stats::bump(|s| s.block_scratch_clones += 1);
+    }
+
+    /// Replay into the block scratch every union ground made since the last
+    /// sync. The scratch is ground plus the block cube, so whatever ground
+    /// derives holds there too, and it must not depend on *how* ground got it:
+    /// an instruction's own union, a rule run (function bodies unfolded in
+    /// ground and the callee tokens they release, ADT reductions), or the
+    /// congruence closure of either. Logged as the id pairs union was asked
+    /// for (see `ConstFold::pair_log`) and translated like any other operand. A
+    /// same-typed conflict here (the cube makes the union contradictory) folds
+    /// to `Inconsistent`, not a panic: the block's goals hold vacuously.
+    fn sync_scratch(&mut self) {
+        let pairs = match self.egraph.analysis.pair_log.borrow_mut().as_mut() {
+            Some(log) if !log.is_empty() => std::mem::take(log),
+            _ => return,
+        };
+        for (a, b) in pairs {
+            let (ta, tb) = (self.tr(a), self.tr(b));
+            let sc = self.scratch.as_mut().expect("scratch live");
+            if sc.egraph.union(ta, tb) {
+                sc.dirty = true;
+                sc.dirty_reduce = true;
+            }
+        }
     }
 
     /// Saturate the block scratch under the full rule set if it changed since the
