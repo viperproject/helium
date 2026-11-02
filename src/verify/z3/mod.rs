@@ -1,4 +1,4 @@
-use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::lang::{FuncId, RecipeId, Symbolic};
 use itertools::Itertools;
 
 use crate::verify::context::VerifyContext;
@@ -11,6 +11,8 @@ use std::borrow::Cow;
 use z3::ast::{Ast, Bool, Dynamic};
 use z3::datatype_builder::create_datatypes;
 use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Solver, Sort};
+use crate::verify::quant::RecipeTable;
+use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm};
 
 /// The translator's caches, kept in `VerifyContext::z3translator` so sorts and
 /// datatypes are created once per context. The translation itself is the free
@@ -22,6 +24,12 @@ pub(crate) struct Z3Translation {
     func_cache: HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
     max_node_id: usize,
     max_merges_is: usize,
+    /// Whether `Forall` nodes are translated. Off until a goal needs one
+    /// ([`include_foralls`]), then on for the rest of the context.
+    include_forall: bool,
+    /// The `Forall` nodes [`sync_facts`] left out while `include_forall` was
+    /// off, by node index; asserted by the first sync after it is turned on.
+    skipped_forall: Vec<usize>,
     pub(crate) solver: Solver,
 }
 
@@ -34,6 +42,8 @@ impl Default for Z3Translation {
             func_cache: HashMap::default(),
             max_node_id: 0,
             max_merges_is: 0,
+            include_forall: false,
+            skipped_forall: vec![],
             solver: new_solver(),
         }
     }
@@ -98,6 +108,7 @@ pub(crate) struct ScratchScope {
     max_node_id: usize,
     max_merges_is: usize,
     class_types: HashMap<Id, Type>,
+    skipped_forall: Vec<usize>,
 }
 
 /// Open a solver scope before the live graph is swapped for a throwaway clone.
@@ -111,11 +122,14 @@ pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
         max_node_id: tr.max_node_id,
         max_merges_is: tr.max_merges_is,
         class_types: tr.class_types.clone(),
+        skipped_forall: tr.skipped_forall.clone(),
     }
 }
 
 /// Drop what Z3 learned on the throwaway graph: its facts (`pop`), the
-/// watermarks past the live graph, and the sorts cached for its ids.
+/// watermarks past the live graph, and the sorts cached for its ids. The
+/// skipped quantifiers go back to the live graph's list: the clone's ids are
+/// reused, and any live quantifier asserted inside the scope was popped with it.
 pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     let tr = &mut ctxt.z3translator;
     tr.solver.pop(1);
@@ -125,6 +139,13 @@ pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     tr.max_node_id = scope.max_node_id;
     tr.max_merges_is = scope.max_merges_is;
     tr.class_types = scope.class_types;
+    tr.skipped_forall = scope.skipped_forall;
+}
+
+/// Translate quantifiers from now on: the next [`sync_facts`] asserts the ones
+/// skipped so far, and later ones are no longer skipped.
+pub(crate) fn include_foralls(ctxt: &mut VerifyContext) {
+    ctxt.z3translator.include_forall = true;
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
@@ -267,12 +288,21 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
 pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
     let start = ctxt.z3translator.max_node_id;
     let end = ctxt.egraph.nodes().len();
-    for i in start..end {
+
+    let prefix = if ctxt.z3translator.include_forall {
+        std::mem::take(&mut ctxt.z3translator.skipped_forall)
+    } else {
+        Vec::new()
+    };
+    let ids = prefix.into_iter().chain(start..end);
+
+    for i in ids {
         let id = Id::from(i);
         // Clone just this node: translating needs `ctxt` mutably (the caches),
         // so the node list cannot stay borrowed across the call.
         let node = ctxt.egraph.id_to_node(id).clone();
-        if matches!(node, Symbolic::Forall(..)) {
+        if !ctxt.z3translator.include_forall && matches!(node, Symbolic::Forall(..)) {
+            ctxt.z3translator.skipped_forall.push(i);
             continue;
         }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {

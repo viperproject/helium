@@ -1,15 +1,28 @@
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
-use egg::{Analysis, DidMerge, EGraph, Id, Justification};
+use egg::{Analysis, DidMerge, EGraph, Id, Justification, Language};
 use num::BigRational;
 
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::vmir::{BinOp, Literal, MemberId, Type};
 
-/// Const-fold analysis data: a three-state lattice over an e-class's folded
-/// value. **Type-free**: only the literal is tracked (types are reconstructed
-/// for visualization from the side oracle in `verify::context`).
+/// Const-fold analysis data: the e-class's folded [`Value`], plus whether the
+/// class reaches a quantifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Data {
+    pub value: Value,
+    /// The class holds a [`Symbolic::Forall`] node, or a node with a child
+    /// class that [reaches](Data::reaches_forall) one. An over-approximation:
+    /// it is OR-ed on merge and never cleared, so a parent keeps it after the
+    /// child folds to a literal. Read by the Z3 rung to decide whether a goal
+    /// needs the quantifiers it otherwise leaves out.
+    pub has_forall: bool,
+}
+
+/// A three-state lattice over an e-class's folded value. **Type-free**: only
+/// the literal is tracked (types are reconstructed for visualization from the
+/// side oracle in `verify::context`).
 ///
 /// - `Unknown`: not (yet) a constant.
 /// - `Known(lit)`: folds to `lit`.
@@ -24,7 +37,7 @@ use crate::vmir::{BinOp, Literal, MemberId, Type};
 ///   contradictory. Merging across *different* types is instead a verifier panic:
 ///   a type error, not a fact about the program.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Data {
+pub enum Value {
     Unknown,
     Known(Literal),
     Ctor(FuncId, Box<[Type]>),
@@ -39,8 +52,8 @@ pub enum Data {
 /// The constructor half rests on **free constructors** — distinct variants of one
 /// ADT head at one instantiation are disjoint. That is the same premise
 /// [`ConstFold::make`] uses to fold a `Ctor == Ctor` comparison to `false` and
-/// [`ConstFold::merge`] uses to declare a class [`Data::Inconsistent`] (see the
-/// [`Data`] doc). If the ADT encoding ever gains non-free constructors, all three
+/// [`ConstFold::merge`] uses to declare a class [`Value::Inconsistent`] (see the
+/// [`Value`] doc). If the ADT encoding ever gains non-free constructors, all three
 /// sites break together.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Fingerprint<'a> {
@@ -76,8 +89,8 @@ impl Fingerprint<'_> {
 impl Data {
     /// The folded literal, if this e-class is a known constant.
     pub fn known(&self) -> Option<&Literal> {
-        match self {
-            Data::Known(lit) => Some(lit),
+        match &self.value {
+            Value::Known(lit) => Some(lit),
             _ => None,
         }
     }
@@ -86,16 +99,24 @@ impl Data {
     /// (nothing pinned) and for `Inconsistent` (the graph is already
     /// contradictory; other machinery handles it).
     pub fn fingerprint(&self) -> Option<Fingerprint<'_>> {
-        match self {
-            Data::Known(lit) => Some(Fingerprint::Lit(lit)),
-            Data::Ctor(f, tys) => Some(Fingerprint::Ctor(*f, tys)),
-            Data::Unknown | Data::Inconsistent => None,
+        match &self.value {
+            Value::Known(lit) => Some(Fingerprint::Lit(lit)),
+            Value::Ctor(f, tys) => Some(Fingerprint::Ctor(*f, tys)),
+            Value::Unknown | Value::Inconsistent => None,
         }
     }
 
     /// Whether this e-class merged conflicting same-typed literals.
     pub fn is_inconsistent(&self) -> bool {
-        matches!(self, Data::Inconsistent)
+        matches!(self.value, Value::Inconsistent)
+    }
+
+    /// Whether a quantifier may still decide this class's value. A class that
+    /// folded to a literal does not count: its value is a fact of its own. That
+    /// also keeps the bit from spreading through `true`, which every assumed
+    /// quantifier and every proven goal merges with.
+    pub fn reaches_forall(&self) -> bool {
+        self.has_forall && self.known().is_none()
     }
 }
 
@@ -139,7 +160,81 @@ impl Analysis<Symbolic> for ConstFold {
     type Data = Data;
 
     fn make(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, _id: Id) -> Self::Data {
-        use Data::{Ctor, Inconsistent, Known, Unknown};
+        let has_forall = matches!(enode, Symbolic::Forall(..))
+            || enode
+                .children()
+                .iter()
+                .any(|&c| egraph[c].data.reaches_forall());
+        Data {
+            value: Self::make_value(egraph, enode),
+            has_forall,
+        }
+    }
+
+    fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
+        let forall = DidMerge(
+            !a.has_forall && b.has_forall,
+            a.has_forall && !b.has_forall,
+        );
+        a.has_forall |= b.has_forall;
+        self.merge_value(&mut a.value, b.value) | forall
+    }
+
+    /// When `union_log` is on, record the classes whose nodes will read
+    /// differently after this union: the root that survives (it gains nodes),
+    /// the parents of the class absorbed (a child's identity changes), and the
+    /// parents of the survivor if its value changes. egg keeps the class with
+    /// more parents as the root, the first on a tie; were that to change, only
+    /// which classes get walked again would, never what a walk may derive.
+    ///
+    /// Only the value counts as a change: no bucket rule reads `has_forall`.
+    fn pre_union(egraph: &EGraph<Symbolic, Self>, id1: Id, id2: Id, _: &Option<Justification>) {
+        let mut log = egraph.analysis.union_log.borrow_mut();
+        let Some(log) = log.as_mut() else {
+            return;
+        };
+        let (a, b) = (egraph.find(id1), egraph.find(id2));
+        if a == b {
+            return;
+        }
+        let (keep, gone) = if egraph[a].parents().len() < egraph[b].parents().len() {
+            (b, a)
+        } else {
+            (a, b)
+        };
+        log.push(keep);
+        log.extend(egraph[gone].parents());
+        let (kept, absorbed) = (&egraph[keep].data.value, &egraph[gone].data.value);
+        if kept != absorbed && *absorbed != Value::Unknown && *kept != Value::Inconsistent {
+            log.extend(egraph[keep].parents());
+        }
+    }
+
+    fn modify(egraph: &mut EGraph<Symbolic, Self>, id: Id) {
+        match egraph[id].data.value.clone() {
+            Value::Known(lit) => {
+                let lit_id = egraph.add(Symbolic::Lit(lit));
+                egraph.union(id, lit_id);
+            }
+            // One contradictory class makes the whole graph contradictory, so
+            // record that *in the graph* — `true == false` — and callers decide
+            // it with two `find`s instead of scanning every class. The merged
+            // class is itself `Inconsistent` (a same-typed `Bool` conflict), so
+            // this re-fires on it once and then unions an already-merged pair.
+            Value::Inconsistent => {
+                let t = egraph.add(Symbolic::Lit(Literal::Bool(true)));
+                let f = egraph.add(Symbolic::Lit(Literal::Bool(false)));
+                egraph.union(t, f);
+            }
+            Value::Unknown | Value::Ctor(..) => {}
+        }
+    }
+}
+
+impl ConstFold {
+    /// The [`Value`] half of [`Analysis::make`].
+    fn make_value(egraph: &EGraph<Symbolic, Self>, enode: &Symbolic) -> Value {
+        use Value::{Ctor, Inconsistent, Known, Unknown};
         match enode {
             Symbolic::Lit(lit) => Known(lit.clone()),
 
@@ -152,14 +247,14 @@ impl Analysis<Symbolic> for ConstFold {
             // payload or its capture children.
             Symbolic::Fresh(_) | Symbolic::FuncApp(..) | Symbolic::Forall(..) => Unknown,
 
-            Symbolic::RealCast(c) => match &egraph[*c].data {
+            Symbolic::RealCast(c) => match &egraph[*c].data.value {
                 Known(Literal::Int(n)) => Known(Literal::Real(BigRational::from(n.clone()))),
                 Known(_) | Ctor(..) => unreachable!("RealCast operand must be an integer literal"),
                 Inconsistent => Inconsistent,
                 Unknown => Unknown,
             },
 
-            Symbolic::Binary(op, [l, r]) => match (&egraph[*l].data, &egraph[*r].data) {
+            Symbolic::Binary(op, [l, r]) => match (&egraph[*l].data.value, &egraph[*r].data.value) {
                 (Inconsistent, _) | (_, Inconsistent) => Inconsistent,
                 // Disequality of constructors: distinct constructors of one ADT
                 // are distinct values, so an `==` between them folds to `false`
@@ -177,9 +272,9 @@ impl Analysis<Symbolic> for ConstFold {
                 _ => Unknown,
             },
 
-            Symbolic::Ite([c, t, e]) => match &egraph[*c].data {
-                Known(Literal::Bool(true)) => egraph[*t].data.clone(),
-                Known(Literal::Bool(false)) => egraph[*e].data.clone(),
+            Symbolic::Ite([c, t, e]) => match &egraph[*c].data.value {
+                Known(Literal::Bool(true)) => egraph[*t].data.value.clone(),
+                Known(Literal::Bool(false)) => egraph[*e].data.value.clone(),
                 Known(_) | Ctor(..) => unreachable!("Condition of ITE must be a boolean literal"),
                 Inconsistent => Inconsistent,
                 Unknown => Unknown,
@@ -187,8 +282,9 @@ impl Analysis<Symbolic> for ConstFold {
         }
     }
 
-    fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
-        use Data::{Ctor, Inconsistent, Known, Unknown};
+    /// The [`Value`] half of [`Analysis::merge`].
+    fn merge_value(&self, a: &mut Value, b: Value) -> DidMerge {
+        use Value::{Ctor, Inconsistent, Known, Unknown};
         match (&*a, &b) {
             (Inconsistent, Inconsistent) => DidMerge(false, false),
             (Inconsistent, _) => DidMerge(false, true),
@@ -243,54 +339,6 @@ impl Analysis<Symbolic> for ConstFold {
             }
             (Known(_), Unknown) => DidMerge(false, true),
             (Unknown, Unknown) => DidMerge(false, false),
-        }
-    }
-
-    /// When `union_log` is on, record the classes whose nodes will read
-    /// differently after this union: the root that survives (it gains nodes),
-    /// the parents of the class absorbed (a child's identity changes), and the
-    /// parents of the survivor if its data changes. egg keeps the class with more
-    /// parents as the root, the first on a tie; were that to change, only which
-    /// classes get walked again would, never what a walk may derive.
-    fn pre_union(egraph: &EGraph<Symbolic, Self>, id1: Id, id2: Id, _: &Option<Justification>) {
-        let mut log = egraph.analysis.union_log.borrow_mut();
-        let Some(log) = log.as_mut() else {
-            return;
-        };
-        let (a, b) = (egraph.find(id1), egraph.find(id2));
-        if a == b {
-            return;
-        }
-        let (keep, gone) = if egraph[a].parents().len() < egraph[b].parents().len() {
-            (b, a)
-        } else {
-            (a, b)
-        };
-        log.push(keep);
-        log.extend(egraph[gone].parents());
-        let (kept, absorbed) = (&egraph[keep].data, &egraph[gone].data);
-        if kept != absorbed && *absorbed != Data::Unknown && *kept != Data::Inconsistent {
-            log.extend(egraph[keep].parents());
-        }
-    }
-
-    fn modify(egraph: &mut EGraph<Symbolic, Self>, id: Id) {
-        match egraph[id].data.clone() {
-            Data::Known(lit) => {
-                let lit_id = egraph.add(Symbolic::Lit(lit));
-                egraph.union(id, lit_id);
-            }
-            // One contradictory class makes the whole graph contradictory, so
-            // record that *in the graph* — `true == false` — and callers decide
-            // it with two `find`s instead of scanning every class. The merged
-            // class is itself `Inconsistent` (a same-typed `Bool` conflict), so
-            // this re-fires on it once and then unions an already-merged pair.
-            Data::Inconsistent => {
-                let t = egraph.add(Symbolic::Lit(Literal::Bool(true)));
-                let f = egraph.add(Symbolic::Lit(Literal::Bool(false)));
-                egraph.union(t, f);
-            }
-            Data::Unknown | Data::Ctor(..) => {}
         }
     }
 }
