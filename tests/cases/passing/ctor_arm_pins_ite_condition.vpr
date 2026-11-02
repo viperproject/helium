@@ -6,8 +6,11 @@
 // same premise `ConstFold` uses to fold a `Ctor == Ctor` comparison to `false`
 // and to declare a two-constructor class inconsistent.
 //
-// The negative half (identical arms, same-constructor arms, and the arm that
-// *does* match) lives in `failing/ctor_ite_*_pins_nothing.vpr`.
+// The negative half (identical arms and the arm that *does* match) lives in
+// `failing/ctor_ite_identical_arms_pin_nothing.vpr` and
+// `failing/ctor_ite_matching_arm_pins_no_polarity.vpr`. Same-constructor arms with differing
+// payloads entail the condition by injectivity, so that case is in
+// `passing/ctor_ite_same_ctor_arms_pin_nothing.vpr`.
 
 adt SH { c0() c1(x: Int) }
 

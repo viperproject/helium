@@ -4,6 +4,7 @@ use prove::BlockScratch;
 
 use crate::dhash::HashMap;
 
+use crate::verify::z3::Z3Translation;
 use crate::{
     verify::{
         analysis::ConstFold,
@@ -129,6 +130,9 @@ pub(crate) struct VerifyContext<'a> {
     /// Unlike [`Self::is_inconsistent`] this is a fact about the *scratch*, so it
     /// must never be consulted outside the block that established it.
     block_dead: bool,
+
+    /// Sort and datatype caches of the Z3 translation (`verify::z3`).
+    pub(crate) z3translator: Z3Translation,
 }
 
 /// Whether any declaration uses a `wildcard` permission. Scanned once per unit at
@@ -200,6 +204,7 @@ impl<'a> VerifyContext<'a> {
             in_block: false,
             scratch: None,
             block_dead: false,
+            z3translator: Z3Translation::default(),
         }
     }
 

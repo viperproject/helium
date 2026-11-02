@@ -7,7 +7,8 @@
 //! The same line is a plain string in the binary, so a binary that cannot be
 //! run can be checked with `strings verify | grep helium-build`.
 //!
-//! `--breakdown` (`-b`) prints per-member verify times, slowest first.
+//! `--breakdown` (`-b`) prints per-member verify times, slowest first, then
+//! rule timings and the Z3 rung's build/solve time.
 //!
 //! `--json` prints one JSON object on stdout instead of the text rows: every
 //! member's status, the phase timings, per-member verify times, the full
@@ -266,4 +267,10 @@ fn print_breakdown(member_times: &[(String, Duration)], stats: &VerifyStats) {
             t.apply * 1e3
         );
     }
+    let z3 = stats.z3_timing.0;
+    eprintln!(
+        "[Z3-TIMING] build {:>8.1}ms  solve {:>8.1}ms",
+        z3.build * 1e3,
+        z3.solve * 1e3
+    );
 }
