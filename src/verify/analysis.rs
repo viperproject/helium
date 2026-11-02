@@ -172,10 +172,7 @@ impl Analysis<Symbolic> for ConstFold {
     }
 
     fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
-        let forall = DidMerge(
-            !a.has_forall && b.has_forall,
-            a.has_forall && !b.has_forall,
-        );
+        let forall = DidMerge(!a.has_forall && b.has_forall, a.has_forall && !b.has_forall);
         a.has_forall |= b.has_forall;
         self.merge_value(&mut a.value, b.value) | forall
     }
@@ -254,23 +251,25 @@ impl ConstFold {
                 Unknown => Unknown,
             },
 
-            Symbolic::Binary(op, [l, r]) => match (&egraph[*l].data.value, &egraph[*r].data.value) {
-                (Inconsistent, _) | (_, Inconsistent) => Inconsistent,
-                // Disequality of constructors: distinct constructors of one ADT
-                // are distinct values, so an `==` between them folds to `false`
-                // outright. No tester term and no distinctness axiom needed — the
-                // constructor identity is right there in the operand's e-class.
-                (Ctor(f, ftys), Ctor(g, gtys))
-                    if *op == BinOp::Eq
-                        && f != g
-                        && ftys == gtys
-                        && egraph.analysis.head_of(*f) == egraph.analysis.head_of(*g) =>
-                {
-                    Known(Literal::Bool(false))
+            Symbolic::Binary(op, [l, r]) => {
+                match (&egraph[*l].data.value, &egraph[*r].data.value) {
+                    (Inconsistent, _) | (_, Inconsistent) => Inconsistent,
+                    // Disequality of constructors: distinct constructors of one ADT
+                    // are distinct values, so an `==` between them folds to `false`
+                    // outright. No tester term and no distinctness axiom needed — the
+                    // constructor identity is right there in the operand's e-class.
+                    (Ctor(f, ftys), Ctor(g, gtys))
+                        if *op == BinOp::Eq
+                            && f != g
+                            && ftys == gtys
+                            && egraph.analysis.head_of(*f) == egraph.analysis.head_of(*g) =>
+                    {
+                        Known(Literal::Bool(false))
+                    }
+                    (Known(lv), Known(rv)) => eval_binary(*op, lv, rv).map_or(Unknown, Known),
+                    _ => Unknown,
                 }
-                (Known(lv), Known(rv)) => eval_binary(*op, lv, rv).map_or(Unknown, Known),
-                _ => Unknown,
-            },
+            }
 
             Symbolic::Ite([c, t, e]) => match &egraph[*c].data.value {
                 Known(Literal::Bool(true)) => egraph[*t].data.value.clone(),
