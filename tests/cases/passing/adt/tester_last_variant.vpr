@@ -87,6 +87,59 @@ method one_negation_leaves_disjunction(s: Shape)
     assert s.isCircle || s.isSquare
 }
 
+// The disjunction query over the variants left open: with the trailing
+// variants false, the leading ones are the only candidates.
+method trailing_false_leaves_disjunction(c: Suit)
+{
+    assume !c.isClubs
+    assume !c.isSpades
+    assert c.isHearts || c.isDiamonds
+}
+
+method trailing_false_leaves_disjunction_conj(c: Suit)
+{
+    assume !c.isClubs && !c.isSpades
+    assert c.isHearts || c.isDiamonds
+}
+
+// The open variants need not be adjacent.
+method scattered_false_leaves_disjunction(c: Suit)
+{
+    assume !c.isHearts
+    assume !c.isClubs
+    assert c.isDiamonds || c.isSpades
+}
+
+// One variant false leaves a three-way disjunction.
+method one_false_leaves_three_way_disjunction(c: Suit)
+{
+    assume !c.isSpades
+    assert c.isHearts || c.isDiamonds || c.isClubs
+}
+
+// The open variants, queried in another order.
+method disjunction_order_irrelevant(c: Suit)
+{
+    assume !c.isHearts && !c.isDiamonds
+    assert c.isSpades || c.isClubs
+}
+
+// The negative testers come from an equal value.
+method disjunction_through_equality(c: Suit, d: Suit)
+{
+    assume c == d
+    assume !d.isClubs && !d.isSpades
+    assert c.isHearts || c.isDiamonds
+}
+
+// The negative testers come from preconditions, the query is a postcondition.
+method disjunction_as_postcondition(c: Suit)
+    requires !c.isClubs
+    requires !c.isSpades
+    ensures c.isHearts || c.isDiamonds
+{
+}
+
 // The last-variant fact feeds a branch: only the else branch is reachable.
 method last_variant_prunes_branch(s: Shape) returns (r: Int)
     requires !s.isCircle && !s.isTri

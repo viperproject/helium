@@ -1,0 +1,14 @@
+// Ruling out variants of `d` says nothing about `c`.
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method no_leak(c: Suit, d: Suit)
+{
+    assume !d.isClubs && !d.isSpades
+    assert c.isHearts || c.isDiamonds
+}

@@ -1,0 +1,15 @@
+// With Clubs and Spades false, Hearts and Diamonds are open: a disjunction that
+// swaps one of them for a ruled-out variant leaves Diamonds uncovered.
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method includes_ruled_out(c: Suit)
+{
+    assume !c.isClubs && !c.isSpades
+    assert c.isHearts || c.isClubs
+}
