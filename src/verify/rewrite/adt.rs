@@ -1,4 +1,4 @@
-//! ADT rules: projection, injectivity and tester reductions plus tester
+//! ADT rules: projection, accessor and tester reductions plus tester
 //! exclusivity, minted per concept by the `FuncRegistry`, and the shared
 //! op-indexed searcher they use.
 
@@ -27,22 +27,22 @@ pub fn proj_rule(accessor: FuncId, ctor: FuncId, index: usize) -> Rule {
     )
 }
 
-/// Build the injectivity rule for one constructor: an e-class holding two
-/// applications of the same constructor unions their arguments pairwise
-/// (`C(a..) ≡ C(b..) ⟹ aᵢ ≡ bᵢ`). Sound because ADT constructors are free.
+/// Build the accessor rule for one constructor: every application
+/// `C(a₀, …, aₙ)` gets its accessors, `C.i(C(a₀, …, aₙ)) ≡ aᵢ`. `accessors` is
+/// indexed by field.
 ///
-/// Congruence runs only *forward*, and [`proj_rule`] recovers the backward
-/// direction only where a `projᵢ` application exists. Two constructor terms can
-/// land in one class with no projection over them, and then the component
-/// equalities are reachable only through this rule.
-pub fn inj_rule(ctor: FuncId) -> Rule {
+/// This subsumes injectivity: two applications `C(a..) ≡ C(b..)` share one class
+/// `x`, so they share the one node `C.i(x)`, which is then equal to both `aᵢ`
+/// and `bᵢ`. Congruence alone runs only *forward*; the accessor terms give the
+/// backward direction even where the program never projects.
+pub fn accessor_rule(ctor: FuncId, accessors: Box<[FuncId]>) -> Rule {
     timed(
         Rewrite::new(
-            format!("inj-{}", ctor.0),
+            format!("accessor-{}", ctor.0),
             AxiomTriggerSearcher { func: ctor },
-            InjApplier { ctor },
+            AccessorApplier { ctor, accessors },
         )
-        .expect("valid injectivity rewrite"),
+        .expect("valid accessor rewrite"),
     )
 }
 
@@ -380,15 +380,17 @@ impl Applier<Symbolic, ConstFold> for IsExclApplier {
     }
 }
 
-/// Applier for [`inj_rule`]: unions the arguments of every pair of same-ctor
-/// applications sharing the matched e-class. Grouped by type args — two
-/// instantiations of a generic constructor are different operators, and only
-/// same-operator applications are congruent.
-pub(super) struct InjApplier {
+/// Applier for [`accessor_rule`]: for every application of `ctor` in the matched
+/// e-class, adds `accessorᵢ(class)` at the application's own type args and
+/// unions it with the `i`-th argument. The accessor node is hash-consed, so after
+/// the first application it is a lookup and a no-op union.
+pub(super) struct AccessorApplier {
     pub(super) ctor: FuncId,
+    /// The constructor's field accessors, indexed by field.
+    pub(super) accessors: Box<[FuncId]>,
 }
 
-impl Applier<Symbolic, ConstFold> for InjApplier {
+impl Applier<Symbolic, ConstFold> for AccessorApplier {
     fn apply_one(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
@@ -397,26 +399,35 @@ impl Applier<Symbolic, ConstFold> for InjApplier {
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
-        // One representative application per type instantiation; every later one
-        // is unioned against it argument-wise (transitivity covers the rest).
-        let mut reps: Vec<(Box<[Type]>, Box<[Id]>)> = Vec::new();
-        let mut pairs: Vec<(Id, Id)> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, tys, args) = node else {
-                continue;
-            };
-            if *f != self.ctor {
-                continue;
-            }
-            match reps.iter().find(|(t, _)| t == tys) {
-                Some((_, rep)) => pairs.extend(rep.iter().copied().zip(args.iter().copied())),
-                None => reps.push((tys.clone(), args.clone())),
-            }
-        }
+        let x = egraph.find(eclass);
+        // Collect first: the adds and unions below need `&mut egraph`. An
+        // accessor is applied at its constructor's type args, so each
+        // application carries the ones its accessor terms need.
+        let apps: Vec<(Box<[Type]>, Box<[Id]>)> = egraph[x]
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Symbolic::FuncApp(f, tys, args) if *f == self.ctor => {
+                    Some((tys.clone(), args.clone()))
+                }
+                _ => None,
+            })
+            .collect();
         let mut changed = Vec::new();
-        for (a, b) in pairs {
-            if egraph.union(a, b) {
-                changed.push(egraph.find(a));
+        for (tys, args) in apps {
+            assert_eq!(
+                args.len(),
+                self.accessors.len(),
+                "constructor {:?} applied to {} args but has {} accessors",
+                self.ctor,
+                args.len(),
+                self.accessors.len()
+            );
+            for (&accessor, &arg) in self.accessors.iter().zip(&args) {
+                let app = egraph.add(Symbolic::FuncApp(accessor, tys.clone(), Box::new([x])));
+                if egraph.union(app, arg) {
+                    changed.push(egraph.find(arg));
+                }
             }
         }
         changed

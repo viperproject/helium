@@ -135,7 +135,7 @@ impl Applier<Symbolic, ConstFold> for EqFalseMirrorApplier {
 /// asymmetry), so we fire **only when the disjunction collapses to a unit**:
 /// when every argument pair but one is already proven equal (`aᵢ ≡ bᵢ`), the
 /// lone remaining pair must differ — `aⱼ == bⱼ` is false. Sound for **any** `f`,
-/// injective or not; unlike [`inj_rule`] the contrapositive of congruence needs
+/// injective or not; unlike [`accessor_rule`] the contrapositive of congruence needs
 /// no free constructor.
 ///
 /// Connects an unboxed comparison to its boxed source: `value(v) != 0` with the

@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
-use crate::verify::rewrite::{inj_rule, is_excl_rule, is_rule, proj_rule};
+use crate::verify::rewrite::{accessor_rule, is_excl_rule, is_rule, proj_rule};
 use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
@@ -206,7 +206,7 @@ impl FuncRegistry {
 
         let rules = vec![
             proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
-            inj_rule(BUILTIN_OPTION_SOME),
+            accessor_rule(BUILTIN_OPTION_SOME, Box::new([BUILTIN_OPTION_VALUE])),
             is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
         ];
         let mut ctor_head = HashMap::default();
@@ -401,9 +401,7 @@ impl FuncRegistry {
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);
 
-            if fields > 0 {
-                self.rules.push(inj_rule(cons_id));
-            }
+            let mut accessors = Vec::with_capacity(fields);
             for field in 0..fields {
                 let proj_id = self.mint(
                     format!("{cons_label}.{field}"),
@@ -415,6 +413,10 @@ impl FuncRegistry {
                 );
                 self.proj.insert((adt, variant, field), proj_id);
                 self.rules.push(proj_rule(proj_id, cons_id, field));
+                accessors.push(proj_id);
+            }
+            if fields > 0 {
+                self.rules.push(accessor_rule(cons_id, accessors.into()));
             }
         }
 
