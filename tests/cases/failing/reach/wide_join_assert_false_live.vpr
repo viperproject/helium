@@ -1,0 +1,32 @@
+// SOUNDNESS CANARY for the reach of a wide join. Seven arms reach `tgt`, with
+// path cubes of length 1..7, and every arm is FEASIBLE, so `assert false` must
+// fail. Accepting it means the join's reach condition was decided false (a
+// mis-built disjunction over the arms) or a live cube was wrongly refuted.
+//
+// Both arms of every `if` end in a `goto`: a fall-through `if` is tail-duplicated
+// into single-cube paths and never forms the multi-cube join this exercises.
+//
+// Ported from backend-blocks-perf 38b84da (also rejected by Silicon 3.1.0).
+//
+// Must FAIL.
+method m(x: Int)
+{
+  if (x == 1) { goto tgt } else { goto next1 }
+  label next1
+  if (x == 2) { goto tgt } else { goto next2 }
+  label next2
+  if (x == 3) { goto tgt } else { goto next3 }
+  label next3
+  if (x == 4) { goto tgt } else { goto next4 }
+  label next4
+  if (x == 5) { goto tgt } else { goto next5 }
+  label next5
+  if (x == 6) { goto tgt } else { goto next6 }
+  label next6
+  if (x == 7) { goto tgt } else { goto fin0 }
+  label fin0
+  goto fin
+  label tgt
+  assert false
+  label fin
+}

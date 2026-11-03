@@ -1,0 +1,13 @@
+// REGRESSION GUARD (soundness). Without `x != y` the two field locations may be
+// one, holding `1/2 + 1/2`: `perm(x.f) == 1/2` is not provable.
+//
+// Ported from backend-blocks-perf (location identity).
+//
+// Must FAIL.
+field f: Int
+
+method fields_may_alias(x: Ref, y: Ref)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  assert perm(x.f) == 1/2
+}
