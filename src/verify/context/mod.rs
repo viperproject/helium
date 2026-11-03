@@ -621,6 +621,32 @@ pub(super) fn graph_inconsistent(egraph: &egg::EGraph<Symbolic, ConstFold>) -> b
     egraph.find(t) == egraph.find(f)
 }
 
+/// Iterations one rule run may take. A termination bound: quantifier
+/// instantiation and function unfolding make the rule set non-terminating
+/// (matching loops, unfolding a recursive definition), and every iteration is
+/// finite, so this ends every run. Checked between iterations, so a stopped run
+/// holds every derivation of depth up to the limit, whatever the rule order.
+const ITER_LIMIT: usize = 100;
+
+/// E-nodes one rule run may add, counted from the graph it started on. Also a
+/// termination bound: the iteration limit ends a run, but not in bounded memory —
+/// a quantifier whose instance mints two new trigger terms doubles the graph
+/// every iteration (`forall i :: {f(i)} f(i) == (f(2*i) && f(2*i+1))`), so a
+/// hundred iterations of it never finish. Counting from the entry size makes
+/// the bound measure what the run derives: the graph the program built, however
+/// large, does not stop a run that derives little. Checked between iterations,
+/// like `ITER_LIMIT`, so one large iteration is never cut short.
+///
+/// Sized as a backstop for divergence only: an order of magnitude above the
+/// growth of every terminating run measured (up to ~300k nodes over several
+/// iterations), which a smaller bound would truncate — and a truncated run is
+/// not just incomplete but costly, since every later probe clones the
+/// unfinished graph and redoes the rest.
+const GROWTH_LIMIT: usize = 1_000_000;
+
+/// The `Runner` stop reason of [`GROWTH_LIMIT`].
+const GROWTH_STOP: &str = "growth limit";
+
 pub(super) fn run_rules<'r>(
     egraph: egg::EGraph<Symbolic, ConstFold>,
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
@@ -675,12 +701,18 @@ pub(super) fn run_rules_until<'r>(
     // 119s run and verifying on a 149s one, same binary and input. That also
     // silently falsifies the premise `perf_regression` rests on ("egg is
     // deterministic for a fixed rule set + input") for any program whose
-    // saturation approaches it. Disabled outright — the node and iteration limits
-    // are the real backstops, and unlike a clock they are reproducible.
+    // saturation approaches it. Disabled outright.
+    //
+    // egg's node limit is off too: it bounds the graph's *size*, so on a graph
+    // the program alone made large every run stopped before its first iteration,
+    // and it is checked between rules, so a run that crossed it kept only the
+    // rules ordered first. The two termination bounds are `ITER_LIMIT` and
+    // `GROWTH_LIMIT`, both checked between iterations (see their docs).
+    let entry_size = egraph.total_size();
     let mut runner = egg::Runner::default()
         .with_scheduler(egg::SimpleScheduler)
-        .with_node_limit(100_000)
-        .with_iter_limit(iter_limit.unwrap_or(100))
+        .with_node_limit(usize::MAX)
+        .with_iter_limit(iter_limit.unwrap_or(ITER_LIMIT))
         .with_time_limit(std::time::Duration::MAX)
         .with_egraph(egraph)
         // Contradiction reached mid-run: every remaining iteration is spent
@@ -689,6 +721,12 @@ pub(super) fn run_rules_until<'r>(
             if graph_inconsistent(&r.egraph) {
                 stats::bump(|s| s.probe_early_stops += 1);
                 return Err("inconsistent".to_owned());
+            }
+            Ok(())
+        })
+        .with_hook(move |r| {
+            if r.egraph.total_size().saturating_sub(entry_size) > GROWTH_LIMIT {
+                return Err(GROWTH_STOP.to_owned());
             }
             Ok(())
         });
@@ -707,5 +745,114 @@ pub(super) fn run_rules_until<'r>(
         });
     }
     let runner = runner.run(rules);
+    let bound_stop = match &runner.stop_reason {
+        Some(egg::StopReason::IterationLimit(_)) => true,
+        Some(egg::StopReason::Other(why)) => why == GROWTH_STOP,
+        _ => false,
+    };
+    if bound_stop {
+        stats::bump(|s| s.sat_bound_stops += 1);
+    }
     (runner.egraph, runner.iterations)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vmir::BinOp;
+    use egg::{EGraph, Id, rewrite as rw};
+    use num::BigInt;
+
+    type Graph = EGraph<Symbolic, ConstFold>;
+
+    fn int(g: &mut Graph, n: i64) -> Id {
+        g.add(Symbolic::Lit(Literal::Int(BigInt::from(n))))
+    }
+
+    /// `x - 1` for a fresh `x`: the term [`divergent`] matches.
+    fn seed(g: &mut Graph, x: u32) -> Id {
+        let (x, one) = (g.add(Symbolic::Fresh(x)), int(g, 1));
+        g.add(Symbolic::Binary(BinOp::SubI, [x, one]))
+    }
+
+    /// A rule set that never saturates and doubles the graph every iteration, as a
+    /// quantifier does whose instance mints two new trigger terms: each `x - 1`
+    /// yields `(x + x) - 1` and `(x * x) - 1`, over two classes nothing merges.
+    fn divergent() -> egg::Rewrite<Symbolic, ConstFold> {
+        rw!("divergent"; "(-i ?x 1)" => "(+i (-i (+i ?x ?x) 1) (-i (*i ?x ?x) 1))")
+    }
+
+    fn add_zero() -> egg::Rewrite<Symbolic, ConstFold> {
+        rw!("add-zero"; "(+i ?x 0)" => "?x")
+    }
+
+    /// `y + 0` for a fresh `y`, the redex of [`add_zero`].
+    fn redex(g: &mut Graph, y: u32) -> (Id, Id) {
+        let (y, zero) = (g.add(Symbolic::Fresh(y)), int(g, 0));
+        (y, g.add(Symbolic::Binary(BinOp::AddI, [y, zero])))
+    }
+
+    fn stopped_by_growth(its: &[egg::Iteration<()>]) -> bool {
+        matches!(
+            its.last().and_then(|it| it.stop_reason.as_ref()),
+            Some(egg::StopReason::Other(why)) if why == GROWTH_STOP
+        )
+    }
+
+    /// The iteration limit alone would let this run reach 2^100 nodes; the growth
+    /// limit ends it within one iteration of crossing the bound.
+    #[test]
+    fn growth_limit_ends_a_divergent_run() {
+        let mut g = Graph::default();
+        seed(&mut g, 0);
+        g.rebuild();
+        let (g, its) = run_rules(g, &[divergent()], None);
+        assert!(
+            stopped_by_growth(&its),
+            "{:?}",
+            its.last().map(|i| &i.stop_reason)
+        );
+        assert!(its.len() < ITER_LIMIT);
+        assert!(
+            g.total_size() <= 3 * GROWTH_LIMIT,
+            "{} nodes",
+            g.total_size()
+        );
+    }
+
+    /// The bound counts what the run adds, not the graph it starts on: a graph
+    /// the program alone made larger than the bound still gets its rules run.
+    #[test]
+    fn growth_limit_ignores_the_entry_size() {
+        let mut g = Graph::default();
+        for x in 0..(GROWTH_LIMIT + 1000) as u32 {
+            g.add(Symbolic::Fresh(x));
+        }
+        let (y, sum) = redex(&mut g, u32::MAX);
+        g.rebuild();
+        let (g, its) = run_rules(g, &[add_zero()], None);
+        assert!(matches!(
+            its.last().and_then(|it| it.stop_reason.as_ref()),
+            Some(egg::StopReason::Saturated)
+        ));
+        assert_eq!(g.find(sum), g.find(y));
+    }
+
+    /// A run stopped by the growth limit still finishes the iteration that crossed
+    /// it, so what it derived does not depend on where a rule sits in the rule
+    /// list: `add-zero`, ordered after the rule that crosses the bound, fires.
+    #[test]
+    fn growth_limit_stops_between_iterations() {
+        let mut g = Graph::default();
+        // One step of `divergent` adds 6 nodes per seed.
+        for x in 0..(GROWTH_LIMIT / 4) as u32 {
+            seed(&mut g, x);
+        }
+        let (y, sum) = redex(&mut g, u32::MAX);
+        g.rebuild();
+        let (g, its) = run_rules(g, &[divergent(), add_zero()], None);
+        assert!(stopped_by_growth(&its));
+        assert_eq!(its.len(), 2, "one full iteration, then the stop");
+        assert_eq!(g.find(sum), g.find(y));
+    }
 }
