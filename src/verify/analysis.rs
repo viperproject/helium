@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
 use egg::{Analysis, DidMerge, EGraph, Id, Justification};
+use itertools::Itertools;
 use num::BigRational;
-
+use crate::HashSet;
+use crate::verify::analysis::Data::Adt;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::vmir::{BinOp, Literal, MemberId, Type};
 
@@ -24,10 +27,20 @@ use crate::vmir::{BinOp, Literal, MemberId, Type};
 ///   contradictory. Merging across *different* types is instead a verifier panic:
 ///   a type error, not a fact about the program.
 #[derive(Debug, Clone, PartialEq)]
+pub struct AdtData {
+    /// The type of the ADT, e.g. List
+    pub head: MemberId,
+    /// The generic instantiation of the ADT
+    pub tys: Box<[Type]>,
+    /// The possible variants, by constructor id
+    pub possible: BTreeSet<FuncId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Data {
     Unknown,
     Known(Literal),
-    Ctor(FuncId, Box<[Type]>),
+    Adt(AdtData),
     Inconsistent,
 }
 
@@ -45,7 +58,12 @@ pub enum Data {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Fingerprint<'a> {
     Lit(&'a Literal),
-    Ctor(FuncId, &'a [Type]),
+    /// The variants the value may be, at one instantiation of one head.
+    Adt {
+        head: MemberId,
+        tys: &'a [Type],
+        possible: &'a BTreeSet<FuncId>,
+    },
 }
 
 impl Fingerprint<'_> {
@@ -67,7 +85,10 @@ impl Fingerprint<'_> {
     pub fn differs_from(&self, other: &Self) -> bool {
         match (self, other) {
             (Fingerprint::Lit(a), Fingerprint::Lit(b)) => a != b,
-            (Fingerprint::Ctor(f, ftys), Fingerprint::Ctor(g, gtys)) => f != g && ftys == gtys,
+            (
+                Fingerprint::Adt { head: h1, tys: t1, possible: p1 },
+                Fingerprint::Adt { head: h2, tys: t2, possible: p2 },
+            ) => h1 == h2 && t1 == t2 && p1.is_disjoint(p2),
             _ => false,
         }
     }
@@ -88,7 +109,12 @@ impl Data {
     pub fn fingerprint(&self) -> Option<Fingerprint<'_>> {
         match self {
             Data::Known(lit) => Some(Fingerprint::Lit(lit)),
-            Data::Ctor(f, tys) => Some(Fingerprint::Ctor(*f, tys)),
+            Data::Adt(adt) => {
+                assert!(!adt.possible.is_empty(), "empty variant set must be `Inconsistent`");
+                Some(Fingerprint::Adt {
+                    head: adt.head.clone(), tys : &adt.tys, possible: &adt.possible,
+                })
+            },
             Data::Unknown | Data::Inconsistent => None,
         }
     }
@@ -139,12 +165,14 @@ impl Analysis<Symbolic> for ConstFold {
     type Data = Data;
 
     fn make(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, _id: Id) -> Self::Data {
-        use Data::{Ctor, Inconsistent, Known, Unknown};
+        use Data::{Adt, Inconsistent, Known, Unknown};
         match enode {
             Symbolic::Lit(lit) => Known(lit.clone()),
 
-            Symbolic::FuncApp(f, tys, _) if egraph.analysis.head_of(*f).is_some() => {
-                Ctor(*f, tys.clone())
+            Symbolic::FuncApp(f, tys, _) if let Some(head) = egraph.analysis.head_of(*f) => {
+                Adt(
+                    AdtData { head,  tys: tys.clone(), possible: BTreeSet::from([f.clone()]) }
+                )
             }
 
             // A quantifier is opaque to constant folding: its truth is decided by
@@ -154,7 +182,7 @@ impl Analysis<Symbolic> for ConstFold {
 
             Symbolic::RealCast(c) => match &egraph[*c].data {
                 Known(Literal::Int(n)) => Known(Literal::Real(BigRational::from(n.clone()))),
-                Known(_) | Ctor(..) => unreachable!("RealCast operand must be an integer literal"),
+                Known(_) | Adt{..} => unreachable!("RealCast operand must be an integer literal"),
                 Inconsistent => Inconsistent,
                 Unknown => Unknown,
             },
@@ -165,11 +193,11 @@ impl Analysis<Symbolic> for ConstFold {
                 // are distinct values, so an `==` between them folds to `false`
                 // outright. No tester term and no distinctness axiom needed — the
                 // constructor identity is right there in the operand's e-class.
-                (Ctor(f, ftys), Ctor(g, gtys))
+                (Adt(lhs), Adt(rhs) )
                     if *op == BinOp::Eq
-                        && f != g
-                        && ftys == gtys
-                        && egraph.analysis.head_of(*f) == egraph.analysis.head_of(*g) =>
+                        && lhs.head == rhs.head
+                        && lhs.tys == rhs.tys
+                        && lhs.possible.is_disjoint(&rhs.possible) =>
                 {
                     Known(Literal::Bool(false))
                 }
@@ -180,7 +208,7 @@ impl Analysis<Symbolic> for ConstFold {
             Symbolic::Ite([c, t, e]) => match &egraph[*c].data {
                 Known(Literal::Bool(true)) => egraph[*t].data.clone(),
                 Known(Literal::Bool(false)) => egraph[*e].data.clone(),
-                Known(_) | Ctor(..) => unreachable!("Condition of ITE must be a boolean literal"),
+                Known(_) | Adt(..) => unreachable!("Condition of ITE must be a boolean literal"),
                 Inconsistent => Inconsistent,
                 Unknown => Unknown,
             },
@@ -188,44 +216,49 @@ impl Analysis<Symbolic> for ConstFold {
     }
 
     fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
-        use Data::{Ctor, Inconsistent, Known, Unknown};
-        match (&*a, &b) {
+        use Data::{Adt, Inconsistent, Known, Unknown};
+        match (&mut *a, &b) {
             (Inconsistent, Inconsistent) => DidMerge(false, false),
             (Inconsistent, _) => DidMerge(false, true),
             (_, Inconsistent) => {
                 *a = Inconsistent;
                 DidMerge(true, false)
             }
-            (Ctor(f, ftys), Ctor(g, gtys)) => {
+            (Adt(a_adt), Adt(b_adt)) => {
                 // Distinctness. Only comparable within one instantiation: the type
                 // args are part of the operator's identity (the polymorphic
                 // e-graph keeps `List[Int]::Nil` and `List[Bool]::Nil` apart by
                 // discriminant), so a clash across instantiations is a type error,
                 // not a contradiction.
-                let (fh, gh) = (self.head_of(*f), self.head_of(*g));
-                if fh != gh || ftys != gtys {
+                if a_adt.head != b_adt.head || a_adt.tys != b_adt.tys {
                     panic!(
                         "type error: merged constructors of different ADTs or \
-                         instantiations: {f:?}{ftys:?} vs {g:?}{gtys:?}"
+                         instantiations: {:?}{:?} vs {:?}{:?}", a_adt.head, a_adt.tys, b_adt.head, b_adt.tys
                     );
                 }
-                if f == g {
-                    DidMerge(false, false)
-                } else {
-                    // Distinct variants of one ADT, same instantiation: free
-                    // constructors are disjoint, so this class is contradictory.
+                let before = a_adt.possible.len();
+                a_adt.possible.retain(|f| b_adt.possible.contains(f));
+                let after = a_adt.possible.len();
+                if after == 0 {
+                    // No variant satisfies both sides: free constructors, contradiction.
                     *a = Inconsistent;
-                    DidMerge(true, true)
+                    return DidMerge(true, true);
                 }
+                // a changed iff it lost a variant; b would change iff the result is
+                // smaller than b (the result is a subset of b, so lengths suffice).
+                DidMerge(after != before, after != b_adt.possible.len())
             }
-            (Ctor(..), Known(lit)) | (Known(lit), Ctor(..)) => {
+            (Adt(..), Known(lit)) => {
                 panic!("type error: merged an ADT constructor with a literal: {lit:?}")
             }
-            (Unknown, Ctor(..)) => {
+            (Known(lit), Adt(..)) => {
+                panic!("type error: merged an ADT constructor with a literal: {lit:?}")
+            }
+            (Unknown, Adt(..)) => {
                 *a = b;
                 DidMerge(true, false)
             }
-            (Ctor(..), Unknown) => DidMerge(false, true),
+            (Adt(..), Unknown) => DidMerge(false, true),
             (Known(x), Known(y)) => {
                 if x == y {
                     DidMerge(false, false)
@@ -290,7 +323,7 @@ impl Analysis<Symbolic> for ConstFold {
                 let f = egraph.add(Symbolic::Lit(Literal::Bool(false)));
                 egraph.union(t, f);
             }
-            Data::Unknown | Data::Ctor(..) => {}
+            Data::Unknown | Data::Adt(..) => {}
         }
     }
 }

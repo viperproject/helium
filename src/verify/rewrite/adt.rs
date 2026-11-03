@@ -2,14 +2,15 @@
 //! exclusivity, minted per concept by the `FuncRegistry`, and the shared
 //! op-indexed searcher they use.
 
+use std::collections::BTreeSet;
 use crate::dhash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
-use crate::verify::analysis::{ConstFold, Data};
+use crate::verify::analysis::{AdtData, ConstFold, Data};
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
-use crate::vmir::{Literal, Type};
+use crate::vmir::{Literal, MemberId, Type};
 
 use super::*;
 
@@ -156,10 +157,17 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let Data::Ctor(c, _) = &egraph[xc].data else {
+        let Data::Adt(adt) = &egraph[xc].data else {
             return vec![];
         };
-        let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));
+        let holds = if !adt.possible.contains(&self.ctor) {
+            false
+        } else if adt.possible.len() == 1 {
+            true
+        } else {
+            return vec![]
+        };
+        let lit = egraph.add(Symbolic::Lit(Literal::Bool(holds)));
         if egraph.union(eclass, lit) {
             vec![egraph.find(eclass)]
         } else {
@@ -171,24 +179,18 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
     }
 }
 
-/// Exclusivity / last-variant for the testers of one ADT head: `is_C(x) = true`
-/// makes every other existing `is_D(x)` false; all-but-one false makes the last
-/// one true. Lookup only, never adds a tester node, so it cannot grow the graph.
-///
-/// **One rule per head**, not one per tester: the decided testers of every
-/// variant share the `true` and `false` classes, so per-tester rules would each
-/// walk those classes again. `testers` is indexed by variant; the rule is named
-/// after its first tester.
-pub fn is_excl_rule(testers: Arc<[FuncId]>) -> Rule {
+
+pub fn variant_narrow_rule(head: MemberId, ctors: Arc<[FuncId]>, testers: Arc<[FuncId]>) -> Rule {
     let variant_of = testers.iter().enumerate().map(|(v, &t)| (t, v)).collect();
     timed(
         Rewrite::new(
-            format!("is-excl-{}", testers[0].0),
+            format!("variant-narrow-{}", head.0),
             DecidedTesterSearcher {
                 testers: testers.clone(),
             },
-            IsExclApplier {
-                testers,
+            VariantNarrowApplier {
+                head,
+                ctors,
                 variant_of,
             },
         )
@@ -246,6 +248,111 @@ impl Searcher<Symbolic, ConstFold> for DecidedTesterSearcher {
             .collect()
     }
 
+    fn vars(&self) -> Vec<Var> {
+        vec![]
+    }
+}
+
+pub(super) struct VariantNarrowApplier {
+    pub(super) head: MemberId,
+    /// All constructors of the head, indexed by variant.
+    pub(super) ctors: Arc<[FuncId]>,
+    pub(super) variant_of: HashMap<FuncId, usize>,
+}
+
+impl VariantNarrowApplier {
+
+    fn apply_class(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id) -> Vec<Id> {
+        let Some(&Literal::Bool(holds)) = egraph[eclass].data.known() else {
+            return vec![];
+        };
+        let apps: Vec<(usize, Box<[Type]>, Id)> = egraph[eclass]
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Symbolic::FuncApp(f, tys, args) => {
+                    self.variant_of.get(f).map(|&v| (v, tys.clone(), args[0]))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut changed = vec![];
+        for (variant, tys, x) in apps {
+            self.apply_app(egraph, holds, variant, tys, x, &mut changed);
+        }
+        changed
+    }
+    fn apply_app(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        holds: bool,
+        variant: usize,
+        tys: Box<[Type]>,
+        x: Id,
+        changed: &mut Vec<Id>,
+    ) {
+        let x = egraph.find(x);
+        // What is known so far; `Unknown` means every variant is still possible.
+        let current: BTreeSet<FuncId> = match &egraph[x].data {
+            Data::Adt(adt) => adt.possible.clone(),
+            Data::Unknown => self.ctors.iter().copied().collect(),
+            // Already contradictory: nothing to narrow.
+            Data::Inconsistent => return,
+            Data::Known(lit) => panic!("type error: tester applied to literal {lit:?}"),
+        };
+
+        let ctor = self.ctors[variant];
+        let narrowed : BTreeSet<FuncId> = if holds {
+            current.iter().filter(|&c| *c == ctor).copied().collect()
+        } else {
+            current.iter().filter(|&c| *c != ctor).copied().collect()
+        };
+
+        // only write when something changed
+        let was_unknown = matches!(egraph[x].data, Data::Unknown);
+        if !was_unknown && narrowed.len() == current.len() {
+            return;
+        }
+
+        let data = if narrowed.is_empty() {
+            Data::Inconsistent
+        } else {
+            Data::Adt(AdtData { head: self.head, tys, possible: narrowed })
+        };
+        egraph.set_analysis_data(x, data);
+        changed.push(x);
+    }
+}
+
+impl Applier<Symbolic, ConstFold> for VariantNarrowApplier {
+    /// One [`VariantNarrowApplier::apply_class`] per matched class. Matches that an
+    /// earlier rule of this iteration merged into one class are walked once.
+    fn apply_matches(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        matches: &[SearchMatches<Symbolic>],
+        _: Symbol,
+    ) -> Vec<Id> {
+        let mut walked = HashSet::default();
+        let mut changed = vec![];
+        for m in matches {
+            if walked.insert(egraph.find(m.eclass)) {
+                changed.extend(self.apply_class(egraph, m.eclass));
+            }
+        }
+        changed
+    }
+
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        _: &Subst,
+        _: Option<&PatternAst<Symbolic>>,
+        _: Symbol,
+    ) -> Vec<Id> {
+        self.apply_class(egraph, eclass)
+    }
     fn vars(&self) -> Vec<Var> {
         vec![]
     }
@@ -543,141 +650,6 @@ impl Applier<Symbolic, ConstFold> for ProjApplier {
 
     fn vars(&self) -> Vec<Var> {
         vec![arg_x()]
-    }
-}
-
-#[cfg(test)]
-mod is_excl_tests {
-    //! [`is_excl_rule`] on a graph where every decided tester sits in the
-    //! `true` / `false` class — the shape that made a per-match class scan
-    //! quadratic.
-    //!
-    //! Benchmark: `cargo test --lib --release is_excl_tests -- --ignored --nocapture`.
-    use super::*;
-    use egg::Runner;
-    use std::time::Instant;
-
-    const TESTERS: [FuncId; 3] = [FuncId(9000), FuncId(9001), FuncId(9002)];
-
-    fn rules() -> Vec<Rule> {
-        vec![is_excl_rule(Arc::new(TESTERS))]
-    }
-
-    /// `n` values with all three testers applied. `pin(i)` gives, per variant,
-    /// the literal value `i`'s tester is assumed to be (`None` = undecided).
-    fn graph(
-        n: usize,
-        pin: impl Fn(usize) -> [Option<bool>; 3],
-    ) -> (EGraph<Symbolic, ConstFold>, Vec<[Id; 3]>) {
-        let mut g = EGraph::<Symbolic, ConstFold>::default();
-        // Give both literals a parent, as every real graph does (`ite(pc, fact,
-        // true)`). egg keeps the class with more parents as the root; with none,
-        // each merge into `false` would make the tester the root and grow a
-        // union-find chain that the non-compressing `find` then walks per lookup.
-        let t = g.add(Symbolic::Lit(Literal::Bool(true)));
-        let f = g.add(Symbolic::Lit(Literal::Bool(false)));
-        g.add(Symbolic::Ite([t, f, t]));
-        let mut apps = Vec::with_capacity(n);
-        for i in 0..n {
-            let x = g.add(Symbolic::Fresh(i as u32));
-            let ids = TESTERS.map(|f| g.add(Symbolic::FuncApp(f, Box::new([]), Box::new([x]))));
-            for (id, pin) in ids.iter().zip(pin(i)) {
-                if let Some(b) = pin {
-                    let lit = g.add(Symbolic::Lit(Literal::Bool(b)));
-                    g.union(*id, lit);
-                }
-            }
-            apps.push(ids);
-        }
-        g.rebuild();
-        (g, apps)
-    }
-
-    fn known(g: &EGraph<Symbolic, ConstFold>, id: Id) -> Option<bool> {
-        match g[id].data.known() {
-            Some(Literal::Bool(b)) => Some(*b),
-            _ => None,
-        }
-    }
-
-    fn saturate(g: EGraph<Symbolic, ConstFold>) -> EGraph<Symbolic, ConstFold> {
-        Runner::default()
-            .with_node_limit(usize::MAX)
-            .with_time_limit(std::time::Duration::MAX)
-            .with_egraph(g)
-            .with_iter_limit(10)
-            .run(&rules())
-            .egraph
-    }
-
-    #[test]
-    fn exclusivity_refutes_every_sibling() {
-        let (g, apps) = graph(50, |_| [Some(true), None, None]);
-        let g = saturate(g);
-        for [a, b, c] in apps {
-            assert_eq!(known(&g, a), Some(true));
-            assert_eq!(known(&g, b), Some(false));
-            assert_eq!(known(&g, c), Some(false));
-        }
-    }
-
-    #[test]
-    fn last_variant_is_forced() {
-        let (g, apps) = graph(50, |_| [Some(false), Some(false), None]);
-        let g = saturate(g);
-        for [_, _, c] in apps {
-            assert_eq!(known(&g, c), Some(true));
-        }
-    }
-
-    #[test]
-    fn two_open_variants_decide_nothing() {
-        let (g, apps) = graph(50, |_| [Some(false), None, None]);
-        let g = saturate(g);
-        for [_, b, c] in apps {
-            assert_eq!(known(&g, b), None);
-            assert_eq!(known(&g, c), None);
-        }
-    }
-
-    /// Value `i` is variant `i % 3`: `true` and `false` each hold testers of
-    /// every variant.
-    fn mixed(i: usize) -> [Option<bool>; 3] {
-        let mut pin = [None; 3];
-        pin[i % 3] = Some(true);
-        pin
-    }
-
-    #[test]
-    fn mixed_variants_refute_their_siblings() {
-        let (g, apps) = graph(60, mixed);
-        let g = saturate(g);
-        for (i, ids) in apps.iter().enumerate() {
-            for (v, &id) in ids.iter().enumerate() {
-                assert_eq!(known(&g, id), Some(v == i % 3));
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "perf benchmark; run explicitly with --ignored --nocapture"]
-    fn decided_testers_scale_linearly() {
-        for n in [2_000, 4_000, 8_000] {
-            let (g, _) = graph(n, mixed);
-            take_rule_timing();
-            let start = Instant::now();
-            let g = saturate(g);
-            let total = start.elapsed();
-            let (search, apply) = take_rule_timing()
-                .values()
-                .fold((0.0, 0.0), |(s, a), t| (s + t.search, a + t.apply));
-            eprintln!(
-                "n={n:>5}  total {total:>10.1?}  search {:>8.1}ms  apply {:>8.1}ms",
-                search * 1e3,
-                apply * 1e3
-            );
-            std::hint::black_box(g.total_size());
-        }
     }
 }
 

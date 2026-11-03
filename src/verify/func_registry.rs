@@ -23,7 +23,8 @@ use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
-use crate::verify::rewrite::{accessor_rule, is_excl_rule, is_rule, proj_rule};
+use crate::verify::rewrite::{accessor_rule, is_rule, proj_rule};
+use crate::verify::rewrite::adt::variant_narrow_rule;
 use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
@@ -207,7 +208,7 @@ impl FuncRegistry {
         let rules = vec![
             proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
             accessor_rule(BUILTIN_OPTION_SOME, Box::new([BUILTIN_OPTION_VALUE])),
-            is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
+            variant_narrow_rule(BUILTIN_OPTION_HEAD, Arc::from([BUILTIN_OPTION_SOME, BUILTIN_OPTION_NONE]), Arc::from([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
         ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
@@ -423,7 +424,9 @@ impl FuncRegistry {
         if !counts.is_empty() {
             let testers: Arc<[FuncId]> =
                 (0..counts.len()).map(|v| self.adt_is[&(adt, v)]).collect();
-            self.rules.push(is_excl_rule(testers));
+            let ctors : Arc<[FuncId]> =
+                (0..counts.len()).map(|v| self.cons[&(adt, v)]).collect();
+            self.rules.push(variant_narrow_rule(adt, ctors, testers));
         }
     }
 
