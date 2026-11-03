@@ -210,7 +210,20 @@ impl Analysis<Symbolic> for ConstFold {
                 Known(Literal::Bool(false)) => egraph[*e].data.clone(),
                 Known(_) | Adt(..) => unreachable!("Condition of ITE must be a boolean literal"),
                 Inconsistent => Inconsistent,
-                Unknown => Unknown,
+                Unknown => match (&egraph[*t].data, &egraph[*e].data) {
+                    (Adt(a), Adt(b)) => {
+                        assert!(
+                            a.head == b.head && a.tys == b.tys,
+                            "type error: ite branches of different ADTs or instantiations"
+                        );
+                        Adt(AdtData {
+                            head: a.head,
+                            tys: a.tys.clone(),
+                            possible: a.possible.union(&b.possible).copied().collect(),
+                        })
+                    }
+                    _ => Unknown,
+                },
             },
         }
     }
