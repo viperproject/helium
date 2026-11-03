@@ -1,0 +1,21 @@
+// Soundness canary for the block-scratch union replay: a derivation made while
+// the then-arm's scratch is live must not reach the else-arm, whose `r` is
+// unconstrained.
+
+function g(x: Int): Int { x + 1 }
+
+method callee(x: Int) returns (r: Int)
+  ensures r == g(x)
+
+method f_sibling(b: Bool, x: Int)
+{
+  var r: Int
+  if (b) {
+    assert b
+    r := callee(x)
+    assert r == x + 1
+  } else {
+    assert !b
+    assert r == x + 1
+  }
+}

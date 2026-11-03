@@ -1,0 +1,23 @@
+// The block scratch must see what ground derives after the scratch was built.
+//
+// `assert b` needs the block cube, so it builds the block scratch. The call
+// that follows releases `callee`'s postcondition `r == g(x)`; ground's own
+// saturation unfolds `g` there (the unfold rule's unions go straight into
+// ground). The scratch, cloned before the call, has to be told: it is ground
+// plus the cube, so the derivation holds in it too. Without `assert b` the
+// scratch is built after the unfold and the method verifies regardless.
+
+function g(x: Int): Int { x + 1 }
+
+method callee(x: Int) returns (r: Int)
+  ensures r == g(x)
+
+method late_derivation(b: Bool, x: Int)
+{
+  if (b) {
+    assert b
+    var r: Int
+    r := callee(x)
+    assert r == x + 1
+  }
+}

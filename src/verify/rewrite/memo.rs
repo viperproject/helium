@@ -45,9 +45,9 @@ impl ScratchScope {
     /// after the clone describes an instance this graph does *not* have. Runs
     /// under a detached scope therefore ignore the base and re-instantiate into
     /// their own overlay. Reading it instead loses the instance in both graphs:
-    /// the live run claims the key, and the clone — which never saw the union,
-    /// because an applier unions its e-graph directly and only
-    /// `VerifyContext::union` mirrors — is told it already has it.
+    /// the live run claims the key, and the clone, which gets ground's unions
+    /// (`VerifyContext::sync_scratch`) but not the nodes an applier adds without
+    /// one, is told it already has it.
     pub(crate) fn resume(id: u64) -> Self {
         SCRATCH_STACK.with(|s| s.borrow_mut().push((id, true)));
         ScratchScope

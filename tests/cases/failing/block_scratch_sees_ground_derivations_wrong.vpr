@@ -1,0 +1,17 @@
+// Soundness canary for `passing/block_scratch_sees_ground_derivations.vpr`:
+// replaying ground's unions into the block scratch adds only what ground knows.
+
+function g(x: Int): Int { x + 1 }
+
+method callee(x: Int) returns (r: Int)
+  ensures r == g(x)
+
+method late_derivation_wrong(b: Bool, x: Int)
+{
+  if (b) {
+    assert b
+    var r: Int
+    r := callee(x)
+    assert r == x + 2
+  }
+}
