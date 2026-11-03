@@ -1,0 +1,45 @@
+// suite: no-z3
+// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
+//
+// Every tester of a value false is a contradiction: the testers are exhaustive.
+// `is-excl-*` handles all-but-one false (the last one becomes true, see
+// `passing/adt/tester_last_variant.vpr`) but not all false, where there is no
+// undecided tester left to set and the rule never declares the class
+// inconsistent. A single-variant ADT is the degenerate case: its only tester
+// false is already "all false".
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+adt Single {
+    Only(content: Int)
+}
+
+method all_false_three(s: Shape)
+{
+    assume !s.isCircle
+    assume !s.isSquare
+    assume !s.isTri
+    assert false
+}
+
+method all_false_four(c: Suit)
+{
+    assume !c.isHearts && !c.isDiamonds && !c.isClubs && !c.isSpades
+    assert false
+}
+
+method single_variant_negated_is_false(x: Single)
+{
+    assume !x.isOnly
+    assert false
+}

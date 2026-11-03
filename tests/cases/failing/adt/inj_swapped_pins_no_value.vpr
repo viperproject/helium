@@ -1,0 +1,13 @@
+// `Tri(a, b) == Tri(b, a)` makes the components equal, but does not fix them.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method swapped_no_value(a: Int, b: Int)
+{
+    assume Tri(a, b) == Tri(b, a)
+    assert a == 0
+}

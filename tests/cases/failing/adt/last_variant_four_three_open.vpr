@@ -1,0 +1,14 @@
+// Four variants, one ruled out: no single one of the rest follows.
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method four_three_open(c: Suit)
+{
+    assume !c.isHearts
+    assert c.isDiamonds || c.isClubs
+}

@@ -1,0 +1,75 @@
+// suite: no-z3
+// A recursive ADT with functions over it: testers, projections and
+// injectivity interleaved with function unfolding.
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+function len(l: Lst): Int
+{
+    l.isNil ? 0 : 1 + len(l.tail)
+}
+
+function first_or(l: Lst, d: Int): Int
+{
+    l.isCons ? l.head : d
+}
+
+// One unfold only: deeper literals need more fuel than a recursive function
+// gets, which is a function-unfolding question, not an ADT one.
+method len_of_literal()
+{
+    assert len(Nil()) == 0
+}
+
+method len_of_cons(x: Int, xs: Lst)
+{
+    assert len(Cons(x, xs)) == 1 + len(xs)
+}
+
+// The last-variant rule feeds the function's branch.
+method len_unfolds_when_not_nil(l: Lst)
+    requires !l.isNil
+{
+    assert len(l) == 1 + len(l.tail)
+}
+
+method first_or_cases(x: Int, d: Int)
+{
+    assert first_or(Nil(), d) == d
+    assert first_or(Cons(x, Nil()), d) == x
+}
+
+// Injectivity on a list equality, then projection and testers on the parts.
+method decompose(l: Lst, x: Int, y: Int)
+{
+    assume l == Cons(x, Cons(y, Nil()))
+    assert l.tail.head == y
+    assert l.tail.tail.isNil
+    assert len(l) == 1 + len(l.tail)
+}
+
+method cons_unequal_heads(xs: Lst)
+{
+    assert Cons(1, xs) != Cons(2, xs)
+}
+
+method cons_not_nil(x: Int, xs: Lst)
+{
+    assert Cons(x, xs) != Nil()
+}
+
+method prepend(x: Int, l: Lst) returns (r: Lst)
+    ensures r.isCons && r.head == x && r.tail == l
+{
+    r := Cons(x, l)
+}
+
+method use_prepend(l: Lst)
+{
+    var r: Lst
+    r := prepend(7, l)
+    assert !r.isNil
+    assert r.tail == l
+}

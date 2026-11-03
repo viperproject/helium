@@ -1,0 +1,12 @@
+// Nothing is known about an opaque value's variant.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method unknown_value(s: Shape)
+{
+    assert s.isCircle
+}

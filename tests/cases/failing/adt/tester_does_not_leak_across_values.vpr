@@ -1,0 +1,13 @@
+// Exclusivity is per value: a tester on `s` says nothing about `t`.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method no_leak(s: Shape, t: Shape)
+{
+    assume s.isCircle
+    assert !t.isCircle
+}

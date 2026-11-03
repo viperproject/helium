@@ -1,0 +1,53 @@
+// KNOWN LIMITATION — should verify, currently rejected.
+//
+// Eta (`x.isC ==> x == C(x.f1, .., x.fn)`) is not an e-graph rule; only the Z3
+// rung proves it (without Z3 nothing does, see `eta.vpr`). With the variant and
+// payload facts given by `assume`, Z3 does (`eta_by_assume` below). When the same
+// facts come from a callee's postcondition about a fresh result variable, Z3
+// returns `sat` and the goal is rejected. `use_prepend` and `use_grow` hold, since the
+// postconditions fix both the variant and every payload component.
+//
+// The state is consistent, so the rejection is not a vacuous discharge.
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+}
+
+method prepend(x: Int, l: Lst) returns (r: Lst)
+    ensures r.isCons && r.head == x && r.tail == l
+{
+    r := Cons(x, l)
+}
+
+method use_prepend(l: Lst)
+{
+    var r: Lst
+    r := prepend(7, l)
+    assert r == Cons(7, l)
+}
+
+method grow(s: Shape) returns (t: Shape)
+    requires s.isCircle
+    ensures t.isCircle && t.radius == s.radius + 1
+{
+    t := Circle(s.radius + 1)
+}
+
+method use_grow(r: Int)
+{
+    var t: Shape
+    t := grow(Circle(r))
+    assert t == Circle(r + 1)
+}
+
+// The same facts by `assume` verify today.
+method eta_by_assume(r: Lst, l: Lst)
+{
+    assume r.isCons && r.head == 7 && r.tail == l
+    assert r == Cons(7, l)
+}

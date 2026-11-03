@@ -1,0 +1,24 @@
+// suite: no-z3
+// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
+//
+// A tester of an `ite` whose arms both satisfy it: `isC(b ? s : t)` with `s`
+// and `t` both `C`. Needs either the tester pushed into the arms
+// (`isC(ite(b, s, t)) == ite(b, isC(s), isC(t))`) or a case split on `b`; the
+// `ite` here comes from a function body.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+function pick(b: Bool, s: Shape, t: Shape): Shape
+{
+    b ? s : t
+}
+
+method tester_through_function_ite(b: Bool, s: Shape, t: Shape)
+    requires s.isCircle && t.isCircle
+{
+    assert pick(b, s, t).isCircle
+    assert !pick(b, s, t).isTri
+}

@@ -1,3 +1,4 @@
+// suite: no-z3
 // Reasoning from discriminators on an opaque value, which needs the testers'
 // exclusivity and last-variant rule (`is-excl`), not a known constructor.
 // A negative test (`!s.isCircle`) is a tester merged with `false`, an equality

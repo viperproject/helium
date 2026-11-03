@@ -1,0 +1,70 @@
+// suite: no-z3
+// Different constructors of one ADT are never equal (free constructors), so an
+// assumption equating them is a contradiction.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Color {
+    Red()
+    Green()
+    Blue()
+}
+
+method distinct_literals()
+{
+    assert Circle(1) != Square(1)
+    assert Square(0) != Tri(0, 0)
+    assert Red() != Green()
+    assert Green() != Blue()
+}
+
+method distinct_symbolic(x: Int, y: Int, a: Int, b: Int)
+{
+    assert Circle(x) != Square(y)
+    assert Circle(x) != Tri(a, b)
+}
+
+method distinct_assumed_equal_is_false(x: Int, y: Int)
+{
+    assume Circle(x) == Square(y)
+    assert false
+}
+
+// The contradiction is reached through a shared variable.
+method distinct_via_variable(s: Shape, x: Int, a: Int, b: Int)
+{
+    assume s == Circle(x)
+    assume s == Tri(a, b)
+    assert false
+}
+
+method distinct_unit_via_variable(c: Color)
+{
+    assume c == Red()
+    assume c == Blue()
+    assert false
+}
+
+// Equal to one constructor => unequal to every other.
+method equal_rules_out_others(s: Shape, x: Int, y: Int, a: Int, b: Int)
+{
+    assume s == Circle(x)
+    assert s != Square(y)
+    assert s != Tri(a, b)
+}
+
+// A tester mismatch makes the value unequal to the constructor.
+method tester_rules_out_ctor(s: Shape, y: Int)
+{
+    assume s.isCircle
+    assert s != Square(y)
+}
+
+method negative_tester_rules_out_ctor(s: Shape, x: Int)
+{
+    assume !s.isCircle
+    assert s != Circle(x)
+}

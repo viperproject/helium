@@ -1,0 +1,13 @@
+// Eta holds only for the value's own variant.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method eta_wrong_variant(s: Shape)
+{
+    assume s.isSquare
+    assert s == Circle(s.radius)
+}

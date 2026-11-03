@@ -1,0 +1,13 @@
+// A value pinned to one nullary constructor is not another.
+
+adt Color {
+    Red()
+    Green()
+    Blue()
+}
+
+method enum_pinned(c: Color)
+{
+    assume c == Red()
+    assert c == Blue()
+}

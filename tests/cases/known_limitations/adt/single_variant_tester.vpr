@@ -1,0 +1,17 @@
+// suite: no-z3
+// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
+//
+// The only tester of a single-variant ADT always holds. This is last-variant
+// with zero other testers to rule out first: `is-excl-*` only acts on testers
+// whose value is already decided, so an undecided lone tester never becomes
+// `true`. Exhaustiveness asserted as a disjunction does work (see
+// `passing/adt/tester_last_variant.vpr`), because the goal itself supplies the
+// case split.
+adt Single {
+    Only(content: Int)
+}
+
+method single_variant_always(x: Single)
+{
+    assert x.isOnly
+}

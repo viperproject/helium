@@ -1,0 +1,86 @@
+// suite: no-z3
+// Tester reduction `isC(D(..)) == (C == D)` (`is-*`): a discriminator applied to
+// a value whose class holds a constructor folds to a literal.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+method tester_on_ctor(r: Int, a: Int, b: Int)
+{
+    assert Circle(r).isCircle
+    assert !Circle(r).isSquare
+    assert !Circle(r).isTri
+    assert Tri(a, b).isTri
+    assert !Tri(a, b).isCircle
+}
+
+method tester_through_variable(k: Int)
+{
+    var s: Shape := Square(k)
+    assert s.isSquare
+    assert !s.isCircle
+    assert !s.isTri
+}
+
+method tester_through_assumed_equality(s: Shape, a: Int, b: Int)
+{
+    assume s == Tri(a, b)
+    assert s.isTri
+    assert !s.isSquare
+}
+
+// The constructor is reached through a chain of equalities.
+method tester_through_equality_chain(s: Shape, t: Shape, k: Int)
+{
+    assume s == t
+    assume t == Square(k)
+    assert s.isSquare
+}
+
+method tester_nested(x: Int)
+{
+    var l: Lst := Cons(x, Cons(x, Nil()))
+    assert l.isCons
+    assert l.tail.isCons
+    assert l.tail.tail.isNil
+    assert !l.tail.tail.isCons
+}
+
+// A tester known true contradicts a different constructor.
+method tester_contradicts_ctor(s: Shape, r: Int)
+{
+    assume s.isSquare
+    assume s == Circle(r)
+    assert false
+}
+
+// A tester known false contradicts the matching constructor.
+method negative_tester_contradicts_ctor(s: Shape, r: Int)
+{
+    assume !s.isCircle
+    assume s == Circle(r)
+    assert false
+}
+
+// The tester fact is known before the constructor is (order of assumptions).
+method tester_before_ctor(s: Shape, k: Int)
+{
+    assume s.isSquare
+    assume s == Square(k)
+    assert s.side == k
+}
+
+// Testers inside a boolean expression.
+method tester_in_expression(r: Int)
+{
+    var s: Shape := Circle(r)
+    assert (s.isCircle ? 1 : 2) == 1
+    assert (s.isSquare ? 1 : 2) == 2
+}

@@ -1,0 +1,14 @@
+// A single positive tester plus a payload fact is consistent.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method positive_no_vacuity(s: Shape)
+{
+    assume s.isCircle
+    assume s.radius == 3
+    assert false
+}

@@ -1,0 +1,101 @@
+// suite: no-z3
+// Tester exclusivity on an opaque value (`is-excl-*`): at most one tester holds,
+// and disjunctions of testers narrow the open variants. Complements
+// `tester_exclusivity_basic.vpr` with more variants, disjunctions,
+// contradictions, and testers reached through equalities.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method positive_excludes_others_four(c: Suit)
+{
+    assume c.isDiamonds
+    assert !c.isHearts
+    assert !c.isClubs
+    assert !c.isSpades
+}
+
+method two_positive_testers_contradict(s: Shape)
+{
+    assume s.isCircle
+    assume s.isSquare
+    assert false
+}
+
+method two_positive_testers_contradict_conj(c: Suit)
+{
+    assume c.isClubs && c.isSpades
+    assert false
+}
+
+// Exclusivity stated as a formula with no assumptions.
+method exclusivity_as_implication(s: Shape)
+{
+    assert s.isCircle ==> !s.isSquare
+    assert s.isSquare ==> !s.isTri
+    assert !(s.isCircle && s.isTri)
+}
+
+// A disjunction of testers excludes the variants it does not mention.
+method disjunction_excludes_rest(s: Shape)
+{
+    assume s.isCircle || s.isSquare
+    assert !s.isTri
+}
+
+method disjunction_excludes_rest_four(c: Suit)
+{
+    assume c.isHearts || c.isDiamonds
+    assert !c.isClubs
+    assert !c.isSpades
+}
+
+// A disjunction minus one of its disjuncts leaves the other.
+method disjunction_minus_one(s: Shape)
+{
+    assume s.isCircle || s.isSquare
+    assume !s.isCircle
+    assert s.isSquare
+}
+
+// A disjunction that conflicts with a tester elsewhere is unsatisfiable.
+method disjunction_conflicts_with_tester(s: Shape)
+{
+    assume s.isCircle || s.isSquare
+    assume s.isTri
+    assert false
+}
+
+// Disjunction of testers with payload constraints in each arm.
+method disjunction_with_payload(s: Shape)
+{
+    assume (s.isCircle && s.radius == 1) || (s.isSquare && s.side == 1)
+    assert !s.isTri
+}
+
+// Exclusivity transfers through an equality between two opaque values.
+method exclusivity_through_equality(s: Shape, t: Shape)
+{
+    assume s == t
+    assume s.isCircle
+    assert !t.isSquare
+    assert !t.isTri
+}
+
+// Exclusivity is per value: a tester on one value says nothing about another,
+// but two values with different testers are different.
+method different_testers_different_values(s: Shape, t: Shape)
+{
+    assume s.isCircle
+    assume t.isSquare
+    assert s != t
+}

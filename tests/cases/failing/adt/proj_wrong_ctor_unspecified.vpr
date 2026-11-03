@@ -1,0 +1,13 @@
+// Projection must only reduce against the matching constructor: `radius` of a
+// `Square(k)` is not `k`, even though both are the first argument.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method proj_wrong_ctor(k: Int)
+{
+    assert Square(k).radius == k
+}

@@ -1,0 +1,12 @@
+// One of two testers false is consistent.
+
+adt Option[T] {
+    None()
+    Some(value: T)
+}
+
+method last_no_vacuity_two(o: Option[Int])
+{
+    assume !o.isNone
+    assert false
+}

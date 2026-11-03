@@ -1,0 +1,15 @@
+// All-but-one testers false is consistent: the last-variant rule must make the
+// remaining tester true, not the state inconsistent.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method last_no_vacuity(s: Shape)
+{
+    assume !s.isCircle
+    assume !s.isSquare
+    assert false
+}
