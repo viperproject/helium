@@ -957,7 +957,9 @@ impl<'a> VerifyContext<'a> {
             .into_iter()
             .filter(|&(id, pol)| known(id) != Some(matches!(pol, Polarity::Positive)))
             .collect();
-        if delta.is_empty() {
+        // Read off the graph itself only at a fixpoint: it saturates at most once
+        // per walk step, so terms of this step may not have been run yet.
+        if delta.is_empty() && !self.work.as_ref().unwrap().dirty {
             let w = self.work.as_ref().unwrap();
             return Some(tids.iter().map(|&i| w.egraph.find(i)).collect());
         }
@@ -1320,6 +1322,11 @@ impl<'a> VerifyContext<'a> {
         let ta = self.tr(addr);
         let tcs: Vec<egg::Id> = chunk_addrs.iter().map(|c| self.tr(*c)).collect();
         self.saturate_work();
+        // Not at a fixpoint (it saturates at most once per walk step): the caller
+        // asks a probe that saturates instead.
+        if self.work.as_ref().unwrap().dirty {
+            return None;
+        }
         let ground = self.egraph.find(addr);
         let w = self.work.as_ref().unwrap();
         let canon = w.egraph.find(ta);

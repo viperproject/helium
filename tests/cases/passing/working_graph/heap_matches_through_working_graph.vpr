@@ -7,7 +7,9 @@ field f: Int
 domain D {
   function g(x: Int): Int
   function same(r: Ref): Ref
+  function whole(p: Perm): Perm
   axiom same_is_identity { forall r: Ref :: { same(r) } same(r) == r }
+  axiom whole_is_identity { forall p: Perm :: { whole(p) } whole(p) == p }
 }
 
 // The first branch gives the method its working graph. `same(x)` meets `x` only
@@ -17,6 +19,16 @@ method unconditional(x: Ref, z: Int)
 {
   if (z == 3) { assert g(z) == g(3) }
   exhale acc(same(x).f)
+}
+
+// A wildcard share taken through such a match comes off that chunk directly: a
+// summarized consume proves a fixed amount, which a wildcard is not.
+method unconditional_wildcard(x: Ref, z: Int)
+  requires acc(x.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  exhale acc(same(x).f, wildcard)
+  exhale acc(x.f, wildcard)
 }
 
 // The read finds the chunk through the working graph although the path
@@ -40,4 +52,25 @@ method conditional(x: Ref, y: Ref, c: Bool, z: Int)
   } else {
     exhale acc(y.f, 1/2)
   }
+}
+
+// The chunk the working graph matches is drained on both arms, by an amount equal
+// to all of it only through an axiom (so its permission stays a term), and the
+// permission is back in chunks given back there, at addresses equal to the demand
+// only under each arm's condition. The group summary still gets its turn, as it
+// does after a ground match.
+method given_back_on_both_arms(x: Ref, y: Ref, w: Ref, c: Bool, z: Int)
+  requires acc(x.f)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    exhale acc(same(x).f, whole(1/1))
+    inhale y == x
+    inhale acc(y.f)
+  } else {
+    exhale acc(same(x).f, whole(1/1))
+    inhale w == x
+    inhale acc(w.f)
+  }
+  exhale acc(same(x).f)
 }

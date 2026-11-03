@@ -1211,6 +1211,35 @@ pub(crate) fn heap_subtract_inner(
                 },
             );
         }
+        // A wildcard demand whose only match the working graph finds without assuming
+        // anything of the instruction's pc (once rules run there, the equalities
+        // ground's rules would have derived): take the share from that chunk, as a
+        // ground match does. The summarized consume below proves a fixed amount, which
+        // a wildcard is not. Sound for the block's heap: the working graph's facts hold
+        // on every path to the block, the remainder fact is guarded by the pc, and the
+        // demanded value is fresh. A match that needs the pc stays with the guarded
+        // consume below.
+        if demand == Demand::Wildcard && ctx.rules_on_work() {
+            let chunks = h1.chunks_of(kind);
+            let ids: Vec<egg::Id> = std::iter::once(chunk2.addr)
+                .chain(chunks.iter().map(|c| c.addr))
+                .collect();
+            let ground = ctx.egraph.find(chunk2.addr);
+            let partners: Vec<&Chunk> = match ctx.classes_under_pc(&[], &ids) {
+                Some(canons) => chunks
+                    .iter()
+                    .zip(&canons[1..])
+                    .filter(|(c, canon)| **canon == canons[0] && ctx.egraph.find(c.addr) != ground)
+                    .map(|(c, _)| c)
+                    .collect(),
+                None => Vec::new(),
+            };
+            if let [c] = partners[..]
+                && let (Some(c), kept) = normalize_guard_for_consume(ctx, Some(c.clone()), pc_lits)
+            {
+                return debit_wildcard(ctx, out, kind, &c, &chunk2, pc_lits, kept);
+            }
+        }
         // Nothing on ground: the demanded address may still match a held chunk under
         // the pc (a `&mut` reborrow inside a branch arm, whose address equality is a
         // pc-guarded fact ground e-class matching cannot see), or under an equality
@@ -1452,9 +1481,14 @@ fn debit_wildcard_walk(
 ///   one-member summary is that same chunk again — only a genuinely larger set is
 ///   worth the attempt.
 ///
-/// The pc-alias branch **returns** rather than falling through when it produces a
-/// set: its `Err` is the answer. (With `existing = Some`, the set always contains at
-/// least that chunk, so this is exactly the pre-refactor control flow of both callers.)
+/// With a ground match, the pc-alias branch **returns** rather than falling through
+/// when it produces a set: the set contains that chunk, and its `Err` is the answer.
+/// Without one it falls through to the group summary on failure. Once rules run on
+/// the working graph, its partners include the chunk a saturated ground would have
+/// matched outright, and a ground match is exactly what goes on to the group
+/// summary when it alone is not enough: the remainder may sit in chunks given back
+/// on the arms of a join, at addresses equal to the demand only under each arm's
+/// condition.
 pub(crate) fn heap_subtract_summarized_fallbacks(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
@@ -1479,9 +1513,19 @@ pub(crate) fn heap_subtract_summarized_fallbacks(
     if !partners.is_empty() {
         let (set, total) = pc_alias_set(ctx, h1, kind, existing, &partners, pc_lits);
         if !set.is_empty() {
-            let r =
-                heap_subtract_summarized(ctx, out, kind, &set, total, chunk2, chunk2_perm, pc_lits);
-            return r;
+            let r = heap_subtract_summarized(
+                ctx,
+                out.clone(),
+                kind,
+                &set,
+                total,
+                chunk2.clone(),
+                chunk2_perm,
+                pc_lits,
+            );
+            if r.is_ok() || existing.is_some() {
+                return r;
+            }
         }
     }
     // 2. Whole-group Σ-ite summary.
