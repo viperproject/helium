@@ -39,6 +39,35 @@ impl Default for Z3Translation {
     }
 }
 
+thread_local! {
+    /// Set by [`without_z3`] for the duration of one run. Thread-local for the
+    /// same reason the stats sink is (`verify::stats`): one verification runs on
+    /// one thread, and parallel tests must not bleed into each other.
+    static DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the Z3 rung may run. Off when `SILVER_OXIDE_NO_Z3` is set, or inside
+/// [`without_z3`]; then the rung answers "not proven", like an `unknown`, and
+/// only the e-graph tiers decide.
+pub(crate) fn enabled() -> bool {
+    !DISABLED.get() && std::env::var_os("SILVER_OXIDE_NO_Z3").is_none()
+}
+
+/// Run `f` with the Z3 rung off on this thread, to see what the e-graph tiers
+/// prove on their own (the per-run form of `SILVER_OXIDE_NO_Z3`, which the test
+/// suite uses for cases marked `// suite: no-z3`).
+pub fn without_z3<T>(f: impl FnOnce() -> T) -> T {
+    /// Restores the previous setting even if `f` panics.
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DISABLED.set(self.0);
+        }
+    }
+    let _restore = Restore(DISABLED.replace(true));
+    f()
+}
+
 /// The options Silicon sets in its preamble (`z3config.smt2`) that change how
 /// Z3 solves. MBQI is off, so quantifiers are instantiated only through their
 /// triggers, and arithmetic uses the old simplex solver (2) rather than Z3's

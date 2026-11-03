@@ -1,4 +1,4 @@
-use silver_oxide::pipeline;
+use silver_oxide::{pipeline, verify};
 use std::path::{Path, PathBuf};
 
 fn cases_dir() -> PathBuf {
@@ -30,6 +30,19 @@ fn collect_vpr_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Run one corpus case. A case whose source has a `// suite: no-z3` line is
+/// verified with the Z3 rung off, so its expected outcome is what the e-graph
+/// tiers decide on their own and Z3 cannot mask a change to them.
+fn run_case(path: &Path) -> Result<Vec<pipeline::MemberResult>, pipeline::PipelineError> {
+    let no_z3 = std::fs::read_to_string(path)
+        .is_ok_and(|src| src.lines().any(|l| l.trim() == "// suite: no-z3"));
+    if no_z3 {
+        verify::without_z3(|| pipeline::run_file(path))
+    } else {
+        pipeline::run_file(path)
+    }
+}
+
 fn file_name(p: &Path) -> &str {
     p.file_name().and_then(|s| s.to_str()).unwrap_or("?")
 }
@@ -48,7 +61,7 @@ fn passing_cases_all_verify() {
     for path in &files {
         let name = file_name(path);
         total += 1;
-        match pipeline::run_file(path) {
+        match run_case(path) {
             Err(e) => {
                 failures.push(format!("  [PIPELINE-ERROR] {name}: {e}"));
             }
@@ -102,7 +115,7 @@ fn failing_cases_are_rejected() {
     for path in &files {
         let name = file_name(path);
         total += 1;
-        let rejected = match pipeline::run_file(path) {
+        let rejected = match run_case(path) {
             Err(e) => {
                 println!("  [PIPELINE-ERROR-OK] {name}: {e}");
                 true
@@ -150,7 +163,7 @@ fn known_limitations_still_fail() {
 
     for path in &files {
         let name = file_name(path);
-        let still_fails = match pipeline::run_file(path) {
+        let still_fails = match run_case(path) {
             Err(_) => true,
             Ok(results) => results.iter().any(|(_, r)| !r.is_ok()),
         };
@@ -190,7 +203,7 @@ fn unsupported_cases_are_named_and_survived() {
     let mut failures: Vec<String> = Vec::new();
     for path in &files {
         let name = file_name(path);
-        match pipeline::run_file(path) {
+        match run_case(path) {
             Err(e) => failures.push(format!(
                 "  [PIPELINE-ERROR] {name}: {e} (an unsupported construct must not \
                  take the file down)"
