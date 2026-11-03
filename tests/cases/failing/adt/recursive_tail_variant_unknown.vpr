@@ -1,0 +1,12 @@
+// The head being a Cons says nothing about the tail.
+
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+method tail_unknown(l: Lst)
+{
+    assume l.isCons
+    assert l.tail.isCons
+}

@@ -1,0 +1,92 @@
+// suite: no-z3
+// A generic two-variant ADT at several instantiations. Every rule is minted per
+// `(adt, type args)` instance, so the same facts must hold at each one and must
+// not interfere across instances.
+adt Option[T] {
+    None()
+    Some(value: T)
+}
+
+adt Pair[A, B] {
+    MkPair(left: A, right: B)
+}
+
+method option_proj(x: Int, b: Bool)
+{
+    assert Some(x).value == x
+    assert Some(b).value == b
+}
+
+method option_inj_int(x: Int, y: Int)
+{
+    assume Some(x) == Some(y)
+    assert x == y
+}
+
+method option_inj_bool(p: Bool)
+{
+    assume Some(p) == Some(true)
+    assert p
+}
+
+method option_testers(x: Int)
+{
+    assert Some(x).isSome
+    assert !Some(x).isNone
+    assert (None(): Option[Int]).isNone
+}
+
+method option_distinct(x: Int)
+{
+    assert Some(x) != (None(): Option[Int])
+}
+
+method option_last_variant_int(o: Option[Int])
+{
+    assume !o.isNone
+    assert o.isSome
+}
+
+method option_last_variant_bool(o: Option[Bool])
+{
+    assume !o.isSome
+    assert o.isNone
+}
+
+// Facts at one instantiation do not leak into the other.
+method option_instances_independent(o: Option[Int], p: Option[Bool])
+{
+    assume o.isSome
+    assume p.isNone
+    assert !o.isNone
+    assert !p.isSome
+}
+
+// Nested generic instances: projections and injectivity compose.
+method nested_option(x: Int)
+{
+    var o: Option[Option[Int]] := Some(Some(x))
+    assert o.value.value == x
+    assert o.value.isSome
+}
+
+method nested_option_inj(x: Int, y: Int)
+{
+    assume Some(Some(x)) == Some(Some(y))
+    assert x == y
+}
+
+method pair_mixed(x: Int, b: Bool, y: Int, c: Bool)
+{
+    assume MkPair(x, b) == MkPair(y, c)
+    assert x == y
+    assert b == c
+}
+
+method pair_of_options(x: Int)
+{
+    var p: Pair[Option[Int], Option[Bool]] := MkPair(Some(x), None())
+    assert p.left.isSome
+    assert p.left.value == x
+    assert p.right.isNone
+}

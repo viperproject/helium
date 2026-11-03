@@ -1,15 +1,18 @@
-//! ADT rules: projection, injectivity and tester reductions plus tester
-//! exclusivity, minted per concept by the `FuncRegistry`, and the shared
-//! op-indexed searcher they use.
+//! ADT rules: projection, accessor and tester reductions plus variant
+//! narrowing, minted per concept by the `FuncRegistry`, and the shared
+//! op-indexed searcher they use. What a class's value may be is tracked by the
+//! `ConstFold` variant sets (`Data::Adt`); the testers read those sets, and
+//! decided testers narrow them.
 
 use crate::dhash::{HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
-use crate::verify::analysis::{ConstFold, Data};
+use crate::verify::analysis::{AdtData, ConstFold, Data};
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
-use crate::vmir::{Literal, Type};
+use crate::vmir::{Literal, MemberId, Type};
 
 use super::*;
 
@@ -27,35 +30,36 @@ pub fn proj_rule(accessor: FuncId, ctor: FuncId, index: usize) -> Rule {
     )
 }
 
-/// Build the injectivity rule for one constructor: an e-class holding two
-/// applications of the same constructor unions their arguments pairwise
-/// (`C(a..) ≡ C(b..) ⟹ aᵢ ≡ bᵢ`). Sound because ADT constructors are free.
+/// Build the accessor rule for one constructor: every application
+/// `C(a₀, …, aₙ)` gets its accessors, `C.i(C(a₀, …, aₙ)) ≡ aᵢ`. `accessors` is
+/// indexed by field.
 ///
-/// Congruence runs only *forward*, and [`proj_rule`] recovers the backward
-/// direction only where a `projᵢ` application exists. Two constructor terms can
-/// land in one class with no projection over them, and then the component
-/// equalities are reachable only through this rule.
-pub fn inj_rule(ctor: FuncId) -> Rule {
+/// This subsumes injectivity: two applications `C(a..) ≡ C(b..)` share one class
+/// `x`, so they share the one node `C.i(x)`, which is then equal to both `aᵢ`
+/// and `bᵢ`. Congruence alone runs only *forward*; the accessor terms give the
+/// backward direction even where the program never projects.
+pub fn accessor_rule(ctor: FuncId, accessors: Box<[FuncId]>) -> Rule {
     timed(
         Rewrite::new(
-            format!("inj-{}", ctor.0),
+            format!("accessor-{}", ctor.0),
             AxiomTriggerSearcher { func: ctor },
-            InjApplier { ctor },
+            AccessorApplier { ctor, accessors },
         )
-        .expect("valid injectivity rewrite"),
+        .expect("valid accessor rewrite"),
     )
 }
 
-/// Build the tester reduction `is_C(D(..)) ⇒ (C == D)` for the tester `is_fn`
-/// of constructor `ctor`: a tester applied to a value whose class holds a
-/// constructor of the head folds to `true` or `false`. Sound because ADT
-/// constructors are free.
-pub fn is_rule(is_fn: FuncId, ctor: FuncId) -> Rule {
+/// Build the tester reduction for the tester `is_fn` of constructor `ctor`: the
+/// tester folds to `true` when its argument's variant set is `{ctor}` and to
+/// `false` when the set excludes `ctor`. `sole` marks the only constructor of a
+/// single-variant ADT, whose tester is always `true`. Sound because ADT
+/// constructors are free and exhaustive.
+pub fn is_rule(is_fn: FuncId, ctor: FuncId, sole: bool) -> Rule {
     timed(
         Rewrite::new(
             format!("is-{}", is_fn.0),
             UnaryAppSearcher { func: is_fn },
-            IsApplier { ctor },
+            IsApplier { ctor, sole },
         )
         .expect("valid is rewrite"),
     )
@@ -138,12 +142,16 @@ impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
     }
 }
 
-/// Applier for [`is_rule`]: if the argument class holds a constructor (read
-/// from its `ConstFold` data, no node scan), unions the tester with `true` when
-/// that constructor is `ctor` and with `false` otherwise.
+/// Applier for [`is_rule`]: reads the argument's variant set from its
+/// `ConstFold` data (no node scan) and unions the tester with `true` when the
+/// set is `{ctor}`, with `false` when the set excludes `ctor`. While several
+/// variants are still possible (or nothing is known), the tester is left alone.
 pub(super) struct IsApplier {
     /// The constructor this tester tests for (`cons(adt, variant)`).
     pub(super) ctor: FuncId,
+    /// `ctor` is its head's only constructor, so the tester holds whatever is
+    /// known about the argument.
+    pub(super) sole: bool,
 }
 
 impl Applier<Symbolic, ConstFold> for IsApplier {
@@ -156,10 +164,14 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let Data::Ctor(c, _) = &egraph[xc].data else {
-            return vec![];
+        let holds = match &egraph[xc].data {
+            _ if self.sole => true,
+            Data::Adt(adt) if !adt.possible.contains(&self.ctor) => false,
+            Data::Adt(adt) if adt.possible.len() == 1 => true,
+            // Several variants still possible, or nothing known yet.
+            _ => return vec![],
         };
-        let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));
+        let lit = egraph.add(Symbolic::Lit(Literal::Bool(holds)));
         if egraph.union(eclass, lit) {
             vec![egraph.find(eclass)]
         } else {
@@ -171,32 +183,35 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
     }
 }
 
-/// Exclusivity / last-variant for the testers of one ADT head: `is_C(x) = true`
-/// makes every other existing `is_D(x)` false; all-but-one false makes the last
-/// one true. Lookup only, never adds a tester node, so it cannot grow the graph.
+/// Variant narrowing for the testers of one ADT head: a decided tester narrows
+/// its argument's variant set. `is_C(x) = true` intersects the set with `{C}`,
+/// `is_C(x) = false` removes `C`; an argument with nothing known starts from all
+/// of the head's constructors. An empty result makes the class `Inconsistent`.
+/// Exclusivity, the last variant and "all testers false" all follow from the
+/// set, and [`is_rule`] reads it back into the other testers.
 ///
 /// **One rule per head**, not one per tester: the decided testers of every
 /// variant share the `true` and `false` classes, so per-tester rules would each
-/// walk those classes again. `testers` is indexed by variant; the rule is named
-/// after its first tester.
-pub fn is_excl_rule(testers: Arc<[FuncId]>) -> Rule {
+/// walk those classes again. `ctors` and `testers` are indexed by variant.
+pub fn variant_narrow_rule(head: MemberId, ctors: Arc<[FuncId]>, testers: Arc<[FuncId]>) -> Rule {
     let variant_of = testers.iter().enumerate().map(|(v, &t)| (t, v)).collect();
     timed(
         Rewrite::new(
-            format!("is-excl-{}", testers[0].0),
+            format!("variant-narrow-{}", head.0),
             DecidedTesterSearcher {
                 testers: testers.clone(),
             },
-            IsExclApplier {
-                testers,
+            VariantNarrowApplier {
+                head,
+                ctors,
                 variant_of,
             },
         )
-        .expect("valid is-excl rewrite"),
+        .expect("valid variant-narrow rewrite"),
     )
 }
 
-/// Searcher for [`is_excl_rule`]: every class that holds a tester of the head
+/// Searcher for [`variant_narrow_rule`]: every class that holds a tester of the head
 /// and whose value is known. Reads the testers' `classes_by_op` buckets and one
 /// class datum per class; inspects no node. One empty subst per class; the
 /// applier re-reads the nodes.
@@ -251,26 +266,29 @@ impl Searcher<Symbolic, ConstFold> for DecidedTesterSearcher {
     }
 }
 
-pub(super) struct IsExclApplier {
-    /// All testers of the head, indexed by variant.
-    pub(super) testers: Arc<[FuncId]>,
-    /// Tester → its variant, the inverse of `testers`.
+/// Applier for [`variant_narrow_rule`].
+pub(super) struct VariantNarrowApplier {
+    /// The ADT head whose testers this rule narrows.
+    pub(super) head: MemberId,
+    /// All constructors of the head, indexed by variant.
+    pub(super) ctors: Arc<[FuncId]>,
+    /// Tester → its variant, an index into `ctors`.
     pub(super) variant_of: HashMap<FuncId, usize>,
 }
 
-impl IsExclApplier {
-    /// Applies the rule to every tester node of `eclass` in **one** walk.
+impl VariantNarrowApplier {
+    /// Narrows the argument of every tester node of `eclass` in **one** walk.
     ///
     /// A decided tester sits in the `true` or `false` class, which holds one
     /// such node per decided value and every assumed fact besides. Applying per
     /// match and re-scanning the class to recover the matched node's type args
-    /// cost `|class|` per match, so `|class|²` per iteration. Here each node is
-    /// read once and carries its own variant, type args and argument.
+    /// would cost `|class|` per match, so `|class|²` per iteration. Here each
+    /// node is read once and carries its own variant, type args and argument.
     fn apply_class(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id) -> Vec<Id> {
         let Some(&Literal::Bool(holds)) = egraph[eclass].data.known() else {
             return vec![];
         };
-        // Collect first: the lookups and unions below need `&mut egraph`.
+        // Collect first: narrowing below needs `&mut egraph`.
         let apps: Vec<(usize, Box<[Type]>, Id)> = egraph[eclass]
             .nodes
             .iter()
@@ -288,8 +306,11 @@ impl IsExclApplier {
         changed
     }
 
-    /// The rule for one tester application `is_C[tys](x)`, `C` the `variant`-th,
-    /// known to be `holds`.
+    /// Narrows `x` by one tester application `is_C[tys](x)`, `C` the
+    /// `variant`-th, known to be `holds`. Writes the data only when the set
+    /// shrinks (or `x` had none), and reports `x` as changed then: a data-only
+    /// change moves no node or class count, so without the report egg would
+    /// take the iteration for saturated.
     fn apply_app(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
@@ -299,55 +320,45 @@ impl IsExclApplier {
         x: Id,
         changed: &mut Vec<Id>,
     ) {
-        // Existing sibling tester classes, by variant (None = not in the graph).
-        // One probe node re-pointed at each tester, so a lookup allocates nothing.
-        let mut probe = Symbolic::FuncApp(self.testers[variant], tys, Box::new([x]));
-        let sib: Vec<Option<Id>> = self
-            .testers
-            .iter()
-            .map(|&t| {
-                if let Symbolic::FuncApp(f, ..) = &mut probe {
-                    *f = t;
-                }
-                egraph.lookup(&mut probe)
-            })
-            .collect();
-
-        let mut union_lit = |eg: &mut EGraph<_, _>, id: Id, b: bool| {
-            let lit = eg.add(Symbolic::Lit(Literal::Bool(b)));
-            if eg.union(id, lit) {
-                changed.push(eg.find(id));
-            }
+        let x = egraph.find(x);
+        // What is known so far; `Unknown` means every variant is still possible.
+        let current: BTreeSet<FuncId> = match &egraph[x].data {
+            Data::Adt(adt) => adt.possible.clone(),
+            Data::Unknown => self.ctors.iter().copied().collect(),
+            // Already contradictory: nothing to narrow.
+            Data::Inconsistent => return,
+            Data::Known(lit) => panic!("type error: tester applied to literal {lit:?}"),
         };
 
-        if holds {
-            // Exclusivity.
-            for (d, id) in sib.iter().enumerate() {
-                if d != variant
-                    && let Some(id) = id
-                {
-                    union_lit(egraph, *id, false);
-                }
-            }
+        let ctor = self.ctors[variant];
+        let narrowed: BTreeSet<FuncId> = if holds {
+            current.iter().filter(|&c| *c == ctor).copied().collect()
         } else {
-            // Last variant: every other variant has a tester known false.
-            let is_false = |eg: &EGraph<_, ConstFold>, id: Id| {
-                eg[id].data.known() == Some(&Literal::Bool(false))
-            };
-            let open: Vec<usize> = (0..sib.len())
-                .filter(|&d| !sib[d].is_some_and(|id| is_false(egraph, id)))
-                .collect();
-            if let [e] = open[..]
-                && let Some(id) = sib[e]
-            {
-                union_lit(egraph, id, true);
-            }
+            current.iter().filter(|&c| *c != ctor).copied().collect()
+        };
+
+        // only write when something changed
+        let was_unknown = matches!(egraph[x].data, Data::Unknown);
+        if !was_unknown && narrowed.len() == current.len() {
+            return;
         }
+
+        let data = if narrowed.is_empty() {
+            Data::Inconsistent
+        } else {
+            Data::Adt(AdtData {
+                head: self.head,
+                tys,
+                possible: narrowed,
+            })
+        };
+        egraph.set_analysis_data(x, data);
+        changed.push(x);
     }
 }
 
-impl Applier<Symbolic, ConstFold> for IsExclApplier {
-    /// One [`IsExclApplier::apply_class`] per matched class. Matches that an
+impl Applier<Symbolic, ConstFold> for VariantNarrowApplier {
+    /// One [`VariantNarrowApplier::apply_class`] per matched class. Matches that an
     /// earlier rule of this iteration merged into one class are walked once.
     fn apply_matches(
         &self,
@@ -380,15 +391,17 @@ impl Applier<Symbolic, ConstFold> for IsExclApplier {
     }
 }
 
-/// Applier for [`inj_rule`]: unions the arguments of every pair of same-ctor
-/// applications sharing the matched e-class. Grouped by type args — two
-/// instantiations of a generic constructor are different operators, and only
-/// same-operator applications are congruent.
-pub(super) struct InjApplier {
+/// Applier for [`accessor_rule`]: for every application of `ctor` in the matched
+/// e-class, adds `accessorᵢ(class)` at the application's own type args and
+/// unions it with the `i`-th argument. The accessor node is hash-consed, so after
+/// the first application it is a lookup and a no-op union.
+pub(super) struct AccessorApplier {
     pub(super) ctor: FuncId,
+    /// The constructor's field accessors, indexed by field.
+    pub(super) accessors: Box<[FuncId]>,
 }
 
-impl Applier<Symbolic, ConstFold> for InjApplier {
+impl Applier<Symbolic, ConstFold> for AccessorApplier {
     fn apply_one(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
@@ -397,26 +410,35 @@ impl Applier<Symbolic, ConstFold> for InjApplier {
         _searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
-        // One representative application per type instantiation; every later one
-        // is unioned against it argument-wise (transitivity covers the rest).
-        let mut reps: Vec<(Box<[Type]>, Box<[Id]>)> = Vec::new();
-        let mut pairs: Vec<(Id, Id)> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, tys, args) = node else {
-                continue;
-            };
-            if *f != self.ctor {
-                continue;
-            }
-            match reps.iter().find(|(t, _)| t == tys) {
-                Some((_, rep)) => pairs.extend(rep.iter().copied().zip(args.iter().copied())),
-                None => reps.push((tys.clone(), args.clone())),
-            }
-        }
+        let x = egraph.find(eclass);
+        // Collect first: the adds and unions below need `&mut egraph`. An
+        // accessor is applied at its constructor's type args, so each
+        // application carries the ones its accessor terms need.
+        let apps: Vec<(Box<[Type]>, Box<[Id]>)> = egraph[x]
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                Symbolic::FuncApp(f, tys, args) if *f == self.ctor => {
+                    Some((tys.clone(), args.clone()))
+                }
+                _ => None,
+            })
+            .collect();
         let mut changed = Vec::new();
-        for (a, b) in pairs {
-            if egraph.union(a, b) {
-                changed.push(egraph.find(a));
+        for (tys, args) in apps {
+            assert_eq!(
+                args.len(),
+                self.accessors.len(),
+                "constructor {:?} applied to {} args but has {} accessors",
+                self.ctor,
+                args.len(),
+                self.accessors.len()
+            );
+            for (&accessor, &arg) in self.accessors.iter().zip(&args) {
+                let app = egraph.add(Symbolic::FuncApp(accessor, tys.clone(), Box::new([x])));
+                if egraph.union(app, arg) {
+                    changed.push(egraph.find(arg));
+                }
             }
         }
         changed
@@ -532,141 +554,6 @@ impl Applier<Symbolic, ConstFold> for ProjApplier {
 
     fn vars(&self) -> Vec<Var> {
         vec![arg_x()]
-    }
-}
-
-#[cfg(test)]
-mod is_excl_tests {
-    //! [`is_excl_rule`] on a graph where every decided tester sits in the
-    //! `true` / `false` class — the shape that made a per-match class scan
-    //! quadratic.
-    //!
-    //! Benchmark: `cargo test --lib --release is_excl_tests -- --ignored --nocapture`.
-    use super::*;
-    use egg::Runner;
-    use std::time::Instant;
-
-    const TESTERS: [FuncId; 3] = [FuncId(9000), FuncId(9001), FuncId(9002)];
-
-    fn rules() -> Vec<Rule> {
-        vec![is_excl_rule(Arc::new(TESTERS))]
-    }
-
-    /// `n` values with all three testers applied. `pin(i)` gives, per variant,
-    /// the literal value `i`'s tester is assumed to be (`None` = undecided).
-    fn graph(
-        n: usize,
-        pin: impl Fn(usize) -> [Option<bool>; 3],
-    ) -> (EGraph<Symbolic, ConstFold>, Vec<[Id; 3]>) {
-        let mut g = EGraph::<Symbolic, ConstFold>::default();
-        // Give both literals a parent, as every real graph does (`ite(pc, fact,
-        // true)`). egg keeps the class with more parents as the root; with none,
-        // each merge into `false` would make the tester the root and grow a
-        // union-find chain that the non-compressing `find` then walks per lookup.
-        let t = g.add(Symbolic::Lit(Literal::Bool(true)));
-        let f = g.add(Symbolic::Lit(Literal::Bool(false)));
-        g.add(Symbolic::Ite([t, f, t]));
-        let mut apps = Vec::with_capacity(n);
-        for i in 0..n {
-            let x = g.add(Symbolic::Fresh(i as u32));
-            let ids = TESTERS.map(|f| g.add(Symbolic::FuncApp(f, Box::new([]), Box::new([x]))));
-            for (id, pin) in ids.iter().zip(pin(i)) {
-                if let Some(b) = pin {
-                    let lit = g.add(Symbolic::Lit(Literal::Bool(b)));
-                    g.union(*id, lit);
-                }
-            }
-            apps.push(ids);
-        }
-        g.rebuild();
-        (g, apps)
-    }
-
-    fn known(g: &EGraph<Symbolic, ConstFold>, id: Id) -> Option<bool> {
-        match g[id].data.known() {
-            Some(Literal::Bool(b)) => Some(*b),
-            _ => None,
-        }
-    }
-
-    fn saturate(g: EGraph<Symbolic, ConstFold>) -> EGraph<Symbolic, ConstFold> {
-        Runner::default()
-            .with_node_limit(usize::MAX)
-            .with_time_limit(std::time::Duration::MAX)
-            .with_egraph(g)
-            .with_iter_limit(10)
-            .run(&rules())
-            .egraph
-    }
-
-    #[test]
-    fn exclusivity_refutes_every_sibling() {
-        let (g, apps) = graph(50, |_| [Some(true), None, None]);
-        let g = saturate(g);
-        for [a, b, c] in apps {
-            assert_eq!(known(&g, a), Some(true));
-            assert_eq!(known(&g, b), Some(false));
-            assert_eq!(known(&g, c), Some(false));
-        }
-    }
-
-    #[test]
-    fn last_variant_is_forced() {
-        let (g, apps) = graph(50, |_| [Some(false), Some(false), None]);
-        let g = saturate(g);
-        for [_, _, c] in apps {
-            assert_eq!(known(&g, c), Some(true));
-        }
-    }
-
-    #[test]
-    fn two_open_variants_decide_nothing() {
-        let (g, apps) = graph(50, |_| [Some(false), None, None]);
-        let g = saturate(g);
-        for [_, b, c] in apps {
-            assert_eq!(known(&g, b), None);
-            assert_eq!(known(&g, c), None);
-        }
-    }
-
-    /// Value `i` is variant `i % 3`: `true` and `false` each hold testers of
-    /// every variant.
-    fn mixed(i: usize) -> [Option<bool>; 3] {
-        let mut pin = [None; 3];
-        pin[i % 3] = Some(true);
-        pin
-    }
-
-    #[test]
-    fn mixed_variants_refute_their_siblings() {
-        let (g, apps) = graph(60, mixed);
-        let g = saturate(g);
-        for (i, ids) in apps.iter().enumerate() {
-            for (v, &id) in ids.iter().enumerate() {
-                assert_eq!(known(&g, id), Some(v == i % 3));
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "perf benchmark; run explicitly with --ignored --nocapture"]
-    fn decided_testers_scale_linearly() {
-        for n in [2_000, 4_000, 8_000] {
-            let (g, _) = graph(n, mixed);
-            take_rule_timing();
-            let start = Instant::now();
-            let g = saturate(g);
-            let total = start.elapsed();
-            let (search, apply) = take_rule_timing()
-                .values()
-                .fold((0.0, 0.0), |(s, a), t| (s + t.search, a + t.apply));
-            eprintln!(
-                "n={n:>5}  total {total:>10.1?}  search {:>8.1}ms  apply {:>8.1}ms",
-                search * 1e3,
-                apply * 1e3
-            );
-            std::hint::black_box(g.total_size());
-        }
     }
 }
 

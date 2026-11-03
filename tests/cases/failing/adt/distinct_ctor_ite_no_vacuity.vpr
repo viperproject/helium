@@ -1,0 +1,14 @@
+// An ite over two different constructors equal to one of them is consistent:
+// it pins the condition, it does not make the state inconsistent.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method ite_no_vacuity(b: Bool, r: Int, k: Int)
+{
+    assume (b ? Circle(r) : Square(k)) == Square(k)
+    assert false
+}

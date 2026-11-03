@@ -1,0 +1,15 @@
+// `isCircle || isSquare` and `isSquare || isTri` together pin `isSquare`, so
+// `isCircle` is false. Asserting it must fail.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method overlapping_exclude(s: Shape)
+{
+    assume s.isCircle || s.isSquare
+    assume s.isSquare || s.isTri
+    assert s.isCircle
+}

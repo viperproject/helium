@@ -1,0 +1,12 @@
+// `isSome` does not fix the payload.
+
+adt Option[T] {
+    None()
+    Some(value: T)
+}
+
+method some_payload_unknown(o: Option[Int])
+{
+    assume !o.isNone
+    assert o.value == 0
+}

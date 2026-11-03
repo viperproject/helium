@@ -24,6 +24,7 @@ mod z3;
 
 pub use error::VerifyError;
 pub use stats::VerifyStats;
+pub use z3::without_z3;
 
 /// Result for one verification unit (method or resource): its name and whether
 /// verification succeeded.

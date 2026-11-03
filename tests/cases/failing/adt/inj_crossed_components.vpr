@@ -1,0 +1,14 @@
+// Injectivity pairs components by position: `Tri(a, b) == Tri(c, d)` gives
+// `a == c` and `b == d`, never `a == d`.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method inj_crossed(a: Int, b: Int, c: Int, d: Int)
+{
+    assume Tri(a, b) == Tri(c, d)
+    assert a == d
+}

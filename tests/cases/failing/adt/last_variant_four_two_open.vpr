@@ -1,0 +1,15 @@
+// Four variants, two ruled out: the remaining two stay open.
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method four_two_open(c: Suit)
+{
+    assume !c.isHearts
+    assume !c.isDiamonds
+    assert c.isSpades
+}

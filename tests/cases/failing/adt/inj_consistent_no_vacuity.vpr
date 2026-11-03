@@ -1,0 +1,13 @@
+// Injectivity on a consistent equality must not make the state inconsistent.
+
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+method inj_no_vacuity(x: Int, y: Int, xs: Lst, ys: Lst)
+{
+    assume Cons(x, xs) == Cons(y, ys)
+    assume xs.isNil
+    assert false
+}

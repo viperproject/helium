@@ -1,0 +1,15 @@
+// Overwriting a field with a new variant replaces the old tester facts.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+field shape: Shape
+
+method overwrite_forgets(x: Ref, r: Int)
+    requires acc(x.shape) && x.shape.isSquare
+{
+    x.shape := Circle(r)
+    assert x.shape.isSquare
+}

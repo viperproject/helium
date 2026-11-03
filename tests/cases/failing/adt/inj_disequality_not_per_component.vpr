@@ -1,0 +1,14 @@
+// Two values of one constructor can differ in any component, so a disequality
+// of the whole says nothing about the first component alone.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method diseq_not_per_component(a: Int, b: Int, c: Int, d: Int)
+{
+    assume Tri(a, b) != Tri(c, d)
+    assert a != c
+}

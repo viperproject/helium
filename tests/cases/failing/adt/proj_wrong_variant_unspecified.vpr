@@ -1,0 +1,14 @@
+// A destructor applied to a value of another variant is unspecified: knowing
+// the value is a Square says nothing about its `radius`.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method proj_wrong_variant(s: Shape)
+{
+    assume s.isSquare
+    assert s.radius == 0
+}

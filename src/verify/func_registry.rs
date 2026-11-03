@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
-use crate::verify::rewrite::{inj_rule, is_excl_rule, is_rule, proj_rule};
+use crate::verify::rewrite::{accessor_rule, is_rule, proj_rule, variant_narrow_rule};
 use crate::vmir::{Declaration, MemberId, Program, Type};
 
 type Rule = egg::Rewrite<Symbolic, ConstFold>;
@@ -206,8 +206,14 @@ impl FuncRegistry {
 
         let rules = vec![
             proj_rule(BUILTIN_OPTION_VALUE, BUILTIN_OPTION_SOME, 0),
-            inj_rule(BUILTIN_OPTION_SOME),
-            is_excl_rule(Arc::new([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE])),
+            accessor_rule(BUILTIN_OPTION_SOME, Box::new([BUILTIN_OPTION_VALUE])),
+            variant_narrow_rule(
+                BUILTIN_OPTION_HEAD,
+                Arc::from([BUILTIN_OPTION_SOME, BUILTIN_OPTION_NONE]),
+                Arc::from([BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_IS_NONE]),
+            ),
+            is_rule(BUILTIN_OPTION_IS_SOME, BUILTIN_OPTION_SOME, false),
+            is_rule(BUILTIN_OPTION_IS_NONE, BUILTIN_OPTION_NONE, false),
         ];
         let mut ctor_head = HashMap::default();
         ctor_head.insert(BUILTIN_OPTION_SOME, BUILTIN_OPTION_HEAD);
@@ -370,9 +376,12 @@ impl FuncRegistry {
     /// every instantiation; the ground type args live in the `FuncApp`
     /// discriminant, so the reductions are instantiation-agnostic.
     ///
-    /// Rules per head: `is` per variant (a tester applied to a constructor
-    /// reduces to a literal), `inj` per variant with fields, `proj` per field,
-    /// and one `is-excl` relating the head's testers to each other.
+    /// Rules per head: `is` per variant (a tester folds to a literal from its
+    /// argument's variant set; for a single-variant head it always holds),
+    /// `accessor` per variant with fields (every constructor application gets
+    /// its projection terms, which also gives injectivity), `proj` per field,
+    /// and one `variant-narrow` that narrows a value's variant set from its
+    /// decided testers.
     fn ensure(&mut self, adt: MemberId) {
         if self.adt_is.contains_key(&(adt, 0usize)) {
             return;
@@ -384,6 +393,7 @@ impl FuncRegistry {
             .clone();
         let label = self.label(adt);
 
+        let singleton = counts.len() == 1;
         for (variant, &fields) in counts.iter().enumerate() {
             // `Adt::Ctor` for a named constructor, `Adt::#i` for an anonymous one.
             let cons_label = match self.variant_name(adt, variant) {
@@ -397,13 +407,11 @@ impl FuncRegistry {
             self.adt_is.insert((adt, variant), is_id);
 
             let cons_id = self.mint(cons_label.clone(), FuncKind::Cons { head: adt, variant });
-            self.rules.push(is_rule(is_id, cons_id));
+            self.rules.push(is_rule(is_id, cons_id, singleton));
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);
 
-            if fields > 0 {
-                self.rules.push(inj_rule(cons_id));
-            }
+            let mut accessors = Vec::with_capacity(fields);
             for field in 0..fields {
                 let proj_id = self.mint(
                     format!("{cons_label}.{field}"),
@@ -415,13 +423,18 @@ impl FuncRegistry {
                 );
                 self.proj.insert((adt, variant, field), proj_id);
                 self.rules.push(proj_rule(proj_id, cons_id, field));
+                accessors.push(proj_id);
+            }
+            if fields > 0 {
+                self.rules.push(accessor_rule(cons_id, accessors.into()));
             }
         }
 
         if !counts.is_empty() {
             let testers: Arc<[FuncId]> =
                 (0..counts.len()).map(|v| self.adt_is[&(adt, v)]).collect();
-            self.rules.push(is_excl_rule(testers));
+            let ctors: Arc<[FuncId]> = (0..counts.len()).map(|v| self.cons[&(adt, v)]).collect();
+            self.rules.push(variant_narrow_rule(adt, ctors, testers));
         }
     }
 

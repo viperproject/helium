@@ -17,7 +17,7 @@ pub(crate) mod memo;
 pub(crate) mod recipe;
 pub(crate) mod timing;
 
-pub use adt::{inj_rule, is_excl_rule, is_rule, proj_rule};
+pub use adt::{accessor_rule, is_rule, proj_rule, variant_narrow_rule};
 pub(crate) use forall::{PreparedTerm, forall_rule};
 pub(crate) use function::{function_post_rule, function_rule, post_rule};
 pub(crate) use memo::{Memo, ScratchScope, new_memo_unit, new_scope_id};
@@ -163,8 +163,8 @@ fn var(name: &str) -> Var {
     name.parse().expect("valid pattern var")
 }
 
-/// The static structural rule set. The per-ADT rules (`is`, `inj`, `proj`,
-/// `is-excl`) are minted by the `FuncRegistry` and appended by
+/// The static structural rule set. The per-ADT rules (`is`, `accessor`, `proj`,
+/// `variant-narrow`) are minted by the `FuncRegistry` and appended by
 /// `VerifyContext::new`.
 pub fn rules() -> Vec<Rule> {
     static_rules().into_iter().filter(kept).map(timed).collect()

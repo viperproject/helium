@@ -837,6 +837,9 @@ impl<'a> VerifyContext<'a> {
     }
 
     fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
+        if !crate::verify::z3::enabled() {
+            return false;
+        }
         let t_build = std::time::Instant::now();
 
         crate::verify::z3::sync_facts(self);

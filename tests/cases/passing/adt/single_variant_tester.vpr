@@ -1,0 +1,13 @@
+// suite: no-z3
+// The only tester of a single-variant ADT always holds, even when nothing is
+// known about the value: `is-*` is minted with `sole` for the head's only
+// constructor. This is last-variant with zero other testers to rule out first,
+// so the variant set alone cannot decide it — an opaque value has no set yet.
+adt Single {
+    Only(content: Int)
+}
+
+method single_variant_always(x: Single)
+{
+    assert x.isOnly
+}

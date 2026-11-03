@@ -1,0 +1,14 @@
+// The tail equality from injectivity carries the tester across with its
+// polarity: `xs` is Nil, so `ys` is Nil too, not Cons.
+
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+method transfer_polarity(x: Int, y: Int, xs: Lst, ys: Lst)
+{
+    assume Cons(x, xs) == Cons(y, ys)
+    assume xs.isNil
+    assert ys.isCons
+}

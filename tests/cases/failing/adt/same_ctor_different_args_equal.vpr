@@ -1,0 +1,13 @@
+// Free constructors: same constructor with different arguments are different
+// values. Asserting them equal must fail.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method different_args(a: Int)
+{
+    assert Circle(a) == Circle(a + 1)
+}

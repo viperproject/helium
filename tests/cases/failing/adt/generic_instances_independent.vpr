@@ -1,0 +1,13 @@
+// Facts at `Option[Int]` do not leak into `Option[Bool]`: both values are
+// opaque and unrelated.
+
+adt Option[T] {
+    None()
+    Some(value: T)
+}
+
+method instances_independent(o: Option[Int], p: Option[Bool])
+{
+    assume o.isSome
+    assert p.isSome
+}

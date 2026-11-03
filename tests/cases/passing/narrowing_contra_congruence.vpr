@@ -8,7 +8,7 @@
 //   mk(p, q) != mk(p, r)   with p ≡ p (shared)   ⟹   q != r
 //
 // Sound for any function, injective or not (the contrapositive of congruence
-// needs no injectivity — unlike `inj_rule`, the forward proven-equal direction).
+// needs no injectivity — unlike `accessor_rule`, the forward proven-equal direction).
 // The old unary rule could not see through a 2-ary application; this is the
 // n-ary generalization that fires only when the disjunction is a unit clause.
 domain D {
