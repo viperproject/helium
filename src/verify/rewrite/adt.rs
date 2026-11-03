@@ -51,12 +51,12 @@ pub fn accessor_rule(ctor: FuncId, accessors: Box<[FuncId]>) -> Rule {
 /// of constructor `ctor`: a tester applied to a value whose class holds a
 /// constructor of the head folds to `true` or `false`. Sound because ADT
 /// constructors are free.
-pub fn is_rule(is_fn: FuncId, ctor: FuncId) -> Rule {
+pub fn is_rule(is_fn: FuncId, ctor: FuncId, sole: bool) -> Rule {
     timed(
         Rewrite::new(
             format!("is-{}", is_fn.0),
             UnaryAppSearcher { func: is_fn },
-            IsApplier { ctor },
+            IsApplier { ctor, sole },
         )
         .expect("valid is rewrite"),
     )
@@ -145,6 +145,7 @@ impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
 pub(super) struct IsApplier {
     /// The constructor this tester tests for (`cons(adt, variant)`).
     pub(super) ctor: FuncId,
+    pub(super) sole: bool,
 }
 
 impl Applier<Symbolic, ConstFold> for IsApplier {
@@ -157,15 +158,12 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let Data::Adt(adt) = &egraph[xc].data else {
-            return vec![];
-        };
-        let holds = if !adt.possible.contains(&self.ctor) {
-            false
-        } else if adt.possible.len() == 1 {
-            true
-        } else {
-            return vec![]
+
+        let holds = match  &egraph[xc].data {
+            _ if self.sole => true,
+            Data::Adt(adt) if !adt.possible.contains(&self.ctor) => false,
+            Data::Adt(adt) if adt.possible.len() == 1 => true,
+            _ => return vec![]
         };
         let lit = egraph.add(Symbolic::Lit(Literal::Bool(holds)));
         if egraph.union(eclass, lit) {

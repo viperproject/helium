@@ -385,6 +385,7 @@ impl FuncRegistry {
             .clone();
         let label = self.label(adt);
 
+        let singleton = counts.len() == 1;
         for (variant, &fields) in counts.iter().enumerate() {
             // `Adt::Ctor` for a named constructor, `Adt::#i` for an anonymous one.
             let cons_label = match self.variant_name(adt, variant) {
@@ -398,7 +399,7 @@ impl FuncRegistry {
             self.adt_is.insert((adt, variant), is_id);
 
             let cons_id = self.mint(cons_label.clone(), FuncKind::Cons { head: adt, variant });
-            self.rules.push(is_rule(is_id, cons_id));
+            self.rules.push(is_rule(is_id, cons_id, singleton));
             self.cons.insert((adt, variant), cons_id);
             self.ctor_head.insert(cons_id, adt);
 
