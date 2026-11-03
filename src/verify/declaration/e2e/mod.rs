@@ -3571,8 +3571,9 @@ fn adt_constructor_is_injective() {
     // Two applications of the same constructor sharing an e-class must union
     // their arguments pairwise. Here `f(p)`'s body and `g(p)`'s body both build a
     // `Pair`, and `p` equates them — but the goal mentions no projection, so the
-    // component equality is reachable only through the injectivity rule
-    // (congruence runs forward only; `proj_rule` needs a `projᵢ` node to fire).
+    // component equality is reachable only through the accessor rule's
+    // `projᵢ(mk(..))` terms (congruence runs forward only; `proj_rule` needs a
+    // `projᵢ` node to fire).
     let input = r#"
 adt Pair {
     mk(fst: Int, snd: Int)

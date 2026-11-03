@@ -1,5 +1,6 @@
 // suite: no-z3
-// Tester exclusivity on an opaque value (`is-excl-*`): at most one tester holds,
+// Tester exclusivity on an opaque value (`variant-narrow-*` and `is-*` over the
+// value's variant set): at most one tester holds,
 // and disjunctions of testers narrow the open variants. Complements
 // `tester_exclusivity_basic.vpr` with more variants, disjunctions,
 // contradictions, and testers reached through equalities.

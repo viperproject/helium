@@ -1,8 +1,8 @@
 // suite: no-z3
-// Constructor injectivity `C(a..) == C(b..) ==> a_i == b_i` (`inj-*`), with and
-// without a projection over the terms. Without a projection, congruence cannot
-// recover the component equalities, so these exercise the injectivity rule
-// itself, not `proj-*`.
+// Constructor injectivity `C(a..) == C(b..) ==> a_i == b_i`, with and without a
+// projection over the terms. Without a projection, congruence cannot recover
+// the component equalities, so these exercise the accessor terms that
+// `accessor-*` adds for every constructor application, not `proj-*`.
 adt Shape {
     Circle(radius: Int)
     Square(side: Int)

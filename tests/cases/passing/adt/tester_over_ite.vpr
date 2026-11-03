@@ -1,10 +1,8 @@
 // suite: no-z3
-// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
-//
 // A tester of an `ite` whose arms both satisfy it: `isC(b ? s : t)` with `s`
-// and `t` both `C`. Needs either the tester pushed into the arms
-// (`isC(ite(b, s, t)) == ite(b, isC(s), isC(t))`) or a case split on `b`; the
-// `ite` here comes from a function body.
+// and `t` both `C`. With `b` undecided, `ConstFold` gives the `ite` the union of
+// its arms' variant sets, here `{C}`, so `is-*` decides the tester without a
+// case split on `b`. The `ite` comes from a function body.
 adt Shape {
     Circle(radius: Int)
     Square(side: Int)

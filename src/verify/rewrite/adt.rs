@@ -1,9 +1,11 @@
-//! ADT rules: projection, accessor and tester reductions plus tester
-//! exclusivity, minted per concept by the `FuncRegistry`, and the shared
-//! op-indexed searcher they use.
+//! ADT rules: projection, accessor and tester reductions plus variant
+//! narrowing, minted per concept by the `FuncRegistry`, and the shared
+//! op-indexed searcher they use. What a class's value may be is tracked by the
+//! `ConstFold` variant sets (`Data::Adt`); the testers read those sets, and
+//! decided testers narrow them.
 
-use std::collections::BTreeSet;
 use crate::dhash::{HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
@@ -47,10 +49,11 @@ pub fn accessor_rule(ctor: FuncId, accessors: Box<[FuncId]>) -> Rule {
     )
 }
 
-/// Build the tester reduction `is_C(D(..)) ⇒ (C == D)` for the tester `is_fn`
-/// of constructor `ctor`: a tester applied to a value whose class holds a
-/// constructor of the head folds to `true` or `false`. Sound because ADT
-/// constructors are free.
+/// Build the tester reduction for the tester `is_fn` of constructor `ctor`: the
+/// tester folds to `true` when its argument's variant set is `{ctor}` and to
+/// `false` when the set excludes `ctor`. `sole` marks the only constructor of a
+/// single-variant ADT, whose tester is always `true`. Sound because ADT
+/// constructors are free and exhaustive.
 pub fn is_rule(is_fn: FuncId, ctor: FuncId, sole: bool) -> Rule {
     timed(
         Rewrite::new(
@@ -139,12 +142,15 @@ impl Searcher<Symbolic, ConstFold> for UnaryAppSearcher {
     }
 }
 
-/// Applier for [`is_rule`]: if the argument class holds a constructor (read
-/// from its `ConstFold` data, no node scan), unions the tester with `true` when
-/// that constructor is `ctor` and with `false` otherwise.
+/// Applier for [`is_rule`]: reads the argument's variant set from its
+/// `ConstFold` data (no node scan) and unions the tester with `true` when the
+/// set is `{ctor}`, with `false` when the set excludes `ctor`. While several
+/// variants are still possible (or nothing is known), the tester is left alone.
 pub(super) struct IsApplier {
     /// The constructor this tester tests for (`cons(adt, variant)`).
     pub(super) ctor: FuncId,
+    /// `ctor` is its head's only constructor, so the tester holds whatever is
+    /// known about the argument.
     pub(super) sole: bool,
 }
 
@@ -158,12 +164,12 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-
-        let holds = match  &egraph[xc].data {
+        let holds = match &egraph[xc].data {
             _ if self.sole => true,
             Data::Adt(adt) if !adt.possible.contains(&self.ctor) => false,
             Data::Adt(adt) if adt.possible.len() == 1 => true,
-            _ => return vec![]
+            // Several variants still possible, or nothing known yet.
+            _ => return vec![],
         };
         let lit = egraph.add(Symbolic::Lit(Literal::Bool(holds)));
         if egraph.union(eclass, lit) {
@@ -177,7 +183,16 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
     }
 }
 
-
+/// Variant narrowing for the testers of one ADT head: a decided tester narrows
+/// its argument's variant set. `is_C(x) = true` intersects the set with `{C}`,
+/// `is_C(x) = false` removes `C`; an argument with nothing known starts from all
+/// of the head's constructors. An empty result makes the class `Inconsistent`.
+/// Exclusivity, the last variant and "all testers false" all follow from the
+/// set, and [`is_rule`] reads it back into the other testers.
+///
+/// **One rule per head**, not one per tester: the decided testers of every
+/// variant share the `true` and `false` classes, so per-tester rules would each
+/// walk those classes again. `ctors` and `testers` are indexed by variant.
 pub fn variant_narrow_rule(head: MemberId, ctors: Arc<[FuncId]>, testers: Arc<[FuncId]>) -> Rule {
     let variant_of = testers.iter().enumerate().map(|(v, &t)| (t, v)).collect();
     timed(
@@ -192,11 +207,11 @@ pub fn variant_narrow_rule(head: MemberId, ctors: Arc<[FuncId]>, testers: Arc<[F
                 variant_of,
             },
         )
-        .expect("valid is-excl rewrite"),
+        .expect("valid variant-narrow rewrite"),
     )
 }
 
-/// Searcher for [`is_excl_rule`]: every class that holds a tester of the head
+/// Searcher for [`variant_narrow_rule`]: every class that holds a tester of the head
 /// and whose value is known. Reads the testers' `classes_by_op` buckets and one
 /// class datum per class; inspects no node. One empty subst per class; the
 /// applier re-reads the nodes.
@@ -251,19 +266,29 @@ impl Searcher<Symbolic, ConstFold> for DecidedTesterSearcher {
     }
 }
 
+/// Applier for [`variant_narrow_rule`].
 pub(super) struct VariantNarrowApplier {
+    /// The ADT head whose testers this rule narrows.
     pub(super) head: MemberId,
     /// All constructors of the head, indexed by variant.
     pub(super) ctors: Arc<[FuncId]>,
+    /// Tester → its variant, an index into `ctors`.
     pub(super) variant_of: HashMap<FuncId, usize>,
 }
 
 impl VariantNarrowApplier {
-
+    /// Narrows the argument of every tester node of `eclass` in **one** walk.
+    ///
+    /// A decided tester sits in the `true` or `false` class, which holds one
+    /// such node per decided value and every assumed fact besides. Applying per
+    /// match and re-scanning the class to recover the matched node's type args
+    /// would cost `|class|` per match, so `|class|²` per iteration. Here each
+    /// node is read once and carries its own variant, type args and argument.
     fn apply_class(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id) -> Vec<Id> {
         let Some(&Literal::Bool(holds)) = egraph[eclass].data.known() else {
             return vec![];
         };
+        // Collect first: narrowing below needs `&mut egraph`.
         let apps: Vec<(usize, Box<[Type]>, Id)> = egraph[eclass]
             .nodes
             .iter()
@@ -280,6 +305,12 @@ impl VariantNarrowApplier {
         }
         changed
     }
+
+    /// Narrows `x` by one tester application `is_C[tys](x)`, `C` the
+    /// `variant`-th, known to be `holds`. Writes the data only when the set
+    /// shrinks (or `x` had none), and reports `x` as changed then: a data-only
+    /// change moves no node or class count, so without the report egg would
+    /// take the iteration for saturated.
     fn apply_app(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
@@ -300,7 +331,7 @@ impl VariantNarrowApplier {
         };
 
         let ctor = self.ctors[variant];
-        let narrowed : BTreeSet<FuncId> = if holds {
+        let narrowed: BTreeSet<FuncId> = if holds {
             current.iter().filter(|&c| *c == ctor).copied().collect()
         } else {
             current.iter().filter(|&c| *c != ctor).copied().collect()
@@ -315,7 +346,11 @@ impl VariantNarrowApplier {
         let data = if narrowed.is_empty() {
             Data::Inconsistent
         } else {
-            Data::Adt(AdtData { head: self.head, tys, possible: narrowed })
+            Data::Adt(AdtData {
+                head: self.head,
+                tys,
+                possible: narrowed,
+            })
         };
         egraph.set_analysis_data(x, data);
         changed.push(x);
@@ -324,135 +359,6 @@ impl VariantNarrowApplier {
 
 impl Applier<Symbolic, ConstFold> for VariantNarrowApplier {
     /// One [`VariantNarrowApplier::apply_class`] per matched class. Matches that an
-    /// earlier rule of this iteration merged into one class are walked once.
-    fn apply_matches(
-        &self,
-        egraph: &mut EGraph<Symbolic, ConstFold>,
-        matches: &[SearchMatches<Symbolic>],
-        _: Symbol,
-    ) -> Vec<Id> {
-        let mut walked = HashSet::default();
-        let mut changed = vec![];
-        for m in matches {
-            if walked.insert(egraph.find(m.eclass)) {
-                changed.extend(self.apply_class(egraph, m.eclass));
-            }
-        }
-        changed
-    }
-
-    fn apply_one(
-        &self,
-        egraph: &mut EGraph<Symbolic, ConstFold>,
-        eclass: Id,
-        _: &Subst,
-        _: Option<&PatternAst<Symbolic>>,
-        _: Symbol,
-    ) -> Vec<Id> {
-        self.apply_class(egraph, eclass)
-    }
-    fn vars(&self) -> Vec<Var> {
-        vec![]
-    }
-}
-
-pub(super) struct IsExclApplier {
-    /// All testers of the head, indexed by variant.
-    pub(super) testers: Arc<[FuncId]>,
-    /// Tester → its variant, the inverse of `testers`.
-    pub(super) variant_of: HashMap<FuncId, usize>,
-}
-
-impl IsExclApplier {
-    /// Applies the rule to every tester node of `eclass` in **one** walk.
-    ///
-    /// A decided tester sits in the `true` or `false` class, which holds one
-    /// such node per decided value and every assumed fact besides. Applying per
-    /// match and re-scanning the class to recover the matched node's type args
-    /// cost `|class|` per match, so `|class|²` per iteration. Here each node is
-    /// read once and carries its own variant, type args and argument.
-    fn apply_class(&self, egraph: &mut EGraph<Symbolic, ConstFold>, eclass: Id) -> Vec<Id> {
-        let Some(&Literal::Bool(holds)) = egraph[eclass].data.known() else {
-            return vec![];
-        };
-        // Collect first: the lookups and unions below need `&mut egraph`.
-        let apps: Vec<(usize, Box<[Type]>, Id)> = egraph[eclass]
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Symbolic::FuncApp(f, tys, args) => {
-                    self.variant_of.get(f).map(|&v| (v, tys.clone(), args[0]))
-                }
-                _ => None,
-            })
-            .collect();
-        let mut changed = vec![];
-        for (variant, tys, x) in apps {
-            self.apply_app(egraph, holds, variant, tys, x, &mut changed);
-        }
-        changed
-    }
-
-    /// The rule for one tester application `is_C[tys](x)`, `C` the `variant`-th,
-    /// known to be `holds`.
-    fn apply_app(
-        &self,
-        egraph: &mut EGraph<Symbolic, ConstFold>,
-        holds: bool,
-        variant: usize,
-        tys: Box<[Type]>,
-        x: Id,
-        changed: &mut Vec<Id>,
-    ) {
-        // Existing sibling tester classes, by variant (None = not in the graph).
-        // One probe node re-pointed at each tester, so a lookup allocates nothing.
-        let mut probe = Symbolic::FuncApp(self.testers[variant], tys, Box::new([x]));
-        let sib: Vec<Option<Id>> = self
-            .testers
-            .iter()
-            .map(|&t| {
-                if let Symbolic::FuncApp(f, ..) = &mut probe {
-                    *f = t;
-                }
-                egraph.lookup(&mut probe)
-            })
-            .collect();
-
-        let mut union_lit = |eg: &mut EGraph<_, _>, id: Id, b: bool| {
-            let lit = eg.add(Symbolic::Lit(Literal::Bool(b)));
-            if eg.union(id, lit) {
-                changed.push(eg.find(id));
-            }
-        };
-
-        if holds {
-            // Exclusivity.
-            for (d, id) in sib.iter().enumerate() {
-                if d != variant
-                    && let Some(id) = id
-                {
-                    union_lit(egraph, *id, false);
-                }
-            }
-        } else {
-            // Last variant: every other variant has a tester known false.
-            let is_false = |eg: &EGraph<_, ConstFold>, id: Id| {
-                eg[id].data.known() == Some(&Literal::Bool(false))
-            };
-            let open: Vec<usize> = (0..sib.len())
-                .filter(|&d| !sib[d].is_some_and(|id| is_false(egraph, id)))
-                .collect();
-            if let [e] = open[..]
-                && let Some(id) = sib[e]
-            {
-                union_lit(egraph, id, true);
-            }
-        }
-    }
-}
-
-impl Applier<Symbolic, ConstFold> for IsExclApplier {
-    /// One [`IsExclApplier::apply_class`] per matched class. Matches that an
     /// earlier rule of this iteration merged into one class are walked once.
     fn apply_matches(
         &self,

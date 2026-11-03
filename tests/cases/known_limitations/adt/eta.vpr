@@ -3,9 +3,10 @@
 //
 // Eta / surjectivity: a value of variant `C` equals `C` applied to its own
 // destructors (`x.isC ==> x == C(x.f1, .., x.fn)`). Viper's ADT encoding states
-// it, the Z3 rung proves it, but no e-graph rule does: `proj-*` and `inj-*`
-// only reason *from* a constructor term already in the value's class, and
-// nothing ever puts `C(x.f1, ..)` there. Every method below needs that step.
+// it, the Z3 rung proves it, but no e-graph rule does: `proj-*` and
+// `accessor-*` only reason *from* a constructor term already in the value's
+// class, and nothing ever puts `C(x.f1, ..)` there. The variant set does know
+// the value is a `C`, but not that it equals that term. Every method below needs that step.
 //
 // The nullary case (`c.isRed ==> c == Red()`) needs no destructors and is in
 // `nullary_tester_pins_value.vpr`; eta after a call, which Z3 misses too, is in

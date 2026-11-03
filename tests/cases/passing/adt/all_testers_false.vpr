@@ -1,12 +1,10 @@
 // suite: no-z3
-// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
-//
 // Every tester of a value false is a contradiction: the testers are exhaustive.
-// `is-excl-*` handles all-but-one false (the last one becomes true, see
-// `passing/adt/tester_last_variant.vpr`) but not all false, where there is no
-// undecided tester left to set and the rule never declares the class
-// inconsistent. A single-variant ADT is the degenerate case: its only tester
-// false is already "all false".
+// `variant-narrow-*` removes one variant per false tester from the value's
+// variant set; with every variant removed the set is empty and the class
+// `Inconsistent`. A single-variant ADT is the degenerate case: its only tester
+// false is already "all false". All-but-one false (the last one becomes true) is
+// in `tester_last_variant.vpr`.
 adt Shape {
     Circle(radius: Int)
     Square(side: Int)

@@ -1,7 +1,8 @@
 // suite: no-z3
-// Last-variant reasoning on an opaque value (`is-excl-*`): when every tester but
-// one is false, the remaining one is true, and the testers are exhaustive.
-// All-false and single-variant ADTs are in `known_limitations/adt/`.
+// Last-variant reasoning on an opaque value (`variant-narrow-*` and `is-*`): when
+// every tester but one is false, the remaining one is true, and the testers are
+// exhaustive. All-false and single-variant ADTs are in `all_testers_false.vpr`
+// and `single_variant_tester.vpr`.
 adt Shape {
     Circle(radius: Int)
     Square(side: Int)
