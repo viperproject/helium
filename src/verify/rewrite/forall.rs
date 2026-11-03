@@ -6,6 +6,8 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::dhash::HashMap;
+
 use egg::{
     Applier, Changes, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var,
 };
@@ -331,18 +333,22 @@ pub(super) struct ForallApplier {
     pub(super) memo: Arc<Memo<(RecipeId, Vec<Id>)>>,
 }
 
-impl Applier<Symbolic, ConstFold> for ForallApplier {
-    fn apply_one(
+impl ForallApplier {
+    /// The new instances of the quantifiers in `eclass` under `substs`, recorded in
+    /// the memo. With an anchor, only the σ under which some trigger term matches at
+    /// the anchor class are new (see `ForallSearcher::search_changes`).
+    ///
+    /// A group's terms are matched anywhere at most once per call, and the
+    /// partial σ are joined with those matches on the binders they share: matching
+    /// a term again under each partial σ would scan the term's classes once per σ,
+    /// which is quadratic when both are large (e.g. a trigger term whose
+    /// applications all sit in `true`).
+    fn instances(
         &self,
-        egraph: &mut EGraph<Symbolic, ConstFold>,
+        egraph: &EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        subst: &Subst,
-        _searcher_ast: Option<&PatternAst<Symbolic>>,
-        _rule_name: Symbol,
-    ) -> Vec<Id> {
-        // With an anchor, only the σ under which some trigger term matches at the
-        // anchor class are new (see `ForallSearcher::search_changes`).
-        let anchor = subst.get(anchor()).map(|&a| egraph.find(a));
+        substs: &[Subst],
+    ) -> Vec<(RecipeId, Vec<Id>)> {
         // Distinct capture tuples in one e-class are distinct quantifiers (each
         // yields its own instances); the guard is this e-class either way.
         let quants: Vec<(RecipeId, Box<[Id]>)> = egraph[eclass]
@@ -354,6 +360,16 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             })
             .collect();
 
+        // The anchors as classes now: rules applied earlier in the iteration may
+        // have merged several (typically into a hub such as `true`), whose terms
+        // are then matched once.
+        let mut anchors: Vec<Option<Id>> = substs
+            .iter()
+            .map(|s| s.get(anchor()).map(|&a| egraph.find(a)))
+            .collect();
+        anchors.sort_unstable();
+        anchors.dedup();
+
         let table = self.table.read().expect("recipe table lock");
         // Collect the instances first: `build_instance` needs `&mut egraph`.
         let mut instances: Vec<(RecipeId, Vec<Id>)> = Vec::new();
@@ -362,29 +378,39 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
             for group in &recipe.groups {
                 let empty: Sigma = vec![None; recipe.n_bound];
-                // Which term is matched first, and where: the whole group's first
-                // term anywhere, or (anchored) each term at the anchor in turn.
-                let starts: Vec<(usize, Vec<Sigma>)> = match anchor {
-                    None => match group.first() {
-                        Some(first) => vec![(0, match_term_anywhere(egraph, first, &caps, &empty))],
-                        None => vec![],
-                    },
-                    Some(at) => (0..group.len())
-                        .map(|i| (i, match_term(egraph, &group[i], at, &caps, &empty)))
-                        .collect(),
-                };
+                let mut anywhere: Vec<Option<Vec<Sigma>>> = vec![None; group.len()];
                 let mut sigmas = Vec::new();
-                for (first, mut partial) in starts {
-                    for (i, term) in group.iter().enumerate() {
-                        if i == first || partial.is_empty() {
-                            continue;
+                for &at in &anchors {
+                    // Which term is matched first, and where: the whole group's
+                    // first term anywhere, or (anchored) each term at the anchor in
+                    // turn.
+                    let starts: Vec<(usize, Vec<Sigma>)> = match at {
+                        None if group.is_empty() => vec![],
+                        None => vec![(0, Vec::new())],
+                        Some(at) => (0..group.len())
+                            .map(|i| (i, match_term(egraph, &group[i], at, &caps, &empty)))
+                            .collect(),
+                    };
+                    let anchored = at.is_some();
+                    for (first, mut partial) in starts {
+                        for (i, term) in group.iter().enumerate() {
+                            if anchored && (i == first || partial.is_empty()) {
+                                continue;
+                            }
+                            let matches = anywhere[i].get_or_insert_with(|| {
+                                match_term_anywhere(egraph, term, &caps, &empty)
+                            });
+                            partial = if !anchored && i == 0 {
+                                matches.clone()
+                            } else {
+                                join(&partial, matches)
+                            };
+                            if partial.is_empty() {
+                                break;
+                            }
                         }
-                        partial = partial
-                            .iter()
-                            .flat_map(|s| match_term_anywhere(egraph, term, &caps, s))
-                            .collect();
+                        sigmas.extend(partial);
                     }
-                    sigmas.extend(partial);
                 }
                 for sigma in sigmas {
                     // A group covers every binder (typecheck-enforced), so a
@@ -401,7 +427,17 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                 }
             }
         }
+        instances
+    }
 
+    /// Builds `instances` of the quantifiers in `eclass`, each behind its guard.
+    fn build(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        instances: Vec<(RecipeId, Vec<Id>)>,
+    ) -> Vec<Id> {
+        let table = self.table.read().expect("recipe table lock");
         let mut changed = Vec::new();
         for (rid, vals) in instances {
             let recipe = table.get(rid);
@@ -430,6 +466,39 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         }
         changed
     }
+}
+
+impl Applier<Symbolic, ConstFold> for ForallApplier {
+    /// All of a quantifier's matches are joined against the graph as the search
+    /// saw it, before any of their instances is built. Building between anchors
+    /// would let the joins of later anchors pick up the terms of earlier
+    /// instances, chaining a matching loop through one application instead of one
+    /// level per iteration.
+    fn apply_matches(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        matches: &[SearchMatches<Symbolic>],
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let mut changed = Vec::new();
+        for m in matches {
+            let instances = self.instances(egraph, m.eclass, &m.substs);
+            changed.extend(self.build(egraph, m.eclass, instances));
+        }
+        changed
+    }
+
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let instances = self.instances(egraph, eclass, std::slice::from_ref(subst));
+        self.build(egraph, eclass, instances)
+    }
 
     fn vars(&self) -> Vec<Var> {
         vec![]
@@ -452,3 +521,38 @@ pub(crate) fn forall_rule(table: Arc<RwLock<RecipeTable>>) -> Rule {
 
 /// A partial bound-variable substitution, one slot per binder.
 pub(super) type Sigma = Vec<Option<Id>>;
+
+/// Every merge of a σ in `partial` with a compatible σ in `matches` (equal where
+/// both bind a binder). Each side binds one set of binders throughout (those of
+/// the terms matched so far, resp. of one term), so the σ are indexed by the
+/// binders both bind and paired per key.
+fn join(partial: &[Sigma], matches: &[Sigma]) -> Vec<Sigma> {
+    let (Some(p0), Some(m0)) = (partial.first(), matches.first()) else {
+        return vec![];
+    };
+    let shared: Vec<usize> = (0..p0.len())
+        .filter(|&k| p0[k].is_some() && m0[k].is_some())
+        .collect();
+    let key = |s: &Sigma| -> Vec<Option<Id>> { shared.iter().map(|&k| s[k]).collect() };
+    let mut index: HashMap<Vec<Option<Id>>, Vec<&Sigma>> = HashMap::default();
+    for m in matches {
+        index.entry(key(m)).or_default().push(m);
+    }
+    let mut out = Vec::new();
+    for p in partial {
+        for m in index.get(&key(p)).into_iter().flatten() {
+            // Checked slot by slot, so a σ binding other binders than its side's
+            // first is merged only where it agrees.
+            let merged: Option<Sigma> = p
+                .iter()
+                .zip(m.iter())
+                .map(|(a, b)| match (a, b) {
+                    (Some(a), Some(b)) if a != b => None,
+                    (a, b) => Some(a.or(*b)),
+                })
+                .collect();
+            out.extend(merged);
+        }
+    }
+    out
+}
