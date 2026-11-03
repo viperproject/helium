@@ -1,0 +1,14 @@
+// The sibling-arm form of `wildcard_remainder_leaks_past_join.vpr`: the else arm
+// must not see the then arm's `r < p` (and so `0 < p`). Silicon rejects.
+field f: Int
+
+method wildcard_remainder_leaks_to_sibling(x: Ref, p: Perm, c: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    inhale p > none
+    exhale acc(x.f, wildcard)
+  } else {
+    assert p > none
+  }
+}

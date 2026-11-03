@@ -940,6 +940,13 @@ fn assert_statement_pc_is_block_cube(ctx: &mut VerifyContext<'_>, inst: &Inst) {
 }
 
 /// Evaluate a heap inst. `Sub` may fail with `InsufficientPermission`.
+///
+/// The heap algebra is handed the **effective** pc ([`collect_pc_lits`]), never
+/// the bare `pc` delta: besides proving obligations under it, it *assumes* facts
+/// under it — the agreement of two chunks' values, a wildcard remainder's bound —
+/// and a fact guarded by the delta alone leaks onto every path outside the
+/// block's cube. (`prove_under_pc` adds the cube itself as well; seeing a cube
+/// literal twice is harmless.)
 fn eval_heap_inst(
     ctx: &mut VerifyContext<'_>,
     state: &EvalState,
@@ -956,11 +963,7 @@ fn eval_heap_inst(
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
+            let pc_lits = collect_pc_lits(ctx, state, pc);
             Ok(union_heaps(ctx, &ha, &hb, &pc_lits))
         }
         // Block-IR heap join: structural per-chunk SELECT of the two predecessor
@@ -999,11 +1002,7 @@ fn eval_heap_inst(
             let base_h = get_heap(state, base);
             let cperm = eval_perm_structural(ctx, state, perm);
             let chunk = heap_acc(ctx, loc, cperm.clone(), state);
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
+            let pc_lits = collect_pc_lits(ctx, state, pc);
             let (kind, ch) = chunk.entries().next().unwrap();
             let (kind, mut ch) = (kind.clone(), ch.clone());
             if let Some(bind) = bind {
@@ -1094,11 +1093,7 @@ fn eval_heap_inst(
             // per leaf, so a branch-structured held perm never materializes. Under
             // the guarded-merge path the write obligation is proven against the
             // guard-gated perm (write required only where the chunk is present).
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
+            let pc_lits = collect_pc_lits(ctx, state, pc);
             let proof_perm = if !guard.is_empty() {
                 gate_perm_by_guard(ctx, &perm, &guard)
             } else {
@@ -1620,11 +1615,7 @@ fn eval_sub_yield(
         .loc_kind(loc)
         .expect("acc location must be Addr-typed");
     let cperm = eval_perm_structural(ctx, state, perm);
-    let pc_lits: Vec<(egg::Id, Polarity)> = pc
-        .conds
-        .iter()
-        .map(|(v, p)| (state.get_val(ctx, v), *p))
-        .collect();
+    let pc_lits = collect_pc_lits(ctx, state, pc);
 
     // The held value, and (certificate walks) its provenance. The `Option` below
     // is concretely `Some` on every path that continues: `heap_subtract` fails
