@@ -981,7 +981,12 @@ fn eval_heap_inst(
             let cond_id = state.get_val(ctx, cond);
             let h_then = get_heap(state, then_h);
             let h_els = get_heap(state, els_h);
-            Ok(merge_heaps(ctx, cond_id, &h_then, &h_els))
+            // The merged heap exists only on the join's path. A join is walked with
+            // the block cube cleared and the merge carries the join's cube as its
+            // own pc, so the effective pc is that cube (`collect_pc_lits` prepends
+            // the ambient, empty here).
+            let heap_pc = collect_pc_lits(ctx, state, pc);
+            Ok(merge_heaps(ctx, cond_id, &h_then, &h_els, &heap_pc))
         }
         // `base ± acc loc perm`: build the single chunk, then union (Add) or
         // subtract (Sub) it.

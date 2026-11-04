@@ -459,21 +459,34 @@ pub(crate) fn gate_bool_by_cube(
 /// [`VerifyContext::assume_guarded`] (whose scratch half is unguarded, invariant
 /// 4) is involved. With empty guards this is byte-identical to the pre-gating
 /// encoding, so the unconditional hot path pays nothing.
-pub(crate) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
+///
+/// # And under the path condition of the heap itself
+///
+/// `heap_pc` is the path condition under which `h` exists, and every fact is
+/// gated by it as well. The caller has to supply it, because the block cube in
+/// [`VerifyContext::current_cube`] is only that condition during a block's body
+/// walk: a join is walked with the cube cleared (`end_block`), and its merge
+/// materializes the join's cube itself. Reading the cleared cube there stated the
+/// merged heap's axioms on every path. A merge inside `if (d)` of a heap holding
+/// `1/1` at `a.f` and `1/2` at `b.f` derived `a != b` outright, and made the
+/// `!d` arm, where `a == b` is consistent, infeasible.
+pub(crate) fn assume_location_axioms(
+    ctx: &mut VerifyContext<'_>,
+    h: &Heap,
+    heap_pc: &[(egg::Id, Polarity)],
+) {
     let chunks = location_chunks(ctx, h);
     if chunks.is_empty() {
         return;
     }
     let true_ = expr!(ctx, true);
 
-    // The cube each chunk is actually present under: the block's control cube
-    // (this heap only exists on that path — `heap_union` runs per `inhale`, inside
-    // a block) meet the chunk's own residual merge guard. A contradiction means the
+    // The cube each chunk is actually present under: the path condition of the
+    // heap meet the chunk's own residual merge guard. A contradiction means the
     // chunk is unreachable here, so it states nothing.
-    let block: Vec<(egg::Id, Polarity)> = ctx.current_cube().to_vec();
     let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> = chunks
         .iter()
-        .map(|c| cube_meet(ctx, &block, &c.guard))
+        .map(|c| cube_meet(ctx, heap_pc, &c.guard))
         .collect();
 
     // Bound: perm ≤ b at each bounded location — assumed **per leaf** of the
@@ -662,7 +675,10 @@ pub(crate) fn heap_union(
     } else {
         out = out.with_chunk(kind, chunk2);
     }
-    assume_location_axioms(ctx, &out);
+    // `heap_union` runs per `inhale`, inside a block's body walk, so the heap
+    // exists on the block's cube.
+    let block = ctx.current_cube().to_vec();
+    assume_location_axioms(ctx, &out, &block);
     out
 }
 
@@ -1865,11 +1881,15 @@ pub(crate) fn summarized_value(
 /// **transiently at each consume site** (`gate_perm_by_guard`), so merges stay
 /// flat while sufficiency/remainder keep the pre-hoist semantics. Runs only when
 /// both arms are live, so an absent side is a genuine conditional footprint.
+///
+/// `heap_pc` is the path condition of the join: the merged heap exists only there,
+/// and its location axioms are gated by it ([`assume_location_axioms`]).
 pub(crate) fn merge_heaps(
     ctx: &mut VerifyContext<'_>,
     cond: egg::Id,
     h_then: &Heap,
     h_els: &Heap,
+    heap_pc: &[(egg::Id, Polarity)],
 ) -> Heap {
     let mut out = Heap::empty();
     let mut kinds: Vec<LocationKind> = h_then.kinds().cloned().collect();
@@ -1941,7 +1961,7 @@ pub(crate) fn merge_heaps(
             }
         }
     }
-    assume_location_axioms(ctx, &out);
+    assume_location_axioms(ctx, &out, heap_pc);
     out
 }
 
@@ -2259,7 +2279,7 @@ mod tests {
         }
         ctx.egraph.rebuild();
 
-        assume_location_axioms(&mut ctx, &heap);
+        assume_location_axioms(&mut ctx, &heap, &[]);
         ctx.saturate();
         assert!(
             ctx.is_inconsistent(),
