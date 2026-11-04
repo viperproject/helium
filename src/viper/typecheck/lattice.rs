@@ -1,7 +1,7 @@
 use rusttyc::Constructable;
 use rusttyc::types::{Arity, Partial, Variant};
 
-use crate::viper::typed::{Ident, Type};
+use crate::viper::typed::{BuiltinCollection, Ident, Type};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ViperTcType {
@@ -20,6 +20,7 @@ pub enum ViperTcType {
     /// from an *instantiation* variable (a plain unconstrained key), which any
     /// concrete type may still pin.
     Generic(Ident),
+    Seq,
     Top,
 }
 
@@ -51,7 +52,14 @@ impl Variant for ViperTcType {
     fn arity(&self) -> Arity {
         match self {
             ViperTcType::Domain(_, n) => Arity::Fixed(*n),
-            _ => Arity::Fixed(0),
+            ViperTcType::Seq => Arity::Fixed(1),
+            ViperTcType::Bool
+            | ViperTcType::Int
+            | ViperTcType::Real
+            | ViperTcType::Ref
+            | ViperTcType::Numeric
+            | ViperTcType::Generic(_)
+            | ViperTcType::Top => Arity::Fixed(0),
         }
     }
 
@@ -71,6 +79,7 @@ impl Variant for ViperTcType {
             (Real, Real) => Real,
             (Domain(a, n), Domain(b, m)) if a == b && n == m => Domain(a, n),
             (Generic(a), Generic(b)) if a == b => Generic(a),
+            (Seq, Seq) => Seq,
             (t1, t2) => {
                 return Err(TcTypeErr::Mismatch(t1, t2));
             }
@@ -79,6 +88,7 @@ impl Variant for ViperTcType {
         // every other variant is 0-ary.
         let least_arity = match &variant {
             Domain(_, n) => *n,
+            Seq => 1,
             _ => 0,
         };
         Ok(Partial {
@@ -105,6 +115,12 @@ impl Constructable for ViperTcType {
             ViperTcType::Top => {
                 return Err(TcTypeErr::Abstract);
             }
+            ViperTcType::Seq => Type::Collection(BuiltinCollection::Seq(Box::new(
+                children
+                    .first()
+                    .expect("sequence must have a child type")
+                    .clone(),
+            ))),
         })
     }
 }
@@ -120,6 +136,7 @@ pub fn type_to_tc(ty: &Type) -> ViperTcType {
         Type::Real => ViperTcType::Real,
         Type::Ref => ViperTcType::Ref,
         Type::Domain(id, args) => ViperTcType::Domain(*id, args.len()),
+        Type::Collection(BuiltinCollection::Seq(_)) => ViperTcType::Seq,
         Type::Generic(_) | Type::Collection(_) => ViperTcType::Top,
     }
 }

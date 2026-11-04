@@ -115,6 +115,7 @@ impl Type {
             Type::Domain(_, args) => args.iter().for_each(|a| a.generics_in_order(out)),
             Type::Option(t) => t.generics_in_order(out),
             Type::Addr { value, .. } => value.generics_in_order(out),
+            Type::Seq(t) => t.generics_in_order(out),
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => {}
         }
     }
@@ -161,7 +162,9 @@ impl Type {
                         .zip(ys.iter())
                         .all(|(x, y)| x.match_generics(y, out))
             }
-            (Type::Option(x), Type::Option(y)) => x.match_generics(y, out),
+            (Type::Option(x), Type::Option(y)) | (Type::Seq(x), Type::Seq(y)) => {
+                x.match_generics(y, out)
+            }
             (
                 Type::Addr {
                     group: g1,

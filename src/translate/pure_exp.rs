@@ -312,6 +312,8 @@ pub(crate) fn lower<Ext: PureExt>(
                 },
             ))
         }
+        // TODO(seq): lower to `PureInst::Seq` once VMIR has it.
+        P::SeqLit(_) | P::SeqIndex(..) => Err(TranslationError::Unsupported("sequence expression")),
         P::AdtDiscriminator(base, variant) => {
             // `e.is<Ctor>` ⇒ the `Bool` tester `AdtIs{adt, variant}(e)`. The
             // verifier's `is` reduction folds it to a literal when `e` is a known
@@ -908,6 +910,14 @@ fn lower_trig_term(
                 type_args: adt_type_args(b, &base.ty),
                 args: Box::new([lower_trig_term(b, base, env)?]),
             })
+        }
+        // TODO(seq): lower to `TrigHead::Seq` once VMIR has it. Typecheck
+        // accepts these as trigger terms, as Silicon does.
+        P::SeqLit(_)
+        | P::SeqIndex(..)
+        | P::Unary(typed::UnOp::Cardinality, _)
+        | P::Binary(typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range, ..) => {
+            Err(TranslationError::Unsupported("sequence trigger"))
         }
         P::Unary(..)
         | P::Binary(..)

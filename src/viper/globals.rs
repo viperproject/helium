@@ -6,7 +6,7 @@ use lasso::Spur;
 use nonmax::NonMaxU32;
 use typed_index_collections::TiVec;
 
-use crate::viper::{IdnDecl, interner::Interner, typed::Type, walk::AstWalker};
+use crate::viper::{IdnDecl, interner::Interner, typed::{BuiltinCollection, Type}, walk::AstWalker};
 
 /// Rewrite references to a bound type parameter into `Type::Generic`. The parser
 /// emits every named type as `Type::Domain(name, args)`, so a type-parameter use
@@ -21,6 +21,15 @@ fn genericize(ty: Type, params: &HashSet<Spur>) -> Type {
             id,
             args.into_iter().map(|a| genericize(a, params)).collect(),
         ),
+        Type::Collection(c) => {
+            let g = |t: Box<Type>| Box::new(genericize(*t, params));
+            Type::Collection(match c {
+                BuiltinCollection::Seq(t) => BuiltinCollection::Seq(g(t)),
+                BuiltinCollection::Set(t) => BuiltinCollection::Set(g(t)),
+                BuiltinCollection::MultiSet(t) => BuiltinCollection::MultiSet(g(t)),
+                BuiltinCollection::Map(k, v) => BuiltinCollection::Map(g(k), g(v)),
+            })
+        }
         other => other,
     }
 }

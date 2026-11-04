@@ -25,6 +25,7 @@ enum Head {
     Domain(MemberId),
     Snap(MemberId),
     Option,
+    Seq,
     Addr,
 }
 
@@ -39,6 +40,7 @@ impl Head {
             Type::Domain(id, _) => Head::Domain(*id),
             Type::Snap(id) => Head::Snap(*id),
             Type::Option(_) => Head::Option,
+            Type::Seq(_) => Head::Seq,
             Type::Addr { .. } => Head::Addr,
             Type::Generic(_) => unreachable!("a bare parameter is matched against every type"),
         }
