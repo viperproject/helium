@@ -364,9 +364,10 @@ fn eval_pure_inst(
         PureInst::Deref(hv, loc) => {
             let heap = get_heap(state, hv);
             let addr = state.get_val(ctx, loc);
-            let chunk = state
-                .loc_kind(loc)
-                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(&k), addr, pc_lits).cloned());
+            let kind = state.loc_kind(loc);
+            let chunk = kind
+                .as_ref()
+                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(k), addr, pc_lits).cloned());
             match chunk {
                 Some(c) => {
                     // The chunk's recipe provenance is the deref's pure term —
@@ -387,7 +388,28 @@ fn eval_pure_inst(
                             "purify: deref outside footprint",
                         ));
                     }
-                    (ctx.fresh_symbolic_value(ty.clone()), None)
+                    let v = ctx.fresh_symbolic_value(ty.clone());
+                    // No single chunk sits at `addr`, but the location may be held across
+                    // several that each coincide with it only conditionally (a join phi
+                    // `c ? a : b` as receiver). Tie the read to each of them, under its own
+                    // address gate *and* only where it holds permission: a chunk drained
+                    // to zero can still carry a stale value.
+                    if let Some(k) = kind {
+                        let (_, set) = summarize_perm_at(ctx, heap.chunks_of(&k), addr, pc_lits);
+                        for (c, cube) in &set {
+                            let p = c.gated_perm(ctx).to_id(ctx);
+                            let held = expr!(ctx, (0 / 1) < r { p });
+                            let agree = expr!(ctx, { v } == { c.value });
+                            // Innermost-first: the positivity gate, the address cube, the pc.
+                            let guards = std::iter::once((held, Polarity::Positive))
+                                .chain(cube.iter().rev().copied())
+                                .chain(pc_lits.iter().rev().copied());
+                            // Not `assume_guarded`: these gates are finer than the block
+                            // cube, so the fact must not go into the scratch unguarded.
+                            ctx.assume_token_guarded(agree, guards);
+                        }
+                    }
+                    (v, None)
                 }
             }
         }
@@ -2882,11 +2904,20 @@ fn inst_obligations(
         InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
             let addr = state.get_val(ctx, loc);
             let held = get_heap(state, heap);
-            let perm = state.loc_kind(loc).and_then(|k| {
-                let c = chunk_under_pc(ctx, held.chunks_of(&k), addr, pc_lits)?.clone();
-                // Frame against the gated perm: a conditionally-held location
-                // frames only where its guard holds.
-                Some(c.gated_perm(ctx))
+            let perm = state.loc_kind(loc).map(|k| {
+                let chunks = held.chunks_of(&k);
+                match chunk_under_pc(ctx, chunks, addr, pc_lits) {
+                    // Frame against the gated perm: a conditionally-held location
+                    // frames only where its guard holds.
+                    Some(c) => c.clone().gated_perm(ctx),
+                    // No single chunk sits at `addr`, even under the pc: the location may
+                    // still be held across several chunks that each coincide with it only
+                    // conditionally (a join phi `c ? a : b` as receiver). Frame against
+                    // the Σ-ite summary, as a consume's last rung and `perm(loc)` do. Its
+                    // addends are already presence-gated, and an empty summary is `0/1`,
+                    // which fails below exactly as a miss did.
+                    None => summarize_perm_at(ctx, chunks, addr, pc_lits).0,
+                }
             });
             match perm {
                 // A bare (or absent) perm: the goal `0 < leaf` is discharged by
