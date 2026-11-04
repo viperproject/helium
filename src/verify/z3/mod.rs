@@ -383,6 +383,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
             Sort::uninterpreted(format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into())
         }
         Type::Generic(_) => unreachable!("generics are currently not supported"),
+        Type::Seq(_) => todo!("Support translation of sequences to z3")
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort

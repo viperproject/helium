@@ -313,6 +313,7 @@ impl<'a> VerifyContext<'a> {
             Type::Snap(id) => format!("{}@snap", self.member_name(*id)),
             Type::Option(t) => format!("Option<{}>", self.type_name(t)),
             Type::Generic(i) => format!("?{i}"),
+            Type::Seq(t) => format!("Seq<{}>", self.type_name(t)),
         }
     }
 
