@@ -1,0 +1,6 @@
+// Seq well-definedness: only the upper bound is known, `i` may be negative.
+method index_may_be_negative(s: Seq[Int], i: Int)
+  requires i < |s|
+{
+  var x: Int := s[i]
+}

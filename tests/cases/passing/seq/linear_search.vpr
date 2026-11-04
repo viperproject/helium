@@ -1,0 +1,33 @@
+// Seq (verification-heavy): a loop finding the FIRST occurrence of a key.
+
+method first_index_of(xs: Seq[Int], key: Int) returns (index: Int)
+  ensures -1 <= index && index < |xs|
+  ensures index == -1 ==> !(key in xs)
+  ensures 0 <= index ==> xs[index] == key
+  ensures 0 <= index ==> forall j: Int :: { xs[j] } 0 <= j && j < index ==> xs[j] != key
+{
+  var i: Int := 0
+  index := -1
+  while (i < |xs| && index == -1)
+    invariant 0 <= i && i <= |xs|
+    invariant index == -1 || (0 <= index && index < i && xs[index] == key)
+    invariant index == -1 ==> forall j: Int :: { xs[j] } 0 <= j && j < i ==> xs[j] != key
+    invariant 0 <= index ==> forall j: Int :: { xs[j] } 0 <= j && j < index ==> xs[j] != key
+  {
+    if (xs[i] == key) {
+      index := i
+    }
+    i := i + 1
+  }
+}
+
+method client() {
+  var xs: Seq[Int] := Seq(4, 1, 4, 2)
+  var r: Int
+  r := first_index_of(xs, 4)
+  assert xs[0] == 4
+  assert r == 0
+  r := first_index_of(xs, 2)
+  assert xs[3] == 2
+  assert r == 3
+}

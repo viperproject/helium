@@ -1,0 +1,8 @@
+// Seq: `s[i := v]` changes index `i` only; index `j != i` keeps `s[j]`.
+method update_leaks_to_other_index(s: Seq[Int], i: Int, j: Int, v: Int)
+  requires 0 <= i && i < |s|
+  requires 0 <= j && j < |s|
+  requires i != j
+{
+  assert s[i := v][j] == v
+}

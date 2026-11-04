@@ -1,0 +1,20 @@
+// Seq in the heap: after a push, the stored sequence is one longer; claiming
+// its length is unchanged must fail.
+
+field elems: Seq[Int]
+
+method push(this: Ref, v: Int)
+  requires acc(this.elems)
+  ensures acc(this.elems)
+  ensures this.elems == old(this.elems) ++ Seq(v)
+{
+  this.elems := this.elems ++ Seq(v)
+}
+
+method client(this: Ref)
+  requires acc(this.elems)
+{
+  var before: Int := |this.elems|
+  push(this, 1)
+  assert |this.elems| == before
+}

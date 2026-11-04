@@ -1,0 +1,26 @@
+// Seq (verification-heavy): the loop stops one element early, so the result
+// misses the last element (xs = [1]: r = 0, sum = 1). Same hints as the
+// passing version, so only the bug can make it fail.
+
+function sum(xs: Seq[Int]): Int
+  decreases |xs|
+{
+  |xs| == 0 ? 0 : sum(xs[..|xs| - 1]) + xs[|xs| - 1]
+}
+
+method sum_loop(xs: Seq[Int]) returns (r: Int)
+  requires |xs| > 0
+  ensures r == sum(xs)
+{
+  r := 0
+  var i: Int := 0
+  while (i < |xs| - 1)
+    invariant 0 <= i && i <= |xs|
+    invariant r == sum(xs[..i])
+  {
+    assert xs[..i + 1][..i] == xs[..i]
+    r := r + xs[i]
+    i := i + 1
+  }
+  assert xs[..|xs|] == xs
+}

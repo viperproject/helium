@@ -1,0 +1,36 @@
+// Seq: point update `s[i := v]`.
+
+method update_reads_back(s: Seq[Int], i: Int, v: Int)
+  requires 0 <= i && i < |s|
+{
+  var t: Seq[Int] := s[i := v]
+  assert |t| == |s|
+  assert t[i] == v
+}
+
+method update_frames_other_indices(s: Seq[Int], i: Int, j: Int, v: Int)
+  requires 0 <= i && i < |s|
+  requires 0 <= j && j < |s|
+  requires i != j
+{
+  assert s[i := v][j] == s[j]
+}
+
+method update_literal() {
+  var s: Seq[Int] := Seq(1, 2, 3)
+  s := s[1 := 42]
+  assert s[0] == 1 && s[1] == 42 && s[2] == 3
+  assert s == Seq(1, 42, 3)
+}
+
+method update_last_write_wins(s: Seq[Int], i: Int, a: Int, b: Int)
+  requires 0 <= i && i < |s|
+{
+  assert s[i := a][i := b] == s[i := b]
+}
+
+method update_with_same_value_is_identity(s: Seq[Int], i: Int)
+  requires 0 <= i && i < |s|
+{
+  assert s[i := s[i]] == s
+}

@@ -1,0 +1,50 @@
+// Seq (verification-heavy): a recursive pure function over sequences, and
+// loops proven against it. Each iteration needs `xs[..i+1][..i] == xs[..i]`,
+// which only extensionality gives, so it is asserted as a hint (Silicon needs
+// the same hint), as is `xs[..|xs|] == xs` after the loop.
+
+function sum(xs: Seq[Int]): Int
+  decreases |xs|
+{
+  |xs| == 0 ? 0 : sum(xs[..|xs| - 1]) + xs[|xs| - 1]
+}
+
+method sum_loop(xs: Seq[Int]) returns (r: Int)
+  ensures r == sum(xs)
+{
+  r := 0
+  var i: Int := 0
+  while (i < |xs|)
+    invariant 0 <= i && i <= |xs|
+    invariant r == sum(xs[..i])
+  {
+    assert xs[..i + 1][..i] == xs[..i]
+    r := r + xs[i]
+    i := i + 1
+  }
+  assert xs[..|xs|] == xs
+}
+
+method sum_small() {
+  assert sum(Seq[Int]()) == 0
+  assert Seq(5)[..0] == Seq[Int]()
+  assert sum(Seq(5)) == 5
+}
+
+method sum_of_naturals_is_natural(xs: Seq[Int]) returns (r: Int)
+  requires forall i: Int :: { xs[i] } 0 <= i && i < |xs| ==> xs[i] >= 0
+  ensures r == sum(xs)
+  ensures r >= 0
+{
+  r := 0
+  var i: Int := 0
+  while (i < |xs|)
+    invariant 0 <= i && i <= |xs|
+    invariant r == sum(xs[..i]) && r >= 0
+  {
+    assert xs[..i + 1][..i] == xs[..i]
+    r := r + xs[i]
+    i := i + 1
+  }
+  assert xs[..|xs|] == xs
+}

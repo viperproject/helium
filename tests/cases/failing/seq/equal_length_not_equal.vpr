@@ -1,0 +1,6 @@
+// Seq: equal lengths do not make two sequences equal.
+method equal_length_not_equal(s: Seq[Int], t: Seq[Int])
+  requires |s| == |t|
+{
+  assert s == t
+}

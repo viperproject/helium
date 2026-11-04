@@ -1,0 +1,19 @@
+// Seq (verification-heavy): reverse by APPENDING (which actually copies), with
+// the reversing invariant. The invariant is not preserved once `r` has two
+// elements (s = [1, 2]: r becomes [1, 2], but the invariant wants [2, 1]).
+
+method reverse(s: Seq[Int]) returns (r: Seq[Int])
+  ensures |r| == |s|
+  ensures forall i: Int :: { r[i] } 0 <= i && i < |s| ==> r[i] == s[|s| - 1 - i]
+{
+  r := Seq[Int]()
+  var i: Int := 0
+  while (i < |s|)
+    invariant 0 <= i && i <= |s|
+    invariant |r| == i
+    invariant forall j: Int :: { r[j] } 0 <= j && j < i ==> r[j] == s[i - 1 - j]
+  {
+    r := r ++ Seq(s[i])
+    i := i + 1
+  }
+}

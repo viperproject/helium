@@ -1,0 +1,4 @@
+// Seq well-definedness: `s[i := v]` needs `0 <= i < |s|`, like indexing.
+method update_out_of_bounds(s: Seq[Int]) {
+  var t: Seq[Int] := s[|s| := 0]
+}

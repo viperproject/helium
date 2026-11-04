@@ -1,0 +1,6 @@
+// Seq: take clamps at `|s|`, so `|s[..n]| == n` needs `n <= |s|`.
+method take_length_unbounded(s: Seq[Int], n: Int)
+  requires 0 <= n
+{
+  assert |s[..n]| == n
+}

@@ -1,0 +1,59 @@
+// Seq: take `s[..n]`, drop `s[n..]` and slice `s[i..j]`.
+
+method take_length(s: Seq[Int], n: Int)
+  requires 0 <= n && n <= |s|
+{
+  assert |s[..n]| == n
+}
+
+method drop_length(s: Seq[Int], n: Int)
+  requires 0 <= n && n <= |s|
+{
+  assert |s[n..]| == |s| - n
+}
+
+method take_index(s: Seq[Int], n: Int, i: Int)
+  requires 0 <= i && i < n && n <= |s|
+{
+  assert s[..n][i] == s[i]
+}
+
+method drop_index(s: Seq[Int], n: Int, i: Int)
+  requires 0 <= n && 0 <= i && n + i < |s|
+{
+  assert s[n..][i] == s[n + i]
+}
+
+method take_drop_split(s: Seq[Int], n: Int)
+  requires 0 <= n && n <= |s|
+{
+  assert s[..n] ++ s[n..] == s
+}
+
+method slice_length_and_index(s: Seq[Int], i: Int, j: Int, k: Int)
+  requires 0 <= i && i <= j && j <= |s|
+  requires 0 <= k && k < j - i
+{
+  assert |s[i..j]| == j - i
+  assert s[i..j][k] == s[i + k]
+}
+
+method slice_literal() {
+  var s: Seq[Int] := Seq(1, 2, 3, 4, 5)
+  assert s[1..3] == Seq(2, 3)
+  assert s[..2] == Seq(1, 2)
+  assert s[3..] == Seq(4, 5)
+}
+
+// Take and drop are total: out-of-range counts clamp instead of failing.
+method take_drop_clamp(s: Seq[Int]) {
+  assert |s[..-1]| == 0
+  assert s[..|s| + 5] == s
+  assert |s[-3..]| == |s|
+  assert |s[|s| + 1..]| == 0
+}
+
+method take_whole_and_drop_none(s: Seq[Int]) {
+  assert s[..|s|] == s
+  assert s[0..] == s
+}
