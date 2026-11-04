@@ -145,6 +145,13 @@ pub enum TrigHead {
         adt: crate::vmir::MemberId,
         variant: usize,
     },
+    /// A sequence operation. The `App`'s `args` are its operands in
+    /// `PureInst::Seq` order (so `x in s` is `Contains(s, x)`), and `type_args`
+    /// is empty.
+    Seq(crate::vmir::SeqOp),
+    /// A sequence literal with the `App`'s `args` as its elements. `type_args`
+    /// is `[elem]`, which an empty literal has no other way to name.
+    SeqLit,
 }
 
 /// A trigger term, rendered in the enclosing temp syntax: every variable is an
@@ -174,6 +181,8 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
                     TrigHead::AdtIs { adt, variant } => {
                         write!(f, "{}?", self.adt_variant(*adt, *variant))?
                     }
+                    TrigHead::Seq(op) => write!(f, "seq.{op:?}")?,
+                    TrigHead::SeqLit => write!(f, "Seq")?,
                 }
                 if !type_args.is_empty() {
                     write!(f, "<")?;
