@@ -200,7 +200,7 @@ fn generics_in_order(ty: &vmir::Type, out: &mut Vec<usize>) {
     match ty {
         vmir::Type::Generic(i) if !out.contains(i) => out.push(*i),
         vmir::Type::Domain(_, args) => args.iter().for_each(|a| generics_in_order(a, out)),
-        vmir::Type::Option(t) => generics_in_order(t, out),
+        vmir::Type::Option(t) | vmir::Type::Seq(t) => generics_in_order(t, out),
         vmir::Type::Addr { value, .. } => generics_in_order(value, out),
         _ => {}
     }

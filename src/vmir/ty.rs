@@ -145,7 +145,9 @@ impl Type {
                         .zip(ys.iter())
                         .all(|(x, y)| x.match_generics(y, out))
             }
-            (Type::Option(x), Type::Option(y)) => x.match_generics(y, out),
+            (Type::Option(x), Type::Option(y)) | (Type::Seq(x), Type::Seq(y)) => {
+                x.match_generics(y, out)
+            }
             (
                 Type::Addr {
                     group: g1,

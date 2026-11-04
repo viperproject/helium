@@ -143,9 +143,29 @@ pub enum PureExpKind<Ext> {
     AdtDestructor(TypedPureExp<Ext>, Ident),
     /// A variant check on an ADT (e.g., `e.isCons(list)`).
     AdtDiscriminator(TypedPureExp<Ext>, Ident),
+    /// `Seq(e1, ..., en)`; empty for `Seq[T]()`. The element type is the
+    /// node's own `Seq[T]`.
+    SeqLit(Vec<TypedPureExp<Ext>>),
+    /// `s[..]`: an index, a take, a drop, a slice, or an update of `s`.
+    SeqIndex(TypedPureExp<Ext>, SeqIndexOp<Ext>),
     /// The context-specific extension — heap nodes (`Ext::Heap`), `old`, `perm`,
     /// `result`. Uninhabited (`!`) in a pure context, so none are constructible.
     Ext(Ext),
+}
+
+/// What `s[..]` does to the sequence `s`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SeqIndexOp<Ext> {
+    /// `s[i]`
+    Index(TypedPureExp<Ext>),
+    /// `s[..n]`
+    Take(TypedPureExp<Ext>),
+    /// `s[n..]`
+    Drop(TypedPureExp<Ext>),
+    /// `s[a..b]`, i.e. `s[..b][a..]`
+    Slice(TypedPureExp<Ext>, TypedPureExp<Ext>),
+    /// `s[i := v]`
+    Update(TypedPureExp<Ext>, TypedPureExp<Ext>),
 }
 
 /// The heap-reading expression constructs, shared by every heap-bearing context
@@ -426,4 +446,14 @@ pub struct Predicate {
     pub name: Ident,
     pub params: Vec<TypedIdent>,
     pub body: Option<SpatialExp<HeapExt>>,
+}
+
+impl<Ext> SeqIndexOp<Ext> {
+    /// The operands besides the sequence itself, in source order.
+    pub fn operands(&self) -> Vec<&TypedPureExp<Ext>> {
+        match self {
+            SeqIndexOp::Index(e) | SeqIndexOp::Take(e) | SeqIndexOp::Drop(e) => vec![e],
+            SeqIndexOp::Slice(a, b) | SeqIndexOp::Update(a, b) => vec![a, b],
+        }
+    }
 }
