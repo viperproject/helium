@@ -1,0 +1,21 @@
+// REGRESSION (soundness). The agreement facts of a summarized exhale in the then
+// arm were not guarded by the arm's cube (the exhale's own pc does not carry it),
+// so they held on the else arm, where `z == x == y` met `5 == 4`.
+//
+// Must FAIL.
+field f: Int
+
+method summary_cross_branch_leak(x: Ref, y: Ref, z: Ref, c: Bool)
+  requires acc(y.f, 1/2) && y.f == 4
+{
+  if (c) {
+    inhale acc(x.f)
+    x.f := 5
+    exhale acc(x.f, 1/2)
+    inhale z == x || z == y
+    exhale acc(z.f, 1/2)
+  } else {
+    assume z == x && x == y
+    assert false
+  }
+}

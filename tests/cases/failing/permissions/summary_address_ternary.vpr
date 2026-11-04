@@ -1,0 +1,12 @@
+// REGRESSION (soundness). `summary_address_disjunction.vpr` with the address a
+// ternary.
+//
+// Must FAIL.
+field f: Int
+
+method summary_address_ternary(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && x.f == 5 && y.f == 4 && x != y
+{
+  exhale acc((c ? x : y).f, 1/2)
+  assert false
+}
