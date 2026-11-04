@@ -544,12 +544,36 @@ impl<'a> VerifyContext<'a> {
         fact: egg::Id,
         guards: impl Iterator<Item = (egg::Id, Polarity)>,
     ) {
-        let imp = self.implication(fact, guards);
+        let guards: Vec<(egg::Id, Polarity)> = guards.collect();
+        let imp = self.implication(fact, guards.iter().copied());
         let true_ = expr!(self, true);
         self.union(imp, true_);
-        // Invariant 4: ground guarded, scratch unguarded.
-        self.scratch_assume_unguarded(fact);
+        // Invariant 4: ground guarded, scratch unguarded -- by the cube only.
+        let scratch_fact = self.scratch_fact(fact, &guards);
+        self.scratch_assume_unguarded(scratch_fact);
         self.egraph.rebuild();
+    }
+
+    /// What the block scratch may assume of `guards ==> fact`. The scratch has
+    /// assumed the block cube and nothing finer, so exactly the cube literals of
+    /// `guards` may be dropped; every other literal (an intra-block path condition,
+    /// an address equality, a presence guard) stays an antecedent. Dropping one
+    /// assumed the fact on the block's paths where it does not hold.
+    ///
+    /// `guards` are in innermost-first fold order, matching [`Self::implication`].
+    fn scratch_fact(&mut self, fact: egg::Id, guards: &[(egg::Id, Polarity)]) -> egg::Id {
+        let own: Vec<(egg::Id, Polarity)> = guards
+            .iter()
+            .filter(|lit| {
+                !crate::verify::heap::cube_entails(
+                    self,
+                    self.current_cube(),
+                    std::slice::from_ref(*lit),
+                )
+            })
+            .copied()
+            .collect();
+        self.implication(fact, own.into_iter())
     }
 
     /// [`Self::assume_guarded`] for a **release key** rather than a fact about
@@ -599,8 +623,9 @@ impl<'a> VerifyContext<'a> {
         for fact in facts {
             let imp = self.implication(fact, guards.iter().copied());
             self.union(imp, true_);
-            // Invariant 4: ground guarded, scratch unguarded.
-            self.scratch_assume_unguarded(fact);
+            // Invariant 4: ground guarded, scratch unguarded -- by the cube only.
+            let scratch_fact = self.scratch_fact(fact, guards);
+            self.scratch_assume_unguarded(scratch_fact);
         }
         self.egraph.rebuild();
     }
