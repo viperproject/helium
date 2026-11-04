@@ -19,7 +19,7 @@ mod lattice;
 
 pub use error::TypeError;
 use lattice::{ViperTcType, type_to_tc};
-
+use crate::viper::typed::BuiltinCollection;
 // ==========================================
 // 3. Context types
 // ==========================================
@@ -78,7 +78,7 @@ fn check_type(
                 // The collection types: parsed so `scan_unsupported` can name
                 // them, rejected there.
                 _ => match interner.resolve(&name) {
-                    "Seq" | "Set" | "Multiset" => 1,
+                     "Set" | "Multiset" => 1,
                     "Map" => 2,
                     other => return Err(TypeError::UndeclaredType(other.to_string())),
                 },
@@ -93,6 +93,7 @@ fn check_type(
             args.iter()
                 .try_for_each(|a| check_type(a, globals, interner, is_param))
         }
+        P::Seq(ty) => check_type(ty, globals, interner, is_param)
     }
 }
 
@@ -947,6 +948,11 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Real))?;
             }
+            // TODO(seq): `inner` is a `Seq`, the result an `Int`. Until then
+            // `scan_declaration` rejects `|s|` before typecheck runs.
+            viper::UnOp::Cardinality => {
+                return Err(TypeError::Unsupported("|s| (cardinality)"));
+            }
         }
         Ok(())
     }
@@ -1414,6 +1420,8 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                 let resource = self.lower_resource::<Ext>(inner)?;
                 Ok(PureExpKind::Ext(Ext::lower_perm(resource)?))
             }
+            // TODO(seq): lower to `typed::UnOp::Cardinality`.
+            viper::UnOp::Cardinality => Err(TypeError::Unsupported("|s| (cardinality)")),
         }
     }
 
@@ -1978,6 +1986,9 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
                 .map(|a| type_with_generics(a, type_params))
                 .collect(),
         ),
+        P::Seq(t) => Type::Collection(BuiltinCollection::Seq(Box::new(
+            type_with_generics(t, type_params),
+        )))
     }
 }
 
