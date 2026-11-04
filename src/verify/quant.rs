@@ -28,7 +28,7 @@ use crate::verify::error::VerifyError;
 use crate::verify::func_registry::FuncRegistry;
 use crate::verify::lang::RecipeId;
 use crate::verify::rewrite::{AxiomInst, PreparedTerm};
-use crate::vmir::{self, InstKind, PureInst, Val};
+use crate::vmir::{self, InstKind, PureInst, Type, Val};
 
 /// A compiled `forall` body: the pure steps, the boolean result, the binder arity,
 /// and the trigger groups (alternatives — a match of any one instantiates).
@@ -44,6 +44,7 @@ pub(crate) struct QuantRecipe {
     /// arity of every `Symbolic::Forall` node naming this recipe.
     pub(crate) n_caps: usize,
     pub(crate) n_bound: usize,
+    pub(crate) bound: Box<[Type]>,
     /// Alternative trigger groups; each group is a conjunctive multi-pattern.
     pub(crate) groups: Vec<Vec<PreparedTerm>>,
     pub(crate) insts: Vec<AxiomInst>,
@@ -60,6 +61,7 @@ pub(crate) struct QuantRecipe {
 struct RecipeKey {
     n_caps: usize,
     n_bound: usize,
+    bound: Box<[Type]>,
     groups: Vec<Vec<PreparedTerm>>,
     insts: Vec<AxiomInst>,
     res: Val,
@@ -192,6 +194,7 @@ fn intern(
     let key = RecipeKey {
         n_caps,
         n_bound: q.bound.len(),
+        bound: q.bound.clone(),
         groups: groups.clone(),
         insts: insts.clone(),
         res: res.clone(),
@@ -202,6 +205,7 @@ fn intern(
             let id = table.recipes.push_and_get_key(QuantRecipe {
                 n_caps,
                 n_bound: q.bound.len(),
+                bound: q.bound.clone(),
                 groups,
                 insts,
                 res,

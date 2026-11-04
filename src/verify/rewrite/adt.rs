@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
-use crate::verify::analysis::{ConstFold, Data};
+use crate::verify::analysis::{ConstFold, Value};
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
 use crate::vmir::{Literal, Type};
 
@@ -156,7 +156,7 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let Data::Ctor(c, _) = &egraph[xc].data else {
+        let Value::Ctor(c, _) = &egraph[xc].data.value else {
             return vec![];
         };
         let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));

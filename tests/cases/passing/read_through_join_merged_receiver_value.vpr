@@ -1,0 +1,26 @@
+// KNOWN LIMITATION — should verify, currently rejected (assertion may fail).
+//
+// Same receiver shape as read_through_join_merged_receiver.vpr, but the value read
+// is *used*, so framing the read is not enough. After the `if`, `x` is the join
+// phi `c ? a : b` and the read is at `f@addr(c ? a : b)`, which no single chunk's
+// address equals. Framing can be settled by the Σ-ite summary (`inst_obligations`
+// in verify/declaration.rs), but the read's *value* comes from `eval_pure_inst`,
+// which takes it from the one chunk `chunk_under_pc` returns. With no such chunk
+// it mints a fresh symbol tied to neither `a.f` nor `b.f`, so the asserts below,
+// which hold on each arm, cannot be proven. Silicon verifies this.
+//
+// A fix has to tie the value to every chunk the summary draws on, each under its
+// own gate (`addr_i == addr && 0 < perm_i ==> v == v_i`), never unguarded: a
+// chunk drained to zero permission can still carry a stale value.
+
+field f: Int
+
+method m(c: Bool, a: Ref, b: Ref) returns (r: Int)
+  requires acc(a.f) && acc(b.f)
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  r := x.f
+  assert c ==> r == a.f
+  assert !c ==> r == b.f
+}

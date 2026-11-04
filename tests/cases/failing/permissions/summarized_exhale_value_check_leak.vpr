@@ -1,0 +1,13 @@
+// The exhale's own value check runs after its summarized consume. With the
+// agreement leaked unguarded into the block scratch, `x.f` was `a.f` and `b.f` at
+// once, so `x.f == 1` held even on the `!c` arm where it is `b.f == 2`.
+
+field f: Int
+
+method m(c: Bool, a: Ref, b: Ref)
+  requires acc(a.f) && acc(b.f) && a.f == 1 && b.f == 2
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  exhale acc(x.f, 1/2) && x.f == 1
+}

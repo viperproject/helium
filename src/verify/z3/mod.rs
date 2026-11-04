@@ -1,10 +1,12 @@
-use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::lang::{FuncId, RecipeId, Symbolic};
 use itertools::Itertools;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
+use crate::verify::quant::RecipeTable;
+use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm};
 use crate::verify::stats;
-use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
+use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type, Val};
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
@@ -22,6 +24,12 @@ pub(crate) struct Z3Translation {
     func_cache: HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
     max_node_id: usize,
     max_merges_is: usize,
+    /// Whether `Forall` nodes are translated. Off until a goal needs one
+    /// ([`include_foralls`]), then on for the rest of the context.
+    include_forall: bool,
+    /// The `Forall` nodes [`sync_facts`] left out while `include_forall` was
+    /// off, by node index; asserted by the first sync after it is turned on.
+    skipped_forall: Vec<usize>,
     pub(crate) solver: Solver,
 }
 
@@ -34,6 +42,8 @@ impl Default for Z3Translation {
             func_cache: HashMap::default(),
             max_node_id: 0,
             max_merges_is: 0,
+            include_forall: false,
+            skipped_forall: vec![],
             solver: new_solver(),
         }
     }
@@ -98,6 +108,7 @@ pub(crate) struct ScratchScope {
     max_node_id: usize,
     max_merges_is: usize,
     class_types: HashMap<Id, Type>,
+    skipped_forall: Vec<usize>,
 }
 
 /// Open a solver scope before the live graph is swapped for a throwaway clone.
@@ -111,11 +122,14 @@ pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
         max_node_id: tr.max_node_id,
         max_merges_is: tr.max_merges_is,
         class_types: tr.class_types.clone(),
+        skipped_forall: tr.skipped_forall.clone(),
     }
 }
 
 /// Drop what Z3 learned on the throwaway graph: its facts (`pop`), the
-/// watermarks past the live graph, and the sorts cached for its ids.
+/// watermarks past the live graph, and the sorts cached for its ids. The
+/// skipped quantifiers go back to the live graph's list: the clone's ids are
+/// reused, and any live quantifier asserted inside the scope was popped with it.
 pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     let tr = &mut ctxt.z3translator;
     tr.solver.pop(1);
@@ -125,6 +139,13 @@ pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     tr.max_node_id = scope.max_node_id;
     tr.max_merges_is = scope.max_merges_is;
     tr.class_types = scope.class_types;
+    tr.skipped_forall = scope.skipped_forall;
+}
+
+/// Translate quantifiers from now on: the next [`sync_facts`] asserts the ones
+/// skipped so far, and later ones are no longer skipped.
+pub(crate) fn include_foralls(ctxt: &mut VerifyContext) {
+    ctxt.z3translator.include_forall = true;
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
@@ -267,12 +288,21 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
 pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
     let start = ctxt.z3translator.max_node_id;
     let end = ctxt.egraph.nodes().len();
-    for i in start..end {
+
+    let prefix = if ctxt.z3translator.include_forall {
+        std::mem::take(&mut ctxt.z3translator.skipped_forall)
+    } else {
+        Vec::new()
+    };
+    let ids = prefix.into_iter().chain(start..end);
+
+    for i in ids {
         let id = Id::from(i);
         // Clone just this node: translating needs `ctxt` mutably (the caches),
         // so the node list cannot stay borrowed across the call.
         let node = ctxt.egraph.id_to_node(id).clone();
-        if matches!(node, Symbolic::Forall(..)) {
+        if !ctxt.z3translator.include_forall && matches!(node, Symbolic::Forall(..)) {
+            ctxt.z3translator.skipped_forall.push(i);
             continue;
         }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {
@@ -388,12 +418,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
             let ty = ctxt.fresh_types.get(i)?.clone();
             Dynamic::new_const(format!("fresh{i}"), &sort(ctxt, &ty))
         }
-        Symbolic::Lit(literal) => match literal {
-            Literal::Null => Dynamic::new_const("null", &sort(ctxt, &Type::Ref)),
-            Literal::Bool(value) => z3::ast::Bool::from_bool(*value).into(),
-            Literal::Int(value) => z3::ast::Int::from_big_int(value).into(),
-            Literal::Real(value) => z3::ast::Real::from_big_rational(value).into(),
-        },
+        Symbolic::Lit(literal) => literal_to_z3(ctxt, literal),
         Symbolic::Binary(op, [l, r]) => {
             // `Eq` is the only operator without a fixed operand sort; either
             // side fixes it.
@@ -446,8 +471,199 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
             let class = class_const(ctxt, *id)?.as_int().unwrap();
             class.to_real().into()
         }
-        Symbolic::Forall(_, _) => todo!("implement translation for forall nodes"),
+        Symbolic::Forall(rid, caps) => forall_to_z3(ctxt, *rid, caps)?,
     })
+}
+
+fn literal_to_z3(ctxt: &mut VerifyContext, literal: &Literal) -> Dynamic {
+    match literal {
+        Literal::Null => Dynamic::new_const("null", &sort(ctxt, &Type::Ref)),
+        Literal::Bool(value) => z3::ast::Bool::from_bool(*value).into(),
+        Literal::Int(value) => z3::ast::Int::from_big_int(value).into(),
+        Literal::Real(value) => z3::ast::Real::from_big_rational(value).into(),
+    }
+}
+
+/// `⟦Forall(rid, caps)⟧`: the recipe's body as a Z3 quantifier, its captures
+/// read as the capture classes' constants. `None` when a capture has no certain
+/// sort or a body step does not fit its operands' sorts.
+fn forall_to_z3(ctxt: &mut VerifyContext, rid: RecipeId, caps: &[Id]) -> Option<Dynamic> {
+    // Lock a clone of the `Arc`, so the guard borrows this local and `ctxt` stays
+    // free for `&mut`. Nothing in the Z3 rung interns, so no writer can wait on it.
+    let table = std::sync::Arc::clone(ctxt.alloc.quant_table());
+    let table = table.read().expect("recipe table lock");
+    let caps: Vec<Dynamic> = caps
+        .iter()
+        .map(|c| class_const(ctxt, *c))
+        .collect::<Option<_>>()?;
+    let quant = translate_for_all(ctxt, &table, rid, &caps)?;
+    Some(quant.into())
+}
+
+/// A recipe operand: a slot of the environment, or a literal.
+fn translate_val(ctxt: &mut VerifyContext, lookup: &[Dynamic], instr: &Val) -> Option<Dynamic> {
+    match instr {
+        Val::Literal(lit) => Some(literal_to_z3(ctxt, lit)),
+        Val::Temp(id) => Some(lookup[*id].clone()),
+    }
+}
+
+/// One value step of a recipe body over the environment `lookup`. Operands are
+/// Z3 terms here, not e-classes, so each carries its own sort; a step whose
+/// operands do not fit is `None` (Z3 would reject it).
+fn translate_axiom_pure(
+    ctxt: &mut VerifyContext,
+    lookup: &[Dynamic],
+    instr: &AxiomPure,
+) -> Option<Dynamic> {
+    match instr {
+        AxiomPure::Binary(op, lhs, rhs) => {
+            let lhs_value = translate_val(ctxt, lookup, lhs)?;
+            let rhs_value = translate_val(ctxt, lookup, rhs)?;
+            if lhs_value.get_sort() != rhs_value.get_sort() {
+                return None;
+            }
+            let res: Dynamic = match op {
+                BinOp::AddI => (lhs_value.as_int()? + rhs_value.as_int()?).into(),
+                BinOp::AddR => (lhs_value.as_real()? + rhs_value.as_real()?).into(),
+                BinOp::SubI => (lhs_value.as_int()? - rhs_value.as_int()?).into(),
+                BinOp::SubR => (lhs_value.as_real()? - rhs_value.as_real()?).into(),
+                BinOp::MulI => (lhs_value.as_int()? * rhs_value.as_int()?).into(),
+                BinOp::MulR => (lhs_value.as_real()? * rhs_value.as_real()?).into(),
+                BinOp::DivI => lhs_value.as_int()?.div(&rhs_value.as_int()?).into(),
+                BinOp::DivR => lhs_value.as_real()?.div(&rhs_value.as_real()?).into(),
+                BinOp::Mod => lhs_value.as_int()?.modulo(&rhs_value.as_int()?).into(),
+                BinOp::LtI => lhs_value.as_int()?.lt(&rhs_value.as_int()?).into(),
+                BinOp::LtR => lhs_value.as_real()?.lt(&rhs_value.as_real()?).into(),
+                // Both sides are Z3 terms, so each carries its own sort; unlike
+                // the e-graph path, `Eq` needs no `class_type` lookup.
+                BinOp::Eq => lhs_value.eq(&rhs_value).into(),
+            };
+            Some(res)
+        }
+        AxiomPure::Ternary(cond, then, els) => {
+            let cond_value = translate_val(ctxt, lookup, cond)?;
+            let then_value = translate_val(ctxt, lookup, then)?;
+            let els_value = translate_val(ctxt, lookup, els)?;
+            if then_value.get_sort() != els_value.get_sort() {
+                return None;
+            }
+            Some(cond_value.as_bool()?.ite(&then_value, &els_value))
+        }
+        AxiomPure::RealCast(v) => Some(translate_val(ctxt, lookup, v)?.as_int()?.to_real().into()),
+        AxiomPure::App {
+            func,
+            args,
+            type_args,
+        } => {
+            let args: Vec<Dynamic> = args
+                .iter()
+                .map(|a| translate_val(ctxt, lookup, a))
+                .collect::<Option<_>>()?;
+            apply_function_checked(ctxt, func, type_args, &args)
+        }
+    }
+}
+
+/// Recipe `rid` with its captures bound to `caps`, as `∀ b. {triggers} ⟦res⟧`.
+///
+/// The body is walked like `build_instance_vals_impl` walks it into the
+/// e-graph, over the same canonical space: `caps ++ binders ++ one slot per
+/// value step`, so the environment grows exactly as its temps do.
+///
+/// * An `Assume` panics: see [`crate::verify::quant`]'s `intern`, which
+///   refuses to build such a recipe in the first place.
+/// * A nested `Forall` is translated in place, its captures resolved in this
+///   environment (they may be this quantifier's binders).
+/// * A `Token` only gates the e-graph's unfolding of a callee. Z3 has no
+///   function definitions to gate, so it is left out.
+///
+/// Binder names carry the recipe id, which keeps a nested quantifier's apart
+/// from its encloser's (a recipe never contains itself).
+fn translate_for_all(
+    ctxt: &mut VerifyContext,
+    table: &RecipeTable,
+    rid: RecipeId,
+    caps: &[Dynamic],
+) -> Option<Bool> {
+    let recipe = table.get(rid);
+    debug_assert_eq!(
+        recipe.n_caps,
+        caps.len(),
+        "capture arity of forall#{}",
+        rid.0
+    );
+    let bounds: Vec<Dynamic> = recipe
+        .bound
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| Dynamic::new_const(format!("q{}@b{i}", rid.0), &sort(ctxt, ty)))
+        .collect();
+
+    let mut lookup: Vec<Dynamic> = caps.iter().chain(&bounds).cloned().collect();
+    for instr in &recipe.insts {
+        match instr {
+            AxiomInst::Val(pure) => {
+                let value = translate_axiom_pure(ctxt, &lookup, pure)?;
+                lookup.push(value);
+            }
+            AxiomInst::Assume(_) => panic!(
+                "forall#{} has an `Assume` step; a quantifier body is not expected to \
+                 contain one (see `quant::intern`)",
+                rid.0
+            ),
+            AxiomInst::Forall { recipe, caps } => {
+                let inner_caps: Vec<Dynamic> = caps
+                    .iter()
+                    .map(|v| translate_val(ctxt, &lookup, v))
+                    .collect::<Option<_>>()?;
+                lookup.push(translate_for_all(ctxt, table, *recipe, &inner_caps)?.into());
+            }
+            AxiomInst::Token { .. } => {}
+        }
+    }
+    let res = translate_val(ctxt, &lookup, &recipe.res)?.as_bool()?;
+
+    // One multi-pattern per trigger group; the groups are alternatives. MBQI is
+    // off, so these are the only way Z3 instantiates the quantifier.
+    let mut patterns: Vec<z3::Pattern> = Vec::with_capacity(recipe.groups.len());
+    for group in &recipe.groups {
+        let terms: Vec<Dynamic> = group
+            .iter()
+            .map(|t| trigger_to_z3(ctxt, t, caps, &bounds))
+            .collect::<Option<_>>()?;
+        let refs: Vec<&dyn Ast> = terms.iter().map(|t| t as &dyn Ast).collect();
+        patterns.push(z3::Pattern::new(&refs));
+    }
+    let pattern_refs: Vec<&z3::Pattern> = patterns.iter().collect();
+    let bound_refs: Vec<&dyn Ast> = bounds.iter().map(|b| b as &dyn Ast).collect();
+
+    Some(z3::ast::forall_const(&bound_refs, &pattern_refs, &res))
+}
+
+/// A trigger term over the quantifier's captures and binders.
+fn trigger_to_z3(
+    ctxt: &mut VerifyContext,
+    term: &PreparedTerm,
+    caps: &[Dynamic],
+    bounds: &[Dynamic],
+) -> Option<Dynamic> {
+    match term {
+        PreparedTerm::Bound(i) => Some(bounds[*i].clone()),
+        PreparedTerm::Capture(i) => Some(caps[*i].clone()),
+        PreparedTerm::Lit(lit) => Some(literal_to_z3(ctxt, lit)),
+        PreparedTerm::App {
+            func,
+            type_args,
+            args,
+        } => {
+            let args: Vec<Dynamic> = args
+                .iter()
+                .map(|a| trigger_to_z3(ctxt, a, caps, bounds))
+                .collect::<Option<_>>()?;
+            apply_function_checked(ctxt, func, type_args, &args)
+        }
+    }
 }
 
 // the type build by heads constructor at instantiation typs
@@ -496,7 +712,7 @@ fn uninterpreted_app(
     tys: &[Type],
     params: &[Type],
     ret: &Type,
-    args: &[Id],
+    args: &[Dynamic],
 ) -> Dynamic {
     assert_eq!(
         params.len(),
@@ -506,12 +722,7 @@ fn uninterpreted_app(
     );
 
     let domain: Vec<Sort> = params.iter().map(|t| sort(ctxt, t)).collect();
-    let arg_consts: Vec<Dynamic> = args
-        .iter()
-        .zip(&domain)
-        .map(|(a, s)| class_const_given_sort(ctxt, *a, s))
-        .collect();
-    let arg_refs: Vec<&dyn Ast> = arg_consts.iter().map(|a| a as &dyn Ast).collect();
+    let arg_refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
     if let Some(decl) = ctxt
         .z3translator
         .func_cache
@@ -538,11 +749,68 @@ fn uninterpreted_app(
     }
 }
 
+/// The parameter types of `f` at instantiation `tys`: the sorts its arguments
+/// must have when passed to [`apply_function`].
+fn param_types(ctxt: &VerifyContext, f_id: &FuncId, ty: &[Type]) -> Vec<Type> {
+    match ctxt.alloc.kind(f_id) {
+        FuncKind::Decl(m) | FuncKind::Limited(m) | FuncKind::PreToken(m) => {
+            function_signature(ctxt, m, ty).0
+        }
+        FuncKind::Cons { head, variant } => field_types(ctxt, head, variant, ty),
+        FuncKind::Proj { head, .. } | FuncKind::IsVariant { head, .. } => {
+            vec![adt_type(ctxt, head, ty)]
+        }
+    }
+}
+
+/// `⟦f[ty](args)⟧` for e-class arguments: each class read at its parameter's
+/// sort, then [`apply_function`].
 fn translate_function(
     ctxt: &mut VerifyContext,
     f_id: &FuncId,
     ty: &[Type],
     args: &[Id],
+) -> Dynamic {
+    let params = param_types(ctxt, f_id, ty);
+    let args: Vec<Dynamic> = args
+        .iter()
+        .zip(&params)
+        .map(|(arg, ty)| {
+            let s = sort(ctxt, ty);
+            class_const_given_sort(ctxt, *arg, &s)
+        })
+        .collect();
+    apply_function(ctxt, f_id, ty, &args)
+}
+
+/// [`apply_function`] for arguments built inside a quantifier body, whose sorts
+/// come from the terms themselves. `None` when one does not match the parameter
+/// it is passed to: Z3 rejects that application outright, and dropping the fact
+/// is sound.
+fn apply_function_checked(
+    ctxt: &mut VerifyContext,
+    f_id: &FuncId,
+    ty: &[Type],
+    args: &[Dynamic],
+) -> Option<Dynamic> {
+    let params = param_types(ctxt, f_id, ty);
+    if params.len() != args.len() {
+        return None;
+    }
+    for (param, arg) in params.iter().zip(args) {
+        if arg.get_sort() != sort(ctxt, param) {
+            return None;
+        }
+    }
+    Some(apply_function(ctxt, f_id, ty, args))
+}
+
+/// `f[ty](args)` over arguments already translated to their parameter sorts.
+fn apply_function(
+    ctxt: &mut VerifyContext,
+    f_id: &FuncId,
+    ty: &[Type],
+    args: &[Dynamic],
 ) -> Dynamic {
     let function_type = ctxt.alloc.kind(f_id);
 
@@ -557,17 +825,7 @@ fn translate_function(
         // ADT construction
         FuncKind::Cons { variant, head } => {
             let adt_ty = adt_type(ctxt, head, ty);
-            let field_tys = field_types(ctxt, head, variant, ty);
-            let fields = args
-                .iter()
-                .zip(&field_tys)
-                .map(|(arg, ty)| {
-                    let s = sort(ctxt, ty);
-                    class_const_given_sort(ctxt, *arg, &s)
-                })
-                .collect::<Vec<_>>();
-
-            let field_refs = fields
+            let field_refs = args
                 .iter()
                 .map(|f| f as &dyn Ast)
                 .collect::<Vec<&dyn Ast>>();
@@ -584,18 +842,16 @@ fn translate_function(
             field,
         } => {
             let adt_ty = adt_type(ctxt, head, ty);
-            let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
-            let base = class_const_given_sort(ctxt, args[0], &adt_sort);
-            ctxt.z3translator.adts[&adt_ty].variants[variant].accessors[field].apply(&[&base])
+            sort(ctxt, &adt_ty); // builds and caches the datatype
+            ctxt.z3translator.adts[&adt_ty].variants[variant].accessors[field].apply(&[&args[0]])
         }
         // ADT tester `Adt::Ctor?`: the datatype's own recognizer for `variant`.
         FuncKind::IsVariant { head, variant } => {
             let adt_ty = adt_type(ctxt, head, ty);
-            let adt_sort = sort(ctxt, &adt_ty); // builds and caches the datatype
-            let base = class_const_given_sort(ctxt, args[0], &adt_sort);
+            sort(ctxt, &adt_ty); // builds and caches the datatype
             ctxt.z3translator.adts[&adt_ty].variants[variant]
                 .tester
-                .apply(&[&base])
+                .apply(&[&args[0]])
         }
         // `f#lim`: same signature as `f`, only the id (and so the name) differs.
         // `f(x) == f#lim(x)` reaches Z3 only where the e-graph already has it.

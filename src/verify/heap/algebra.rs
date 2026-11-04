@@ -1673,10 +1673,34 @@ pub(crate) fn heap_subtract_summarized(
     }
     // Golden rule, but only where the locations coincide — each member under its own
     // gate, so a chunk that is only conditionally at this address claims value
-    // agreement only under that condition.
+    // agreement only under that condition. Three gates, the same as a summarized
+    // read's (`PureInst::Deref` in `declaration.rs`):
+    // - the member's **cube**: off it the locations are distinct;
+    // - **positivity** of what the member holds: a chunk drained to zero is kept
+    //   whenever `perm_all_zero` cannot fold its remainder, and it still carries the
+    //   value it had when it was drained. Agreeing with that stale value equates the
+    //   demand with a value the location no longer has;
+    // - the **pc**, which the pc-alias caller's cube already is (not repeated).
+    //
+    // Recorded with `assume_token_guarded`, not `assume_guarded`: the latter mirrors
+    // the fact *unguarded* into the block scratch (invariant 4), which is licensed
+    // only by guards equal to the block cube. These are finer — an address equality,
+    // a positivity literal — so the unguarded mirror made `a.f == b.f` (and hence
+    // `false`, with distinct known values) provable for the rest of the block.
     for (chunk, cube) in set {
+        let held = present_amount(ctx, chunk, pc_lits).to_id(ctx);
+        let positive = expr!(ctx, (0 / 1) < r { held });
         let agree = expr!(ctx, { chunk.value } == { chunk2.value });
-        ctx.assume_guarded(agree, cube.iter().rev().copied());
+        let pc_rest: Vec<_> = pc_lits
+            .iter()
+            .filter(|l| !cube.contains(l))
+            .rev()
+            .copied()
+            .collect();
+        let guards = std::iter::once((positive, Polarity::Positive))
+            .chain(cube.iter().rev().copied())
+            .chain(pc_rest);
+        ctx.assume_token_guarded(agree, guards);
     }
 
     // Greedy distribution over the set, demanded chunk first.
