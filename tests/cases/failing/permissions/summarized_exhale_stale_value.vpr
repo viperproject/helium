@@ -1,0 +1,22 @@
+// A chunk drained to zero by a symbolic amount is kept (`perm_all_zero` cannot
+// fold `p - p`) and still carries its old value. The summarized consume of `x.f`
+// sees both `a.f` (now holding 42) and that stale `b.f` chunk at the demanded
+// address under `a == b`; agreeing with both equated 42 with the stale `old(b.f)`.
+// Counterexample: p = 1/2, a == b, old(b.f) = 7. The agreement must be gated on
+// the member actually holding permission. The assert sits in a later block, so this
+// is not the scratch leak.
+
+field f: Int
+
+method m(c: Bool, d: Bool, a: Ref, b: Ref, e: Ref, p: Perm)
+  requires none < p && p < write
+  requires acc(a.f, p) && acc(b.f, p) && acc(e.f)
+{
+  exhale acc(b.f, p)
+  inhale acc(a.f, write - p)
+  a.f := 42
+  var x: Ref
+  if (c) { x := a } else { x := e }
+  exhale acc(x.f, p / 2)
+  if (d) { assert c && a == b ==> old(b.f) == 42 }
+}
