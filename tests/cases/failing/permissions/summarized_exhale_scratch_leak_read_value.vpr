@@ -1,0 +1,15 @@
+// Same scratch leak as summarized_exhale_scratch_leak_false.vpr, reached through a
+// summarized read first: `v` is `a.f` on the `c` arm, and only the leaked
+// unguarded `a.f == b.f` from the exhale would make it `b.f` as well.
+
+field f: Int
+
+method m(c: Bool, a: Ref, b: Ref)
+  requires acc(a.f) && acc(b.f)
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  var v: Int := x.f
+  exhale acc(x.f, 1/2)
+  assert c ==> v == b.f
+}
