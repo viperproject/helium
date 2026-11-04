@@ -1,0 +1,34 @@
+// Seq: element types other than Int — Bool, Ref, nested Seq, and a domain type.
+
+domain Color {
+  function red(): Color
+  function green(): Color
+  axiom red_ne_green { red() != green() }
+}
+
+method seq_of_bool(s: Seq[Bool])
+  requires |s| == 2 && s[0] && !s[1]
+{
+  assert s == Seq(true, false)
+}
+
+method seq_of_ref(xs: Seq[Ref], y: Ref)
+  requires |xs| > 0 && xs[0] == y
+{
+  assert y in xs
+}
+
+method nested_seq() {
+  var m: Seq[Seq[Int]] := Seq(Seq(1, 2), Seq[Int](), Seq(3))
+  assert |m| == 3
+  assert |m[0]| == 2
+  assert |m[1]| == 0
+  assert m[2][0] == 3
+  assert m[0] ++ m[2] == Seq(1, 2, 3)
+}
+
+method seq_of_domain() {
+  var cs: Seq[Color] := Seq(red(), green())
+  assert cs[0] != cs[1]
+  assert !(green() in Seq(red()))
+}

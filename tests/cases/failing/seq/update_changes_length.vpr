@@ -1,0 +1,6 @@
+// Seq: a point update keeps the length; it does not append.
+method update_changes_length(s: Seq[Int], v: Int)
+  requires |s| > 0
+{
+  assert |s[0 := v]| == |s| + 1
+}

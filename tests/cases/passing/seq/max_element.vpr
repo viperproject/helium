@@ -1,0 +1,31 @@
+// Seq (verification-heavy): a loop computing the maximum and a witness index.
+
+method max_element(s: Seq[Int]) returns (m: Int, idx: Int)
+  requires |s| > 0
+  ensures 0 <= idx && idx < |s| && s[idx] == m
+  ensures forall i: Int :: { s[i] } 0 <= i && i < |s| ==> s[i] <= m
+{
+  m := s[0]
+  idx := 0
+  var i: Int := 1
+  while (i < |s|)
+    invariant 1 <= i && i <= |s|
+    invariant 0 <= idx && idx < i && s[idx] == m
+    invariant forall j: Int :: { s[j] } 0 <= j && j < i ==> s[j] <= m
+  {
+    if (s[i] > m) {
+      m := s[i]
+      idx := i
+    }
+    i := i + 1
+  }
+}
+
+method client() {
+  var m: Int
+  var idx: Int
+  m, idx := max_element(Seq(3, 9, 2, 9, 1))
+  assert Seq(3, 9, 2, 9, 1)[1] == 9
+  assert m == 9
+  assert idx == 1 || idx == 3
+}

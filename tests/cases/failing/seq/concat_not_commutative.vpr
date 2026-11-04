@@ -1,0 +1,4 @@
+// Seq: `++` is not commutative (s = [1], t = [2]).
+method concat_not_commutative(s: Seq[Int], t: Seq[Int]) {
+  assert s ++ t == t ++ s
+}

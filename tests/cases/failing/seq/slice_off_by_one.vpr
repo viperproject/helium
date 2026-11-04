@@ -1,0 +1,6 @@
+// Seq: the slice `s[i..j]` is half-open, so its length is `j - i`.
+method slice_off_by_one(s: Seq[Int], i: Int, j: Int)
+  requires 0 <= i && i <= j && j <= |s|
+{
+  assert |s[i..j]| == j - i + 1
+}

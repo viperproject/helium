@@ -1,0 +1,40 @@
+// Seq: membership `x in s`.
+
+method literal_contains() {
+  assert 2 in Seq(1, 2, 3)
+  assert !(4 in Seq(1, 2, 3))
+  assert !(0 in Seq[Int]())
+}
+
+method index_implies_contains(s: Seq[Int], i: Int)
+  requires 0 <= i && i < |s|
+{
+  assert s[i] in s
+}
+
+method contains_survives_concat(s: Seq[Int], t: Seq[Int], x: Int)
+  requires x in s
+{
+  assert x in (s ++ t)
+  assert x in (t ++ s)
+}
+
+method contains_after_update(s: Seq[Int], i: Int, v: Int)
+  requires 0 <= i && i < |s|
+{
+  assert s[i := v][i] == v
+  assert v in s[i := v]
+}
+
+method contains_gives_bounded_witness(s: Seq[Int], x: Int)
+  requires x in s
+{
+  assert |s| > 0
+}
+
+method not_contains_means_all_different(s: Seq[Int], x: Int, i: Int)
+  requires !(x in s)
+  requires 0 <= i && i < |s|
+{
+  assert s[i] != x
+}

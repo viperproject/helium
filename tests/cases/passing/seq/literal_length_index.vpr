@@ -1,0 +1,48 @@
+// Seq: literals, the empty sequence, length and indexing.
+
+method empty_has_length_zero() {
+  var s: Seq[Int] := Seq[Int]()
+  assert |s| == 0
+}
+
+method literal_length_and_index() {
+  var s: Seq[Int] := Seq(10, 20, 30)
+  assert |s| == 3
+  assert s[0] == 10
+  assert s[1] == 20
+  assert s[2] == 30
+}
+
+method singleton_bool() {
+  assert |Seq(true)| == 1
+  assert Seq(true)[0]
+}
+
+method literal_equality() {
+  assert Seq(1, 2) == Seq(1, 2)
+  // Lengths differ.
+  assert Seq(1, 2) != Seq(1, 2, 3)
+  // Same length, differ at index 0 (the index term is the witness).
+  assert Seq(1, 2)[0] != Seq(2, 1)[0]
+  assert Seq(1, 2) != Seq(2, 1)
+}
+
+method parameter_index(s: Seq[Int], i: Int)
+  requires 0 <= i && i < |s|
+  requires s[i] > 0
+{
+  assert s[i] >= 1
+}
+
+method length_is_nonnegative(s: Seq[Bool]) {
+  assert |s| >= 0
+}
+
+method assignment_copies_value(s: Seq[Int])
+  requires |s| == 2
+{
+  var t: Seq[Int] := s
+  assert t == s
+  assert |t| == 2
+  assert t[1] == s[1]
+}

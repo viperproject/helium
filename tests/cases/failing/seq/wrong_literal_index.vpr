@@ -1,0 +1,4 @@
+// Seq: indexing is 0-based; `Seq(10, 20, 30)[1]` is 20.
+method wrong_literal_index() {
+  assert Seq(10, 20, 30)[1] == 10
+}

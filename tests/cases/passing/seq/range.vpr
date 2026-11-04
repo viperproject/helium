@@ -1,0 +1,33 @@
+// Seq: integer ranges `[a..b)`.
+
+method range_length() {
+  assert |[0..5)| == 5
+  assert |[3..3)| == 0
+  assert |[5..2)| == 0
+}
+
+method range_index(a: Int, b: Int, i: Int)
+  requires 0 <= i && i < b - a
+{
+  assert [a..b)[i] == a + i
+}
+
+method range_contains(a: Int, b: Int, x: Int)
+  requires a <= x && x < b
+{
+  assert x in [a..b)
+}
+
+method range_excludes_upper_bound(a: Int, b: Int) {
+  assert !(b in [a..b))
+}
+
+method range_literal() {
+  assert [1..4) == Seq(1, 2, 3)
+}
+
+method range_split(a: Int, m: Int, b: Int)
+  requires a <= m && m <= b
+{
+  assert [a..m) ++ [m..b) == [a..b)
+}

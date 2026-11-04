@@ -1,0 +1,37 @@
+// Seq (verification-heavy): insert into a sorted sequence at the position a
+// loop finds, then show the result is sorted, one longer, and keeps every
+// element. Proving `sorted(r)` needs a case split over which of the three
+// concatenated pieces each of the two quantified indices falls into.
+
+function sorted(s: Seq[Int]): Bool
+{
+  forall i: Int, j: Int :: { s[i], s[j] } 0 <= i && i < j && j < |s| ==> s[i] <= s[j]
+}
+
+method insert_sorted(s: Seq[Int], x: Int) returns (r: Seq[Int])
+  requires sorted(s)
+  ensures sorted(r)
+  ensures |r| == |s| + 1
+  ensures x in r
+  ensures forall k: Int :: { s[k] } 0 <= k && k < |s| ==> s[k] in r
+{
+  var i: Int := 0
+  while (i < |s| && s[i] < x)
+    invariant 0 <= i && i <= |s|
+    invariant forall j: Int :: { s[j] } 0 <= j && j < i ==> s[j] < x
+  {
+    i := i + 1
+  }
+  r := s[..i] ++ Seq(x) ++ s[i..]
+  assert r[i] == x
+  assert forall k: Int :: { s[k] } 0 <= k && k < i ==> r[k] == s[k]
+  assert forall k: Int :: { s[k] } i <= k && k < |s| ==> r[k + 1] == s[k]
+}
+
+method client() {
+  var r: Seq[Int]
+  r := insert_sorted(Seq(1, 4, 9), 5)
+  assert |r| == 4
+  assert sorted(r)
+  assert 5 in r
+}
