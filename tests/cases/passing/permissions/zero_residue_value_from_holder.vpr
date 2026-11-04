@@ -1,12 +1,3 @@
-// KNOWN LIMITATION — should verify, currently rejected.
-//
-// `frame_holder` and `wildcard_frame_holder` fail: a function's frame check reads
-// the value of whichever chunk matches the address on ground, which is the
-// drained chunk at `x` (old value 4), not the pc-alias partner at `y` that holds
-// the permission (value 5). The fix for the zero-permission value agreement
-// (known_unsoundness/permissions/zero_residue_*.vpr) takes the value from the
-// chunks the permission comes from, which makes this file verify.
-//
 // Positive controls for the `failing/permissions/zero_residue_*` cases: where a
 // consume (or frame check) draws its permission from a pc-alias partner, the
 // value it takes is the partner's, and members that do hold permission still
