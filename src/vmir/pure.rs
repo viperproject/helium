@@ -115,6 +115,47 @@ pub fn write() -> Val {
     Val::Literal(Literal::Real(num::BigInt::from(1).into()))
 }
 
+
+/// A sequence operation. Shared by `PureInst::Seq`, `TrigHead::Seq` and
+/// `Symbolic::Seq`, so the three layers cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SeqOp {
+    /// `|s|` : Int
+    Len,
+    /// `s ++ t` : Seq<T>
+    Concat,
+    /// `s[i]` : T. SIDECOND: `0 <= i < |s|`.
+    Index,
+    /// `s[i := v]` : Seq<T>. SIDECOND: `0 <= i < |s|`.
+    Update,
+    /// `s[..n]` : Seq<T>. Total: Viper clamps `n`.
+    Take,
+    /// `s[n..]` : Seq<T>. Total: Viper clamps `n`.
+    Drop,
+    /// `x in s` : Bool. Operands are `[s, x]`: the sequence always comes first.
+    Contains,
+    /// `[a..b)` : Seq<Int>
+    Range,
+}
+
+impl SeqOp {
+    /// How many operands `PureInst::Seq(self, _)` takes.
+    pub fn arity(self) -> usize {
+        match self {
+            SeqOp::Len => 1,
+            SeqOp::Concat | SeqOp::Index | SeqOp::Take | SeqOp::Drop
+            | SeqOp::Contains | SeqOp::Range => 2,
+            SeqOp::Update => 3,
+        }
+    }
+
+    /// Whether this op has the in-range side condition, so `emit_pure_guarded`
+    /// must check it (the counterpart of `BinOp::is_div_or_mod`).
+    pub fn has_bound_check(self) -> bool {
+        matches!(self, SeqOp::Index | SeqOp::Update)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PureInst {
     Fresh,
@@ -174,6 +215,12 @@ pub enum PureInst {
         base: Val,
     },
 
+    /// `Seq(e1, .., en)`, or the empty sequence `Seq[elem]()` when `elems` is empty.
+    /// `elem` is the element type, which an empty literal has no other way to name.
+    SeqLit { elem: Type, elems: Vec<Val> },
+    /// A sequence operation. Build it with `PureInst::seq`, which checks the arity.
+    Seq(SeqOp, Vec<Val>),
+
     /// An inline, nestable pure `forall` (see [`Forall`](crate::vmir::Forall)).
     /// Produces the quantified `Bool`. Its body shares *this* temp space —
     /// capture is implicit, so a free occurrence is just the enclosing temp.
@@ -205,7 +252,13 @@ impl PureInst {
             PureInst::OptionUnwrap(v) => f(v),
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
+            PureInst::SeqLit {  elems, .. } => {elems.iter().for_each(&mut *f);}
+            PureInst::Seq(_, v) => v.iter().for_each(&mut *f),
         }
+    }
+    pub fn seq(op: SeqOp, args: Vec<Val>) -> PureInst {
+        assert_eq!(args.len(), op.arity(), "`{op:?}` takes {} operands, got {args:?}", op.arity());
+        PureInst::Seq(op, args)
     }
 }
 
@@ -295,6 +348,27 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 adt, variant, base, ..
             } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
             PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
+            PureInst::SeqLit { elem, elems } => {
+                write!(f, "Seq<{}>(", self.with(elem))?;
+                for (i, e) in elems.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                write!(f, ")")
+            }
+            PureInst::Seq(op, args) => match (op, args.as_slice()) {
+                (SeqOp::Len, [s]) => write!(f, "|{s}|"),
+                (SeqOp::Concat, [s, t]) => write!(f, "{s} ++ {t}"),
+                (SeqOp::Index, [s, i]) => write!(f, "{s}[{i}]"),
+                (SeqOp::Update, [s, i, v]) => write!(f, "{s}[{i} := {v}]"),
+                (SeqOp::Take, [s, n]) => write!(f, "{s}[..{n}]"),
+                (SeqOp::Drop, [s, n]) => write!(f, "{s}[{n}..]"),
+                (SeqOp::Contains, [s, x]) => write!(f, "{x} in {s}"),
+                (SeqOp::Range, [a, b]) => write!(f, "[{a}..{b})"),
+                (op, args) => unreachable!("`{op:?}` with {} operands; `PureInst::seq` checks arity", args.len()),
+            },
         }
     }
 }

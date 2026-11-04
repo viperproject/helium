@@ -910,13 +910,48 @@ fn lower_trig_term(
                 args: Box::new([lower_trig_term(b, base, env)?]),
             })
         }
-        // TODO(seq): lower to `TrigHead::Seq` once VMIR has it. Typecheck
-        // accepts these as trigger terms, as Silicon does.
-        P::SeqLit(_)
-        | P::SeqIndex(..)
-        | P::Unary(typed::UnOp::Cardinality, _)
-        | P::Binary(typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range, ..) => {
-            Err(TranslationError::Unsupported("sequence trigger"))
+        // Sequence terms, which typecheck accepts as triggers as Silicon does.
+        // Each lowers to the operand order `PureInst::Seq` uses, so the pattern
+        // matches what a body builds.
+        P::SeqLit(elems) => {
+            let elem = match &term.ty {
+                typed::Type::Collection(typed::BuiltinCollection::Seq(t)) => b.lower_type(t),
+                other => unreachable!("a sequence literal of type {other:?}"),
+            };
+            Ok(vmir::TrigTerm::App {
+                head: vmir::TrigHead::SeqLit,
+                type_args: vec![elem],
+                args: lower_args(elems)?.into(),
+            })
+        }
+        P::SeqIndex(base, op) => {
+            use typed::SeqIndexOp as I;
+            let s = lower_trig_term(b, base, env)?;
+            let t = |e| lower_trig_term(b, e, env);
+            Ok(match op {
+                I::Index(i) => seq_trig(vmir::SeqOp::Index, [s, t(i)?]),
+                I::Take(n) => seq_trig(vmir::SeqOp::Take, [s, t(n)?]),
+                I::Drop(n) => seq_trig(vmir::SeqOp::Drop, [s, t(n)?]),
+                I::Update(i, v) => seq_trig(vmir::SeqOp::Update, [s, t(i)?, t(v)?]),
+                // `s[a..b]` is `s[..b][a..]`, as in the body.
+                I::Slice(a, z) => {
+                    let taken = seq_trig(vmir::SeqOp::Take, [s, t(z)?]);
+                    seq_trig(vmir::SeqOp::Drop, [taken, t(a)?])
+                }
+            })
+        }
+        P::Unary(typed::UnOp::Cardinality, s) => {
+            Ok(seq_trig(vmir::SeqOp::Len, [lower_trig_term(b, s, env)?]))
+        }
+        P::Binary(op @ (typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range), l, r) => {
+            let l = lower_trig_term(b, l, env)?;
+            let r = lower_trig_term(b, r, env)?;
+            Ok(match op {
+                typed::BinOp::Concat => seq_trig(vmir::SeqOp::Concat, [l, r]),
+                typed::BinOp::Range => seq_trig(vmir::SeqOp::Range, [l, r]),
+                // `x in s` is `Contains(s, x)`: the sequence comes first.
+                _ => seq_trig(vmir::SeqOp::Contains, [r, l]),
+            })
         }
         P::Unary(..)
         | P::Binary(..)
@@ -925,6 +960,17 @@ fn lower_trig_term(
         | P::Ext(typed::AxiomExt::Forall(_)) => {
             unreachable!("typecheck rejects non-matchable trigger subterms")
         }
+    }
+}
+
+/// A trigger application of the sequence operation `op`, checking its arity
+/// as `PureInst::seq` does.
+fn seq_trig<const N: usize>(op: vmir::SeqOp, args: [vmir::TrigTerm; N]) -> vmir::TrigTerm {
+    assert_eq!(N, op.arity(), "`{op:?}` takes {} operands", op.arity());
+    vmir::TrigTerm::App {
+        head: vmir::TrigHead::Seq(op),
+        type_args: Vec::new(),
+        args: Box::new(args),
     }
 }
 

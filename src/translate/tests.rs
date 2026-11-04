@@ -1553,3 +1553,46 @@ method m(a: Bool, b: Bool, c: Bool) returns (r: Int) {
         "the synthetic join blocks have a join phase and an empty body"
     );
 }
+
+#[test]
+fn seq_trigger_lowers_to_seq_heads() {
+    // `x in s` puts the sequence first, and a slice is a take then a drop, the
+    // operand order `PureInst::Seq` uses.
+    let input = r#"
+domain D {
+    function f(s: Seq[Int]): Bool
+    axiom len { forall s: Seq[Int] :: {|s|} f(s) }
+    axiom mem { forall s: Seq[Int], x: Int :: {x in s} f(s) }
+    axiom slice { forall s: Seq[Int], a: Int, b: Int :: {s[a..b]} f(s) }
+    axiom lit { forall x: Int :: {Seq(x)} x == x }
+}
+"#;
+    let p = run(input);
+    use vmir::{SeqOp, TrigHead, TrigTerm};
+    let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
+        head,
+        type_args: Vec::new(),
+        args: args.into(),
+    };
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "len")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Len));
+    assert_eq!(args, &[TrigTerm::Var(0)]);
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Contains));
+    assert_eq!(args, &[TrigTerm::Var(0), TrigTerm::Var(1)], "sequence first");
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "slice")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Drop));
+    let take = app(TrigHead::Seq(SeqOp::Take), vec![TrigTerm::Var(0), TrigTerm::Var(2)]);
+    assert_eq!(args, &[take, TrigTerm::Var(1)]);
+
+    let [TrigTerm::App { head, type_args, args }] = &only_group(axiom_forall(&p, "lit")).terms[..]
+    else {
+        panic!("expected one application");
+    };
+    assert_eq!(*head, TrigHead::SeqLit);
+    assert_eq!(type_args, &[vmir::Type::Int], "the element type");
+    assert_eq!(&args[..], &[TrigTerm::Var(0)]);
+}

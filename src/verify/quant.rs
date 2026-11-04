@@ -213,9 +213,9 @@ fn intern(
             g.terms
                 .iter()
                 .map(|t| prepare_trig_term(alloc, t, q.binder_base, &slot))
-                .collect()
+                .collect::<Result<_, _>>()
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let res = rename(&q.body.res);
     let mut generics = crate::dhash::HashSet::default();
     forall_generics(q, true, &mut generics);

@@ -684,6 +684,10 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
+        // TODO(seq): add `Symbolic::Seq` / `Symbolic::SeqLit` and evaluate here.
+        PureInst::SeqLit { .. } | PureInst::Seq(..) => {
+            return Err(VerifyError::Unimplemented("sequence expression"));
+        }
     })
 }
 
@@ -2064,9 +2068,9 @@ pub(crate) fn prepare_trig_term(
     term: &vmir::TrigTerm,
     binder_base: usize,
     slot: &crate::dhash::HashMap<usize, usize>,
-) -> crate::verify::rewrite::PreparedTerm {
+) -> Result<crate::verify::rewrite::PreparedTerm, VerifyError> {
     use crate::verify::rewrite::PreparedTerm;
-    match term {
+    Ok(match term {
         vmir::TrigTerm::Var(k) if *k >= binder_base => PreparedTerm::Bound(k - binder_base),
         vmir::TrigTerm::Var(k) => PreparedTerm::Capture(slot[k]),
         vmir::TrigTerm::Lit(lit) => PreparedTerm::Lit(lit.clone()),
@@ -2084,6 +2088,11 @@ pub(crate) fn prepare_trig_term(
                     field,
                 } => alloc.proj(*adt, *variant, *field),
                 vmir::TrigHead::AdtIs { adt, variant } => alloc.adt_is(*adt, *variant),
+                // TODO(seq): match on `Symbolic::Seq` / `Symbolic::SeqLit` once
+                // the e-graph has them; until then no pattern can find them.
+                vmir::TrigHead::Seq(_) | vmir::TrigHead::SeqLit => {
+                    return Err(VerifyError::Unimplemented("sequence trigger"));
+                }
             };
             PreparedTerm::App {
                 func,
@@ -2091,10 +2100,10 @@ pub(crate) fn prepare_trig_term(
                 args: args
                     .iter()
                     .map(|a| prepare_trig_term(alloc, a, binder_base, slot))
-                    .collect(),
+                    .collect::<Result<_, _>>()?,
             }
         }
-    }
+    })
 }
 
 /// Lower an axiom/quantifier body's inst stream into registry-resolved pure
@@ -2193,6 +2202,10 @@ pub(crate) fn prepare_body(
                 | PureInst::OptionUnwrap(_)
                 | PureInst::Forall(_) => {
                     return Err(VerifyError::Unimplemented("impure inst in axiom body"));
+                }
+                // TODO(seq): an `AxiomPure` form for sequence ops.
+                PureInst::SeqLit { .. } | PureInst::Seq(..) => {
+                    return Err(VerifyError::Unimplemented("sequence expression in axiom body"));
                 }
             }),
             InstKind::Assume(v) => AxiomInst::Assume(v.clone()),
