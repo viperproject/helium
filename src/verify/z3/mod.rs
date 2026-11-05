@@ -4,7 +4,7 @@ use itertools::Itertools;
 use crate::verify::context::VerifyContext;
 use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
 use crate::verify::stats;
-use crate::vmir::{BinOp, Literal, MemberId, Polarity, SeqOp, Type};
+use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
@@ -258,14 +258,8 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
             } => Some(field_types(ctxt, head, variant, tys).swap_remove(field)),
             FuncKind::IsVariant { .. } => Some(Type::Bool),
         },
-        Symbolic::SeqLit(elem, _) => Some(Type::Seq(elem.clone())),
-        Symbolic::Seq(op, _) => match op {
-            SeqOp::Len => Some(Type::Int),
-            SeqOp::Contains => Some(Type::Bool),
-            SeqOp::Range => Some(Type::Seq(Box::new(Type::Int))),
-            // The type comes from the operand; see `cached_class_type`.
-            _ => None,
-        },
+        Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
+        Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
     }
 }
 
@@ -397,7 +391,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
             Sort::uninterpreted(format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into())
         }
         Type::Generic(_) => unreachable!("generics are currently not supported"),
-        Type::Seq(elem_type) => Sort::uninterpreted(format!("seq@{elem_type}").into()),
+        Type::Seq(elem_ty) => Sort::uninterpreted(format!("seq@{elem_ty}").into()),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -469,7 +463,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
             class.to_real().into()
         }
         Symbolic::Forall(..) => todo!("implement translation for forall nodes"),
-        Symbolic::Seq(_, _) => todo!("implement translation for seq nodes"),
+        Symbolic::Seq(..) => todo!("implement translation for seq nodes"),
         Symbolic::SeqLit(_, _) => todo!("implement translation for seq_lit nodes"),
     })
 }

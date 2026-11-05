@@ -9,7 +9,7 @@ use egg::{EGraph, Id};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{FuncId, Symbolic};
-use crate::vmir::{BinOp, Literal, SeqOp, Type};
+use crate::vmir::{BinOp, Literal, Type};
 
 /// Reconstruct an e-class's type from the type-free e-graph (memoized,
 /// cycle-safe, best-effort): `Lit`→literal type, `RealCast`→Real,
@@ -48,22 +48,8 @@ pub(crate) fn infer_type(
             }
             // A quantifier is a proposition.
             Symbolic::Forall(..) => Some(Type::Bool),
-            Symbolic::Seq(op, args) => match op {
-                SeqOp::Len => Some(Type::Int),
-                SeqOp::Contains => Some(Type::Bool),
-                SeqOp::Range => Some(Type::Seq(Box::new(Type::Int))),
-                // These return the same sequence type as their first operand.
-                SeqOp::Concat | SeqOp::Update | SeqOp::Take | SeqOp::Drop => {
-                    infer_type(egraph, fresh_types, func_ret_types, args[0], memo)
-                }
-                // `s[i]` has the element type of `s`.
-                SeqOp::Index => match infer_type(egraph, fresh_types, func_ret_types, args[0], memo) {
-                    Some(Type::Seq(elem)) => Some(*elem),
-                    Some(other) => panic!("`seq.at` on a non-sequence of type {other}"),
-                    None => None,
-                },
-            },
-            Symbolic::SeqLit(elem, _) => Some(Type::Seq(elem.clone())),
+            Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
+            Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
         };
         if t.is_some() {
             result = t;

@@ -147,10 +147,10 @@ pub enum TrigHead {
     },
     /// A sequence operation. The `App`'s `args` are its operands in
     /// `PureInst::Seq` order (so `x in s` is `Contains(s, x)`), and `type_args`
-    /// is empty.
+    /// is `[elem_ty]`, the element type of the sequence it works on.
     Seq(crate::vmir::SeqOp),
     /// A sequence literal with the `App`'s `args` as its elements. `type_args`
-    /// is `[elem]`, which an empty literal has no other way to name.
+    /// is `[elem_ty]`, which an empty literal has no other way to name.
     SeqLit,
 }
 

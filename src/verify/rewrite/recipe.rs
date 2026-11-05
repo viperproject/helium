@@ -28,6 +28,7 @@ pub(crate) enum AxiomPure {
         args: Vec<Val>,
     },
     Seq {
+        elem_ty: Type,
         op: SeqOp,
         args: Vec<Val>
     },
@@ -302,9 +303,9 @@ pub(super) fn build_instance_vals_impl(
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
                     }
-                    AxiomPure::Seq { op, args } => {
+                    AxiomPure::Seq { elem_ty, op, args } => {
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                        egraph.add(Symbolic::Seq(*op, args))
+                        egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args))
                     }
                     AxiomPure::SeqLit { elem_ty, elems } => {
                         let args: Box<[Id]> = elems.iter().map(|v| get(egraph, &vals, v)).collect();

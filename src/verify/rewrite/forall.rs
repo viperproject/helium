@@ -24,10 +24,8 @@ pub(crate) enum TermHead {
         func: FuncId,
         type_args: Box<[Type]>,
     },
-    /// A `Symbolic::Seq` of this operation. The node has no type payload, so
-    /// this head alone does not fix its operands' types; `quant::intern` refuses
-    /// a trigger that relies on it to.
-    Seq(SeqOp),
+    /// A `Symbolic::Seq` of this element type and operation.
+    Seq(Type, SeqOp),
     /// A `Symbolic::SeqLit` of this element type.
     SeqLit(Type),
 }
@@ -37,7 +35,7 @@ impl TermHead {
     fn discriminant(&self) -> Discriminant {
         match self {
             TermHead::Func { func, .. } => Discriminant::FuncApp(*func),
-            TermHead::Seq(op) => Discriminant::Seq(*op),
+            TermHead::Seq(_, op) => Discriminant::Seq(*op),
             TermHead::SeqLit(_) => Discriminant::SeqLit,
         }
     }
@@ -50,8 +48,12 @@ impl TermHead {
             {
                 Some(children)
             }
-            (TermHead::Seq(op), Symbolic::Seq(o, children)) if o == op => Some(children),
-            (TermHead::SeqLit(elem), Symbolic::SeqLit(e, children)) if **e == *elem => {
+            (TermHead::Seq(elem_ty, op), Symbolic::Seq(e, o, children))
+                if o == op && **e == *elem_ty =>
+            {
+                Some(children)
+            }
+            (TermHead::SeqLit(elem_ty), Symbolic::SeqLit(e, children)) if **e == *elem_ty => {
                 Some(children)
             }
             _ => None,

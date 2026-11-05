@@ -163,7 +163,7 @@ impl<'p> Collector<'p> {
             | PureInst::Perm(..)
             | PureInst::OptionUnwrap(_)
             | PureInst::SeqLit { .. }
-            | PureInst::Seq(..) => {}
+            | PureInst::Seq { .. } => {}
         }
     }
 

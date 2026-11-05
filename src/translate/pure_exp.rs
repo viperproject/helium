@@ -227,7 +227,10 @@ pub(crate) fn lower<Ext: PureExt>(
                     ty.clone(),
                     PureInst::Binary(vmir::BinOp::sub(&ty), zero_literal(&ty), v),
                 )),
-                typed::UnOp::Cardinality => Ok(sink.emit_pure(vmir::Type::Int, PureInst::Seq(SeqOp::Len, vec![v]))),
+                typed::UnOp::Cardinality => {
+                    let elem_ty = seq_elem(b, &x.ty);
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Len, vec![v])))
+                }
             }
         }
         P::Binary(op, l, r) => lower_binary(b, env, sink, hctx, ty, op, l, r),
@@ -311,18 +314,19 @@ pub(crate) fn lower<Ext: PureExt>(
             ))
         }
         P::SeqLit(value) => {
-            let Type::Seq(elem) = &ty else {
+            let Type::Seq(elem_ty) = &ty else {
                 panic!("sequence literal of type {ty}");
             };
-            let elem = (**elem).clone();
+            let elem_ty = (**elem_ty).clone();
             let elems = value
                 .iter()
                 .map(|v| lower(b, env, sink, hctx, v))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(sink.emit_pure(ty, PureInst::SeqLit { elem, elems }))
+            Ok(sink.emit_pure(ty, PureInst::SeqLit { elem_ty, elems }))
         }
         P::SeqIndex(seq, op) => {
             use typed::SeqIndexOp as I;
+            let elem_ty = seq_elem(b, &seq.ty);
             let s = lower(b, env, sink, hctx, seq)?;
             match op {
                 // `s[i]` and `s[i := v]` need `0 <= i < |s|`, checked like a
@@ -330,31 +334,31 @@ pub(crate) fn lower<Ext: PureExt>(
                 I::Index(i) => {
                     let i = lower(b, env, sink, hctx, i)?;
                     Ok(sink.with_heap(hctx.value, |sink| {
-                        sink.emit_pure_guarded(ty, PureInst::seq(SeqOp::Index, vec![s, i]))
+                        sink.emit_pure_guarded(ty, PureInst::seq(elem_ty, SeqOp::Index, vec![s, i]))
                     }))
                 }
                 I::Update(i, v) => {
                     let i = lower(b, env, sink, hctx, i)?;
                     let v = lower(b, env, sink, hctx, v)?;
                     Ok(sink.with_heap(hctx.value, |sink| {
-                        sink.emit_pure_guarded(ty, PureInst::seq(SeqOp::Update, vec![s, i, v]))
+                        sink.emit_pure_guarded(ty, PureInst::seq(elem_ty, SeqOp::Update, vec![s, i, v]))
                     }))
                 }
                 // Total: Viper clamps the bounds.
                 I::Take(n) => {
                     let n = lower(b, env, sink, hctx, n)?;
-                    Ok(sink.emit_pure(ty, PureInst::seq(SeqOp::Take, vec![s, n])))
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Take, vec![s, n])))
                 }
                 I::Drop(n) => {
                     let n = lower(b, env, sink, hctx, n)?;
-                    Ok(sink.emit_pure(ty, PureInst::seq(SeqOp::Drop, vec![s, n])))
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![s, n])))
                 }
                 // `s[a..z]` is `s[..z][a..]`, the same shape as in a trigger.
                 I::Slice(a, z) => {
                     let a = lower(b, env, sink, hctx, a)?;
                     let z = lower(b, env, sink, hctx, z)?;
-                    let taken = sink.emit_pure(ty.clone(), PureInst::seq(SeqOp::Take, vec![s, z]));
-                    Ok(sink.emit_pure(ty, PureInst::seq(SeqOp::Drop, vec![taken, a])))
+                    let taken = sink.emit_pure(ty.clone(), PureInst::seq(elem_ty.clone(), SeqOp::Take, vec![s, z]));
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![taken, a])))
                 }
             }
         }
@@ -569,10 +573,10 @@ fn lower_binary<Ext: PureExt>(
         B::Iff => sink.emit_pure(ty, PureInst::Binary(V::Eq, lv, rv)),
         // `ty` is the node's own type: `Seq<T>` for `++`, `Seq<Int>` for `[a..b)`,
         // `Bool` for `in`.
-        B::Concat => sink.emit_pure(ty, PureInst::seq(SeqOp::Concat, vec![lv, rv])),
-        B::Range => sink.emit_pure(ty, PureInst::seq(SeqOp::Range, vec![lv, rv])),
+        B::Concat => sink.emit_pure(ty, PureInst::seq(seq_elem(b, &l.ty), SeqOp::Concat, vec![lv, rv])),
+        B::Range => sink.emit_pure(ty, PureInst::seq(vmir::Type::Int, SeqOp::Range, vec![lv, rv])),
         // `x in s` is `Contains(s, x)`: the sequence comes first.
-        B::In => sink.emit_pure(ty, PureInst::seq(SeqOp::Contains, vec![rv, lv])),
+        B::In => sink.emit_pure(ty, PureInst::seq(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv])),
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
             return Err(TranslationError::Unsupported("collection operator"));
         }
@@ -965,43 +969,41 @@ fn lower_trig_term(
         // Each lowers to the operand order `PureInst::Seq` uses, so the pattern
         // matches what a body builds.
         P::SeqLit(elems) => {
-            let elem = match &term.ty {
-                typed::Type::Collection(typed::BuiltinCollection::Seq(t)) => b.lower_type(t),
-                other => unreachable!("a sequence literal of type {other:?}"),
-            };
             Ok(vmir::TrigTerm::App {
                 head: vmir::TrigHead::SeqLit,
-                type_args: vec![elem],
+                type_args: vec![seq_elem(b, &term.ty)],
                 args: lower_args(elems)?.into(),
             })
         }
         P::SeqIndex(base, op) => {
             use typed::SeqIndexOp as I;
+            let elem_ty = seq_elem(b, &base.ty);
             let s = lower_trig_term(b, base, env)?;
             let t = |e| lower_trig_term(b, e, env);
             Ok(match op {
-                I::Index(i) => seq_trig(vmir::SeqOp::Index, [s, t(i)?]),
-                I::Take(n) => seq_trig(vmir::SeqOp::Take, [s, t(n)?]),
-                I::Drop(n) => seq_trig(vmir::SeqOp::Drop, [s, t(n)?]),
-                I::Update(i, v) => seq_trig(vmir::SeqOp::Update, [s, t(i)?, t(v)?]),
+                I::Index(i) => seq_trig(&elem_ty, vmir::SeqOp::Index, [s, t(i)?]),
+                I::Take(n) => seq_trig(&elem_ty, vmir::SeqOp::Take, [s, t(n)?]),
+                I::Drop(n) => seq_trig(&elem_ty, vmir::SeqOp::Drop, [s, t(n)?]),
+                I::Update(i, v) => seq_trig(&elem_ty, vmir::SeqOp::Update, [s, t(i)?, t(v)?]),
                 // `s[a..b]` is `s[..b][a..]`, as in the body.
                 I::Slice(a, z) => {
-                    let taken = seq_trig(vmir::SeqOp::Take, [s, t(z)?]);
-                    seq_trig(vmir::SeqOp::Drop, [taken, t(a)?])
+                    let taken = seq_trig(&elem_ty, vmir::SeqOp::Take, [s, t(z)?]);
+                    seq_trig(&elem_ty, vmir::SeqOp::Drop, [taken, t(a)?])
                 }
             })
         }
         P::Unary(typed::UnOp::Cardinality, s) => {
-            Ok(seq_trig(vmir::SeqOp::Len, [lower_trig_term(b, s, env)?]))
+            Ok(seq_trig(&seq_elem(b, &s.ty), vmir::SeqOp::Len, [lower_trig_term(b, s, env)?]))
         }
         P::Binary(op @ (typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range), l, r) => {
+            let (l_ty, r_ty) = (&l.ty, &r.ty);
             let l = lower_trig_term(b, l, env)?;
             let r = lower_trig_term(b, r, env)?;
             Ok(match op {
-                typed::BinOp::Concat => seq_trig(vmir::SeqOp::Concat, [l, r]),
-                typed::BinOp::Range => seq_trig(vmir::SeqOp::Range, [l, r]),
+                typed::BinOp::Concat => seq_trig(&seq_elem(b, l_ty), vmir::SeqOp::Concat, [l, r]),
+                typed::BinOp::Range => seq_trig(&vmir::Type::Int, vmir::SeqOp::Range, [l, r]),
                 // `x in s` is `Contains(s, x)`: the sequence comes first.
-                _ => seq_trig(vmir::SeqOp::Contains, [r, l]),
+                _ => seq_trig(&seq_elem(b, r_ty), vmir::SeqOp::Contains, [r, l]),
             })
         }
         P::Unary(..)
@@ -1016,12 +1018,24 @@ fn lower_trig_term(
 
 /// A trigger application of the sequence operation `op`, checking its arity
 /// as `PureInst::seq` does.
-fn seq_trig<const N: usize>(op: vmir::SeqOp, args: [vmir::TrigTerm; N]) -> vmir::TrigTerm {
+fn seq_trig<const N: usize>(
+    elem_ty: &vmir::Type,
+    op: vmir::SeqOp,
+    args: [vmir::TrigTerm; N],
+) -> vmir::TrigTerm {
     assert_eq!(N, op.arity(), "`{op:?}` takes {} operands", op.arity());
     vmir::TrigTerm::App {
         head: vmir::TrigHead::Seq(op),
-        type_args: Vec::new(),
+        type_args: vec![elem_ty.clone()],
         args: Box::new(args),
+    }
+}
+
+/// The element type of an expression that typecheck has given a sequence type.
+fn seq_elem(b: &TranslationContext<'_>, ty: &typed::Type) -> vmir::Type {
+    match ty {
+        typed::Type::Collection(typed::BuiltinCollection::Seq(t)) => b.lower_type(t),
+        other => panic!("a sequence operation on a value of type {other:?}"),
     }
 }
 
