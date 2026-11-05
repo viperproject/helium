@@ -87,6 +87,9 @@ pub enum TypeError {
     /// A solver mismatch ([`TcTypeErr::Mismatch`]) with both types spelled as
     /// Viper types, made by [`TypeError::with_names`].
     Mismatch(String, String),
+    /// Nothing constrains an expression's type, as in `|Seq()|`: the solver's
+    /// [`TcTypeErr::Abstract`], made readable by [`TypeError::with_names`].
+    CannotInferType,
     Other(String),
 }
 
@@ -129,6 +132,10 @@ impl TypeError {
                 TcErr::Bound(_, _, TcTypeErr::Mismatch(t1, t2))
                 | TcErr::KeyEquation(_, _, TcTypeErr::Mismatch(t1, t2)),
             ) => TypeError::Mismatch(viper_name(&t1, interner), viper_name(&t2, interner)),
+            TypeError::Tc(
+                TcErr::Construction(_, _, TcTypeErr::Abstract)
+                | TcErr::ChildConstruction(_, _, _, TcTypeErr::Abstract),
+            ) => TypeError::CannotInferType,
             other => other,
         }
     }
@@ -280,6 +287,10 @@ impl std::fmt::Display for TypeError {
             TypeError::Mismatch(t1, t2) => {
                 write!(f, "type mismatch: cannot unify {t1} and {t2}")
             }
+            TypeError::CannotInferType => write!(
+                f,
+                "cannot infer the type of an expression; annotate it, e.g. `Seq[Int]()`"
+            ),
             TypeError::Other(msg) => write!(f, "{msg}"),
         }
     }
