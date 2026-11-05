@@ -2,7 +2,7 @@
 // verified, and the method that calls the rejected one must not be.
 field f: Int
 
-method uses_seq(xs: Seq[Int])
+method uses_set(xs: Set[Int])
 {
   assert true
 }
@@ -15,7 +15,7 @@ method fine(x: Ref)
   assert x.f == 1
 }
 
-method calls_rejected(xs: Seq[Int])
+method calls_rejected(xs: Set[Int])
 {
-  uses_seq(xs)
+  uses_set(xs)
 }

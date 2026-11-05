@@ -67,11 +67,6 @@ impl<'a> AstWalker<'a> for Scan {
             ExpKind::Unsupported(what) => self.hit(what),
             ExpKind::MagicWand(..) => self.hit("magic wand `--*`"),
             ExpKind::ForPerm(..) => self.hit("forperm"),
-            // Sequence expressions parse, but typecheck does not lower them yet.
-            // Lift each hit as its lowering lands.
-            ExpKind::Index(..) => self.hit("collection indexing"),
-            ExpKind::SeqLit(..) => self.hit("Seq"),
-            ExpKind::UnOp(UnOp::Cardinality, _) => self.hit("|s| (cardinality)"),
             ExpKind::Quantifier(QuantifierKind::Exists, ..) => self.hit("exists"),
             // `forall x: Ref :: acc(x.f)` — a quantified permission. The
             // quantifier's body has to stay heap-free.
@@ -127,9 +122,6 @@ impl<'a> AstWalker<'a> for Scan {
             BinOp::SetMinus => self.hit("setminus"),
             BinOp::Intersection => self.hit("intersection"),
             BinOp::Subset => self.hit("subset"),
-            BinOp::Concat => self.hit("++ (sequence concatenation)"),
-            BinOp::Range => self.hit("[a..b) (sequence range)"),
-            BinOp::In => self.hit("in (collection membership)"),
             _ => {}
         }
         op.walk_children(self);
@@ -141,12 +133,6 @@ impl<'a> AstWalker<'a> for Scan {
             && let Some(collection) = COLLECTION_TYPES.iter().find(|c| *c == name)
         {
             self.hit(collection);
-        }
-        // `Seq[T]` parses to its own type now, but typecheck and translate do
-        // not model it yet (translate would lower it to `Ref`). Lift together
-        // with the expression hits above.
-        if let Type::Seq(_) = ty {
-            self.hit("Seq");
         }
         ty.walk_children(self);
     }
