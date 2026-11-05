@@ -35,8 +35,8 @@ pub(crate) enum AxiomPure {
     },
     SeqLit {
         elem_ty: Type,
-        elems : Vec<Val>
-    }
+        elem: Val,
+    },
 }
 
 /// One instruction of a prepared body: a value-producing pure step, an
@@ -101,10 +101,10 @@ pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
                     args: args.clone(),
                 })
             }
-            AxiomInst::Val(AxiomPure::SeqLit { elem_ty, elems }) => {
+            AxiomInst::Val(AxiomPure::SeqLit { elem_ty, elem }) => {
                 AxiomInst::Val(AxiomPure::SeqLit {
                     elem_ty: elem_ty.subst_generics(tys),
-                    elems: elems.clone(),
+                    elem: elem.clone(),
                 })
             }
             AxiomInst::Forall {
@@ -367,9 +367,9 @@ pub(super) fn build_instance_vals_impl(
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args))
                     }
-                    AxiomPure::SeqLit { elem_ty, elems } => {
-                        let args: Box<[Id]> = elems.iter().map(|v| get(egraph, &vals, v)).collect();
-                        egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), args))
+                    AxiomPure::SeqLit { elem_ty, elem } => {
+                        let elem = get(egraph, &vals, elem);
+                        egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), elem))
                     }
                 };
                 vals.push(id);

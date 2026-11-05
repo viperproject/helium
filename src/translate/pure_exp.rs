@@ -322,7 +322,23 @@ pub(crate) fn lower<Ext: PureExt>(
                 .iter()
                 .map(|v| lower(b, env, sink, hctx, v))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(sink.emit_pure(ty, PureInst::SeqLit { elem_ty, elems }))
+            // As Silicon does: `Seq(a, b, c)` is `Seq(a) ++ (Seq(b) ++ Seq(c))`.
+            let singletons: Vec<Val> = elems
+                .into_iter()
+                .map(|elem| {
+                    let elem_ty = elem_ty.clone();
+                    sink.emit_pure(ty.clone(), PureInst::SeqLit { elem_ty, elem })
+                })
+                .collect();
+            let concat = singletons.into_iter().rev().reduce(|tail, head| {
+                sink.emit_pure(
+                    ty.clone(),
+                    PureInst::seq(elem_ty.clone(), SeqOp::Concat, vec![head, tail]),
+                )
+            });
+            Ok(concat.unwrap_or_else(|| {
+                sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Empty, vec![]))
+            }))
         }
         P::SeqIndex(seq, op) => {
             use typed::SeqIndexOp as I;
@@ -966,13 +982,19 @@ fn lower_trig_term(
         }
         // Sequence terms, which typecheck accepts as triggers as Silicon does.
         // Each lowers to the operand order `PureInst::Seq` uses, so the pattern
-        // matches what a body builds.
+        // matches what a body builds. That includes a literal's shape: right-nested
+        // concatenations of singletons, or `SeqOp::Empty`.
         P::SeqLit(elems) => {
-            Ok(vmir::TrigTerm::App {
+            let elem_ty = seq_elem(b, &term.ty);
+            let singletons = lower_args(elems)?.into_iter().map(|elem| vmir::TrigTerm::App {
                 head: vmir::TrigHead::SeqLit,
-                type_args: vec![seq_elem(b, &term.ty)],
-                args: lower_args(elems)?.into(),
-            })
+                type_args: vec![elem_ty.clone()],
+                args: Box::new([elem]),
+            });
+            Ok(singletons
+                .rev()
+                .reduce(|tail, head| seq_trig(&elem_ty, vmir::SeqOp::Concat, [head, tail]))
+                .unwrap_or_else(|| seq_trig(&elem_ty, vmir::SeqOp::Empty, [])))
         }
         P::SeqIndex(base, op) => {
             use typed::SeqIndexOp as I;

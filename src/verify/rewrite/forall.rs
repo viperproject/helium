@@ -58,10 +58,10 @@ impl TermHead {
                 std::slice::from_ref(&**e),
                 children,
             )),
-            (TermHead::SeqLit(elem), Symbolic::SeqLit(e, children)) => Some((
-                std::slice::from_ref(elem),
+            (TermHead::SeqLit(elem_ty), Symbolic::SeqLit(e, elem)) => Some((
+                std::slice::from_ref(elem_ty),
                 std::slice::from_ref(&**e),
-                children,
+                std::slice::from_ref(elem),
             )),
             _ => None,
         }
