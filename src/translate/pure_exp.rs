@@ -7,9 +7,7 @@ use lasso::Spur;
 use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
-use crate::vmir::{
-    self, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, TRUE, Val,
-};
+use crate::vmir::{self, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp, Val, FALSE, TRUE, Type};
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
 /// body. `baseline` is the post-requires-inhale heap (target of unlabeled
@@ -229,7 +227,7 @@ pub(crate) fn lower<Ext: PureExt>(
                     ty.clone(),
                     PureInst::Binary(vmir::BinOp::sub(&ty), zero_literal(&ty), v),
                 )),
-                typed::UnOp::Cardinality => Err(TranslationError::Unsupported("cardinality")),
+                typed::UnOp::Cardinality => Ok(sink.emit_pure(vmir::Type::Int, PureInst::Seq(SeqOp::Len, vec![v]))),
             }
         }
         P::Binary(op, l, r) => lower_binary(b, env, sink, hctx, ty, op, l, r),
@@ -312,8 +310,54 @@ pub(crate) fn lower<Ext: PureExt>(
                 },
             ))
         }
-        // TODO(seq): lower to `PureInst::Seq` once VMIR has it.
-        P::SeqLit(_) | P::SeqIndex(..) => Err(TranslationError::Unsupported("sequence expression")),
+        P::SeqLit(value) => {
+            let Type::Seq(elem) = &ty else {
+                panic!("sequence literal of type {ty}");
+            };
+            let elem = (**elem).clone();
+            let elems = value
+                .iter()
+                .map(|v| lower(b, env, sink, hctx, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(sink.emit_pure(ty, PureInst::SeqLit { elem, elems }))
+        }
+        P::SeqIndex(seq, op) => {
+            use typed::SeqIndexOp as I;
+            let s = lower(b, env, sink, hctx, seq)?;
+            match op {
+                // `s[i]` and `s[i := v]` need `0 <= i < |s|`, checked like a
+                // divisor in the current value heap.
+                I::Index(i) => {
+                    let i = lower(b, env, sink, hctx, i)?;
+                    Ok(sink.with_heap(hctx.value, |sink| {
+                        sink.emit_pure_guarded(ty, PureInst::seq(SeqOp::Index, vec![s, i]))
+                    }))
+                }
+                I::Update(i, v) => {
+                    let i = lower(b, env, sink, hctx, i)?;
+                    let v = lower(b, env, sink, hctx, v)?;
+                    Ok(sink.with_heap(hctx.value, |sink| {
+                        sink.emit_pure_guarded(ty, PureInst::seq(SeqOp::Update, vec![s, i, v]))
+                    }))
+                }
+                // Total: Viper clamps the bounds.
+                I::Take(n) => {
+                    let n = lower(b, env, sink, hctx, n)?;
+                    Ok(sink.emit_pure(ty, PureInst::seq(SeqOp::Take, vec![s, n])))
+                }
+                I::Drop(n) => {
+                    let n = lower(b, env, sink, hctx, n)?;
+                    Ok(sink.emit_pure(ty, PureInst::seq(SeqOp::Drop, vec![s, n])))
+                }
+                // `s[a..z]` is `s[..z][a..]`, the same shape as in a trigger.
+                I::Slice(a, z) => {
+                    let a = lower(b, env, sink, hctx, a)?;
+                    let z = lower(b, env, sink, hctx, z)?;
+                    let taken = sink.emit_pure(ty.clone(), PureInst::seq(SeqOp::Take, vec![s, z]));
+                    Ok(sink.emit_pure(ty, PureInst::seq(SeqOp::Drop, vec![taken, a])))
+                }
+            }
+        }
         P::AdtDiscriminator(base, variant) => {
             // `e.is<Ctor>` ⇒ the `Bool` tester `AdtIs{adt, variant}(e)`. The
             // verifier's `is` reduction folds it to a literal from `e`'s variant
@@ -522,7 +566,13 @@ fn lower_binary<Ext: PureExt>(
         }
         B::And | B::Or | B::Implies => unreachable!("handled above"),
         B::Iff => sink.emit_pure(ty, PureInst::Binary(V::Eq, lv, rv)),
-        B::In | B::Union | B::SetMinus | B::Intersection | B::Subset | B::Concat | B::Range => {
+        // `ty` is the node's own type: `Seq<T>` for `++`, `Seq<Int>` for `[a..b)`,
+        // `Bool` for `in`.
+        B::Concat => sink.emit_pure(ty, PureInst::seq(SeqOp::Concat, vec![lv, rv])),
+        B::Range => sink.emit_pure(ty, PureInst::seq(SeqOp::Range, vec![lv, rv])),
+        // `x in s` is `Contains(s, x)`: the sequence comes first.
+        B::In => sink.emit_pure(ty, PureInst::seq(SeqOp::Contains, vec![rv, lv])),
+        B::Union | B::SetMinus | B::Intersection | B::Subset => {
             return Err(TranslationError::Unsupported("collection operator"));
         }
     })

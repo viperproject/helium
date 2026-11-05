@@ -154,6 +154,19 @@ impl SeqOp {
     pub fn has_bound_check(self) -> bool {
         matches!(self, SeqOp::Index | SeqOp::Update)
     }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            SeqOp::Len => "seq.len",
+            SeqOp::Index => "seq.at",
+            SeqOp::Update => "seq.upd",
+            SeqOp::Concat => "seq.++",
+            SeqOp::Take => "seq.take",
+            SeqOp::Drop => "seq.drop",
+            SeqOp::Range => "seq.range",
+            SeqOp::Contains => "seq.in",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -25,6 +25,7 @@ use crate::{
         Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
+use crate::vmir::SeqOp;
 
 struct EvalState {
     vals: Vec<egg::Id>,
@@ -684,9 +685,13 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
-        // TODO(seq): add `Symbolic::Seq` / `Symbolic::SeqLit` and evaluate here.
-        PureInst::SeqLit { .. } | PureInst::Seq(..) => {
-            return Err(VerifyError::Unimplemented("sequence expression"));
+        PureInst::Seq(op, args) => {
+            let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
+            (ctx.add(Symbolic::Seq(*op, ids)), None)
+        }
+        PureInst::SeqLit { elem, elems } => {
+            let ids: Box<[egg::Id]> = elems.iter().map(|v| state.get_val(ctx, v)).collect();
+            (ctx.add(Symbolic::SeqLit(Box::new(elem.clone()), ids)), None)
         }
     })
 }
@@ -2996,6 +3001,19 @@ fn inst_obligations(
             // Divisor must be non-zero: not (divisor == 0).
             let goal = expr!(ctx, not({ rv } == { zero }));
             vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
+        }
+
+        InstKind::Pure(ty, PureInst::Seq(op, val)) if op.has_bound_check() => {
+            // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
+            let s = state.get_val(ctx, &val[0]);
+            let i = state.get_val(ctx, &val[1]);
+            let len = ctx.add(Symbolic::Seq(SeqOp::Len, Box::new([s])));
+            let lower = expr!(ctx, not({ i } <i 0));
+            let upper = expr!(ctx, { i } <i { len });
+            vec![
+                 (lower, VerifyError::SideCondition("sequence index may be negative")),
+                 (upper, VerifyError::SideCondition("sequence index may be out of bounds")),
+            ]
         }
         _ => vec![],
     }
