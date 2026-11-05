@@ -161,7 +161,9 @@ impl<'p> Collector<'p> {
             | PureInst::RealCast(_)
             | PureInst::Deref(..)
             | PureInst::Perm(..)
-            | PureInst::OptionUnwrap(_) => {}
+            | PureInst::OptionUnwrap(_)
+            | PureInst::SeqLit { .. }
+            | PureInst::Seq(..) => {}
         }
     }
 

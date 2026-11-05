@@ -5,6 +5,7 @@ use crate::dhash::HashMap;
 use lasso::Spur;
 
 use crate::viper::typed;
+use crate::viper::typed::BuiltinCollection;
 use crate::vmir;
 
 /// Lower a typed Silver type to a VMIR type.
@@ -45,6 +46,9 @@ pub(crate) fn lower_type(
             // Ref, as before; ADTs are always present (declared in pass 1).
             None => vmir::Type::Ref,
         },
+        typed::Type::Collection(BuiltinCollection::Seq(ty)) => {
+            vmir::Type::Seq(Box::new(lower_type(names, generics, ty)))
+        }
         // TODO: Seq/Set — modeled as builtin parametric types like Option.
         typed::Type::Collection(_) => vmir::Type::Ref,
     }
