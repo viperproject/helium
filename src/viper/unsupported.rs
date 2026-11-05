@@ -3,7 +3,7 @@
 //! Everything that reaches here is *parseable*: the grammar accepts the whole
 //! surface syntax it can recognise, and turns the parts we do not implement
 //! into `ExpKind::Unsupported` / `Statement::Unsupported` markers or into
-//! ordinary nodes we then refuse here (a magic wand, `epsilon`, a `Seq` type).
+//! ordinary nodes we then refuse here (a magic wand, `epsilon`).
 //! One scan per declaration is what lets the pipeline report "this declaration
 //! uses `package`" and carry on with the rest of the file, instead of dying at
 //! the first construct with a parse error that names something else.

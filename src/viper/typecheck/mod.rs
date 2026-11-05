@@ -71,9 +71,10 @@ fn check_type(
                 Some(GlobalSignature::Domain(d)) => d.type_arity,
                 Some(GlobalSignature::Adt(a)) => a.type_arity,
                 // The collection types: parsed so `scan_unsupported` can name
-                // them, rejected there.
+                // them, rejected there. A well-formed `Seq[T]` is `P::Seq`; `Seq`
+                // only lands here with the wrong number of type arguments.
                 _ => match interner.resolve(&name) {
-                     "Set" | "Multiset" => 1,
+                    "Seq" | "Set" | "Multiset" => 1,
                     "Map" => 2,
                     other => return Err(TypeError::UndeclaredType(other.to_string())),
                 },
@@ -3617,6 +3618,22 @@ function TryFromBytes_impl(Self$0_trait: Type): Bool
         ] {
             assert_rejected(decl, |e| matches!(e, TypeError::WrongTypeArgCount { .. }));
         }
+    }
+
+    #[test]
+    fn seq_with_wrong_type_argument_count_rejected() {
+        for decl in ["method m(x: Seq)", "method m(x: Seq[Int, Int])"] {
+            assert_rejected(decl, |e| {
+                matches!(e, TypeError::WrongTypeArgCount { name, expected: 1, .. } if name == "Seq")
+            });
+        }
+    }
+
+    #[test]
+    fn uninferable_empty_seq_rejected() {
+        assert_rejected("method m() { assert |Seq()| == 0 }", |e| {
+            matches!(e, TypeError::CannotInferType)
+        });
     }
 
     #[test]

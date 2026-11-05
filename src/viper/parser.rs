@@ -60,7 +60,7 @@ peg::parser! {
             / "Perm" { Type::Real }
             / "Ref" { Type::Ref }
             / "Rational"   { Type::Real }
-            // The collection types are parsed but not implemented: they are kept
+            // The collection types are parsed but not implemented (expect Seq): they are kept
             // as ordinary domain types under their own name so that
             // `scan_unsupported` can name the construct and reject only the
             // declaration that mentions one, instead of failing the whole file

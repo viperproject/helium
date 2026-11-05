@@ -181,7 +181,7 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
                     TrigHead::AdtIs { adt, variant } => {
                         write!(f, "{}?", self.adt_variant(*adt, *variant))?
                     }
-                    TrigHead::Seq(op) => write!(f, "seq.{op:?}")?,
+                    TrigHead::Seq(op) => write!(f, "{}", op.token())?,
                     TrigHead::SeqLit => write!(f, "Seq")?,
                 }
                 if !type_args.is_empty() {

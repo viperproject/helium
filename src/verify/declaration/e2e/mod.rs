@@ -12,6 +12,7 @@ mod generations;
 mod interplay;
 mod permissions;
 mod predicates;
+mod sequences;
 mod unit_type_collection;
 mod wildcards;
 
