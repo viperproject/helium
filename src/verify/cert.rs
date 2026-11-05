@@ -7,7 +7,6 @@
 //! whatever it needs itself. See the plan's Findings B/C.
 
 use egg::{EGraph, Id};
-
 use crate::verify::analysis::ConstFold;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::LocationKind;
@@ -523,6 +522,8 @@ fn for_each_operand_mut(inst: &mut AxiomInst, mut f: impl FnMut(&mut Val)) {
             }
             AxiomPure::RealCast(v) => f(v),
             AxiomPure::App { args, .. } => args.iter_mut().for_each(f),
+            AxiomPure::Seq { args, .. } => args.iter_mut().for_each(f),
+            AxiomPure::SeqLit { elems, .. } => elems.iter_mut().for_each(f),
         },
         AxiomInst::Forall { caps, .. } => caps.iter_mut().for_each(f),
         AxiomInst::Assume(v) => f(v),
@@ -554,6 +555,8 @@ fn for_each_operand(inst: &AxiomInst, mut f: impl FnMut(&Val)) {
             }
             AxiomPure::RealCast(v) => f(v),
             AxiomPure::App { args, .. } => args.iter().for_each(f),
+            AxiomPure::Seq { args, .. } => args.iter().for_each(f),
+            AxiomPure::SeqLit {elems, ..} => elems.iter().for_each(f),
         },
         AxiomInst::Forall { caps, .. } => caps.iter().for_each(f),
         AxiomInst::Assume(v) => f(v),

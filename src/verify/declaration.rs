@@ -681,11 +681,36 @@ fn eval_pure_inst(
         }
         PureInst::Seq(op, args) => {
             let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
-            (ctx.add(Symbolic::Seq(*op, ids)), None)
+            let recipe = if ctx.recipe.is_some() {
+                let args: Vec<Val> = args
+                    .iter()
+                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
+                    .collect::<Result<_, _>>()?;
+                let rb = ctx.recipe.as_mut().unwrap();
+                Some(rb.emit(AxiomPure::Seq { op: *op, args }))
+            } else {
+                None
+            };
+            (ctx.add(Symbolic::Seq(*op, ids)), recipe)
         }
         PureInst::SeqLit { elem, elems } => {
             let ids: Box<[egg::Id]> = elems.iter().map(|v| state.get_val(ctx, v)).collect();
-            (ctx.add(Symbolic::SeqLit(Box::new(elem.clone()), ids)), None)
+            let recipe = if ctx.recipe.is_some() {
+                let args: Vec<Val> = elems
+                    .iter()
+                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
+                    .collect::<Result<_, _>>()?;
+
+                let rb = ctx.recipe.as_mut().unwrap();
+                Some(rb.emit(AxiomPure::SeqLit {
+                    elem_ty : elem.clone(),
+                    elems : args
+                }))
+            } else {
+                None
+            };
+
+            (ctx.add(Symbolic::SeqLit(Box::new(elem.clone()), ids)), recipe)
         }
     })
 }
@@ -2085,18 +2110,18 @@ fn assume_axioms(
     Ok(())
 }
 
-/// Resolve a trigger pattern term's heads to verifier `FuncId`s — the same
-/// mapping [`prepare_body`] applies to the corresponding `PureInst`, so a
-/// pattern matches exactly the nodes a body would build — and canonicalize its
-/// variables into recipe space: at or above `binder_base` a variable is a binder
-/// (`Bound`), below it a free enclosing value whose capture slot is `slot`.
+/// Resolve a trigger pattern term's heads to what the e-graph speaks — the same
+/// mapping [`prepare_body`] applies to the corresponding `PureInst`, so a pattern
+/// matches exactly the nodes a body would build — and canonicalize its variables
+/// into recipe space: at or above `binder_base` a variable is a binder (`Bound`),
+/// below it a free enclosing value whose capture slot is `slot`.
 pub(crate) fn prepare_trig_term(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     term: &vmir::TrigTerm,
     binder_base: usize,
     slot: &crate::dhash::HashMap<usize, usize>,
 ) -> Result<crate::verify::rewrite::PreparedTerm, VerifyError> {
-    use crate::verify::rewrite::PreparedTerm;
+    use crate::verify::rewrite::{PreparedTerm, TermHead};
     Ok(match term {
         vmir::TrigTerm::Var(k) if *k >= binder_base => PreparedTerm::Bound(k - binder_base),
         vmir::TrigTerm::Var(k) => PreparedTerm::Capture(slot[k]),
@@ -2106,24 +2131,37 @@ pub(crate) fn prepare_trig_term(
             type_args,
             args,
         } => {
-            let func = match head {
-                vmir::TrigHead::Func(id) => crate::verify::func_registry::func_id_for_member(*id),
-                vmir::TrigHead::AdtCons { adt, variant } => alloc.cons(*adt, *variant),
+            let func = |func| TermHead::Func {
+                func,
+                type_args: type_args.iter().cloned().collect(),
+            };
+            let head = match head {
+                vmir::TrigHead::Func(id) => {
+                    func(crate::verify::func_registry::func_id_for_member(*id))
+                }
+                vmir::TrigHead::AdtCons { adt, variant } => func(alloc.cons(*adt, *variant)),
                 vmir::TrigHead::AdtProj {
                     adt,
                     variant,
                     field,
-                } => alloc.proj(*adt, *variant, *field),
-                vmir::TrigHead::AdtIs { adt, variant } => alloc.adt_is(*adt, *variant),
-                // TODO(seq): match on `Symbolic::Seq` / `Symbolic::SeqLit` once
-                // the e-graph has them; until then no pattern can find them.
-                vmir::TrigHead::Seq(_) | vmir::TrigHead::SeqLit => {
-                    return Err(VerifyError::Unimplemented("sequence trigger"));
+                } => func(alloc.proj(*adt, *variant, *field)),
+                vmir::TrigHead::AdtIs { adt, variant } => func(alloc.adt_is(*adt, *variant)),
+                vmir::TrigHead::Seq(op) => {
+                    assert!(
+                        type_args.is_empty(),
+                        "a `{op:?}` trigger head takes no type arguments: {type_args:?}"
+                    );
+                    TermHead::Seq(*op)
+                }
+                vmir::TrigHead::SeqLit => {
+                    let [elem] = &type_args[..] else {
+                        panic!("a sequence literal trigger names its element type: {type_args:?}");
+                    };
+                    TermHead::SeqLit(elem.clone())
                 }
             };
             PreparedTerm::App {
-                func,
-                type_args: type_args.iter().cloned().collect(),
+                head,
                 args: args
                     .iter()
                     .map(|a| prepare_trig_term(alloc, a, binder_base, slot))
@@ -2229,10 +2267,14 @@ pub(crate) fn prepare_body(
                 | PureInst::Forall(_) => {
                     return Err(VerifyError::Unimplemented("impure inst in axiom body"));
                 }
-                // TODO(seq): an `AxiomPure` form for sequence ops.
-                PureInst::SeqLit { .. } | PureInst::Seq(..) => {
-                    return Err(VerifyError::Unimplemented("sequence expression in axiom body"));
-                }
+                PureInst::Seq(op, args) => AxiomPure::Seq {
+                    op: *op,
+                    args: args.clone(),
+                },
+                PureInst::SeqLit { elem, elems } => AxiomPure::SeqLit {
+                    elem_ty: elem.clone(),
+                    elems: elems.clone(),
+                },
             }),
             InstKind::Assume(v) => AxiomInst::Assume(v.clone()),
             // Never verified; nothing to record.

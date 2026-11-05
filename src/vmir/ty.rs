@@ -177,7 +177,6 @@ impl Type {
                     ..
                 },
             ) => g1 == g2 && v1.match_generics(v2, out),
-            (Type::Seq(x), Type::Seq(y)) => x.match_generics(y, out),
             (a, b) => a == b,
         }
     }
