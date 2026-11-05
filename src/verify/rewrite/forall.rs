@@ -12,33 +12,83 @@ use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
 use crate::verify::quant::RecipeTable;
 use crate::verify::stats;
-use crate::vmir::{Literal, Type};
+use crate::vmir::{Literal, SeqOp, Type};
 
 use super::*;
 
-/// One trigger pattern term, with every head resolved to its verifier `FuncId`
-/// (the applier has no registry access). The `vmir::TrigTerm` grammar, flattened
-/// to what the e-graph speaks: an `App` matches a `FuncApp` node with the same
-/// function, type payload and arity, whose argument e-classes match `args`
-/// recursively.
+/// The head of a trigger application, resolved to what the e-graph speaks.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum TermHead {
+    /// A `FuncApp` with this function and type payload.
+    Func {
+        func: FuncId,
+        type_args: Box<[Type]>,
+    },
+    /// A `Symbolic::Seq` of this operation. The node has no type payload, so
+    /// this head alone does not fix its operands' types; `quant::intern` refuses
+    /// a trigger that relies on it to.
+    Seq(SeqOp),
+    /// A `Symbolic::SeqLit` of this element type.
+    SeqLit(Type),
+}
+
+impl TermHead {
+    /// The `classes_by_op` bucket holding this head's applications.
+    fn discriminant(&self) -> Discriminant {
+        match self {
+            TermHead::Func { func, .. } => Discriminant::FuncApp(*func),
+            TermHead::Seq(op) => Discriminant::Seq(*op),
+            TermHead::SeqLit(_) => Discriminant::SeqLit,
+        }
+    }
+
+    /// When `node` is an application of this head: the head's pattern types, the
+    /// node's types (to be matched by [`match_types`], which binds a generic
+    /// quantifier's open type parameters), and the node's children.
+    fn children_of<'s, 'a>(
+        &'s self,
+        node: &'a Symbolic,
+    ) -> Option<(&'s [Type], &'a [Type], &'a [Id])> {
+        match (self, node) {
+            (TermHead::Func { func, type_args }, Symbolic::FuncApp(f, tys, children))
+                if f == func =>
+            {
+                Some((type_args, tys, children))
+            }
+            (TermHead::Seq(op), Symbolic::Seq(o, children)) if o == op => {
+                Some((&[], &[], children))
+            }
+            (TermHead::SeqLit(elem), Symbolic::SeqLit(e, children)) => Some((
+                std::slice::from_ref(elem),
+                std::slice::from_ref(&**e),
+                children,
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// One trigger pattern term, with every head resolved (the applier has no
+/// registry access). The `vmir::TrigTerm` grammar, flattened to what the e-graph
+/// speaks: an `App` matches a node of its head with the same arity, whose
+/// argument e-classes match `args` recursively.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum PreparedTerm {
     Bound(usize),
     Capture(usize),
     Lit(Literal),
     App {
-        func: FuncId,
-        type_args: Box<[Type]>,
+        head: TermHead,
         args: Vec<PreparedTerm>,
     },
 }
 
 impl PreparedTerm {
-    /// The function a term is rooted at — the searcher's anchor. Only an `App`
-    /// can be a top-level trigger term (typecheck-enforced).
-    fn root_func(&self) -> Option<FuncId> {
+    /// The head a term is rooted at, which is the searcher's anchor. Only an
+    /// `App` can be a top-level trigger term (typecheck-enforced).
+    fn root_head(&self) -> Option<&TermHead> {
         match self {
-            PreparedTerm::App { func, .. } => Some(*func),
+            PreparedTerm::App { head, .. } => Some(head),
             _ => None,
         }
     }
@@ -89,20 +139,16 @@ pub(super) fn match_term(
                 vec![]
             }
         }
-        PreparedTerm::App {
-            func,
-            type_args,
-            args,
-        } => {
+        PreparedTerm::App { head, args } => {
             let mut out = Vec::new();
             for node in &egraph[class].nodes {
-                let Symbolic::FuncApp(f, tys, children) = node else {
+                let Some((pats, tys, children)) = head.children_of(node) else {
                     continue;
                 };
-                if f != func || children.len() != args.len() {
+                if children.len() != args.len() {
                     continue;
                 }
-                let Some(sigma) = match_types(type_args, tys, &matched()) else {
+                let Some(sigma) = match_types(pats, tys, &matched()) else {
                     continue;
                 };
                 // Thread σ left to right across the arguments, branching on every
@@ -152,17 +198,17 @@ fn match_types(pats: &[Type], ground: &[Type], sigma: &Sigma) -> Option<Sigma> {
 }
 
 /// Every σ that matches `term` somewhere in the e-graph, extending `sigma`. Scans
-/// the classes holding an application of the term's root function.
+/// the classes holding an application of the term's root head.
 pub(super) fn match_term_anywhere(
     egraph: &EGraph<Symbolic, ConstFold>,
     term: &PreparedTerm,
     caps: &[Id],
     sigma: &Sigma,
 ) -> Vec<Sigma> {
-    let Some(root) = term.root_func() else {
+    let Some(root) = term.root_head() else {
         return vec![];
     };
-    let Some(classes) = egraph.classes_for_op(&Discriminant::FuncApp(root)) else {
+    let Some(classes) = egraph.classes_for_op(&root.discriminant()) else {
         return vec![];
     };
     // Between a union and the next rebuild the index still lists the class that
@@ -456,8 +502,10 @@ mod tests {
             g.union(apps[0], app);
         }
         let trigger = PreparedTerm::App {
-            func: f,
-            type_args: Box::new([]),
+            head: TermHead::Func {
+                func: f,
+                type_args: Box::new([]),
+            },
             args: vec![PreparedTerm::Bound(0)],
         };
         let empty = Sigma {
@@ -492,8 +540,10 @@ mod tests {
             n_tys: 0,
             own_tys: vec![],
             groups: vec![vec![PreparedTerm::App {
-                func: f,
-                type_args: Box::new([]),
+                head: TermHead::Func {
+                    func: f,
+                    type_args: Box::new([]),
+                },
                 args: vec![PreparedTerm::Bound(0)],
             }]],
             insts: vec![app(g_, vec![Val::Temp(0)]), app(f, vec![Val::Temp(1)])],

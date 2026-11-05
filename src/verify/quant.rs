@@ -28,7 +28,7 @@ use crate::verify::error::VerifyError;
 use crate::verify::func_registry::FuncRegistry;
 use crate::verify::lang::RecipeId;
 use crate::verify::rewrite::{AxiomInst, PreparedTerm};
-use crate::vmir::{self, InstKind, PureInst, Type, Val};
+use crate::vmir::{self, InstKind, PureInst, SeqOp, TrigHead, TrigTerm, Type, Val};
 
 /// A compiled `forall` body: the pure steps, the boolean result, the binder arity,
 /// and the trigger groups (alternatives — a match of any one instantiates).
@@ -189,6 +189,7 @@ fn intern(
     if let Some((id, _)) = table.by_forall.get(q) {
         return Ok(*id);
     }
+    check_triggers_fix_binder_types(q)?;
 
     let free = q.free_temps();
     let n_caps = free.len();
@@ -287,5 +288,117 @@ fn forall_generics(q: &vmir::Forall, deep: bool, out: &mut crate::dhash::HashSet
             PureInst::Forall(inner) if deep => forall_generics(inner, deep, out),
             _ => {}
         }
+    }
+}
+
+/// Refuse a quantifier with a trigger group that does not fix the type of every
+/// binder.
+///
+/// Matching is type-blind and relies on the head to say what its operands are: a
+/// function has one signature, and an ADT head or a sequence literal carries its
+/// type arguments. A `Symbolic::Seq` carries none, so `forall s: Seq[Int] :: {|s|}`
+/// would also match `|t|` for a `t: Seq[Bool]`. Instantiating there states the
+/// body about a value of the wrong type, which is unsound and can merge classes of
+/// different types. Nothing at match time can tell the two apart, because an
+/// e-class does not record its type.
+fn check_triggers_fix_binder_types(q: &vmir::Forall) -> Result<(), VerifyError> {
+    for group in q.triggers.iter() {
+        let mut types = BinderTypes {
+            binder_base: q.binder_base,
+            fixed: vec![false; q.bound.len()],
+            changed: true,
+        };
+        // A binder fixed in one place fixes its other occurrences, also across
+        // the terms of a multi-pattern, so run until nothing changes.
+        while types.changed {
+            types.changed = false;
+            for term in group.terms.iter() {
+                types.visit(term, false);
+            }
+        }
+        if types.fixed.contains(&false) {
+            return Err(VerifyError::Unimplemented(
+                "a sequence trigger that does not fix a binder's type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Which binders of one trigger group have a type the match itself determines.
+struct BinderTypes {
+    binder_base: usize,
+    fixed: Vec<bool>,
+    changed: bool,
+}
+
+impl BinderTypes {
+    /// Walk `term`, where `known` says whether its position determines its type.
+    /// Returns whether its type is determined.
+    fn visit(&mut self, term: &TrigTerm, known: bool) -> bool {
+        match term {
+            TrigTerm::Lit(_) => true,
+            // A capture matches one given e-class, of the type it was stated at.
+            TrigTerm::Var(k) if *k < self.binder_base => true,
+            TrigTerm::Var(k) => {
+                let fixed = &mut self.fixed[k - self.binder_base];
+                if known && !*fixed {
+                    *fixed = true;
+                    self.changed = true;
+                }
+                *fixed
+            }
+            TrigTerm::App {
+                head: TrigHead::Seq(op),
+                args,
+                ..
+            } => self.visit_seq(*op, args, known),
+            TrigTerm::App { args, .. } => {
+                for arg in args.iter() {
+                    self.visit(arg, true);
+                }
+                true
+            }
+        }
+    }
+
+    fn visit_seq(&mut self, op: SeqOp, args: &[TrigTerm], known: bool) -> bool {
+        match op {
+            // The result says nothing about the operand.
+            SeqOp::Len => {
+                self.visit(&args[0], false);
+                true
+            }
+            SeqOp::Range => {
+                self.visit(&args[0], true);
+                self.visit(&args[1], true);
+                true
+            }
+            // The sequence and the element determine each other.
+            SeqOp::Contains => {
+                self.visit_linked(&[&args[0], &args[1]], false);
+                true
+            }
+            // The result's type gives the sequence's and vice versa. The second
+            // operand is an `Int` whatever the sequence holds.
+            SeqOp::Index | SeqOp::Take | SeqOp::Drop => {
+                self.visit(&args[1], true);
+                self.visit(&args[0], known)
+            }
+            SeqOp::Concat => self.visit_linked(&[&args[0], &args[1]], known),
+            SeqOp::Update => {
+                self.visit(&args[1], true);
+                self.visit_linked(&[&args[0], &args[2]], known)
+            }
+        }
+    }
+
+    /// Visit terms whose types determine each other: one known type fixes all.
+    fn visit_linked(&mut self, terms: &[&TrigTerm], known: bool) -> bool {
+        let known = terms.iter().fold(known, |k, t| self.visit(t, false) || k);
+        for term in terms {
+            self.visit(term, known);
+        }
+        known
     }
 }
