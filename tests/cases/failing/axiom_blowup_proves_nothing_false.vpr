@@ -1,0 +1,14 @@
+// Twin of passing/axiom_blowup_keeps_unit_rules.vpr: the axiom seed hits the
+// node backstop, and what the unit derives from it must still be sound.
+domain D {
+  function h(x: Int): Int
+  axiom loop { forall x: Int :: { h(x) } h(x) == h(2 * x) + h(2 * x + 1) }
+  axiom seed { h(1) == 5 }
+}
+
+function f(): Int { 3 }
+
+method m_bad() {
+  assert f() == 3
+  assert h(2) + h(3) == 6
+}

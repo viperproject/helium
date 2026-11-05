@@ -135,6 +135,21 @@ pub(crate) struct VerifyContext<'a> {
     pub(crate) z3translator: Z3Translation,
 }
 
+/// The graph-side part of a [`VerifyContext`]: what [`VerifyContext::graph_state`]
+/// copies out and [`VerifyContext::install_graph_state`] copies back in.
+pub(crate) struct GraphState {
+    egraph: egg::EGraph<Symbolic, ConstFold>,
+    fresh_counter: u32,
+    fresh_types: HashMap<u32, Type>,
+    func_ret_types: HashMap<FuncId, Type>,
+}
+
+impl GraphState {
+    pub(crate) fn egraph(&self) -> &egg::EGraph<Symbolic, ConstFold> {
+        &self.egraph
+    }
+}
+
 /// Whether any declaration uses a `wildcard` permission. Scanned once per unit at
 /// [`VerifyContext::new`]; lets a wildcard-free program skip the wildcard rules
 /// entirely. A `wildcard` is either inline on a heap op or an arm of a permission
@@ -206,6 +221,28 @@ impl<'a> VerifyContext<'a> {
             block_dead: false,
             z3translator: Z3Translation::default(),
         }
+    }
+
+    /// Snapshot the graph-side state (the e-graph and the side tables keyed by
+    /// its nodes), for the axiom seed every later unit starts from.
+    pub(crate) fn graph_state(&self) -> GraphState {
+        GraphState {
+            egraph: self.egraph.clone(),
+            fresh_counter: self.fresh_counter,
+            fresh_types: self.fresh_types.clone(),
+            func_ret_types: self.func_ret_types.clone(),
+        }
+    }
+
+    /// Replace the graph-side state with a copy of `state` (see
+    /// [`Self::graph_state`]). Only on a context that has done nothing yet: the
+    /// rest of the per-unit state (memos, scratch, recipe) assumes it is empty.
+    pub(crate) fn install_graph_state(&mut self, state: &GraphState) {
+        self.egraph = state.egraph.clone();
+        self.fresh_counter = state.fresh_counter;
+        self.fresh_types = state.fresh_types.clone();
+        self.func_ret_types = state.func_ret_types.clone();
+        self.clean = None;
     }
 
     /// The fixpoint-cache tag for the current rule sets (their sizes — growth
@@ -353,11 +390,19 @@ impl<'a> VerifyContext<'a> {
         if self.is_clean(CleanLevel::Full) {
             return;
         }
+        self.saturate_uncached();
+    }
+
+    /// [`Self::saturate`] without the fixpoint-cache check. Returns whether the
+    /// run reached a fixpoint of the rules (or a contradiction) rather than
+    /// stopping at a backstop of [`run_rules`].
+    pub(crate) fn saturate_uncached(&mut self) -> bool {
         let t = std::time::Instant::now();
         let egraph = std::mem::take(&mut self.egraph);
         let (n0, c0) = (egraph.total_number_of_nodes(), egraph.number_of_classes());
         let it0 = stats::with_stats(|s| s.sat_iterations);
-        self.egraph = self.saturate_flat(egraph);
+        let (egraph, fixpoint) = self.saturate_flat(egraph);
+        self.egraph = egraph;
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
             eprintln!(
                 "[ground-sat] {n0}n/{c0}c -> {}n/{}c true={} ({} iters)",
@@ -374,15 +419,17 @@ impl<'a> VerifyContext<'a> {
         stats::bump(|s| s.graph_timing.0.ground += secs);
         stats::bump(|s| s.saturations += 1);
         self.clean = Some(self.clean_tag(CleanLevel::Full));
+        fixpoint
     }
 
     /// One full-rule-set run, shared by [`Self::saturate`], [`Self::run_probe`],
     /// and the block scratch. Memo scoping is ambient (see `rewrite::Memo`): live
-    /// runs write the persistent base, scratch scopes an overlay.
+    /// runs write the persistent base, scratch scopes an overlay. The flag says
+    /// whether the run reached a fixpoint or a contradiction (not a backstop).
     fn saturate_flat(
         &mut self,
         egraph: egg::EGraph<Symbolic, ConstFold>,
-    ) -> egg::EGraph<Symbolic, ConstFold> {
+    ) -> (egg::EGraph<Symbolic, ConstFold>, bool) {
         let (egraph, iterations) = run_rules(
             egraph,
             self.static_rules
@@ -392,7 +439,11 @@ impl<'a> VerifyContext<'a> {
             None,
         );
         stats::bump(|s| s.record_run(&iterations));
-        egraph
+        let fixpoint = graph_inconsistent(&egraph)
+            || iterations
+                .last()
+                .is_some_and(|it| matches!(it.stop_reason, Some(egg::StopReason::Saturated)));
+        (egraph, fixpoint)
     }
 
     /// Run only the terminating structural reductions in place. Used after
