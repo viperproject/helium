@@ -685,7 +685,7 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
-        PureInst::Seq(op, args) => {
+        PureInst::Seq { elem_ty, op, args } => {
             let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
             let recipe = if ctx.recipe.is_some() {
                 let args: Vec<Val> = args
@@ -693,13 +693,17 @@ fn eval_pure_inst(
                     .map(|v| state.require_recipe(v, OPERAND_RECIPE))
                     .collect::<Result<_, _>>()?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Seq { op: *op, args }))
+                Some(rb.emit(AxiomPure::Seq {
+                    elem_ty: elem_ty.clone(),
+                    op: *op,
+                    args,
+                }))
             } else {
                 None
             };
-            (ctx.add(Symbolic::Seq(*op, ids)), recipe)
+            (ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids)), recipe)
         }
-        PureInst::SeqLit { elem, elems } => {
+        PureInst::SeqLit { elem_ty, elems } => {
             let ids: Box<[egg::Id]> = elems.iter().map(|v| state.get_val(ctx, v)).collect();
             let recipe = if ctx.recipe.is_some() {
                 let args: Vec<Val> = elems
@@ -709,14 +713,14 @@ fn eval_pure_inst(
 
                 let rb = ctx.recipe.as_mut().unwrap();
                 Some(rb.emit(AxiomPure::SeqLit {
-                    elem_ty : elem.clone(),
+                    elem_ty : elem_ty.clone(),
                     elems : args
                 }))
             } else {
                 None
             };
 
-            (ctx.add(Symbolic::SeqLit(Box::new(elem.clone()), ids)), recipe)
+            (ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), ids)), recipe)
         }
     })
 }
@@ -2125,17 +2129,16 @@ pub(crate) fn prepare_trig_term(
                 } => func(alloc.proj(*adt, *variant, *field)),
                 vmir::TrigHead::AdtIs { adt, variant } => func(alloc.adt_is(*adt, *variant)),
                 vmir::TrigHead::Seq(op) => {
-                    assert!(
-                        type_args.is_empty(),
-                        "a `{op:?}` trigger head takes no type arguments: {type_args:?}"
-                    );
-                    TermHead::Seq(*op)
+                    let [elem_ty] = &type_args[..] else {
+                        panic!("a `{op:?}` trigger names its element type: {type_args:?}");
+                    };
+                    TermHead::Seq(elem_ty.clone(), *op)
                 }
                 vmir::TrigHead::SeqLit => {
-                    let [elem] = &type_args[..] else {
+                    let [elem_ty] = &type_args[..] else {
                         panic!("a sequence literal trigger names its element type: {type_args:?}");
                     };
-                    TermHead::SeqLit(elem.clone())
+                    TermHead::SeqLit(elem_ty.clone())
                 }
             };
             PreparedTerm::App {
@@ -2246,12 +2249,13 @@ pub(crate) fn prepare_body(
                 | PureInst::Forall(_) => {
                     return Err(VerifyError::Unimplemented("impure inst in axiom body"));
                 }
-                PureInst::Seq(op, args) => AxiomPure::Seq {
+                PureInst::Seq { elem_ty, op, args } => AxiomPure::Seq {
+                    elem_ty: elem_ty.clone(),
                     op: *op,
                     args: args.clone(),
                 },
-                PureInst::SeqLit { elem, elems } => AxiomPure::SeqLit {
-                    elem_ty: elem.clone(),
+                PureInst::SeqLit { elem_ty, elems } => AxiomPure::SeqLit {
+                    elem_ty: elem_ty.clone(),
                     elems: elems.clone(),
                 },
             }),
@@ -3045,11 +3049,11 @@ fn inst_obligations(
             vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
         }
 
-        InstKind::Pure(ty, PureInst::Seq(op, val)) if op.has_bound_check() => {
+        InstKind::Pure(_, PureInst::Seq { elem_ty, op, args: val }) if op.has_bound_check() => {
             // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
             let s = state.get_val(ctx, &val[0]);
             let i = state.get_val(ctx, &val[1]);
-            let len = ctx.add(Symbolic::Seq(SeqOp::Len, Box::new([s])));
+            let len = ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), SeqOp::Len, Box::new([s])));
             let lower = expr!(ctx, not({ i } <i 0));
             let upper = expr!(ctx, { i } <i { len });
             vec![

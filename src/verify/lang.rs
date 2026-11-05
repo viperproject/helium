@@ -65,7 +65,7 @@ pub enum Symbolic {
     /// not a child, and not in the discriminant.
     Forall(RecipeId, Box<[Type]>, Box<[Id]>),
 
-    Seq(SeqOp, Box<[Id]>),
+    Seq(Box<Type>, SeqOp, Box<[Id]>),
 
     SeqLit(Box<Type>, Box<[Id]>),
 }
@@ -107,7 +107,7 @@ impl Language for Symbolic {
             S::FuncApp(id, _, _) => D::FuncApp(*id),
             S::RealCast(_) => D::RealCast,
             S::Forall(..) => D::Forall,
-            S::Seq(s, ..) => D::Seq(*s),
+            S::Seq(_, op, _) => D::Seq(*op),
             S::SeqLit(..) => D::SeqLit
         }
     }
@@ -127,7 +127,7 @@ impl Language for Symbolic {
                 id1 == id2 && args1.len() == args2.len()
             }
             (Forall(r1, _, caps1), Forall(r2, _, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
-            (Seq(op1,  _), Seq(op2, _)) => op1 == op2,
+            (Seq(_, op1, _), Seq(_, op2, _)) => op1 == op2,
             (SeqLit(_, a), SeqLit(_, b)) => a.len() == b.len(),
             _ => false,
         }
@@ -144,7 +144,7 @@ impl Language for Symbolic {
             FuncApp(_, _, ids) => ids,
             // The recipe and types are payload; the captures are the children.
             Forall(_, _, caps) => caps,
-            Seq(_, ids) => ids,
+            Seq(_, _, ids) => ids,
             SeqLit(_, ids) => ids,
         }
     }
@@ -158,7 +158,7 @@ impl Language for Symbolic {
             RealCast(id) => std::slice::from_mut(id),
             FuncApp(_, _, ids) => ids,
             Forall(_, _, caps) => caps,
-            Seq(_, ids) => ids,
+            Seq(_, _, ids) => ids,
             SeqLit(_, ids) => ids,
         }
     }
@@ -195,7 +195,7 @@ impl Display for Symbolic {
                     write!(f, "forall#{}<{}>", r.0, args.join(", "))
                 }
             }
-            Symbolic::Seq(op, _) => write!(f, "{}", op.token()),
+            Symbolic::Seq(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
             Symbolic::SeqLit(ty, elems) => write!(f, "Seq<{ty}>/{}", elems.len()),
         }
     }
@@ -264,14 +264,8 @@ impl FromOp for Symbolic {
                     Err(FromOpError(format!("unknown leaf `{lit}`")))
                 }
             }
-            ("seq.len", 1) => Ok(Seq(SeqOp::Len, children.into())),
-            ("seq.at", 2) => Ok(Seq(SeqOp::Index, children.into())),
-            ("seq.upd", 3) => Ok(Seq(SeqOp::Update, children.into())),
-            ("seq.++", 2) => Ok(Seq(SeqOp::Concat, children.into())),
-            ("seq.take", 2) => Ok(Seq(SeqOp::Take, children.into())),
-            ("seq.drop", 2) => Ok(Seq(SeqOp::Drop, children.into())),
-            ("seq.range", 2) => Ok(Seq(SeqOp::Range, children.into())),
-            ("seq.in", 2) => Ok(Seq(SeqOp::Contains, children.into())),
+            // `Symbolic::Seq` is deliberately absent: an operator name alone has no
+            // element type, and a placeholder would build a wrong node.
             _ => Err(FromOpError(format!("unknown op `{op}`/{}", children.len()))),
         }
     }

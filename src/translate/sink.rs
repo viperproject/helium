@@ -456,7 +456,7 @@ impl Sink {
         let pc = self.guard();
         let heapless_obligation = match &inst {
             PureInst::Binary(op, _, _) => op.is_div_or_mod(),
-            PureInst::Seq(op, _) => op.has_bound_check(),
+            PureInst::Seq { op, .. } => op.has_bound_check(),
             _ => false,
         };
         let kind = InstKind::Pure(ty, inst);

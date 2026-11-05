@@ -139,7 +139,7 @@ pub enum SeqOp {
 }
 
 impl SeqOp {
-    /// How many operands `PureInst::Seq(self, _)` takes.
+    /// How many operands `PureInst::Seq` of this operation takes.
     pub fn arity(self) -> usize {
         match self {
             SeqOp::Len => 1,
@@ -153,6 +153,18 @@ impl SeqOp {
     /// must check it (the counterpart of `BinOp::is_div_or_mod`).
     pub fn has_bound_check(self) -> bool {
         matches!(self, SeqOp::Index | SeqOp::Update)
+    }
+
+    /// The result type, for a sequence of element type `elem_ty`.
+    pub fn result_type(self, elem_ty: &Type) -> Type {
+        match self {
+            SeqOp::Len => Type::Int,
+            SeqOp::Contains => Type::Bool,
+            SeqOp::Index => elem_ty.clone(),
+            SeqOp::Concat | SeqOp::Update | SeqOp::Take | SeqOp::Drop | SeqOp::Range => {
+                Type::Seq(Box::new(elem_ty.clone()))
+            }
+        }
     }
 
     pub fn token(self) -> &'static str {
@@ -228,11 +240,17 @@ pub enum PureInst {
         base: Val,
     },
 
-    /// `Seq(e1, .., en)`, or the empty sequence `Seq[elem]()` when `elems` is empty.
-    /// `elem` is the element type, which an empty literal has no other way to name.
-    SeqLit { elem: Type, elems: Vec<Val> },
+    /// `Seq(e1, .., en)`, or the empty sequence `Seq[elem_ty]()` when `elems` is empty.
+    /// `elem_ty` is the element type, which an empty literal has no other way to name.
+    SeqLit { elem_ty: Type, elems: Vec<Val> },
     /// A sequence operation. Build it with `PureInst::seq`, which checks the arity.
-    Seq(SeqOp, Vec<Val>),
+    /// `elem_ty` is the element type of the sequence it works on (`Int` for `Range`):
+    /// the result does not always say, as `|s|` shows.
+    Seq {
+        elem_ty: Type,
+        op: SeqOp,
+        args: Vec<Val>,
+    },
 
     /// An inline, nestable pure `forall` (see [`Forall`](crate::vmir::Forall)).
     /// Produces the quantified `Bool`. Its body shares *this* temp space —
@@ -266,12 +284,12 @@ impl PureInst {
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
             PureInst::SeqLit {  elems, .. } => {elems.iter().for_each(&mut *f);}
-            PureInst::Seq(_, v) => v.iter().for_each(&mut *f),
+            PureInst::Seq { args, .. } => args.iter().for_each(&mut *f),
         }
     }
-    pub fn seq(op: SeqOp, args: Vec<Val>) -> PureInst {
+    pub fn seq(elem_ty: Type, op: SeqOp, args: Vec<Val>) -> PureInst {
         assert_eq!(args.len(), op.arity(), "`{op:?}` takes {} operands, got {args:?}", op.arity());
-        PureInst::Seq(op, args)
+        PureInst::Seq { elem_ty, op, args }
     }
 }
 
@@ -361,8 +379,8 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 adt, variant, base, ..
             } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
             PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
-            PureInst::SeqLit { elem, elems } => {
-                write!(f, "Seq<{}>(", self.with(elem))?;
+            PureInst::SeqLit { elem_ty, elems } => {
+                write!(f, "Seq<{}>(", self.with(elem_ty))?;
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -371,7 +389,7 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 }
                 write!(f, ")")
             }
-            PureInst::Seq(op, args) => match (op, args.as_slice()) {
+            PureInst::Seq { op, args, .. } => match (op, args.as_slice()) {
                 (SeqOp::Len, [s]) => write!(f, "|{s}|"),
                 (SeqOp::Concat, [s, t]) => write!(f, "{s} ++ {t}"),
                 (SeqOp::Index, [s, i]) => write!(f, "{s}[{i}]"),

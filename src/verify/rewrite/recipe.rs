@@ -29,6 +29,7 @@ pub(crate) enum AxiomPure {
         args: Vec<Val>,
     },
     Seq {
+        elem_ty: Type,
         op: SeqOp,
         args: Vec<Val>
     },
@@ -93,6 +94,13 @@ pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
                 type_args: subst(type_args),
                 args: args.clone(),
             }),
+            AxiomInst::Val(AxiomPure::Seq { elem_ty, op, args }) => {
+                AxiomInst::Val(AxiomPure::Seq {
+                    elem_ty: elem_ty.subst_generics(tys),
+                    op: *op,
+                    args: args.clone(),
+                })
+            }
             AxiomInst::Val(AxiomPure::SeqLit { elem_ty, elems }) => {
                 AxiomInst::Val(AxiomPure::SeqLit {
                     elem_ty: elem_ty.subst_generics(tys),
@@ -355,9 +363,9 @@ pub(super) fn build_instance_vals_impl(
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
                     }
-                    AxiomPure::Seq { op, args } => {
+                    AxiomPure::Seq { elem_ty, op, args } => {
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                        egraph.add(Symbolic::Seq(*op, args))
+                        egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args))
                     }
                     AxiomPure::SeqLit { elem_ty, elems } => {
                         let args: Box<[Id]> = elems.iter().map(|v| get(egraph, &vals, v)).collect();

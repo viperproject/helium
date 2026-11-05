@@ -229,6 +229,7 @@ fn check_typed(body: &vmir::FunctionBody, fixed: &HashSet<usize>) -> bool {
             | vmir::PureInst::AdtIs { type_args, .. } => type_args
                 .iter()
                 .for_each(|t| t.collect_generics(&mut mentioned)),
+            vmir::PureInst::Seq { elem_ty, .. } => elem_ty.collect_generics(&mut mentioned),
             vmir::PureInst::Forall(q) => {
                 let mut own = HashSet::default();
                 q.bound.iter().for_each(|t| t.collect_generics(&mut own));

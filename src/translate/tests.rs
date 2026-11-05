@@ -1571,7 +1571,7 @@ domain D {
     use vmir::{SeqOp, TrigHead, TrigTerm};
     let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
         head,
-        type_args: Vec::new(),
+        type_args: vec![vmir::Type::Int],
         args: args.into(),
     };
 
