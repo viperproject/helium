@@ -1,0 +1,19 @@
+// `inner_join_in_arm.vpr` two branches deep: the inner join's axioms must carry
+// both outer reach literals. Silicon rejects.
+field f: Int
+
+method nested_inner_joins(a: Ref, b: Ref, e: Bool, g: Bool, d: Bool)
+  requires acc(a.f)
+{
+  if (e) {
+    if (g) {
+      inhale acc(b.f)
+      if (d) {
+        inhale a.f == 1
+      } else {
+        inhale a.f == 2
+      }
+    }
+  }
+  assert a != b
+}
