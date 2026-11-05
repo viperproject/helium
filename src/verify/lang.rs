@@ -60,7 +60,9 @@ pub enum Symbolic {
 
     Seq(Box<Type>, SeqOp, Box<[Id]>),
 
-    SeqLit(Box<Type>, Box<[Id]>),
+    /// The singleton sequence of one element, of this element type. A longer
+    /// literal is a concatenation of these (`PureInst::SeqLit`).
+    SeqLit(Box<Type>, Id),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -120,7 +122,7 @@ impl Language for Symbolic {
                 id1 == id2 && args1.len() == args2.len()
             }
             (Seq(_, op1, _), Seq(_, op2, _)) => op1 == op2,
-            (SeqLit(_, a), SeqLit(_, b)) => a.len() == b.len(),
+            (SeqLit(..), SeqLit(..)) => true,
             (Forall(r1, caps1), Forall(r2, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
             _ => false,
         }
@@ -138,7 +140,7 @@ impl Language for Symbolic {
             // The recipe is payload; the captures are the children.
             Forall(_, caps) => caps,
             Seq(_, _, ids) => ids,
-            SeqLit(_, ids) => ids,
+            SeqLit(_, id) => std::slice::from_ref(id),
         }
     }
 
@@ -152,7 +154,7 @@ impl Language for Symbolic {
             FuncApp(_, _, ids) => ids,
             Forall(_, caps) => caps,
             Seq(_, _, ids) => ids,
-            SeqLit(_, ids) => ids,
+            SeqLit(_, id) => std::slice::from_mut(id),
         }
     }
 }
@@ -182,7 +184,7 @@ impl Display for Symbolic {
             }
             Symbolic::Forall(r, _) => write!(f, "forall#{}", r.0),
             Symbolic::Seq(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
-            Symbolic::SeqLit(ty, elems) => write!(f, "Seq<{ty}>/{}", elems.len()),
+            Symbolic::SeqLit(ty, _) => write!(f, "Seq<{ty}>"),
         }
     }
 }

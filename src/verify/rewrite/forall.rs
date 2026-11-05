@@ -53,8 +53,8 @@ impl TermHead {
             {
                 Some(children)
             }
-            (TermHead::SeqLit(elem_ty), Symbolic::SeqLit(e, children)) if **e == *elem_ty => {
-                Some(children)
+            (TermHead::SeqLit(elem_ty), Symbolic::SeqLit(e, elem)) if **e == *elem_ty => {
+                Some(std::slice::from_ref(elem))
             }
             _ => None,
         }

@@ -697,24 +697,19 @@ fn eval_pure_inst(
             };
             (ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids)), recipe)
         }
-        PureInst::SeqLit { elem_ty, elems } => {
-            let ids: Box<[egg::Id]> = elems.iter().map(|v| state.get_val(ctx, v)).collect();
+        PureInst::SeqLit { elem_ty, elem } => {
+            let id = state.get_val(ctx, elem);
             let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = elems
-                    .iter()
-                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-
+                let elem = state.require_recipe(elem, OPERAND_RECIPE)?;
                 let rb = ctx.recipe.as_mut().unwrap();
                 Some(rb.emit(AxiomPure::SeqLit {
-                    elem_ty : elem_ty.clone(),
-                    elems : args
+                    elem_ty: elem_ty.clone(),
+                    elem,
                 }))
             } else {
                 None
             };
-
-            (ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), ids)), recipe)
+            (ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), id)), recipe)
         }
     })
 }
@@ -2275,9 +2270,9 @@ pub(crate) fn prepare_body(
                     op: *op,
                     args: args.clone(),
                 },
-                PureInst::SeqLit { elem_ty, elems } => AxiomPure::SeqLit {
+                PureInst::SeqLit { elem_ty, elem } => AxiomPure::SeqLit {
                     elem_ty: elem_ty.clone(),
-                    elems: elems.clone(),
+                    elem: elem.clone(),
                 },
             }),
             InstKind::Assume(v) => AxiomInst::Assume(v.clone()),

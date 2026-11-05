@@ -136,12 +136,15 @@ pub enum SeqOp {
     Contains,
     /// `[a..b)` : Seq<Int>
     Range,
+    /// `Seq[T]()` : Seq<T>. Takes no operands, so `elem_ty` is all that names `T`.
+    Empty,
 }
 
 impl SeqOp {
     /// How many operands `PureInst::Seq` of this operation takes.
     pub fn arity(self) -> usize {
         match self {
+            SeqOp::Empty => 0,
             SeqOp::Len => 1,
             SeqOp::Concat | SeqOp::Index | SeqOp::Take | SeqOp::Drop
             | SeqOp::Contains | SeqOp::Range => 2,
@@ -161,7 +164,7 @@ impl SeqOp {
             SeqOp::Len => Type::Int,
             SeqOp::Contains => Type::Bool,
             SeqOp::Index => elem_ty.clone(),
-            SeqOp::Concat | SeqOp::Update | SeqOp::Take | SeqOp::Drop | SeqOp::Range => {
+            SeqOp::Concat | SeqOp::Update | SeqOp::Take | SeqOp::Drop | SeqOp::Range | SeqOp::Empty => {
                 Type::Seq(Box::new(elem_ty.clone()))
             }
         }
@@ -177,6 +180,7 @@ impl SeqOp {
             SeqOp::Drop => "seq.drop",
             SeqOp::Range => "seq.range",
             SeqOp::Contains => "seq.in",
+            SeqOp::Empty => "seq.empty",
         }
     }
 }
@@ -240,9 +244,10 @@ pub enum PureInst {
         base: Val,
     },
 
-    /// `Seq(e1, .., en)`, or the empty sequence `Seq[elem_ty]()` when `elems` is empty.
-    /// `elem_ty` is the element type, which an empty literal has no other way to name.
-    SeqLit { elem_ty: Type, elems: Vec<Val> },
+    /// The singleton sequence `Seq(elem)`. A longer literal is a right-nested
+    /// concatenation of these, `Seq(a, b, c)` being `Seq(a) ++ (Seq(b) ++ Seq(c))`,
+    /// and an empty one is `SeqOp::Empty`.
+    SeqLit { elem_ty: Type, elem: Val },
     /// A sequence operation. Build it with `PureInst::seq`, which checks the arity.
     /// `elem_ty` is the element type of the sequence it works on (`Int` for `Range`):
     /// the result does not always say, as `|s|` shows.
@@ -278,12 +283,12 @@ impl PureInst {
             | PureInst::Deref(_, v)
             | PureInst::Perm(_, v)
             | PureInst::AdtProj { base: v, .. }
-            | PureInst::AdtIs { base: v, .. } => f(v),
+            | PureInst::AdtIs { base: v, .. }
+            | PureInst::SeqLit { elem: v, .. } => f(v),
             PureInst::FunctionCall(fc) => fc.args.iter().for_each(&mut *f),
             PureInst::OptionUnwrap(v) => f(v),
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
-            PureInst::SeqLit {  elems, .. } => {elems.iter().for_each(&mut *f);}
             PureInst::Seq { args, .. } => args.iter().for_each(&mut *f),
         }
     }
@@ -379,17 +384,11 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 adt, variant, base, ..
             } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
             PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
-            PureInst::SeqLit { elem_ty, elems } => {
-                write!(f, "Seq<{}>(", self.with(elem_ty))?;
-                for (i, e) in elems.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{e}")?;
-                }
-                write!(f, ")")
+            PureInst::SeqLit { elem_ty, elem } => {
+                write!(f, "Seq<{}>({elem})", self.with(elem_ty))
             }
-            PureInst::Seq { op, args, .. } => match (op, args.as_slice()) {
+            PureInst::Seq { elem_ty, op, args } => match (op, args.as_slice()) {
+                (SeqOp::Empty, []) => write!(f, "Seq<{}>()", self.with(elem_ty)),
                 (SeqOp::Len, [s]) => write!(f, "|{s}|"),
                 (SeqOp::Concat, [s, t]) => write!(f, "{s} ++ {t}"),
                 (SeqOp::Index, [s, i]) => write!(f, "{s}[{i}]"),

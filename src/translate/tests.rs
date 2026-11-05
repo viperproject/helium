@@ -1543,3 +1543,73 @@ domain D {
     assert_eq!(type_args, &[vmir::Type::Int], "the element type");
     assert_eq!(&args[..], &[TrigTerm::Var(0)]);
 }
+
+#[test]
+fn seq_literal_trigger_lowers_to_concatenated_singletons() {
+    let input = r#"
+domain D {
+    function f(s: Seq[Int]): Bool
+    axiom three { forall x: Int, y: Int, z: Int :: {Seq(x, y, z)} f(Seq(x, y, z)) }
+}
+"#;
+    let p = run(input);
+    use vmir::{SeqOp, TrigHead, TrigTerm};
+    let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
+        head,
+        type_args: vec![vmir::Type::Int],
+        args: args.into(),
+    };
+    let single = |k| app(TrigHead::SeqLit, vec![TrigTerm::Var(k)]);
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "three")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Concat));
+    let tail = app(TrigHead::Seq(SeqOp::Concat), vec![single(1), single(2)]);
+    assert_eq!(args, &[single(0), tail], "right-nested, in source order");
+}
+
+#[test]
+fn seq_literal_lowers_to_concatenated_singletons() {
+    use vmir::{InstKind, PureInst, SeqOp, Val};
+    let seq_steps = |input: &str| -> Vec<PureInst> {
+        let p = run(input);
+        let vmir::Declaration::Method(method) = &p.decls[p.id("m").expect("missing m")] else {
+            panic!("m must be a Method");
+        };
+        method
+            .iter_insts()
+            .filter_map(|inst| match &inst.kind {
+                InstKind::Pure(_, pi @ (PureInst::SeqLit { .. } | PureInst::Seq { .. })) => {
+                    Some(pi.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let steps = seq_steps("method m(a: Int, b: Int, c: Int) { var s: Seq[Int] := Seq(a, b, c) }");
+    let [
+        PureInst::SeqLit { elem: Val::Temp(a), .. },
+        PureInst::SeqLit { elem: Val::Temp(b), .. },
+        PureInst::SeqLit { elem: Val::Temp(c), .. },
+        PureInst::Seq { op: SeqOp::Concat, args: inner, .. },
+        PureInst::Seq { op: SeqOp::Concat, args: outer, .. },
+    ] = &steps[..]
+    else {
+        panic!("expected three singletons and two concatenations, got {steps:?}");
+    };
+    assert_eq!((*b, *c), (*a + 1, *a + 2), "singletons in source order");
+
+    // The five steps are emitted in a row, so their temps are consecutive.
+    let [Val::Temp(tail), _] = &inner[..] else {
+        panic!("expected a temp operand, got {inner:?}");
+    };
+    let first = *tail - 1;
+    assert_eq!(inner, &[Val::Temp(first + 1), Val::Temp(first + 2)]);
+    assert_eq!(outer, &[Val::Temp(first), Val::Temp(first + 3)], "right-nested");
+
+    let steps = seq_steps("method m() { var s: Seq[Int] := Seq[Int]() }");
+    let [PureInst::Seq { elem_ty: vmir::Type::Int, op: SeqOp::Empty, args }] = &steps[..] else {
+        panic!("expected one empty sequence, got {steps:?}");
+    };
+    assert!(args.is_empty());
+}
