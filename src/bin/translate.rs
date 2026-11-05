@@ -9,8 +9,8 @@
 
 use silver_oxide::translate;
 use silver_oxide::viper::{
-    GlobalsCollector, IdentCollector, disambiguate, inline_macros, typecheck_program, viper_parser,
-    walk::AstWalkable,
+    GlobalsCollector, IdentCollector, disambiguate, inline_macros, prelude, typecheck_program,
+    viper_parser, walk::AstWalkable,
 };
 use std::{error::Error, fs};
 
@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input = fs::read_to_string(file)?;
 
     let mut program = viper_parser::vpr_program(&input)?;
+    prelude::add_collections_to_if_appearing(&mut program);
 
     let mut ident_collector = IdentCollector::default();
     program.walk_mut(&mut ident_collector);

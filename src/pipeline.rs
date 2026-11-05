@@ -27,7 +27,7 @@ use crate::viper::{
     GlobalsCollector, IdentCollector, disambiguate_reporting, inline_macros,
     typecheck_program_reporting, units::Units, unsupported::scan_declaration, walk::AstWalkable,
 };
-use crate::{translate, verify, viper_parser, vmir};
+use crate::{translate, verify, viper, viper_parser, vmir};
 
 #[derive(Debug)]
 pub enum PipelineError {
@@ -187,6 +187,8 @@ pub fn run_file_timed(
     let analyzed = loop {
         let dropped = dropped_units(&units, &rejected);
         let mut program = filtered(&parsed, &units, &dropped);
+
+        viper::prelude::add_collections_to_if_appearing(&mut program);
 
         let interner = phase!("idents", {
             let mut ident_collector = IdentCollector::default();

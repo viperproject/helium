@@ -1,0 +1,198 @@
+// Sequence axioms adapted from Silicon's dafny_axioms/sequences.vpr, written over
+// Viper's built-in sequence syntax.
+//
+// Every binder and parameter starts with `$`. They share a scope with the user's
+// globals, and a binder may not shadow a global.
+
+domain $Seq[E] {
+    // Start basics
+
+    axiom Seq_length_nonneg {
+        forall $s: Seq[E] :: { |$s| } 0 <= |$s|
+    }
+    axiom Seq_empty_length {
+        |Seq[E]()| == 0
+    }
+    axiom Seq_length_zero {
+        forall $s: Seq[E] :: { |$s| } |$s| == 0 ==> $s == Seq[E]()
+    }
+    axiom Seq_singleton_length {
+        forall $e: E :: { Seq($e) } |Seq($e)| == 1
+    }
+    axiom Seq_append_length {
+        forall $s0: Seq[E], $s1: Seq[E] :: { |$s0 ++ $s1| }
+            $s0 != Seq[E]() && $s1 != Seq[E]() ==>
+                |$s0 ++ $s1| == |$s0| + |$s1|
+    }
+    axiom Seq_append_empty {
+        forall $s0: Seq[E], $s1: Seq[E] :: { $s0 ++ $s1 }
+            ($s0 == Seq[E]() ==> $s0 ++ $s1 == $s1) && ($s1 == Seq[E]() ==> $s0 ++ $s1 == $s0)
+    }
+    axiom Seq_singleton_index {
+        forall $e: E :: { Seq($e) } Seq($e)[0] == $e
+    }
+
+    // End basics
+    // Start index-append-update
+
+    function Seq_add($i0: Int, $i1: Int): Int
+    axiom Seq_add_def {
+        forall $i: Int, $j: Int :: { Seq_add($i, $j) } Seq_add($i, $j) == $i + $j
+    }
+    function Seq_sub($i0: Int, $i1: Int): Int
+    axiom Seq_sub_def {
+        forall $i: Int, $j: Int :: { Seq_sub($i, $j) } Seq_sub($i, $j) == $i - $j
+    }
+
+    axiom Seq_append_index1 {
+        forall $s0: Seq[E], $s1: Seq[E], $n: Int :: { ($s0 ++ $s1)[$n] } { $s0[$n], $s0 ++ $s1 }
+            $s0 != Seq[E]() && $s1 != Seq[E]() && 0 <= $n && $n < |$s0| ==> ($s0 ++ $s1)[$n] == $s0[$n]
+    }
+    axiom Seq_append_index2 {
+        forall $s0: Seq[E], $s1: Seq[E], $n: Int :: { ($s0 ++ $s1)[$n] }
+            $s0 != Seq[E]() && $s1 != Seq[E]() && |$s0| <= $n && $n < |$s0 ++ $s1| ==>
+                Seq_add(Seq_sub($n, |$s0|), |$s0|) == $n &&
+                ($s0 ++ $s1)[$n] == $s1[Seq_sub($n, |$s0|)]
+    }
+    axiom Seq_append_index3 {
+        forall $s0: Seq[E], $s1: Seq[E], $m: Int :: { $s1[$m], $s0 ++ $s1 }
+            $s0 != Seq[E]() && $s1 != Seq[E]() && $s0 != $s0 ++ $s1 && $s1 != $s0 ++ $s1 && 0 <= $m && $m < |$s1| ==>
+                Seq_sub(Seq_add($m, |$s0|), |$s0|) == $m &&
+                ($s0 ++ $s1)[Seq_add($m, |$s0|)] == $s1[$m]
+    }
+    axiom Seq_update_length {
+        forall $s: Seq[E], $i: Int, $v: E :: { |$s[$i := $v]| } { |$s|, $s[$i := $v] }
+            0 <= $i && $i < |$s| ==> |$s[$i := $v]| == |$s|
+    }
+    axiom Seq_update_index {
+        forall $s: Seq[E], $i: Int, $v: E, $n: Int :: { $s[$i := $v][$n] } { $s[$n], $s[$i := $v] }
+            0 <= $n && $n < |$s| ==>
+                ($i == $n ==> $s[$i := $v][$n] == $v) &&
+                ($i != $n ==> $s[$i := $v][$n] == $s[$n])
+    }
+
+    // End index-append-update
+    // Start take/drop
+
+    axiom Seq_take_length {
+        forall $s: Seq[E], $n: Int :: { |$s[..$n]| } { $s[..$n], |$s| }
+            (0 <= $n ==>
+                ($n <= |$s| ==> |$s[..$n]| == $n) &&
+                (|$s| < $n ==> |$s[..$n]| == |$s|)
+            ) &&
+            ($n < 0 ==> |$s[..$n]| == 0)
+    }
+    axiom Seq_take_index {
+        forall $s: Seq[E], $n: Int, $j: Int :: { $s[..$n][$j] } { $s[$j], $s[..$n] }
+            0 <= $j && $j < $n && $j < |$s| ==> $s[..$n][$j] == $s[$j]
+    }
+    axiom Seq_drop_length {
+        forall $s: Seq[E], $n: Int :: { |$s[$n..]| } { |$s|, $s[$n..] }
+            (0 <= $n ==>
+                ($n <= |$s| ==> |$s[$n..]| == |$s| - $n) &&
+                (|$s| < $n ==> |$s[$n..]| == 0))
+            &&
+            ($n < 0 ==> |$s[$n..]| == |$s|)
+    }
+    axiom Seq_drop_index1 {
+        forall $s: Seq[E], $n: Int, $j: Int :: { $s[$n..][$j] }
+            0 < $n && 0 <= $j && $j < |$s| - $n ==>
+                Seq_sub(Seq_add($j, $n), $n) == $j && $s[$n..][$j] == $s[Seq_add($j, $n)]
+    }
+    axiom Seq_drop_index2 {
+        forall $s: Seq[E], $n: Int, $i: Int :: { $s[$n..], $s[$i] }
+            0 < $n && $n <= $i && $i < |$s| ==>
+                Seq_add(Seq_sub($i, $n), $n) == $i && $s[$n..][Seq_sub($i, $n)] == $s[$i]
+    }
+    axiom Seq_append_take1 {
+        forall $s: Seq[E], $t: Seq[E], $n: Int :: { ($s ++ $t)[..$n] }
+            0 < $n && $n <= |$s| ==> ($s ++ $t)[..$n] == $s[..$n]
+    }
+    axiom Seq_append_take2 {
+        forall $s: Seq[E], $t: Seq[E], $n: Int :: { ($s ++ $t)[..$n] }
+            $n > 0 && $n > |$s| && $n < |$s ++ $t| ==>
+                Seq_add(Seq_sub($n, |$s|), |$s|) == $n &&
+                ($s ++ $t)[..$n] == $s ++ $t[..Seq_sub($n, |$s|)]
+    }
+    axiom Seq_append_drop1 {
+        forall $s: Seq[E], $t: Seq[E], $n: Int :: { ($s ++ $t)[$n..] }
+            0 < $n && $n <= |$s| ==> ($s ++ $t)[$n..] == $s[$n..] ++ $t
+    }
+    axiom Seq_append_drop2 {
+        forall $s: Seq[E], $t: Seq[E], $n: Int :: { ($s ++ $t)[$n..] }
+            $n > 0 && $n > |$s| && $n < |$s ++ $t| ==>
+                Seq_add(Seq_sub($n, |$s|), |$s|) == $n &&
+                ($s ++ $t)[$n..] == $t[Seq_sub($n, |$s|)..]
+    }
+    // The following (especially the third) cut matching loops the axioms above can
+    // otherwise introduce, as those create new append terms.
+    axiom Seq_take_zero {
+        forall $s: Seq[E], $n: Int :: { $s[..$n] } $n <= 0 ==> $s[..$n] == Seq[E]()
+    }
+    axiom Seq_drop_zero {
+        forall $s: Seq[E], $n: Int :: { $s[$n..] } $n <= 0 ==> $s[$n..] == $s
+    }
+    axiom Seq_take_all {
+        forall $s: Seq[E], $n: Int :: { $s[..$n] } $n >= |$s| ==> $s[..$n] == $s
+    }
+    axiom Seq_drop_all {
+        forall $s: Seq[E], $n: Int :: { $s[$n..] } $n >= |$s| ==> $s[$n..] == Seq[E]()
+    }
+
+    // End take/drop
+    // Start contains
+
+    function Seq_contains_trigger($s: Seq[E], $e: E): Bool
+    function Seq_skolem($s: Seq[E], $e: E): Int
+    axiom Seq_contains1 {
+        forall $s: Seq[E], $x: E :: { $x in $s }
+            $x in $s ==> 0 <= Seq_skolem($s, $x) && Seq_skolem($s, $x) < |$s| && $s[Seq_skolem($s, $x)] == $x
+    }
+    axiom Seq_contains2 {
+        forall $s: Seq[E], $x: E, $i: Int :: { $x in $s, $s[$i] }
+            0 <= $i && $i < |$s| && $s[$i] == $x ==> $x in $s
+    }
+    axiom Seq_contains_trigger_def {
+        forall $s: Seq[E], $i: Int :: { $s[$i] }
+            0 <= $i && $i < |$s| ==> Seq_contains_trigger($s, $s[$i])
+    }
+
+    // End contains
+    // Start equals
+
+    function Seq_equal($s0: Seq[E], $s1: Seq[E]): Bool
+    function Seq_skolem_diff($s0: Seq[E], $s1: Seq[E]): Int
+
+    axiom Seq_equal_def {
+        forall $s0: Seq[E], $s1: Seq[E] :: { Seq_equal($s0, $s1) }
+            ($s0 == $s1 && Seq_equal($s0, $s1)) ||
+            ($s0 != $s1 && !Seq_equal($s0, $s1) && |$s0| != |$s1|) ||
+            ($s0 != $s1 && !Seq_equal($s0, $s1) && |$s0| == |$s1| &&
+                Seq_skolem_diff($s0, $s1) == Seq_skolem_diff($s1, $s0) &&
+                0 <= Seq_skolem_diff($s0, $s1) && Seq_skolem_diff($s0, $s1) < |$s0| &&
+                $s0[Seq_skolem_diff($s0, $s1)] != $s1[Seq_skolem_diff($s0, $s1)])
+    }
+    axiom Seq_equal_ext {
+        forall $a: Seq[E], $b: Seq[E] :: { Seq_equal($a, $b) } Seq_equal($a, $b) ==> $a == $b
+    }
+
+    // End equals
+    // Start extras
+
+    axiom Seq_singleton_contains {
+        forall $x: E, $y: E :: { $y in Seq($x) } $y in Seq($x) <==> $x == $y
+    }
+    axiom Seq_range_length {
+        forall $min: Int, $max: Int :: { |[$min..$max)| }
+            ($min < $max ==> |[$min..$max)| == $max - $min) && ($max <= $min ==> |[$min..$max)| == 0)
+    }
+    axiom Seq_range_index {
+        forall $min: Int, $max: Int, $j: Int :: { [$min..$max)[$j] }
+            0 <= $j && $j < $max - $min ==> [$min..$max)[$j] == $min + $j
+    }
+    axiom Seq_range_contains {
+        forall $min: Int, $max: Int, $v: Int :: { $v in [$min..$max) }
+            $v in [$min..$max) <==> $min <= $v && $v < $max
+    }
+}
+
