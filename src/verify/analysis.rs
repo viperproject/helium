@@ -1,11 +1,25 @@
 use crate::dhash::HashMap;
 use std::sync::Arc;
 
-use egg::{Analysis, DidMerge, EGraph, Id, Justification};
+use egg::{Analysis, DidMerge, EGraph, Id, Justification, Language};
 use num::BigRational;
 
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::vmir::{BinOp, Literal, MemberId, Type};
+
+/// An e-class's analysis data: its folded value and its instantiation
+/// [`generation`](ClassData::generation).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassData {
+    pub value: Data,
+    /// How many quantifier instantiations deep the class's oldest term is (Z3's
+    /// instance generation): 0 for a term the program built, `g` for one built
+    /// by a generation-`g` instance. A node is created at the larger of its
+    /// children's generations and the generation of the instance being built
+    /// ([`ConstFold::building`]), and keeps it. A class holds the least of its
+    /// nodes', so only a union changes it, and only downwards.
+    pub generation: u32,
+}
 
 /// Const-fold analysis data: a three-state lattice over an e-class's folded
 /// value. **Type-free**: only the literal is tracked (types are reconstructed
@@ -99,6 +113,23 @@ impl Data {
     }
 }
 
+impl ClassData {
+    /// See [`Data::known`].
+    pub fn known(&self) -> Option<&Literal> {
+        self.value.known()
+    }
+
+    /// See [`Data::fingerprint`].
+    pub fn fingerprint(&self) -> Option<Fingerprint<'_>> {
+        self.value.fingerprint()
+    }
+
+    /// See [`Data::is_inconsistent`].
+    pub fn is_inconsistent(&self) -> bool {
+        self.value.is_inconsistent()
+    }
+}
+
 /// Whether two literals are of the same VMIR type (so a value conflict is an
 /// inconsistency rather than a type error).
 fn same_type(a: &Literal, b: &Literal) -> bool {
@@ -119,6 +150,10 @@ pub struct ConstFold {
     /// While a bucket rule is applied (`rewrite::PerClass`), the classes whose
     /// nodes read differently after each union; see [`Analysis::pre_union`].
     pub(crate) union_log: std::cell::RefCell<Option<Vec<Id>>>,
+    /// The generation of the quantifier instance whose body is being added, 0
+    /// outside one: the least generation a node added now is created at (see
+    /// [`ClassData::generation`]).
+    pub(crate) building: std::cell::Cell<u32>,
 }
 
 impl ConstFold {
@@ -126,6 +161,7 @@ impl ConstFold {
         Self {
             ctors,
             union_log: Default::default(),
+            building: Default::default(),
         }
     }
 
@@ -135,11 +171,10 @@ impl ConstFold {
     }
 }
 
-impl Analysis<Symbolic> for ConstFold {
-    type Data = Data;
-
-    fn make(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, _id: Id) -> Self::Data {
+impl ConstFold {
+    fn make_value(egraph: &EGraph<Symbolic, Self>, enode: &Symbolic) -> Data {
         use Data::{Ctor, Inconsistent, Known, Unknown};
+        let value = |c: &Id| &egraph[*c].data.value;
         match enode {
             Symbolic::Lit(lit) => Known(lit.clone()),
 
@@ -152,14 +187,14 @@ impl Analysis<Symbolic> for ConstFold {
             // payload or its capture children.
             Symbolic::Fresh(_) | Symbolic::FuncApp(..) | Symbolic::Forall(..) => Unknown,
 
-            Symbolic::RealCast(c) => match &egraph[*c].data {
+            Symbolic::RealCast(c) => match value(c) {
                 Known(Literal::Int(n)) => Known(Literal::Real(BigRational::from(n.clone()))),
                 Known(_) | Ctor(..) => unreachable!("RealCast operand must be an integer literal"),
                 Inconsistent => Inconsistent,
                 Unknown => Unknown,
             },
 
-            Symbolic::Binary(op, [l, r]) => match (&egraph[*l].data, &egraph[*r].data) {
+            Symbolic::Binary(op, [l, r]) => match (value(l), value(r)) {
                 (Inconsistent, _) | (_, Inconsistent) => Inconsistent,
                 // Disequality of constructors: distinct constructors of one ADT
                 // are distinct values, so an `==` between them folds to `false`
@@ -177,9 +212,9 @@ impl Analysis<Symbolic> for ConstFold {
                 _ => Unknown,
             },
 
-            Symbolic::Ite([c, t, e]) => match &egraph[*c].data {
-                Known(Literal::Bool(true)) => egraph[*t].data.clone(),
-                Known(Literal::Bool(false)) => egraph[*e].data.clone(),
+            Symbolic::Ite([c, t, e]) => match value(c) {
+                Known(Literal::Bool(true)) => value(t).clone(),
+                Known(Literal::Bool(false)) => value(e).clone(),
                 Known(_) | Ctor(..) => unreachable!("Condition of ITE must be a boolean literal"),
                 Inconsistent => Inconsistent,
                 Unknown => Unknown,
@@ -187,7 +222,7 @@ impl Analysis<Symbolic> for ConstFold {
         }
     }
 
-    fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
+    fn merge_value(&self, a: &mut Data, b: Data) -> DidMerge {
         use Data::{Ctor, Inconsistent, Known, Unknown};
         match (&*a, &b) {
             (Inconsistent, Inconsistent) => DidMerge(false, false),
@@ -245,6 +280,43 @@ impl Analysis<Symbolic> for ConstFold {
             (Unknown, Unknown) => DidMerge(false, false),
         }
     }
+}
+
+impl Analysis<Symbolic> for ConstFold {
+    type Data = ClassData;
+
+    fn make(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, _id: Id) -> Self::Data {
+        // A term is at least as deep as its subterms, whichever rule built it:
+        // otherwise a rule that builds new terms out of an instance's terms would
+        // hand the next instance generation-0 bindings again.
+        let generation = enode
+            .children()
+            .iter()
+            .map(|&c| egraph[c].data.generation)
+            .fold(egraph.analysis.building.get(), u32::max);
+        ClassData {
+            value: Self::make_value(egraph, enode),
+            generation,
+        }
+    }
+
+    /// A node keeps the generation it was created at: re-making it (a child's
+    /// value changed) must not lower it to its children's current ones, so it
+    /// reports its class's.
+    fn remake(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, id: Id) -> Self::Data {
+        ClassData {
+            value: Self::make_value(egraph, enode),
+            generation: egraph[id].data.generation,
+        }
+    }
+
+    /// The value merges as a lattice; the generation is the least of the two.
+    /// Only a value change is reported: a parent was created at its own
+    /// generation and does not depend on its children's later ones.
+    fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
+        a.generation = a.generation.min(b.generation);
+        self.merge_value(&mut a.value, b.value)
+    }
 
     /// When `union_log` is on, record the classes whose nodes will read
     /// differently after this union: the root that survives (it gains nodes),
@@ -268,16 +340,21 @@ impl Analysis<Symbolic> for ConstFold {
         };
         log.push(keep);
         log.extend(egraph[gone].parents());
-        let (kept, absorbed) = (&egraph[keep].data, &egraph[gone].data);
+        let (kept, absorbed) = (&egraph[keep].data.value, &egraph[gone].data.value);
         if kept != absorbed && *absorbed != Data::Unknown && *kept != Data::Inconsistent {
             log.extend(egraph[keep].parents());
         }
     }
 
     fn modify(egraph: &mut EGraph<Symbolic, Self>, id: Id) {
-        match egraph[id].data.clone() {
+        match egraph[id].data.value.clone() {
             Data::Known(lit) => {
+                // The literal a class folds to is derived from the class's terms,
+                // so a new one is as deep as they are.
+                let at = egraph[id].data.generation;
+                let outer = egraph.analysis.building.replace(at);
                 let lit_id = egraph.add(Symbolic::Lit(lit));
+                egraph.analysis.building.set(outer);
                 egraph.union(id, lit_id);
             }
             // One contradictory class makes the whole graph contradictory, so
@@ -385,4 +462,83 @@ fn euclid_mod(a: &num::BigInt, b: &num::BigInt) -> num::BigInt {
     use num::Signed as _;
     let r = a % b;
     if r.is_negative() { r + b.abs() } else { r }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use num::BigInt;
+
+    type Graph = EGraph<Symbolic, ConstFold>;
+
+    fn generation(g: &Graph, id: Id) -> u32 {
+        g[id].data.generation
+    }
+
+    /// Adds `node` as if a generation-`at` instance built it.
+    fn add_at(g: &mut Graph, at: u32, node: Symbolic) -> Id {
+        let outer = g.analysis.building.replace(at);
+        let id = g.add(node);
+        g.analysis.building.set(outer);
+        id
+    }
+
+    fn int(n: i64) -> Symbolic {
+        Symbolic::Lit(Literal::Int(BigInt::from(n)))
+    }
+
+    fn app(f: usize, arg: Id) -> Symbolic {
+        Symbolic::FuncApp(FuncId(f), Box::new([]), Box::new([arg]))
+    }
+
+    /// A node is created at least as deep as its children and as the instance
+    /// building it; a union keeps the shallower class's generation.
+    #[test]
+    fn generation_is_max_at_creation_and_min_at_union() {
+        let mut g = Graph::default();
+        let a = g.add(Symbolic::Fresh(0));
+        let fa = add_at(&mut g, 3, app(0, a));
+        assert_eq!(generation(&g, fa), 3);
+        // A rule outside any instance builds on the generation-3 term.
+        let gfa = g.add(app(1, fa));
+        assert_eq!(generation(&g, gfa), 3);
+        g.union(gfa, a);
+        g.rebuild();
+        assert_eq!(generation(&g, gfa), 0);
+    }
+
+    /// Re-making a parent after its child's value changed keeps the parent's
+    /// creation generation, even though the child is now shallower.
+    #[test]
+    fn remake_keeps_the_creation_generation() {
+        let mut g = Graph::default();
+        let x = add_at(&mut g, 2, Symbolic::Fresh(0));
+        let one = g.add(int(1));
+        let sum = add_at(&mut g, 2, Symbolic::Binary(BinOp::AddI, [x, one]));
+        let five = g.add(int(5));
+        g.union(x, five);
+        g.rebuild();
+        assert_eq!(generation(&g, x), 0);
+        assert_eq!(g[sum].data.known(), Some(&Literal::Int(BigInt::from(6))));
+        assert_eq!(generation(&g, sum), 2);
+    }
+
+    /// A literal a class folds to is new at the class's generation, so folding
+    /// does not hand the next instance a shallower binding than the terms it was
+    /// folded from.
+    #[test]
+    fn folded_literal_inherits_its_class_generation() {
+        let mut g = Graph::default();
+        let x = add_at(&mut g, 4, Symbolic::Fresh(0));
+        let one = g.add(int(1));
+        let sum = add_at(&mut g, 4, Symbolic::Binary(BinOp::AddI, [x, one]));
+        // `x := 5` comes from a generation-4 term; `x + 1` folds to a new `6`
+        // during the rebuild, outside any instance.
+        let five = add_at(&mut g, 4, int(5));
+        g.union(x, five);
+        g.rebuild();
+        let six = g.lookup(int(6)).expect("folded");
+        assert_eq!(g.find(six), g.find(sum));
+        assert_eq!(generation(&g, six), 4);
+    }
 }
