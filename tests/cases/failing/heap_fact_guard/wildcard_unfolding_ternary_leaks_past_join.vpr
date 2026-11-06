@@ -1,0 +1,18 @@
+// A wildcard `unfolding` under a ternary inside an arm: its remainder bound
+// (`0 < p`) holds only under the arm's cube *and* the ternary's condition. The
+// instruction's pc delta is the ternary's `d` alone, so the bound reached ground
+// as `d ==> p > none` and held on the `!c` path too. Silicon rejects.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method wildcard_unfolding_ternary_leaks_past_join(y: Ref, p: Perm, c: Bool, d: Bool)
+  requires p >= none && acc(P(y), p)
+{
+  var v: Int
+  if (c) {
+    inhale d ==> p > none
+    v := d ? (unfolding acc(P(y), wildcard) in y.f) : 0
+  }
+  assert d ==> p > none
+}

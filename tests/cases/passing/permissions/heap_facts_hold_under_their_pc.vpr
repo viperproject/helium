@@ -67,3 +67,46 @@ method fold_value_agreement_in_arm(x: Ref, y: Int, c: Bool)
     assert x.f == y
   }
 }
+
+// ... in an `elseif` arm.
+method fold_value_agreement_in_else_if_arm(x: Ref, y: Int, k: Int)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (k == 0) {
+  } elseif (k == 1) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}
+
+// ... and in a later block on the same path.
+method fold_value_agreement_after_join(x: Ref, y: Int, c: Bool)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (c) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+  }
+  if (c) {
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}
+
+// A wildcard `unfolding` under a ternary: its bound holds under the arm's cube
+// and the ternary's condition, in the arm and after the join.
+method wildcard_unfolding_ternary_in_arm(y: Ref, p: Perm, c: Bool, d: Bool)
+  requires p >= none && acc(P(y), p)
+{
+  var v: Int
+  if (c) {
+    inhale d ==> p > none
+    v := d ? (unfolding acc(P(y), wildcard) in y.f) : 0
+    assert d ==> p > none
+  }
+  assert c ==> (d ==> p > none)
+}
