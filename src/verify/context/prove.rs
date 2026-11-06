@@ -701,11 +701,22 @@ impl<'a> VerifyContext<'a> {
     pub(super) fn saturate_work(&mut self) {
         self.sync_work();
         let step = self.step;
-        if !self
+        if self
             .work
             .as_ref()
-            .is_some_and(|w| w.dirty && w.saturated_at != Some(step))
+            .is_some_and(|w| w.saturated_at == Some(step))
         {
+            return;
+        }
+        self.run_work();
+    }
+
+    /// Saturate the working graph if it changed since the last saturation, also a
+    /// second time in a walk step.
+    fn run_work(&mut self) {
+        self.sync_work();
+        let step = self.step;
+        if !self.work.as_ref().is_some_and(|w| w.dirty) {
             return;
         }
         let mut w = self.work.take().expect("working graph");
@@ -951,6 +962,26 @@ impl<'a> VerifyContext<'a> {
             let out = ids.iter().map(|&i| probe.find(i)).collect();
             (Some(out), probe)
         })
+    }
+
+    /// The working graph's classes of `ids`, with nothing assumed: what holds on
+    /// every path to where the walk is, as far as it has been derived. `fresh` runs
+    /// the rules first if the graph changed since its last run (also a second time
+    /// in a walk step); otherwise it is read as it stands. `None` until the rules
+    /// run there. The ids returned are working-graph ids, comparable only with each
+    /// other.
+    pub(crate) fn work_classes(&mut self, ids: &[egg::Id], fresh: bool) -> Option<Vec<egg::Id>> {
+        if !self.rules_on_work() {
+            return None;
+        }
+        self.ensure_work();
+        let tids: Vec<egg::Id> = ids.iter().map(|&i| self.tr(i)).collect();
+        if fresh {
+            self.run_work();
+        }
+        let w = self.work.as_mut().unwrap();
+        w.egraph.rebuild();
+        Some(tids.iter().map(|&i| w.egraph.find(i)).collect())
     }
 
     /// Whether the working graph finds the current block unreachable: its cube

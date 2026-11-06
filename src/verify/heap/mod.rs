@@ -651,22 +651,6 @@ impl Heap {
     pub fn kinds(&self) -> impl Iterator<Item = &LocationKind> {
         self.groups.keys()
     }
-
-    /// The chunk at `addr` within `kind`'s group, matched by **canonical**
-    /// e-class (`ctx.egraph.find`) so an address that only aliases the stored
-    /// key under the currently-assumed context still resolves. Used by the
-    /// Stage-4 join merge (a chunk held on both arms must line up by identity).
-    pub fn chunk_canon(
-        &self,
-        ctx: &VerifyContext<'_>,
-        kind: &LocationKind,
-        addr: egg::Id,
-    ) -> Option<&Chunk> {
-        let canon = ctx.egraph.find(addr);
-        self.chunks_of(kind)
-            .iter()
-            .find(|c| ctx.egraph.find(c.addr) == canon)
-    }
 }
 
 #[cfg(test)]

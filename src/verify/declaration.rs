@@ -1513,7 +1513,7 @@ fn walk_footprint(
             SlotPerm::Presence(pp) => {
                 let pp = pp.to_id(ctx);
                 let guard = expr!(ctx, (0 / 1) < r { pp });
-                let (_, existing) =
+                let (_, existing, _) =
                     find_chunk_consolidated(ctx, &heap, &slot.kind, addr, pc_lits, true);
                 let suff = match existing {
                     Some(c) => {

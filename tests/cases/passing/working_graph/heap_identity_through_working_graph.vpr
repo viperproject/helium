@@ -1,0 +1,63 @@
+// Once the rules run on the working graph ground no longer derives the
+// equalities the heap matches addresses by (an axiom instance, an inhaled
+// `x == y`). The working graph's classes, with nothing of the instruction's pc
+// assumed, hold on every path to the block: a chunk they match is the
+// location's chunk, stored chunks they equate are folded into one, and the arms
+// of a join line up by them.
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  function whole(p: Perm): Perm
+  axiom same_is_identity { forall r: Ref :: { same(r) } same(r) == r }
+  axiom whole_is_identity { forall p: Perm :: { whole(p) } whole(p) == p }
+}
+
+method callee_full(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f)
+
+// The inhaled chunk is folded into the held one, so the location holds 1/1.
+method inhale_onto_held(x: Ref, y: Ref, w: Ref, z: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && acc(w.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  inhale acc(same(w).f, whole(1/2))
+  assert perm(same(w).f) >= 1/4
+}
+
+// `x` and `w` are equated after the method has its working graph; the next
+// consolidation at that location folds their chunks, and their values agree.
+method equated_chunks_agree(x: Ref, w: Ref, z: Int)
+  requires acc(x.f, 1/2) && acc(w.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  inhale w == x
+  inhale acc(same(x).f, whole(1/2))
+  assert x.f == w.f
+}
+
+// The call gives the permission back at `same(w)` on one arm; the join lines it
+// up with `w.f` on the other.
+method join_axiom_alias(w: Ref, c: Bool, z: Int)
+  requires acc(w.f)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    callee_full(same(w))
+  }
+  inhale same(w).f == 2
+}
+
+// The same with an explicit empty else arm.
+method join_axiom_alias_else(w: Ref, c: Bool, z: Int)
+  requires acc(w.f, 1/1)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    callee_full(same(w))
+  } else {
+  }
+  inhale same(w).f == 2
+}

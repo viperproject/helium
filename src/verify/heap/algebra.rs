@@ -584,7 +584,9 @@ pub(crate) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
 /// snapshot address spine may only meet the held chunk's class after the
 /// terminating reductions collapse the snapshot towers.
 ///
-/// Returns the (possibly consolidated) heap and the chunk found at `addr`.
+/// Returns the (possibly consolidated) heap, the chunk found at `addr`, and
+/// whether the match came from the working graph (the facts recorded because of
+/// it are then gated by [`alias_pc`]).
 ///
 /// `retry_on_miss` gates the normalize-and-retry: a subtract miss is an error
 /// about to be reported (rare — always worth one `reduce`), while a union miss
@@ -597,7 +599,7 @@ pub(crate) fn find_chunk_consolidated(
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
     retry_on_miss: bool,
-) -> (Heap, Option<Chunk>) {
+) -> (Heap, Option<Chunk>, bool) {
     // Address matching is ground e-class equality. Chunk canons are snapshotted up
     // front because the retry below mutates the graph, and canons from before and
     // after a `reduce` are not comparable.
@@ -623,11 +625,60 @@ pub(crate) fn find_chunk_consolidated(
             chunks_vec.iter().map(|c| ctx.egraph.find(c.addr)).collect();
         found = collect_found(canon, &chunk_canons);
     }
+    // Once the rules run on the working graph, ground no longer derives the
+    // equalities a saturated ground matched by (an axiom instance, an inhaled
+    // `x == y`). The working graph does, with nothing of the instruction's pc
+    // assumed: a match there holds on every path to the block, as a ground one
+    // does, but the facts recorded because of it hold only there (`alias_pc`).
+    // Read as the graph stands (a subtract miss has had its saturate-and-retry).
+    //
+    // The working graph has the block's cube assumed, so the chunks it equates may
+    // coincide only on this path; folding them would leave the heap's shape
+    // path-dependent, and the arms of the next join would no longer line up (the
+    // other arm still holds them apart). So nothing is folded: a single match is
+    // the location's chunk, several go to the pc-alias sum, and stored chunks it
+    // equates with each other agree on their value where they coincide.
+    if found.is_empty()
+        && !chunks_vec.is_empty()
+        && let Some(canons) = ctx.work_classes(
+            &std::iter::once(addr)
+                .chain(chunks_vec.iter().map(|c| c.addr))
+                .collect::<Vec<_>>(),
+            false,
+        )
+    {
+        let pc = alias_pc(ctx, pc_lits);
+        let keys = &canons[1..];
+        for i in 0..chunks_vec.len() {
+            for j in i + 1..chunks_vec.len() {
+                if keys[i] != keys[j]
+                    || ctx.egraph.find(chunks_vec[i].addr) == ctx.egraph.find(chunks_vec[j].addr)
+                {
+                    continue;
+                }
+                let (ci, cj) = (&chunks_vec[i], &chunks_vec[j]);
+                let pi = ci.gated_perm(ctx).to_id(ctx);
+                let pj = cj.gated_perm(ctx).to_id(ctx);
+                let pj_pos = expr!(ctx, (0 / 1) < r { pj });
+                let mut guards = pc.clone();
+                guards.push((pj_pos, Polarity::Positive));
+                assume_values_agree(ctx, pi, ci.value, cj.value, &guards);
+            }
+        }
+        let mut hits = chunks_vec
+            .iter()
+            .zip(keys)
+            .filter(|(_, k)| **k == canons[0]);
+        return match (hits.next(), hits.next()) {
+            (Some((c, _)), None) => (h.clone(), Some(c.clone()), true),
+            _ => (h.clone(), None, false),
+        };
+    }
     let Some(first) = found.first().cloned() else {
-        return (h.clone(), None);
+        return (h.clone(), None, false);
     };
     if found.len() == 1 {
-        return (h.clone(), Some(first));
+        return (h.clone(), Some(first), false);
     }
     // Several stored chunks collapsed into one address class: fold them into
     // one chunk (sound — they genuinely alias, so their fractions add and the
@@ -641,7 +692,7 @@ pub(crate) fn find_chunk_consolidated(
         acc = merge_chunks(ctx, acc.addr, &acc, next, pc_lits);
     }
     out = out.with_chunk(kind, acc.clone());
-    (out, Some(acc))
+    (out, Some(acc), false)
 }
 
 /// Heap addition for a single location chunk of kind `kind`.
@@ -652,12 +703,17 @@ pub(crate) fn heap_union(
     chunk2: Chunk,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Heap {
-    let (mut out, existing) = find_chunk_consolidated(ctx, h1, kind, chunk2.addr, pc_lits, false);
+    let (mut out, existing, by_work) =
+        find_chunk_consolidated(ctx, h1, kind, chunk2.addr, pc_lits, false);
     if let Some(existing) = existing {
+        let pc = match by_work {
+            true => alias_pc(ctx, pc_lits),
+            false => pc_lits.to_vec(),
+        };
         // Replace the existing chunk in place (keep its stored address key).
         // `merge_chunks` reconciles the two presence guards — the held chunk may
         // be conditional (a one-sided join arm) while an inhaled `chunk2` is not.
-        let merged = merge_chunks(ctx, existing.addr, &existing, &chunk2, pc_lits);
+        let merged = merge_chunks(ctx, existing.addr, &existing, &chunk2, &pc);
         out = out.with_chunk(kind, merged);
     } else {
         out = out.with_chunk(kind, chunk2);
@@ -1130,7 +1186,8 @@ pub(crate) fn heap_subtract_inner(
     demand: Demand,
     pass: ConsumePass,
 ) -> Result<Heap, VerifyError> {
-    let (out, existing) = find_chunk_consolidated(ctx, h1, kind, chunk2.addr, pc_lits, true);
+    let (out, existing, by_work) =
+        find_chunk_consolidated(ctx, h1, kind, chunk2.addr, pc_lits, true);
     let (existing, kept) = normalize_guard_for_consume(ctx, existing, pc_lits);
     let chunk2_perm = chunk2.ungated_perm().to_id(ctx);
     let Some(existing) = existing else {
@@ -1211,36 +1268,6 @@ pub(crate) fn heap_subtract_inner(
                 },
             );
         }
-        // A wildcard demand whose only match the working graph finds without assuming
-        // anything of the instruction's pc (once rules run there, the equalities
-        // ground's rules would have derived): take the share from that chunk, as a
-        // ground match does. The summarized consume below proves a fixed amount, which
-        // a wildcard is not. Sound for the block's heap: the working graph's facts hold
-        // on every path to the block, the remainder fact is guarded by the block's
-        // cube and the pc (`alias_pc`), and the demanded value is fresh. A match that
-        // needs the pc stays with the guarded consume below.
-        if demand == Demand::Wildcard && ctx.rules_on_work() {
-            let chunks = h1.chunks_of(kind);
-            let ids: Vec<egg::Id> = std::iter::once(chunk2.addr)
-                .chain(chunks.iter().map(|c| c.addr))
-                .collect();
-            let ground = ctx.egraph.find(chunk2.addr);
-            let partners: Vec<&Chunk> = match ctx.classes_under_pc(&[], &ids) {
-                Some(canons) => chunks
-                    .iter()
-                    .zip(&canons[1..])
-                    .filter(|(c, canon)| **canon == canons[0] && ctx.egraph.find(c.addr) != ground)
-                    .map(|(c, _)| c)
-                    .collect(),
-                None => Vec::new(),
-            };
-            if let [c] = partners[..]
-                && let (Some(c), kept) = normalize_guard_for_consume(ctx, Some(c.clone()), pc_lits)
-            {
-                let pc = alias_pc(ctx, pc_lits);
-                return debit_wildcard(ctx, out, kind, &c, &chunk2, &pc, kept);
-            }
-        }
         // Nothing on ground: the demanded address may still match a held chunk under
         // the pc (a `&mut` reborrow inside a branch arm, whose address equality is a
         // pc-guarded fact ground e-class matching cannot see), or under an equality
@@ -1258,7 +1285,12 @@ pub(crate) fn heap_subtract_inner(
     };
 
     if demand == Demand::Wildcard {
-        return debit_wildcard(ctx, out, kind, &existing, &chunk2, pc_lits, kept);
+        // The remainder bound holds where the match does.
+        let pc = match by_work {
+            true => alias_pc(ctx, pc_lits),
+            false => pc_lits.to_vec(),
+        };
+        return debit_wildcard(ctx, out, kind, &existing, &chunk2, &pc, kept);
     }
 
     // Sufficiency `held ≥ needed`, proven per-leaf over the (possibly
@@ -1281,6 +1313,23 @@ pub(crate) fn heap_subtract_inner(
         // below the depth bound, in give-back residue, and a bound wide enough to
         // reach it took `shape_area` from 1s to over ten minutes. The two members
         // that need it are recorded in `expected_failures.txt`.
+        //
+        // A chunk matched only through the working graph is not a ground match: it
+        // joins the alias set as a partner, and a failed sum goes on to the group
+        // summary as after a ground miss.
+        if by_work {
+            let base = out.clone();
+            return heap_subtract_summarized_fallbacks(
+                ctx,
+                &base,
+                out,
+                kind,
+                None,
+                chunk2,
+                chunk2_perm,
+                pc_lits,
+            );
+        }
         let r = heap_subtract_summarized_fallbacks(
             ctx,
             h1,
@@ -1644,11 +1693,15 @@ pub(crate) fn pc_alias_set(
 ) -> (Vec<(Chunk, crate::verify::heap::HeapPc)>, ChunkPerm) {
     // A partner is the address a chunk is stored under, so it names that chunk
     // alone. Two chunks ground has equated but not consolidated share a class, and
-    // resolving by class would count the first of them twice.
+    // resolving by class would count the first of them twice. A chunk matched
+    // through the working graph is `existing` and can be a partner as well.
     let members: Vec<Chunk> = existing
         .cloned()
         .into_iter()
         .chain(partners.iter().filter_map(|a| {
+            if existing.is_some_and(|e| e.addr == *a) {
+                return None;
+            }
             h1.chunks_of(kind).iter().find(|c| c.addr == *a).cloned()
         }))
         .collect();
@@ -1825,16 +1878,43 @@ pub(crate) fn merge_heaps(
         }
     }
     for kind in &kinds {
+        let (then_c, els_c) = (h_then.chunks_of(kind), h_els.chunks_of(kind));
+        let ids: Vec<egg::Id> = then_c.iter().chain(els_c).map(|c| c.addr).collect();
+        // Chunks line up by address class: ground's, or once the rules run on the
+        // working graph its classes with nothing assumed, which hold on every path
+        // to the join (see `find_chunk_consolidated`). No fact is recorded here.
+        // The join's own facts (the arms', handed over at the close) are run only
+        // when a chunk of each arm is left without a partner, the one case a new
+        // equality can pair.
+        let mut keys = ctx
+            .work_classes(&ids, false)
+            .unwrap_or_else(|| ids.iter().map(|&a| ctx.egraph.find(a)).collect());
+        let n = then_c.len();
+        let unpaired =
+            |side: &[egg::Id], other: &[egg::Id]| side.iter().any(|k| !other.contains(k));
+        if unpaired(&keys[..n], &keys[n..])
+            && unpaired(&keys[n..], &keys[..n])
+            && let Some(fresh) = ctx.work_classes(&ids, true)
+        {
+            keys = fresh;
+        }
+        let (then_k, els_k) = keys.split_at(n);
         let mut addrs: Vec<egg::Id> = Vec::new();
-        for c in h_then.chunks_of(kind).iter().chain(h_els.chunks_of(kind)) {
-            let canon = ctx.egraph.find(c.addr);
-            if !addrs.iter().any(|a| ctx.egraph.find(*a) == canon) {
-                addrs.push(canon);
+        for k in &keys {
+            if !addrs.contains(k) {
+                addrs.push(*k);
             }
         }
+        let at = |chunks: &[Chunk], ks: &[egg::Id], k: egg::Id| {
+            chunks
+                .iter()
+                .zip(ks)
+                .find(|(_, ck)| **ck == k)
+                .map(|(c, _)| c.clone())
+        };
         for addr in addrs {
-            let ct = h_then.chunk_canon(ctx, kind, addr).cloned();
-            let ce = h_els.chunk_canon(ctx, kind, addr).cloned();
+            let ct = at(then_c, then_k, addr);
+            let ce = at(els_c, els_k, addr);
             let chunk = match (ct, ce) {
                 (Some(a), Some(b)) => {
                     let value = if ctx.egraph.find(a.value) == ctx.egraph.find(b.value) {
