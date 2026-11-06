@@ -1,0 +1,19 @@
+// Location identity (`tests/cases/passing/predicates/location_identity.vpr`)
+// separates instances only by a *provably* distinct argument: here `x == y`
+// and `k == j` are possible, and then the two instances are one, holding two.
+predicate P(x: Ref, k: Int)
+
+method may_alias(x: Ref, y: Ref, k: Int, j: Int)
+  requires acc(P(x, k)) && acc(P(y, j))
+{
+  assert perm(P(x, k)) == write
+}
+
+field f: Int
+
+// Without `x != y` the two field locations may be one.
+method fields_may_alias(x: Ref, y: Ref)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  assert perm(x.f) == 1/2
+}

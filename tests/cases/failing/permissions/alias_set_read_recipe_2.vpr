@@ -1,0 +1,26 @@
+// A function body reads `x.f` where the context places two chunks at it, `y0.f` (held
+// when `c`) and `y1.f` (held when `!c`). The read's value is chosen by which member
+// holds a share; its recipe -- what the function's definitional axiom states -- must
+// denote that same value. Taking the first member's slot as the recipe made the axiom
+// read the `c` slot when `c` is false, so a caller derived a contradiction from two
+// calls (Silicon rejects `assert false`). A read whose value no single slot denotes is
+// unsupported in a function body.
+
+field f: Int
+
+function h(x: Ref, y0: Ref, y1: Ref, c: Bool): Int
+  requires (c ==> acc(y0.f)) && (!c ==> acc(y1.f))
+  ensures (x == y0 && x == y1 && !c) ==> result == y1.f
+{ (x == y0 && x == y1) ? x.f : 0 }
+
+method m2(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y1.f)
+{
+  if (x == y0 && x == y1) {
+    y1.f := 5
+    var a: Int := h(x, y0, y1, false)
+    y1.f := 6
+    var b: Int := h(x, y0, y1, false)
+    assert false
+  }
+}

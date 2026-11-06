@@ -1,0 +1,14 @@
+// The consume only happens where `x == y0 && x == y1`; elsewhere the two values
+// are unrelated. Value agreement drawn from the alias set must carry that
+// condition, also in the block scratch, which assumes facts without their guard.
+
+field f: Int
+
+method m(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  var a: Int := y0.f
+  var c: Int := y1.f
+  exhale (x == y0 && x == y1) ==> acc(x.f, 1/4)
+  assert a == c
+}

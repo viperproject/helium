@@ -1,0 +1,15 @@
+// Inside the branch the two chunks are one location holding `1/1`; half of it is
+// given up there. After the join that path holds `1/2` in total, so the second of
+// the two exhales below must fail on it.
+
+field f: Int
+
+method m(x: Ref, y0: Ref, y1: Ref)
+  requires acc(y0.f, 1/2) && acc(y1.f, 1/2)
+{
+  if (x == y0 && x == y1) {
+    exhale acc(x.f, 1/2)
+  }
+  exhale acc(y0.f, 1/2)
+  exhale acc(y1.f, 1/2)
+}
