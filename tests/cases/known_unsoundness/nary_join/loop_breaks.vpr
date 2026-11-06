@@ -1,0 +1,22 @@
+// REGRESSION (soundness). Two breaks and the normal exit join at `out`, in the
+// order exit, first break, second break. Only the second break inhales. The
+// inner merge level reaches the two breaks only, where its edge value is `a`,
+// so its heap's `x != y` held under `!a` alone, also on the normal exit, where
+// nothing was inhaled and `x == y` is consistent.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool, n: Int)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant true
+  {
+    if (a) { goto out }
+    if (b) { inhale acc(x.f) && acc(y.f); goto out }
+    i := i + 1
+  }
+  label out
+  assert (!a && b) ==> x != y
+}

@@ -1,0 +1,15 @@
+// REGRESSION (soundness). Four edges into `L`, the inhale on the third. Both
+// inner merge levels reach less than the join, and each simplified its edge
+// value against its own reach.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool)
+{
+  if (a) { goto L }
+  if (b) { goto L }
+  if (c) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  assert c ==> x != y
+}

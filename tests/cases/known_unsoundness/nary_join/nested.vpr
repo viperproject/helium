@@ -1,0 +1,18 @@
+// REGRESSION (soundness). A three-way join `L` inside an arm of the three-way
+// join `M`. The inhaled heap's `x != y` must not hold on `d && a && b`.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool, d: Bool)
+{
+  if (c) { goto M }
+  if (d) {
+    if (a) { goto L }
+    if (b) { inhale acc(x.f) && acc(y.f); goto L }
+    label L
+    goto M
+  }
+  label M
+  assert (!c && d && b) ==> x != y
+}

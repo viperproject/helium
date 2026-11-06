@@ -1,0 +1,19 @@
+// REGRESSION (soundness). A three-way join inside a loop body; the inhaled
+// heap's `x != y` must not hold on `a && b`.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool, n: Int)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant true
+  {
+    if (a) { goto L }
+    if (b) { inhale acc(x.f) && acc(y.f); goto L }
+    label L
+    assert b ==> x != y
+    i := i + 1
+  }
+}
