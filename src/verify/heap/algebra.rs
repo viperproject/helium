@@ -1693,7 +1693,23 @@ pub(crate) fn heap_subtract_summarized(
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
         // fractions fold it away.
         let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
-        let gated = gate_amount_by_pc(ctx, take, &cube);
+        // The gate leaves out the literals of the block's cube: this heap is the
+        // block's own and reaches any other path only through the block's exits,
+        // so they hold wherever the amount is read. Gating by them too left a
+        // drained member at `hold - (cube ? hold : 0)`, zero wherever the heap
+        // exists but not unconditionally, so it was never dropped.
+        let gate: Vec<(egg::Id, Polarity)> = cube
+            .iter()
+            .filter(|lit| {
+                !crate::verify::heap::cube_entails(
+                    ctx,
+                    ctx.current_cube(),
+                    std::slice::from_ref(*lit),
+                )
+            })
+            .copied()
+            .collect();
+        let gated = gate_amount_by_pc(ctx, take, &gate);
         let rest = perm_sub(ctx, chunk.ungated_perm(), gated);
         // Debit `remaining` by what was actually taken — the **gated** amount, not
         // `take`. With one shared cube (the pc-alias caller) the two coincide on-path

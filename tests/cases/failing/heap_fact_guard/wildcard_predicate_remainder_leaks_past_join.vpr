@@ -1,0 +1,16 @@
+// The wildcard remainder bound of `wildcard_remainder_leaks_past_join.vpr`, for a
+// predicate instance instead of a field: `exhale acc(P(y), wildcard)` on one arm
+// must not prove `p > none` after the join. Silicon rejects.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method wildcard_predicate_remainder_leaks_past_join(y: Ref, p: Perm, c: Bool)
+  requires p >= none && acc(P(y), p)
+{
+  if (c) {
+    inhale p > none
+    exhale acc(P(y), wildcard)
+  }
+  assert p > none
+}
