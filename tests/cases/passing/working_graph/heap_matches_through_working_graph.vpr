@@ -74,3 +74,14 @@ method given_back_on_both_arms(x: Ref, y: Ref, w: Ref, c: Bool, z: Int)
   }
   exhale acc(same(x).f)
 }
+
+// Two chunks ground has equated but not consolidated, both matched through the
+// working graph: each is counted once, so the two halves are all there is.
+method unconsolidated_pair(x: Ref, y: Ref, z: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  inhale x == y
+  assert z == 3 ==> g(z) == g(3)
+  exhale acc(same(x).f, 1/2)
+  exhale acc(same(x).f, 1/2)
+}

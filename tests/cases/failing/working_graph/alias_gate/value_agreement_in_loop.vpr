@@ -1,0 +1,22 @@
+// As `value_agreement_in_arm`, with the arm inside a loop body: the agreement
+// recorded on the arm must not reach the loop's exit.
+//
+// Must FAIL (the assert after the loop).
+field f: Int
+
+method alias_in_loop(x: Ref, y: Ref, n: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f, 1/2) && acc(y.f, 1/2)
+  {
+    if (i == 5) {
+      inhale x == y
+      exhale acc(y.f, 1/1)
+      inhale acc(x.f, 1/2) && acc(y.f, 1/2)
+    }
+    i := i + 1
+  }
+  assert x.f == y.f
+}

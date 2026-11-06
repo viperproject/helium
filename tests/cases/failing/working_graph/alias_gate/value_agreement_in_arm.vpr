@@ -1,0 +1,18 @@
+// A pc-alias consume in an arm, answered by the working graph (which has the
+// arm's cube assumed): the value agreement it records holds only on the arm.
+// Gated by the instruction's own (empty) pc it reached ground unguarded and
+// proved the sibling arm's assert.
+//
+// Must FAIL (the assert in the else arm: `x` and `y` may differ there).
+field f: Int
+
+method alias_in_one_arm(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  if (c) {
+    inhale x == y
+    exhale acc(y.f, 1/1)
+  } else {
+    assert x.f == y.f
+  }
+}

@@ -1216,9 +1216,9 @@ pub(crate) fn heap_subtract_inner(
         // ground's rules would have derived): take the share from that chunk, as a
         // ground match does. The summarized consume below proves a fixed amount, which
         // a wildcard is not. Sound for the block's heap: the working graph's facts hold
-        // on every path to the block, the remainder fact is guarded by the pc, and the
-        // demanded value is fresh. A match that needs the pc stays with the guarded
-        // consume below.
+        // on every path to the block, the remainder fact is guarded by the block's
+        // cube and the pc (`alias_pc`), and the demanded value is fresh. A match that
+        // needs the pc stays with the guarded consume below.
         if demand == Demand::Wildcard && ctx.rules_on_work() {
             let chunks = h1.chunks_of(kind);
             let ids: Vec<egg::Id> = std::iter::once(chunk2.addr)
@@ -1237,7 +1237,8 @@ pub(crate) fn heap_subtract_inner(
             if let [c] = partners[..]
                 && let (Some(c), kept) = normalize_guard_for_consume(ctx, Some(c.clone()), pc_lits)
             {
-                return debit_wildcard(ctx, out, kind, &c, &chunk2, pc_lits, kept);
+                let pc = alias_pc(ctx, pc_lits);
+                return debit_wildcard(ctx, out, kind, &c, &chunk2, &pc, kept);
             }
         }
         // Nothing on ground: the demanded address may still match a held chunk under
@@ -1605,9 +1606,29 @@ fn present_amount(
     }
 }
 
+/// The path condition a heap match found by [`pc_alias_partners`] or
+/// [`chunk_under_pc`] holds under, and so the gate of every fact a consume through
+/// it records. Ground answers under the instruction's pc alone. Once the rules run
+/// on the working graph the answer comes from there, and the working graph has the
+/// block's cube assumed, so the match holds only where the cube does too: gated by
+/// the instruction's pc alone, its value agreement and debit would reach ground
+/// unguarded, on every other path.
+pub(crate) fn alias_pc(
+    ctx: &VerifyContext<'_>,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Vec<(egg::Id, Polarity)> {
+    if !ctx.rules_on_work() {
+        return pc_lits.to_vec();
+    }
+    // Disjoint only when the instruction's pc contradicts the cube; the concatenation
+    // is then unsatisfiable too, and gates everything off.
+    crate::verify::heap::cube_meet(ctx, ctx.current_cube(), pc_lits)
+        .unwrap_or_else(|| ctx.current_cube().iter().chain(pc_lits).copied().collect())
+}
+
 /// Build the pc-alias flavour of a [`heap_subtract_summarized`] set: `existing` (when
 /// a chunk did match on ground) followed by the pc-alias `partners`, every member
-/// gated by the *same* cube — the pc.
+/// gated by the *same* cube — the pc the partners were found under ([`alias_pc`]).
 ///
 /// The returned total is not gated by the pc: the sufficiency proof runs under the
 /// pc anyway ([`VerifyContext::prove_under_pc`]), so gating each addend would only
@@ -1621,15 +1642,14 @@ pub(crate) fn pc_alias_set(
     partners: &[egg::Id],
     pc_lits: &[(egg::Id, Polarity)],
 ) -> (Vec<(Chunk, crate::verify::heap::HeapPc)>, ChunkPerm) {
+    // A partner is the address a chunk is stored under, so it names that chunk
+    // alone. Two chunks ground has equated but not consolidated share a class, and
+    // resolving by class would count the first of them twice.
     let members: Vec<Chunk> = existing
         .cloned()
         .into_iter()
         .chain(partners.iter().filter_map(|a| {
-            let canon = ctx.egraph.find(*a);
-            h1.chunks_of(kind)
-                .iter()
-                .find(|c| ctx.egraph.find(c.addr) == canon)
-                .cloned()
+            h1.chunks_of(kind).iter().find(|c| c.addr == *a).cloned()
         }))
         .collect();
     // Structural, like the Σ-ite summary's: a member whose perm carries join
@@ -1647,7 +1667,7 @@ pub(crate) fn pc_alias_set(
             Some(t) => perm_add(ctx, &t, &amount),
         });
     }
-    let cube: crate::verify::heap::HeapPc = std::rc::Rc::from(pc_lits.to_vec());
+    let cube: crate::verify::heap::HeapPc = std::rc::Rc::from(alias_pc(ctx, pc_lits));
     let set = members.into_iter().map(|c| (c, cube.clone())).collect();
     (
         set,

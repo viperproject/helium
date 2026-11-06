@@ -1,0 +1,20 @@
+// As `unconsolidated_pair_counted_once`, with the second demand larger than what
+// is left.
+//
+// Must FAIL (the second exhale: only 1/2 is left).
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function id1(r: Ref): Ref
+  axiom id1_ax { forall r: Ref :: { id1(r) } id1(r) == r }
+}
+
+method overdrawn(x: Ref, y: Ref, z: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  inhale x == y
+  assert z == 3 ==> g(z) == g(3)
+  exhale acc(id1(x).f, 1/2)
+  exhale acc(id1(x).f, 1/1)
+}

@@ -1,0 +1,23 @@
+// Two chunks ground has equated (`x == y`) but not consolidated share a ground
+// class. A pc-alias consume through the working graph names both by address;
+// resolving them by class counted the first one twice, so three halves came off
+// a location that holds two.
+//
+// Must FAIL (the third exhale).
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function id1(r: Ref): Ref
+  axiom id1_ax { forall r: Ref :: { id1(r) } id1(r) == r }
+}
+
+method three_halves_of_two(x: Ref, y: Ref, z: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  inhale x == y
+  assert z == 3 ==> g(z) == g(3)
+  exhale acc(id1(x).f, 1/2)
+  exhale acc(id1(x).f, 1/2)
+  exhale acc(id1(x).f, 1/2)
+}

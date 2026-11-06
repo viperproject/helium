@@ -1,0 +1,15 @@
+// As `value_agreement_in_arm`, with the agreement contradicting the method's
+// precondition: unguarded on ground it made every later goal provable.
+//
+// Must FAIL (the assert after the join).
+field f: Int
+
+method false_after_join(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && x.f == 1 && y.f == 2
+{
+  if (c) {
+    inhale x == y
+    exhale acc(y.f, 1/1)
+  }
+  assert false
+}

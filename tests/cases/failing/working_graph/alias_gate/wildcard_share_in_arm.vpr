@@ -1,0 +1,23 @@
+// A wildcard consume in an arm whose only match the working graph finds without
+// the instruction's pc (here through an axiom): the remainder `r < held` it
+// records holds only on the arm, and with `0 < r` it says `p > none`.
+//
+// Must FAIL (the assert after the join: on the other arm `p` may be `none`).
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  axiom same_is_identity { forall r: Ref :: { same(r) } same(r) == r }
+}
+
+method wildcard_in_one_arm(x: Ref, p: Perm, c: Bool, z: Int)
+  requires p >= none && acc(x.f, p)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    inhale p > none
+    exhale acc(same(x).f, wildcard)
+  }
+  assert p > none
+}
