@@ -1,0 +1,121 @@
+// Controls for tests/cases/known_unsoundness/nary_join/: the facts of a heap
+// merged at a join with three or more edges still hold on the edges that
+// produced them. Each method is the twin of a must-fail case, asserting only on
+// the path of the inhaling edge.
+field f: Int
+
+method three_way_middle_edge(x: Ref, y: Ref, a: Bool, b: Bool)
+{
+  if (a) { goto L }
+  if (b) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  assert (!a && b) ==> x != y
+}
+
+method three_way_middle_edge_false(x: Ref, y: Ref, a: Bool, b: Bool)
+{
+  if (a) { goto L }
+  if (b) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  if (!a && b) { assume x == y; assert false }
+}
+
+method three_way_last_edge(x: Ref, y: Ref, a: Bool, b: Bool)
+{
+  if (a) { goto L }
+  if (b) { goto L }
+  inhale acc(x.f) && acc(y.f)
+  label L
+  assert (!a && !b) ==> x != y
+}
+
+method four_way(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool)
+{
+  if (a) { goto L }
+  if (b) { goto L }
+  if (c) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  assert (!a && !b && c) ==> x != y
+}
+
+method five_way(x: Ref, y: Ref, p: Perm, a: Bool, b: Bool, c: Bool, d: Bool)
+  requires none <= p
+{
+  if (a) { goto L }
+  if (b) { inhale acc(x.f, p); goto L }
+  if (c) { goto L }
+  if (d) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  assert (!a && b) ==> p <= write
+  assert (!a && !b && !c && d) ==> x != y
+}
+
+// The permission itself survives every merge level.
+method five_way_perm(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool, d: Bool)
+{
+  if (a) { goto L }
+  if (b) { inhale acc(x.f); goto L }
+  if (c) { goto L }
+  if (d) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  if (!a && (b || !c && d)) {
+    x.f := 1
+    assert x.f == 1
+  }
+}
+
+method nested(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool, d: Bool)
+{
+  if (c) { goto M }
+  if (d) {
+    if (a) { goto L }
+    if (b) { inhale acc(x.f) && acc(y.f); goto L }
+    label L
+    goto M
+  }
+  label M
+  assert (!c && d && !a && b) ==> x != y
+}
+
+method loop_breaks(x: Ref, y: Ref, a: Bool, b: Bool, n: Int)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant true
+  {
+    if (a) { goto out }
+    if (b) { inhale acc(x.f) && acc(y.f); goto out }
+    i := i + 1
+  }
+  label out
+  assert (!a && b && i < n) ==> x != y
+}
+
+method loop_head_forward_edges(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool, n: Int)
+{
+  var i: Int := 0
+  if (a) { goto head }
+  if (b) { inhale acc(x.f) && acc(y.f); goto head }
+  label head
+    invariant 0 <= i
+  if (i < n) {
+    if (c) { i := i + 1; goto head }
+    i := i + 2
+    goto head
+  }
+  assert (!a && b) ==> x != y
+}
+
+method in_loop_body(x: Ref, y: Ref, a: Bool, b: Bool, n: Int)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant true
+  {
+    if (a) { goto L }
+    if (b) { inhale acc(x.f) && acc(y.f); goto L }
+    label L
+    assert (!a && b) ==> x != y
+    i := i + 1
+  }
+}
