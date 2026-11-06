@@ -675,10 +675,18 @@ pub(crate) fn heap_union(
     } else {
         out = out.with_chunk(kind, chunk2);
     }
-    // `heap_union` runs per `inhale`, inside a block's body walk, so the heap
-    // exists on the block's cube.
-    let block = ctx.current_cube().to_vec();
-    assume_location_axioms(ctx, &out, &block);
+    // The heap exists on the effective pc of the instruction that produces it:
+    // the ambient block cube plus `pc_lits`. Neither alone is that pc. An
+    // `inhale` in a block body has the cube as its ambient and only a delta (often
+    // empty) as `pc_lits`; one in a join phase — a loop head re-inhaling its
+    // invariant — has no ambient cube at all, and the loop's reach condition only
+    // in `pc_lits`. The meet also states each literal once for a caller that
+    // already passes the effective pc (the resource ops).
+    let Some(heap_pc) = cube_meet(ctx, ctx.current_cube(), pc_lits) else {
+        // The instruction's pc contradicts the cube: nothing is reachable here.
+        return out;
+    };
+    assume_location_axioms(ctx, &out, &heap_pc);
     out
 }
 
