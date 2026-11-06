@@ -1,0 +1,85 @@
+// `old[L]` across loops: a label before the loop is reached on every
+// iteration and after it; the loop head's own label is the current
+// iteration's state; a body label is read later in the same iteration.
+field f: Int
+
+// A label before the loop, read in the invariant, the body and after the loop.
+method before_loop(x: Ref, n: Int)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  label pre
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+    invariant x.f >= old[pre](x.f)
+  if (i >= n) {
+    goto out
+  }
+  assert old[pre](perm(x.f)) == write
+  x.f := x.f + 1
+  i := i + 1
+  goto head
+  label out
+  assert x.f >= old[pre](x.f)
+}
+
+// The loop head's label: the state at the start of the current iteration.
+method head_label(x: Ref, n: Int)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+  if (i >= n) {
+    goto out
+  }
+  x.f := x.f + 1
+  assert x.f == old[head](x.f) + 1
+  i := i + 1
+  goto head
+  label out
+  assert old[head](x.f) == x.f
+}
+
+// A body label read later in the same iteration.
+method body_label_same_iteration(x: Ref, n: Int)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+  if (i >= n) {
+    goto out
+  }
+  x.f := 7
+  label body
+  x.f := x.f + 1
+  assert old[body](x.f) == 7
+  i := i + 1
+  goto head
+  label out
+}
+
+// A body label on the way out of the loop through a `goto`: the read after
+// the loop is guarded by that exit.
+method body_label_goto_exit(x: Ref, n: Int, d: Bool)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  var left: Bool := false
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n && !left
+  if (i >= n) {
+    goto out
+  }
+  if (d) {
+    x.f := 9
+    label inner
+    left := true
+    goto out
+  }
+  i := i + 1
+  goto head
+  label out
+  assert left ==> old[inner](x.f) == 9
+}

@@ -1,0 +1,14 @@
+// A `goto` that jumps over the label.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    goto skip
+  }
+  x.f := 1
+  label l
+  label skip
+  assert old[l](x.f) == 1
+}
