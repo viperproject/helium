@@ -151,10 +151,9 @@ pub(crate) fn lower_spatial_ensures(
             })
         },
     );
-    let labeled: HashMap<Spur, HeapVal> = HashMap::default();
     let old = pre_state.map(|baseline| OldHeaps {
         baseline,
-        labeled: &labeled,
+        labeled: None,
     });
     let (h, bv) = lower_spatial(
         b,
