@@ -1,0 +1,14 @@
+// The *bound* axiom (`perm <= write`) of a loop head's re-inhaled invariant: it
+// constrains the symbolic `p` only where the head is reached, not after the
+// arm. Silicon rejects.
+field f: Int
+
+method loop_head_bound_in_arm(x: Ref, p: Perm, c: Bool, n: Int)
+  requires p >= none
+{
+  if (c) {
+    inhale acc(x.f, p)
+    while (n > 0) invariant acc(x.f, p) { }
+  }
+  assert p <= write
+}
