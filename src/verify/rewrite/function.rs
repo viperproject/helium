@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
+use crate::dhash::HashMap;
 use crate::verify::analysis::ConstFold;
 use crate::verify::cert::FunctionDefinition;
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
@@ -356,14 +357,67 @@ impl FunctionUnfoldApplier {
     }
 }
 
-impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
-    fn apply_one(
+/// The calls `matches` name, in match order, each with its match's class and
+/// the type instantiations applied at its args (a `Subst` cannot carry types,
+/// so they are read from the class). Only the substs `wanted` keeps.
+///
+/// Every class is indexed once, before anything is applied. The searcher
+/// yields one match per call, and by the time a match is applied, earlier rules
+/// of this iteration may have merged its class with the classes of many others
+/// (a constant table's entries, merged with the value they share): re-reading
+/// the class per match was quadratic in them.
+///
+/// Indexed by the args as they stand in the nodes, which is how the searcher
+/// bound them: both are canonical as of the last rebuild, and nodes are not
+/// rewritten before the next, so a match finds its own call in the class it
+/// was merged into.
+fn match_calls<'m>(
+    egraph: &EGraph<Symbolic, ConstFold>,
+    matches: &'m [SearchMatches<Symbolic>],
+    func: FuncId,
+    arg_vars: &[Var],
+    wanted: impl Fn(&Subst) -> bool,
+) -> Vec<(Id, &'m Subst, Vec<Box<[Type]>>)> {
+    // Per class: each call's args to its instantiations, in node order.
+    type Index<'g> = HashMap<&'g [Id], Vec<&'g [Type]>>;
+    let index_class = |root: &Id| {
+        let mut index = Index::default();
+        for node in &egraph[*root].nodes {
+            if let Symbolic::FuncApp(f, tys, args) = node
+                && *f == func
+            {
+                let insts = index.entry(args).or_default();
+                if !insts.contains(&&**tys) {
+                    insts.push(tys);
+                }
+            }
+        }
+        index
+    };
+    let mut indexes: HashMap<Id, Index> = HashMap::default();
+    let mut out = Vec::new();
+    for m in matches {
+        for subst in m.substs.iter().filter(|s| wanted(s)) {
+            let index = indexes
+                .entry(egraph.find(m.eclass))
+                .or_insert_with_key(index_class);
+            let args: Vec<Id> = arg_vars.iter().map(|&v| subst[v]).collect();
+            let insts = index.get(&args[..]).map_or(&[][..], Vec::as_slice);
+            out.push((m.eclass, subst, insts.iter().map(|&t| t.into()).collect()));
+        }
+    }
+    out
+}
+
+impl FunctionUnfoldApplier {
+    /// The releases for one match, at the `instantiations` [`match_calls`] read
+    /// for it.
+    fn apply_call(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
         subst: &Subst,
-        _searcher_ast: Option<&PatternAst<Symbolic>>,
-        _rule_name: Symbol,
+        instantiations: Vec<Box<[Type]>>,
     ) -> Vec<Id> {
         // The call this match names. Re-canonicalized: earlier rules of this
         // iteration may have merged classes since the search.
@@ -383,26 +437,42 @@ impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
         // an unconditional call. `tok_id` therefore doubles as the release
         // guard.
         let tok_id = subst.get(self.tok_var).map(|&t| egraph.find(t));
-        // The type instantiations applied at these args (a `Subst` cannot carry
-        // types, so they are re-read from the class).
-        let mut instantiations: Vec<Box<[Type]>> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, tys, nargs) = node else {
-                continue;
-            };
-            if *f != self.func || nargs.len() != args.len() {
-                continue;
-            }
-            let same = nargs.iter().zip(&args).all(|(&a, &b)| egraph.find(a) == b);
-            if same && !instantiations.contains(tys) {
-                instantiations.push(tys.clone());
-            }
-        }
         let mut changed = Vec::new();
         for tys in instantiations {
             self.unfold_call(egraph, eclass, tys, &args, tok_id, &mut changed);
         }
         changed
+    }
+}
+
+impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
+    fn apply_matches(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        matches: &[SearchMatches<Symbolic>],
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        match_calls(egraph, matches, self.func, &self.arg_vars, |_| true)
+            .into_iter()
+            .flat_map(|(eclass, subst, tys)| self.apply_call(egraph, eclass, subst, tys))
+            .collect()
+    }
+
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        rule_name: Symbol,
+    ) -> Vec<Id> {
+        let substs = vec![subst.clone()];
+        let m = SearchMatches {
+            eclass,
+            substs,
+            ast: None,
+        };
+        self.apply_matches(egraph, &[m], rule_name)
     }
 
     fn vars(&self) -> Vec<Var> {
@@ -410,14 +480,14 @@ impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
     }
 }
 
-impl Applier<Symbolic, ConstFold> for FunctionPostApplier {
-    fn apply_one(
+impl FunctionPostApplier {
+    /// The post replay for one match, at the `instantiations` [`match_calls`]
+    /// read for it.
+    fn apply_call(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
-        eclass: Id,
         subst: &Subst,
-        _searcher_ast: Option<&PatternAst<Symbolic>>,
-        _rule_name: Symbol,
+        instantiations: Vec<Box<[Type]>>,
     ) -> Vec<Id> {
         let mut changed = Vec::new();
         // No token, no post (see the struct doc). Not memoized, so a token
@@ -429,32 +499,51 @@ impl Applier<Symbolic, ConstFold> for FunctionPostApplier {
             return changed;
         }
         // The call this match names, re-canonicalized as in
-        // `FunctionUnfoldApplier`, and the type instantiations applied at it.
+        // `FunctionUnfoldApplier`.
         let args: Vec<Id> = self
             .arg_vars
             .iter()
             .map(|&v| egraph.find(subst[v]))
             .collect();
         debug_assert_eq!(args.len(), self.def.n_params, "function post arity");
-        let mut instantiations: Vec<Box<[Type]>> = Vec::new();
-        for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, tys, nargs) = node else {
-                continue;
-            };
-            if *f != self.func || nargs.len() != args.len() {
-                continue;
-            }
-            let same = nargs.iter().zip(&args).all(|(&a, &b)| egraph.find(a) == b);
-            if same && !instantiations.contains(tys) {
-                instantiations.push(tys.clone());
-            }
-        }
         for tys in instantiations {
             if self.memo.insert((tys, args.clone())) {
                 replay_post(egraph, &self.def, &args, tok, &mut changed);
             }
         }
         changed
+    }
+}
+
+impl Applier<Symbolic, ConstFold> for FunctionPostApplier {
+    fn apply_matches(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        matches: &[SearchMatches<Symbolic>],
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        let has_tok = |s: &Subst| s.get(self.tok_var).is_some();
+        match_calls(egraph, matches, self.func, &self.arg_vars, has_tok)
+            .into_iter()
+            .flat_map(|(_, subst, tys)| self.apply_call(egraph, subst, tys))
+            .collect()
+    }
+
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        rule_name: Symbol,
+    ) -> Vec<Id> {
+        let substs = vec![subst.clone()];
+        let m = SearchMatches {
+            eclass,
+            substs,
+            ast: None,
+        };
+        self.apply_matches(egraph, &[m], rule_name)
     }
 
     fn vars(&self) -> Vec<Var> {
@@ -524,3 +613,45 @@ pub(crate) fn function_post_rule(
 /// A canonicalized call key: the ground `(type_args, value_args)` an occurrence
 /// of the function was applied to. Memoized so the recipe rebuilds once per call.
 pub(super) type CallKey = (Box<[Type]>, Vec<Id>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Earlier rules of an iteration can merge the classes of calls the
+    /// searcher matched apart, and their args with them. Each match is still
+    /// applied at its own call's instantiation, read once per merged class.
+    #[test]
+    fn each_match_finds_its_call_in_the_class_it_was_merged_into() {
+        let (f, tok) = (FuncId(0), FuncId(1));
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let (x, y) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let fx = g.add(Symbolic::FuncApp(f, [Type::Int].into(), [x].into()));
+        let fy = g.add(Symbolic::FuncApp(f, [Type::Bool].into(), [y].into()));
+        g.rebuild();
+        let searcher = FunctionCallSearcher::new(f, tok, 1);
+        let matches: Vec<SearchMatches<Symbolic>> = searcher
+            .search(&g)
+            .into_iter()
+            .map(|m| SearchMatches {
+                eclass: m.eclass,
+                substs: m.substs,
+                ast: None,
+            })
+            .collect();
+        assert_eq!(matches.len(), 2);
+        g.union(fx, fy);
+        g.union(x, y);
+        let calls = match_calls(&g, &matches, f, &searcher.arg_vars, |_| true);
+        let mut found: Vec<(Id, Vec<Box<[Type]>>)> = calls
+            .into_iter()
+            .map(|(_, s, tys)| (s[searcher.arg_vars[0]], tys))
+            .collect();
+        found.sort();
+        let want = vec![
+            (x, vec![[Type::Int].into()]),
+            (y, vec![[Type::Bool].into()]),
+        ];
+        assert_eq!(found, want);
+    }
+}
