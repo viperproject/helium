@@ -98,6 +98,11 @@ pub struct VerifyStats {
     /// rather than at a fixpoint or by a hook. Each is a truncation: whatever the
     /// missing iterations would have derived is absent from the verdict.
     pub sat_bound_stops: u64,
+    /// Quantifier instances found beyond the generation bound and deferred
+    /// (counted each time a match finds one).
+    pub inst_deferred: u64,
+    /// The deepest generation of a quantifier instance built.
+    pub inst_generation_peak: u64,
     /// peak e-graph size observed in any iteration.
     pub egraph_nodes_peak: usize,
     pub egraph_classes_peak: usize,
@@ -300,6 +305,8 @@ impl VerifyStats {
             block_scratch_freehits,
             sat_iterations,
             sat_bound_stops,
+            inst_deferred,
+            inst_generation_peak,
             egraph_nodes_peak,
             egraph_classes_peak,
             insts_processed,
@@ -332,6 +339,8 @@ impl VerifyStats {
             ("block_scratch_freehits", n(block_scratch_freehits)),
             ("sat_iterations", n(sat_iterations)),
             ("sat_bound_stops", n(sat_bound_stops)),
+            ("inst_deferred", n(inst_deferred)),
+            ("inst_generation_peak", n(inst_generation_peak)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
             ("insts_processed", n(insts_processed)),

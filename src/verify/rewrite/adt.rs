@@ -156,7 +156,7 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let Data::Ctor(c, _) = &egraph[xc].data else {
+        let Data::Ctor(c, _) = &egraph[xc].data.value else {
             return vec![];
         };
         let lit = egraph.add(Symbolic::Lit(Literal::Bool(*c == self.ctor)));
