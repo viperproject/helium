@@ -469,7 +469,7 @@ impl<'a> VerifyContext<'a> {
             sc.egraph.total_number_of_nodes(),
             sc.egraph.number_of_classes(),
         );
-        sc.egraph = self.saturate_flat(sc.egraph);
+        sc.egraph = self.saturate_flat(sc.egraph).0;
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
             eprintln!(
                 "[scratch-sat] {n0}n/{c0}c -> {}n/{}c true={} (ground {}n/{}c true={}, {} iters)",
@@ -934,7 +934,7 @@ impl<'a> VerifyContext<'a> {
         let _scope = crate::verify::rewrite::ScratchScope::enter();
         let t = std::time::Instant::now();
         let iters_before = stats::with_stats(|s| s.sat_iterations);
-        let out = self.saturate_flat(probe);
+        let (out, _) = self.saturate_flat(probe);
         stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
         stats::bump(|s| s.probe_saturations += 1);
         stats::bump(|s| s.probe_iterations += s.sat_iterations - iters_before);

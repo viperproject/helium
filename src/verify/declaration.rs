@@ -1928,6 +1928,18 @@ fn eval_from_snap(
     Ok(out)
 }
 
+/// The program's domain axioms evaluated into an e-graph and saturated, unless
+/// the saturation stops at a backstop ([`build_axiom_seed`]). Built once per
+/// program, by the first unit that assumes the axioms, and copied by every unit
+/// (see [`assume_axioms`]).
+pub(crate) struct AxiomSeed {
+    state: crate::verify::context::GraphState,
+    /// The axioms' function calls, as (callee, argument classes). A call's
+    /// `f%pre` token depends on the unit — it is minted only once `f` has a
+    /// certificate — so the seed leaves it out and each unit adds its own.
+    calls: Vec<(MemberId, Box<[egg::Id]>)>,
+}
+
 /// Axiomatize the state: make every domain axiom's fact available to the unit
 /// about to be verified. An axiom body is evaluated into the e-graph and its
 /// boolean merged with `true` up front — domains are monomorphic, so there is no
@@ -1935,12 +1947,10 @@ fn eval_from_snap(
 /// which becomes its own lazy-instantiation rule below. Axiom bodies are trusted
 /// — no obligations (div-by-zero, deref permission) are checked on them.
 ///
-/// Invariant: the eager ground-axiom evaluation below only ever sees **nullary**
-/// quantifier occurrences — axioms are closed and `let` is rejected in pure
-/// lowering, so an axiom's top-level `forall`s capture nothing. Occurrences with
-/// captures enter the e-graph when an outer instance's body is built
-/// (`rewrite::build_instance`) or while evaluating a hosting method/resource body,
-/// never eagerly here.
+/// The axioms are the same in every unit, so they are evaluated and saturated
+/// once per program, into an [`AxiomSeed`], and each unit starts from a copy of
+/// it. What depends on the unit is added to the copy: the `f%pre` tokens of the
+/// axioms' calls to functions certified by now, and the rules below.
 fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result<(), VerifyError> {
     // One rule instantiates every `forall` in the program: quantifiers are
     // e-nodes (data), not rules, so one generic rule suffices — and a `forall`
@@ -1954,35 +1964,31 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
     let table = std::sync::Arc::clone(ctx.alloc.quant_table());
     ctx.axiom_rules
         .push(crate::verify::rewrite::forall_rule(table));
-    for decl in program.decls.iter() {
-        let vmir::Declaration::Axiom(ax) = decl else {
-            continue;
-        };
-        let mut state = EvalState::new();
-        for inst in &ax.body.insts {
-            match &inst.kind {
-                InstKind::Pure(ty, pi) => {
-                    // Axiom bodies are heap-free and trusted — no `Deref`, so the
-                    // path condition is irrelevant here.
-                    let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &[], None)?;
-                    state.push_val(id, ty.clone(), None);
-                }
-                InstKind::Assume(val) => {
-                    let id = state.get_val(ctx, val);
-                    let true_ = expr!(ctx, true);
-                    ctx.union(id, true_);
-                    ctx.egraph.rebuild();
-                }
-                // An axiom body is never verified — a stray obligation
-                // (there are none today: callees are precondition-free)
-                // would be skipped, and heap insts cannot occur.
-                InstKind::Assert(_) => {}
-                _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
-            }
-        }
-        let res = state.get_val(ctx, &ax.body.res);
+    let seed = match ctx.alloc.axiom_seed.take() {
+        Some(seed) => seed,
+        None => build_axiom_seed(ctx, program)?,
+    };
+    let nodes = seed.state.egraph().total_number_of_nodes() as u64;
+    stats::bump(|s| s.seed_nodes_copied += nodes);
+    ctx.install_graph_state(&seed.state);
+    // The `f%pre` token of each axiom call, as the `FunctionCall` arm of
+    // `eval_pure_inst` mints it: only for a callee certified by now, and
+    // unguarded (an axiom has no path condition).
+    let certified: Vec<(MemberId, Box<[egg::Id]>)> = seed
+        .calls
+        .iter()
+        .filter(|(f, _)| ctx.fn_certs.is_none_or(|certs| certs.contains_key(f)))
+        .cloned()
+        .collect();
+    ctx.alloc.axiom_seed = Some(seed);
+    if !certified.is_empty() {
         let true_ = expr!(ctx, true);
-        ctx.union(res, true_);
+        for (f, args) in certified {
+            let name = ctx.member_name(f);
+            let tok = ctx.alloc.fn_pre_token(f, &name);
+            let tok_id = ctx.add(Symbolic::FuncApp(tok, Box::new([]), args));
+            ctx.union(tok_id, true_);
+        }
         ctx.egraph.rebuild();
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`
@@ -2035,6 +2041,86 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         }
     }
     Ok(())
+}
+
+/// Evaluate every domain axiom into a fresh graph and saturate it under the
+/// unit-independent rules (the static and ADT rules, and `forall` instantiation):
+/// the [`AxiomSeed`] (left unsaturated if the run stops at a backstop). It runs
+/// in a context of its own that has no function certificates, so no `f%pre`
+/// token is minted (the calls are recorded instead, [`AxiomSeed::calls`]) and no
+/// function rule exists — nothing in it depends on the unit that happens to
+/// build it.
+///
+/// Invariant: the eager ground-axiom evaluation below only ever sees **nullary**
+/// quantifier occurrences — axioms are closed and `let` is rejected in pure
+/// lowering, so an axiom's top-level `forall`s capture nothing. Occurrences with
+/// captures enter the e-graph when an outer instance's body is built
+/// (`rewrite::build_instance`) or while evaluating a hosting method/resource body,
+/// never eagerly here.
+fn build_axiom_seed(
+    ctx: &mut VerifyContext<'_>,
+    program: &vmir::Program,
+) -> Result<AxiomSeed, VerifyError> {
+    let no_certs = HashMap::default();
+    let mut seed_ctx = VerifyContext::new(ctx.interner, ctx.decls, ctx.groups, ctx.alloc);
+    let ctx = &mut seed_ctx;
+    ctx.fn_certs = Some(&no_certs);
+    let mut calls = Vec::new();
+    // Unions only: one rebuild after the last axiom restores the invariants for
+    // all of them (a rebuild walks every class, so one per axiom is quadratic).
+    for decl in program.decls.iter() {
+        let vmir::Declaration::Axiom(ax) = decl else {
+            continue;
+        };
+        let mut state = EvalState::new();
+        for inst in &ax.body.insts {
+            match &inst.kind {
+                InstKind::Pure(ty, pi) => {
+                    // Axiom bodies are heap-free and trusted — no `Deref`, so the
+                    // path condition is irrelevant here.
+                    let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &[], None)?;
+                    if let PureInst::FunctionCall(fc) = pi {
+                        let args = fc.args.iter().map(|v| state.get_val(ctx, v)).collect();
+                        calls.push((fc.function, args));
+                    }
+                    state.push_val(id, ty.clone(), None);
+                }
+                InstKind::Assume(val) => {
+                    let id = state.get_val(ctx, val);
+                    let true_ = expr!(ctx, true);
+                    ctx.union(id, true_);
+                }
+                // An axiom body is never verified — a stray obligation
+                // (there are none today: callees are precondition-free)
+                // would be skipped, and heap insts cannot occur.
+                InstKind::Assert(_) => {}
+                _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
+            }
+        }
+        let res = state.get_val(ctx, &ax.body.res);
+        let true_ = expr!(ctx, true);
+        ctx.union(res, true_);
+    }
+    ctx.egraph.rebuild();
+    let unsaturated = ctx.graph_state();
+    let table = std::sync::Arc::clone(ctx.alloc.quant_table());
+    ctx.axiom_rules
+        .push(crate::verify::rewrite::forall_rule(table));
+    let fixpoint = ctx.saturate_uncached();
+    // The applier memos now describe the seed's own graph; the unit that copies
+    // it starts with empty ones, like every later unit (re-instantiating an
+    // instance the copy already holds adds nothing).
+    crate::verify::rewrite::new_memo_unit();
+    // A run cut off by a backstop leaves a graph that can already fill the node
+    // limit (diverging quantifiers do), so a unit starting from it could run few
+    // or none of its own rules. Units then start from the unsaturated axioms and
+    // saturate them together with their own rules, as without a seed.
+    let state = if fixpoint {
+        ctx.graph_state()
+    } else {
+        unsaturated
+    };
+    Ok(AxiomSeed { state, calls })
 }
 
 /// Resolve a trigger pattern term's heads to verifier `FuncId`s — the same

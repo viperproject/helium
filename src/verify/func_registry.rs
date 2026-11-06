@@ -106,6 +106,11 @@ pub struct FuncRegistry {
     /// never from inside a rule, and egg sees the resulting e-node on the next
     /// iteration either way.
     quant_table: std::sync::Arc<std::sync::RwLock<crate::verify::quant::RecipeTable>>,
+    /// The program's domain axioms, evaluated once by the first unit that needs
+    /// them and copied into every later one (`declaration::assume_axioms`). It
+    /// lives here because its nodes are only meaningful with this registry's ids:
+    /// ADT and token `FuncId`s, and the `forall` recipes of [`Self::quant_table`].
+    pub(crate) axiom_seed: Option<crate::verify::declaration::AxiomSeed>,
 }
 
 // Builtin reserved operator ids (starting from the top of the usize space).
@@ -269,6 +274,7 @@ impl FuncRegistry {
             variant_names: HashMap::default(),
             ctor_head,
             quant_table: Default::default(),
+            axiom_seed: None,
         }
     }
 
