@@ -491,11 +491,27 @@ pub(crate) fn lower_method(
                                 real = Some((new_env, kind, join));
                             } else {
                                 let sid = vmir::BlockId(blocks.len());
+                                // This level is reached where one of edges `i..`
+                                // is taken, and its edge value is only exact
+                                // there. So that is its cube and the pc of its
+                                // `Merge`, not the whole join's reach: under the
+                                // latter the merged heap's facts would hold on the
+                                // paths of edges `..i` too. Each outer level `j`
+                                // takes its else arm where `ev_j` fails, so this
+                                // reach is the join's ∧ `¬ev_0 ∧ … ∧ ¬ev_{i-1}`,
+                                // literals the fold has already materialized.
+                                let mut syn_pc = pc.clone();
+                                syn_pc.conds.extend(
+                                    edges[..i]
+                                        .iter()
+                                        .filter(|(_, e)| *e != vmir::FALSE)
+                                        .map(|(_, e)| (e.clone(), Polarity::Negative)),
+                                );
                                 // A synthetic join has an empty body, so its exit
                                 // heap is exactly its `Merge`.
                                 let syn_h_out = {
                                     let mark = sink.insts.len();
-                                    let m = sink.with_conds(&pc, |sink| {
+                                    let m = sink.with_conds(&syn_pc, |sink| {
                                         sink.emit_heap_guarded(HeapInst::Merge {
                                             cond: ev.clone(),
                                             then_h: h_out_of[&then_],
@@ -506,7 +522,7 @@ pub(crate) fn lower_method(
                                     m
                                 };
                                 blocks.push(vmir::Block {
-                                    cube: pc.clone(),
+                                    cube: syn_pc,
                                     preds: kind,
                                     join,
                                     body: Vec::new(),

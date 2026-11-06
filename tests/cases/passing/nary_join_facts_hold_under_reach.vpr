@@ -1,7 +1,7 @@
-// Controls for tests/cases/known_unsoundness/nary_join/: the facts of a heap
-// merged at a join with three or more edges still hold on the edges that
-// produced them. Each method is the twin of a must-fail case, asserting only on
-// the path of the inhaling edge.
+// Controls for tests/cases/failing/nary_join/: the facts of a heap merged at a
+// join with three or more edges still hold on the edges that produced them.
+// Each method is the twin of a failing case, asserting only on the path of the
+// inhaling edge.
 field f: Int
 
 method three_way_middle_edge(x: Ref, y: Ref, a: Bool, b: Bool)
