@@ -1,0 +1,50 @@
+// Once the rules run on the working graph ground no longer holds the axiom and
+// function instances they build, and Z3, which instantiates no quantifier
+// itself, would miss them on ground: the Z3 rung reads the working graph.
+// Each goal here needs both an instance and arithmetic.
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function k(x: Int): Int
+  axiom k_def { forall x: Int :: { k(x) } k(x) == x + 1 }
+}
+
+function fpos(x: Int): Int
+  ensures result > 0
+
+function inc(x: Int): Int
+  requires x > 0
+  ensures result == k(x)
+
+method instance_then_arithmetic(a: Int, z: Int)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  assert k(a) == a + 1 && k(k(a)) == a + 2
+}
+
+method postconditions_then_arithmetic(a: Int, b: Int, z: Int)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  assert fpos(a) > 0 && fpos(b) > 0 && fpos(a) + fpos(b) > 1
+}
+
+method in_both_arms_and_after(a: Int, b: Int, c: Bool, z: Int)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    assert k(a) == a + 1
+  } else {
+    assert k(b) == b + 1
+  }
+  assert k(b + 2) == b + 3
+}
+
+method call_result_in_arm(x: Ref, c: Bool)
+  requires acc(x.f) && x.f > 0
+{
+  if (c) {
+    x.f := inc(x.f)
+    assert x.f > 1
+  }
+}

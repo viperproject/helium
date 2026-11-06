@@ -105,26 +105,37 @@ pub(crate) struct ScratchScope {
 /// again once the live graph is back, for different terms. Everything Z3 learns
 /// about them has to go with the clone.
 pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
-    ctxt.z3translator.solver.push();
-    let tr = &ctxt.z3translator;
-    ScratchScope {
-        max_node_id: tr.max_node_id,
-        max_merges_is: tr.max_merges_is,
-        class_types: tr.class_types.clone(),
-    }
+    ctxt.z3translator.push()
 }
 
 /// Drop what Z3 learned on the throwaway graph: its facts (`pop`), the
 /// watermarks past the live graph, and the sorts cached for its ids.
 pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
-    let tr = &mut ctxt.z3translator;
-    tr.solver.pop(1);
-    if tr.max_node_id != scope.max_node_id || tr.max_merges_is != scope.max_merges_is {
-        stats::bump(|s| s.z3_timing.0.scratch_scopes += 1);
+    ctxt.z3translator.pop(scope);
+}
+
+impl Z3Translation {
+    /// Open a solver scope for a graph that is about to be rolled back to its
+    /// current state ([`enter_scratch`], and the working graph's scopes).
+    pub(crate) fn push(&mut self) -> ScratchScope {
+        self.solver.push();
+        ScratchScope {
+            max_node_id: self.max_node_id,
+            max_merges_is: self.max_merges_is,
+            class_types: self.class_types.clone(),
+        }
     }
-    tr.max_node_id = scope.max_node_id;
-    tr.max_merges_is = scope.max_merges_is;
-    tr.class_types = scope.class_types;
+
+    /// Close the scope `push` opened, after its graph was rolled back.
+    pub(crate) fn pop(&mut self, scope: ScratchScope) {
+        self.solver.pop(1);
+        if self.max_node_id != scope.max_node_id || self.max_merges_is != scope.max_merges_is {
+            stats::bump(|s| s.z3_timing.0.scratch_scopes += 1);
+        }
+        self.max_node_id = scope.max_node_id;
+        self.max_merges_is = scope.max_merges_is;
+        self.class_types = scope.class_types;
+    }
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.

@@ -1,0 +1,24 @@
+// The Z3 rung reads the working graph, scoped with it: what Z3 learned inside an
+// arm's scope goes when the scope closes. The first assert gives Z3 its
+// translation before the branch, so the arm's facts are asserted in a solver
+// scope of their own.
+//
+// Must FAIL (the assert after the join: `a > 5` held only on the arm).
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function k(x: Int): Int
+  axiom k_def { forall x: Int :: { k(x) } k(x) == x + 1 }
+}
+
+method arm_fact_after_join(a: Int, c: Bool, z: Int)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  assert k(k(z)) == z + 2
+  if (c) {
+    inhale a > 5
+    assert k(k(a)) > 7
+  }
+  assert a > 5
+}

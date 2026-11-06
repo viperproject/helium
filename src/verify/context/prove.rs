@@ -88,6 +88,18 @@ pub(super) struct WorkGraph {
     lag: Option<Lag>,
     /// Whether the current block's cube is assumed.
     cube_assumed: bool,
+    /// The Z3 rung's solver over this graph, made on its first use.
+    z3: Option<WorkZ3>,
+}
+
+/// Z3 over the working graph: a translation of its terms and unions, scoped with
+/// it. Made inside `depth` open scopes, it opens a solver scope with each one
+/// opened after, and is dropped when one of the `depth` closes (its facts then
+/// mention ids the rollback hands out again).
+struct WorkZ3 {
+    tr: crate::verify::z3::Z3Translation,
+    depth: usize,
+    scopes: Vec<crate::verify::z3::ScratchScope>,
 }
 
 /// Block transitions and facts the working graph has not caught up with.
@@ -576,6 +588,9 @@ impl<'a> VerifyContext<'a> {
             dirty: w.dirty,
         };
         w.scopes.push(scope);
+        if let Some(z) = w.z3.as_mut() {
+            z.scopes.push(z.tr.push());
+        }
         stats::bump(|s| s.work_scopes += 1);
     }
 
@@ -587,6 +602,15 @@ impl<'a> VerifyContext<'a> {
     /// level.
     fn close_scopes(&mut self, first: usize) {
         let w = self.work.as_mut().unwrap();
+        if let Some(z) = w.z3.as_mut() {
+            if first < z.depth {
+                w.z3 = None;
+            } else {
+                for s in z.scopes.drain(first - z.depth..).rev() {
+                    z.tr.pop(s);
+                }
+            }
+        }
         let mut closed = w.scopes.split_off(first);
         closed.iter().for_each(|s| rewrite::retire_scope(s.memo));
         let scope = closed.swap_remove(0);
@@ -661,6 +685,7 @@ impl<'a> VerifyContext<'a> {
             saturated_at: None,
             lag: None,
             cube_assumed: false,
+            z3: None,
         });
         self.facts.clear();
         if let Some(block) = self.current_block {
@@ -1274,16 +1299,50 @@ impl<'a> VerifyContext<'a> {
     }
 
     fn prove_by_z3(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
+        if self.rules_on_work() {
+            return self.prove_by_z3_in_work(goal, pc_lits);
+        }
+        // The block's cube is ambient (assumed by the scratch, not in `pc_lits`),
+        // so it has to be added here for its guarded facts to apply.
+        let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
+        self.z3_check(goal, &pc)
+    }
+
+    /// The Z3 rung once the rules run on the working graph. Ground then lacks what
+    /// they derive (an axiom's instances above all, which Z3 does not instantiate
+    /// itself here), so Z3 reads the working graph instead: every fact there holds
+    /// on every path to the block, and the block cube is assumed in it.
+    fn prove_by_z3_in_work(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
+        self.ensure_work();
+        if self.block_dead {
+            return true;
+        }
+        let tg = self.tr(goal);
+        let tpc: Vec<(egg::Id, Polarity)> = pc_lits.iter().map(|&(i, p)| (self.tr(i), p)).collect();
+        let mut w = self.work.take().expect("working graph");
+        let mut z = w.z3.take().unwrap_or_else(|| WorkZ3 {
+            tr: crate::verify::z3::Z3Translation::default(),
+            depth: w.scopes.len(),
+            scopes: Vec::new(),
+        });
+        std::mem::swap(&mut self.egraph, &mut w.egraph);
+        std::mem::swap(&mut self.z3translator, &mut z.tr);
+        let proven = self.z3_check(tg, &tpc);
+        std::mem::swap(&mut self.z3translator, &mut z.tr);
+        std::mem::swap(&mut self.egraph, &mut w.egraph);
+        w.z3 = Some(z);
+        self.work = Some(w);
+        proven
+    }
+
+    /// `pc ⇒ goal` by Z3, over the facts of `self.egraph`.
+    fn z3_check(&mut self, goal: egg::Id, pc: &[(egg::Id, Polarity)]) -> bool {
         let t_build = std::time::Instant::now();
 
         crate::verify::z3::sync_facts(self);
 
         let goal_z3 = crate::verify::z3::build_goal(self, goal);
-
-        // The block's cube is ambient (assumed by the scratch, not in `pc_lits`),
-        // so it has to be added here for its guarded facts to apply.
-        let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
-        let pc_cond = crate::verify::z3::build_pc(self, &pc);
+        let pc_cond = crate::verify::z3::build_pc(self, pc);
 
         let query = [pc_cond, vec![!goal_z3]].concat();
 
