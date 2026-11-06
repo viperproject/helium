@@ -170,6 +170,43 @@ fn known_limitations_still_fail() {
     );
 }
 
+/// Known-unsoundness canaries: cases that *must be rejected* but currently verify,
+/// because of a soundness bug that is not fixed yet. The directory mirrors
+/// `failing/`. This test asserts the CURRENT (wrong) verdict, so a fix that makes
+/// one of them rejected breaks the build here, prompting its promotion to the same
+/// relative path under `failing/`.
+#[test]
+fn known_unsoundness_still_verifies() {
+    let dir = cases_dir().join("known_unsoundness");
+    if !dir.exists() {
+        return;
+    }
+    let files = vpr_files(&dir);
+
+    let mut now_rejected: Vec<String> = Vec::new();
+
+    for path in &files {
+        let name = file_name(path);
+        let still_verifies = match pipeline::run_file(path) {
+            Err(_) => false,
+            Ok(results) => !results.is_empty() && results.iter().all(|(_, r)| r.is_ok()),
+        };
+        if still_verifies {
+            println!("  [STILL-UNSOUND] {name}");
+        } else {
+            now_rejected.push(name.to_string());
+        }
+    }
+
+    assert!(
+        now_rejected.is_empty(),
+        "{} known-unsoundness case(s) are now rejected — promote them to the same \
+         path under tests/cases/failing/:\n{}",
+        now_rejected.len(),
+        now_rejected.join("\n")
+    );
+}
+
 /// Unsupported-construct cases: each file uses at least one construct this
 /// verifier does not implement. The pipeline must survive it — the file still
 /// parses and lowers, and its other members are still verified — and the

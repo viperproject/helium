@@ -1,0 +1,242 @@
+// `old[L]` is well-defined wherever every path to the read passed `label L`:
+// the label dominates the read, or the read is guarded (by a branch, an
+// implication, or a conditional) by a condition under which `L` was reached.
+field f: Int
+
+// The label after the join is reached on every path.
+method after_join(x: Ref, c: Bool)
+  requires acc(x.f, 1/2)
+{
+  if (c) {
+    exhale acc(x.f, 1/2)
+  }
+  label l
+  assert old[l](perm(x.f)) == (c ? none : 1/2)
+}
+
+// The read is in the arm that declares the label.
+method same_arm(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 5
+    label l
+    x.f := 6
+    assert old[l](x.f) == 5
+  }
+}
+
+// A later branch on the same condition: on every path into it, `l` was reached.
+method guarded_by_same_condition(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 5
+    label l
+  }
+  if (c) {
+    assert old[l](x.f) == 5
+  }
+}
+
+// The guard is the antecedent of an implication.
+method guarded_by_implication(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 5
+    label l
+  }
+  assert c ==> old[l](x.f) == 5
+}
+
+// The guard selects the branch of a conditional expression.
+method guarded_by_conditional(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 5
+    label l
+  }
+  assert (c ? old[l](x.f) : 5) == 5
+}
+
+// Each arm has its own label, each read under its arm's condition.
+method one_label_per_arm(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 1
+    label a
+  } else {
+    x.f := 2
+    label b
+  }
+  assert c ==> old[a](x.f) == 1
+  assert !c ==> old[b](x.f) == 2
+}
+
+// A label before a branch is read after it on every path.
+method label_before_branch(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 0
+  label l
+  if (c) {
+    x.f := 3
+  }
+  assert old[l](x.f) == 0
+  assert x.f == (c ? 3 : 0)
+}
+
+// Nested branches: the read is guarded by both conditions of the label.
+method nested_guard(x: Ref, a: Bool, b: Bool)
+  requires acc(x.f)
+{
+  if (a) {
+    if (b) {
+      x.f := 1
+      label l
+    }
+  }
+  if (a && b) {
+    assert old[l](x.f) == 1
+  }
+}
+
+// Nested labels: an outer label read inside the scope of an inner one.
+method nested_labels(x: Ref, a: Bool)
+  requires acc(x.f)
+{
+  x.f := 0
+  label outer
+  if (a) {
+    x.f := 1
+    label inner
+    x.f := 2
+    assert old[outer](x.f) == 0
+    assert old[inner](x.f) == 1
+  }
+  assert old[outer](x.f) == 0
+}
+
+// The guard is a different but equivalent condition.
+method guarded_by_equivalent_condition(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 5
+    label l
+  }
+  if (!!c) {
+    assert old[l](x.f) == 5
+  }
+}
+
+// The guard implies the label's condition only arithmetically.
+method guarded_by_implied_condition(x: Ref, y: Int)
+  requires acc(x.f)
+{
+  if (y > 0) {
+    x.f := 5
+    label l
+  }
+  if (y >= 1) {
+    assert old[l](x.f) == 5
+  }
+}
+
+// Prusti's shape: each edge out of a switch sets a path flag, and a read of a
+// label on one arm is guarded by that arm's flag at a later join.
+method guarded_by_path_flag(x: Ref, k: Int)
+  requires acc(x.f)
+{
+  var from_a: Bool := false
+  var from_b: Bool := false
+  var from_c: Bool := false
+  if (k == 0) {
+    from_a := true
+    goto ba
+  } elseif (k == 1) {
+    from_b := true
+    goto bb
+  } else {
+    from_c := true
+    goto bc
+  }
+  label ba
+  goto join
+  label bb
+  x.f := 1
+  label l
+  goto join
+  label bc
+  goto join
+  label join
+  if (from_b) {
+    assert old[l](x.f) == 1
+  }
+}
+
+// An unreached label read only in dead code.
+method read_in_dead_code(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    label l
+  }
+  if (c && !c) {
+    assert old[l](x.f) == 7
+  }
+}
+
+// A `goto` past the label: the read is guarded by the path through it.
+method goto_through_label(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    goto skip
+  }
+  x.f := 1
+  label l
+  goto done
+  label skip
+  x.f := 2
+  label done
+  assert !c ==> old[l](x.f) == 1
+}
+
+// A three-way (goto) join: the label's arm is the only one with `a`.
+method n_way_join_guarded(x: Ref, a: Bool, b: Bool)
+  requires acc(x.f)
+{
+  if (a) {
+    goto la
+  }
+  if (b) {
+    goto lb
+  }
+  goto lc
+  label la
+  x.f := 1
+  label l
+  goto done
+  label lb
+  goto done
+  label lc
+  goto done
+  label done
+  assert a ==> old[l](x.f) == 1
+}
+
+// A label read in a local's initializer, an `inhale` and an `exhale` amount.
+method other_contexts(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  label l
+  var v: Int := old[l](x.f)
+  inhale old[l](x.f) == v
+  exhale acc(x.f, old[l](perm(x.f)) / 2)
+  assert v == 3
+}

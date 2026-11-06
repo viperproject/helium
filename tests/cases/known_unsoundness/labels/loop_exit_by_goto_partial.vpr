@@ -1,0 +1,22 @@
+// A label in a loop body on one of two ways out of the loop: the loop can
+// also be left from its head, without the label.
+field f: Int
+
+method m(x: Ref, n: Int, d: Bool)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+  if (i >= n) {
+    goto out
+  }
+  if (d) {
+    label inner
+    goto out
+  }
+  i := i + 1
+  goto head
+  label out
+  assert old[inner](x.f) == old[inner](x.f)
+}
