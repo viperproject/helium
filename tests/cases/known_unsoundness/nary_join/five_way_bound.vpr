@@ -1,0 +1,16 @@
+// REGRESSION (soundness). Five edges into `L`, two of them inhaling. The
+// inhaled heap's bound `p <= write` must not hold on the earlier edges.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, p: Perm, a: Bool, b: Bool, c: Bool, d: Bool)
+  requires none <= p
+{
+  if (a) { goto L }
+  if (b) { inhale acc(x.f, p); goto L }
+  if (c) { goto L }
+  if (d) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  assert b ==> p <= write
+}

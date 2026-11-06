@@ -1,0 +1,21 @@
+// REGRESSION (soundness). A loop head reached by three forward edges and two
+// back edges. The forward edges join before the invariant is checked, and the
+// inhaled heap stays in the frame; its `x != y` must not hold on `a && b`.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool, c: Bool, n: Int)
+{
+  var i: Int := 0
+  if (a) { goto head }
+  if (b) { inhale acc(x.f) && acc(y.f); goto head }
+  label head
+    invariant 0 <= i
+  if (i < n) {
+    if (c) { i := i + 1; goto head }
+    i := i + 2
+    goto head
+  }
+  assert b ==> x != y
+}
