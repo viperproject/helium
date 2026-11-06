@@ -130,7 +130,14 @@ pub(super) fn match_term_anywhere(
     let Some(classes) = egraph.classes_for_op(&Discriminant::FuncApp(root)) else {
         return vec![];
     };
+    // Between a union and the next rebuild the index still lists the class that
+    // was merged away, which resolves to the survivor: once the classes of many
+    // applications merge (each proven `true`), the survivor would be matched once
+    // per class it absorbed, every match walking all of their nodes.
+    let mut seen = HashSet::default();
     classes
+        .map(|class| egraph.find(class))
+        .filter(|&class| seen.insert(class))
         .flat_map(|class| match_term(egraph, term, class, caps, sigma))
         .collect()
 }
@@ -312,3 +319,35 @@ pub(crate) fn forall_rule(table: Arc<RwLock<RecipeTable>>) -> Rule {
 
 /// A partial bound-variable substitution, one slot per binder.
 pub(super) type Sigma = Vec<Option<Id>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// After many applications' classes merge, and before the rebuild that
+    /// refreshes the op index, a trigger still matches each application once:
+    /// the index's merged-away entries resolve to the class already matched.
+    #[test]
+    fn a_class_merged_mid_iteration_is_matched_once() {
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let f = FuncId(0);
+        let n = 50;
+        let apps: Vec<Id> = (0..n)
+            .map(|i| {
+                let x = g.add(Symbolic::Fresh(i));
+                g.add(Symbolic::FuncApp(f, Box::new([]), Box::new([x])))
+            })
+            .collect();
+        g.rebuild();
+        for &app in &apps[1..] {
+            g.union(apps[0], app);
+        }
+        let trigger = PreparedTerm::App {
+            func: f,
+            type_args: Box::new([]),
+            args: vec![PreparedTerm::Bound(0)],
+        };
+        let sigmas = match_term_anywhere(&g, &trigger, &[], &vec![None]);
+        assert_eq!(sigmas.len(), n as usize);
+    }
+}
