@@ -1972,6 +1972,7 @@ fn eval_from_snap(
 /// boolean with `true`. A `forall` in it becomes its own lazy-instantiation node.
 fn assume_ground_axiom(
     ctx: &mut VerifyContext<'_>,
+    name: Option<lasso::Spur>,
     body: &vmir::FunctionBody,
 ) -> Result<(), VerifyError> {
     let mut state = EvalState::new();
@@ -1981,6 +1982,12 @@ fn assume_ground_axiom(
                 // Axiom bodies are heap-free and trusted — no `Deref`, so the
                 // path condition is irrelevant here.
                 let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &[], None)?;
+                if let PureInst::Forall(q) = pi {
+                    let table = ctx.alloc.quant_table().read().expect("recipe table lock");
+                    let (rid, _) = table.entry_of(q)?;
+                    let name = name.map_or("<unnamed>", |n| ctx.interner.resolve(&n));
+                    println!("[forall] recipe #{} = axiom {name}", rid.0);
+                }
                 state.push_val(id, ty.clone(), None);
             }
             InstKind::Assume(val) => {
@@ -2051,10 +2058,10 @@ fn assume_axioms(
         // to this unit. Each is assumed as the ground axiom it denotes.
         if ax.ty_params.count() > 0 {
             for tys in type_trigger_matches(ax.ty_params.count(), &ax.ty_triggers, &index) {
-                assume_ground_axiom(ctx, &ax.body.subst_generics(&tys))?;
+                assume_ground_axiom(ctx, ax.name, &ax.body.subst_generics(&tys))?;
             }
         } else {
-            assume_ground_axiom(ctx, &ax.body)?;
+            assume_ground_axiom(ctx, ax.name, &ax.body)?;
         }
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`
