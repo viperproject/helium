@@ -6,6 +6,7 @@
 //! merge is normalised into a chain of synthetic binary-join blocks.
 
 use crate::dhash::{HashMap, HashSet};
+use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use itertools::Itertools;
@@ -293,7 +294,8 @@ pub(crate) fn lower_method(
     }
     // Baseline for unlabeled `old`: the post-requires-inhale heap.
     let baseline = current_heap;
-    let mut labeled: HashMap<Spur, HeapVal> = HashMap::default();
+    // Each `label`'s captured heap and its block's reach (see `Labels`).
+    let mut labeled: HashMap<Spur, (HeapVal, ReachRef)> = HashMap::default();
 
     // Structural heap merge (fork model): each block's `h_in` is derived from
     // its `Preds` (a `HeapInst::Merge` at a `Join`) and arms lower unguarded.
@@ -313,7 +315,8 @@ pub(crate) fn lower_method(
     // lowering guard (`pc`) built from it, and the branch condition `Val` of a
     // `Branch` block.
     let n = cfg.blocks.len();
-    let mut reach = Reach::new();
+    // Shared with the `old[L]` reads of the block being lowered (`Labels`).
+    let reach = RefCell::new(Reach::new());
     let mut reach_bdd: TiVec<BlockId, ReachRef> = (0..n).map(|_| Reach::TRUE).collect();
     let mut reach_pc: TiVec<BlockId, PathConds> = (0..n).map(|_| PathConds::default()).collect();
     // A disjunctive reach split into the conditions of the edges that make it
@@ -347,6 +350,7 @@ pub(crate) fn lower_method(
         } else {
             // The reach is the OR of the incoming edges' conditions; in the same
             // pass build the per-pred materialized `Val` that phis reconcile over.
+            let mut reach = reach.borrow_mut();
             let mut f = Reach::FALSE;
             let mut edges: Vec<(BlockId, Val)> = Vec::new();
             // Each edge's condition as a pc: the pred's pc plus the taken literal.
@@ -586,10 +590,16 @@ pub(crate) fn lower_method(
             // only under the cube; the other arm carries its own heap through the
             // join's `Merge`), so gating would emit `e ? 1/1 : 0/1` for an exhale
             // that always needs the full share.
+            // The head's own label is not passed yet: it is captured below.
+            let labels = pure_exp::Labels {
+                passed: &labeled,
+                here: reach_bdd[bid],
+                reach: &reach,
+            };
             let (frame, h_in) = sink.with_conds_kind(&pc, PcKind::Cube, |sink| {
                 let old = pure_exp::OldHeaps {
                     baseline,
-                    labeled: &labeled,
+                    labeled: Some(&labels),
                 };
                 // Established at the *pre*-havoc values: this is the entry
                 // obligation, about the state control actually arrives in.
@@ -618,8 +628,13 @@ pub(crate) fn lower_method(
 
         // `label L` captures the heap at block entry for later `old[L]`.
         if let Some(l) = cfg.blocks[bid].label {
-            labeled.insert(l, h_in);
+            labeled.insert(l, (h_in, reach_bdd[bid]));
         }
+        let labels = pure_exp::Labels {
+            passed: &labeled,
+            here: reach_bdd[bid],
+            reach: &reach,
+        };
 
         // --- body phase: lower the block's statements and terminator under pc ---
         let blk = &cfg.blocks[bid];
@@ -631,13 +646,13 @@ pub(crate) fn lower_method(
         let (new_heap, cond): (HeapVal, Option<Val>) = sink.with_ambient_cube(&pc, |sink| {
             let mut heap = h_in;
             for stmt in &blk.stmts {
-                heap = lower_stmt(b, &mut env, sink, heap, baseline, &mut labeled, stmt)?;
+                heap = lower_stmt(b, &mut env, sink, heap, baseline, &labels, stmt)?;
             }
             let cond = match &blk.term {
                 Terminator::Branch { cond, .. } => {
                     let old = pure_exp::OldHeaps {
                         baseline,
-                        labeled: &labeled,
+                        labeled: Some(&labels),
                     };
                     let cv = pure_exp::lower(
                         b,
@@ -681,7 +696,7 @@ pub(crate) fn lower_method(
                 Terminator::Goto(t) if cfg.loops.is_back_edge(bid, *t) => {
                     let old = pure_exp::OldHeaps {
                         baseline,
-                        labeled: &labeled,
+                        labeled: Some(&labels),
                     };
                     let invs = &cfg.blocks[*t].invs;
                     heap = lower_invariant(b, &env, sink, heap, invs, true, &old)?;
@@ -693,7 +708,7 @@ pub(crate) fn lower_method(
         })?;
         current_heap = new_heap;
         if let Some(c) = &cond {
-            reach.declare(c);
+            reach.borrow_mut().declare(c);
         }
         cond_val[bid] = cond;
         exit_env.insert(bid, env);
@@ -856,7 +871,7 @@ fn lower_stmt(
     sink: &mut Sink,
     current_heap: HeapVal,
     baseline: HeapVal,
-    labeled: &mut HashMap<Spur, HeapVal>,
+    labeled: &pure_exp::Labels<'_>,
     stmt: &typed::Statement,
 ) -> Result<HeapVal, TranslationError> {
     use typed::Statement as S;
@@ -875,7 +890,7 @@ fn lower_stmt(
             }
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             let v = pure_exp::lower(
                 b,
@@ -947,7 +962,7 @@ fn lower_stmt(
             }
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             let hctx = pure_exp::HeapCtx::same_with_old(current_heap, &old);
             let v = pure_exp::lower(b, env, sink, hctx, pure)?;
@@ -1016,7 +1031,7 @@ fn lower_stmt(
         S::Assert(e) => {
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             if let Some(v) =
                 spatial::lower_assertion_bool(b, env, sink, current_heap, Some(&old), e)?
@@ -1029,7 +1044,7 @@ fn lower_stmt(
         S::Refute(e) => {
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             if let Some(v) =
                 spatial::lower_assertion_bool(b, env, sink, current_heap, Some(&old), e)?
@@ -1041,7 +1056,7 @@ fn lower_stmt(
         S::Assume(e) => {
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             if let Some(v) =
                 spatial::lower_assertion_bool(b, env, sink, current_heap, Some(&old), e)?
@@ -1057,7 +1072,7 @@ fn lower_stmt(
         S::Inhale(e) => {
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             let (h_out, bv) = spatial::lower_spatial(
                 b,
@@ -1084,7 +1099,7 @@ fn lower_stmt(
             // value reads use the fixed pre-exhale `current_heap`.
             let old = pure_exp::OldHeaps {
                 baseline,
-                labeled: &*labeled,
+                labeled: Some(labeled),
             };
             let (h_out, bv) = spatial::lower_spatial(
                 b,
@@ -1163,11 +1178,14 @@ fn lower_fold_unfold(
     sink: &mut Sink,
     current_heap: HeapVal,
     baseline: HeapVal,
-    labeled: &HashMap<Spur, HeapVal>,
+    labeled: &pure_exp::Labels<'_>,
     pwp: &typed::PredicateWithPerm<typed::MethodBodyExt>,
     is_fold: bool,
 ) -> Result<HeapVal, TranslationError> {
-    let old = pure_exp::OldHeaps { baseline, labeled };
+    let old = pure_exp::OldHeaps {
+        baseline,
+        labeled: Some(labeled),
+    };
     let hctx = pure_exp::HeapCtx::same_with_old(current_heap, &old);
     let (call, perm) = pure_exp::lower_pred_call(b, env, sink, hctx, pwp)?;
     let perm = sink.gate_perm(perm);
@@ -1198,13 +1216,16 @@ fn lower_method_call(
     sink: &mut Sink,
     current_heap: HeapVal,
     baseline: HeapVal,
-    labeled: &HashMap<Spur, HeapVal>,
+    labeled: &pure_exp::Labels<'_>,
     call: &typed::Call<typed::MethodBodyExt>,
     ret_names: &[Spur],
     ret_types: &[vmir::Type],
 ) -> Result<HeapVal, TranslationError> {
     // Lower argument expressions (may contain `old(...)`).
-    let old = pure_exp::OldHeaps { baseline, labeled };
+    let old = pure_exp::OldHeaps {
+        baseline,
+        labeled: Some(labeled),
+    };
     let mut args: Vec<Val> = Vec::with_capacity(call.args.len());
     for a in &call.args {
         args.push(pure_exp::lower(
