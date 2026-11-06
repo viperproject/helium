@@ -1,0 +1,21 @@
+// A loop invariant reading a label reached on one arm before the loop: the
+// invariant is not well-defined where the loop is entered without `l`.
+field f: Int
+
+method m(x: Ref, n: Int, c: Bool)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  if (c) {
+    label l
+  }
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+    invariant old[l](perm(x.f)) == perm(x.f)
+  if (i >= n) {
+    goto out
+  }
+  i := i + 1
+  goto head
+  label out
+}

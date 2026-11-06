@@ -1,0 +1,13 @@
+// The label's heap carries the arm's write; read on the path that never
+// reached the label, it must not be usable.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 5
+    label l
+  }
+  assert old[l](x.f) == 5
+}

@@ -1,0 +1,9 @@
+// A label read before it is reached on the only path.
+field f: Int
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  assert old[l](x.f) == x.f
+  label l
+}
