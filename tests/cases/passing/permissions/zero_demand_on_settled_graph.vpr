@@ -1,0 +1,77 @@
+// A consume of a location that holds nothing owes nothing where its demand is
+// zero, or where the state is infeasible. The zero-demand probe answers it, and
+// it must be asked even when the graph is already saturated as the consume
+// starts, so that the consume's own saturate changes nothing.
+//
+// These verify even without that: a consume that mints its chunk value before
+// the lookup dirties the graph, so the retry asks anyway. They fail once a
+// consume takes its value from the chunks it finds instead.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+field f: Int
+
+// Infeasible precondition, postcondition predicate.
+method infeasible_post_predicate(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(Q(y))
+{
+  exhale false
+}
+
+// Infeasible precondition, postcondition field.
+method infeasible_post_field(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(y.f)
+{
+  exhale false
+}
+
+// Infeasible precondition, explicit exhale of a predicate.
+method infeasible_exhale(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+{
+  exhale false
+  exhale acc(Q(y))
+}
+
+// Infeasible after a pure assert.
+method infeasible_after_assert(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(Q(y))
+{
+  assert false
+}
+
+// Infeasible, empty body.
+method infeasible_empty_body(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(Q(y))
+{
+}
+
+method callee(y: Ref)
+  requires acc(Q(y))
+
+// Infeasible, call precondition.
+method infeasible_call(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+{
+  assert false
+  callee(y)
+}
+
+// Feasible: the conditional demand is zero.
+method zero_post(x: Ref, y: Ref, c: Bool, d: Bool)
+  requires acc(P(x)) && c == !d && d
+  ensures c ==> acc(Q(y))
+{
+  assert !c
+}
+
+// Feasible: the conditional demand of an exhale is zero.
+method zero_exhale(x: Ref, y: Ref, c: Bool, d: Bool)
+  requires acc(P(x)) && c == !d && d
+{
+  assert !c
+  exhale c ==> acc(Q(y))
+}
