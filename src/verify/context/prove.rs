@@ -928,6 +928,21 @@ impl<'a> VerifyContext<'a> {
         })
     }
 
+    /// Whether the working graph finds the current block unreachable: its cube
+    /// contradicts what holds on every path to the block. Ground alone no longer
+    /// decides this once the rules run on the working graph.
+    pub(crate) fn work_refutes_block(&mut self) -> bool {
+        if !self.rules_on_work() || !self.in_block {
+            return false;
+        }
+        self.sync_work();
+        self.block_dead
+            || self
+                .work
+                .as_ref()
+                .is_some_and(|w| graph_inconsistent(&w.egraph))
+    }
+
     /// [`Self::classes_under_pc`] in a method: the classes of `ids` in the working
     /// graph with the part of `pc_lits` it does not hold yet assumed under a
     /// checkpoint. The ids returned are working-graph ids, comparable only with

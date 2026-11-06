@@ -2516,13 +2516,16 @@ pub(crate) fn verify_method(
         // Raw: this runs *inside* the block, so `collect_pc_lits` would
         // prepend the very cube being lowered.
         let lits = pc_lits_raw(&mut ctx, &state, &block.cube);
+        // Once the rules run on the working graph ground no longer derives such
+        // a refutation; the working graph, which has the cube assumed, decides.
         let refuted = unreached
             || lits.iter().any(|(id, pol)| {
                 matches!(
                     ctx.egraph[ctx.egraph.find(*id)].data.known(),
                     Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
                 )
-            });
+            })
+            || ctx.work_refutes_block();
         if refuted {
             state.dead_blocks.insert(bid.0);
         }

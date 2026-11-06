@@ -1,0 +1,41 @@
+// Once the rules run on the working graph ground no longer derives that an arm's
+// cube is unsatisfiable; the working graph, which has the cube assumed, tags the
+// arm dead, so the join drops its heap instead of merging a permission that
+// would need a case split to read.
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  axiom same_is_identity { forall r: Ref :: { same(r) } same(r) == r }
+}
+
+method callee_full(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f)
+
+// The inner arm (`e` under `!e`) is dead; its call would need a full permission.
+method dead_inner_arm(y: Ref, e: Bool, z: Int)
+  requires acc(y.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (!e) {
+    if (e) {
+      callee_full(same(y))
+    }
+  }
+  assert perm(y.f) >= 1/4
+}
+
+// The same with a full permission at another location.
+method dead_inner_arm_other(y: Ref, w: Ref, e: Bool, z: Int)
+  requires acc(y.f, 1/2) && acc(w.f, 1/1)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (!e) {
+    if (e) {
+      callee_full(same(y))
+    }
+  }
+  assert perm(y.f) >= 1/4
+}

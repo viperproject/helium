@@ -1,0 +1,27 @@
+// The arm `e` holds 1/2 + 1/1 at one location (the inhaled `same(w).f` is `w.f`
+// through the axiom), so it is dead, and so is everything nested in it. Ground no
+// longer derives that once the rules run on the working graph; untagged, the
+// dead arms' heaps were merged at the inner join, and the bound of the merged
+// chunk was stated with the join phase's empty cube, refuting every path.
+//
+// Must FAIL (the assert: nothing is held at `x`).
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  axiom same_is_identity { forall r: Ref :: { same(r) } same(r) == r }
+}
+
+method dead_arm_heap_not_merged(x: Ref, w: Ref, d: Bool, e: Bool, z: Int)
+  requires acc(w.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (e) {
+    inhale acc(same(w).f, 1/1)
+    if (!d) {
+      same(x).f := 3
+    }
+  }
+  assert perm(x.f) >= 1/4
+}
