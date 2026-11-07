@@ -1,0 +1,41 @@
+// Tester exclusivity (`is-excl`) where the tester it decides appears only after
+// the decided one was matched and its graph saturated. `f(s) > k - 1` forces a
+// saturation in between; the tester asserted afterwards is a new node whose
+// decided sibling did not change, so the sibling's incremental search must look
+// again when a tester of another variant over the same argument appears.
+adt Shape {
+    Circle(r: Int)
+    Square(s: Int)
+    Tri(a: Int, b: Int)
+}
+
+function f(s: Shape): Int
+
+method sibling_after_positive(s: Shape, k: Int)
+    requires f(s) > k
+{
+    assume s.isCircle
+    assert f(s) > k - 1
+    assert !s.isSquare
+}
+
+method last_variant_after_negatives(s: Shape, k: Int)
+    requires f(s) > k
+{
+    assume !s.isCircle
+    assume !s.isSquare
+    assert f(s) > k - 1
+    assert s.isTri
+}
+
+// The argument merges with another value whose tester is decided.
+method decided_through_a_merge(s: Shape, t: Shape, k: Int)
+    requires f(s) > k && f(t) > k
+{
+    assume t.isSquare
+    var b: Bool := s.isTri
+    assert f(s) > k - 1
+    assume s == t
+    assert !b
+}
+

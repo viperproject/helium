@@ -1,0 +1,23 @@
+// A tester whose argument's class becomes a constructor only after the tester
+// was searched: the first assertion saturates the graph while `x` and `y` are
+// opaque, and the assumptions then merge them with constructors. The tester
+// reads its argument's data, so its incremental search must look again at the
+// testers over a class whose data changed, not only at new tester nodes.
+adt List {
+  Nil()
+  Cons(head: Int, tail: List)
+}
+
+function f(l: List): Int
+
+method m(x: List, y: List, k: Int)
+  requires f(x) > k
+{
+  var b: Bool := x.isNil
+  var c: Bool := y.isCons
+  assert f(x) > k - 1
+  assume x == Nil()
+  assume y == Cons(1, Nil())
+  assert b
+  assert c
+}

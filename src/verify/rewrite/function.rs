@@ -4,7 +4,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, Changes, EGraph, Id, Language, PatternAst, Rewrite, SearchMatches, Searcher, Subst,
+    Symbol, Var,
+};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::cert::FunctionDefinition;
@@ -110,7 +113,9 @@ impl FunctionCallSearcher {
 }
 impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
     fn vars(&self) -> Vec<Var> {
-        vec![]
+        let mut vars = self.arg_vars.clone();
+        vars.push(self.tok_var);
+        vars
     }
 
     fn search_with_limit(
@@ -133,6 +138,47 @@ impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
         }
         out
     }
+    /// A call matches anew when it is new, or when its `f%pre(args)` token
+    /// appeared since the rule last ran: both bring the call's class back.
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        _limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let mut classes: Vec<Id> = changes
+            .nodes(&Discriminant::FuncApp(self.func))
+            .map(|(class, _)| *class)
+            .collect();
+        for (_, token) in changes.nodes(&Discriminant::FuncApp(self.pre_token)) {
+            // The calls this token belongs to: same arguments.
+            let calls = |n: &Symbolic| matches!(n, Symbolic::FuncApp(f, ..) if *f == self.func);
+            match token.children().first() {
+                Some(&arg) => classes.extend(
+                    parents_where(egraph, arg, calls)
+                        .into_iter()
+                        .filter(|(_, call)| call.children() == token.children())
+                        .map(|(class, _)| class),
+                ),
+                None => classes.extend(
+                    egraph
+                        .classes_for_op(&Discriminant::FuncApp(self.func))
+                        .into_iter()
+                        .flatten(),
+                ),
+            }
+        }
+        for class in &mut classes {
+            *class = egraph.find(*class);
+        }
+        classes.sort_unstable();
+        classes.dedup();
+        classes
+            .into_iter()
+            .filter_map(|class| self.search_eclass_with_limit(egraph, class, usize::MAX))
+            .collect()
+    }
+
     fn search_eclass_with_limit(
         &self,
         egraph: &EGraph<Symbolic, ConstFold>,
@@ -481,17 +527,28 @@ pub(crate) fn function_rule(
     timed(Rewrite::new(format!("fn-{name}"), searcher, applier).expect("function rule"))
 }
 
-/// Mint a post-only rule keyed on `func`: replays the definition's post behind
+/// Mint the spec-derived post rule installed for each SCC member **during** a
+/// recursive batch's own verification, keyed on `func`: replays the post behind
 /// the call's `pre_token` (the full function's `f%pre`), no definitional union.
-/// Two users:
-/// - the limited-twin post rule of a recursive function ([`function_post_rule`]);
-/// - the spec-derived post rule installed for each SCC member **during** a
-///   recursive batch's own verification, which is what makes induction over a
-///   recursive call work (Silicon's phase-1 `post` axiom). The recursive call
-///   in the body mints its token under the call's path condition, so the
-///   induction hypothesis holds only on the path that makes the call.
+/// This is what makes induction over a recursive call work (Silicon's phase-1
+/// `post` axiom). The recursive call in the body mints its token under the
+/// call's path condition, so the induction hypothesis holds only on the path
+/// that makes the call.
 pub(crate) fn post_rule(
     name: &str,
+    func: FuncId,
+    def: Arc<FunctionDefinition>,
+    pre_token: FuncId,
+) -> Rule {
+    post_only_rule(format!("fn-spec-post-{name}"), func, def, pre_token)
+}
+
+/// A post-only rule keyed on `func`: replays the definition's post behind the
+/// call's `pre_token`, no definitional union. Its name must be unique among the
+/// rules of a unit: a rule's progress through the e-graph's changes is kept under
+/// its name.
+fn post_only_rule(
+    rule_name: String,
     func: FuncId,
     def: Arc<FunctionDefinition>,
     pre_token: FuncId,
@@ -504,7 +561,7 @@ pub(crate) fn post_rule(
         def,
         memo: Memo::new(),
     };
-    timed(Rewrite::new(format!("fn-post-{name}"), searcher, applier).expect("function post rule"))
+    timed(Rewrite::new(rule_name, searcher, applier).expect("function post rule"))
 }
 
 /// Mint the limited-twin post rule for a **recursive** function: keyed on
@@ -518,7 +575,7 @@ pub(crate) fn function_post_rule(
     pre_token: FuncId,
 ) -> Rule {
     let func = def.limited.expect("post rule requires a limited twin");
-    post_rule(name, func, def, pre_token)
+    post_only_rule(format!("fn-post-{name}"), func, def, pre_token)
 }
 
 /// A canonicalized call key: the ground `(type_args, value_args)` an occurrence
