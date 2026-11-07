@@ -1,0 +1,29 @@
+// Chunks stored apart can come to share a class after they were stored: here
+// `same(x) == x` is derived only after the second chunk is inhaled. A join lines
+// the arms' chunks up one to one, by ground's classes first and by the working
+// graph's (which holds what ground's rules would have derived) only for what
+// ground leaves without a partner, one chunk per arm and class. Lining them up by
+// class alone kept one chunk of each class and dropped the other: on main once
+// ground's saturation equates them, here once the working graph does. (Reduced
+// from `parking_lot::raw_rwlock::RawRwLock::wait_for_readers`.)
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  axiom same_is_id { forall r: Ref :: { same(r) } same(r) == r }
+}
+
+method join_keeps_both_chunks(x: Ref, z: Int, c: Bool)
+  requires acc(x.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  inhale acc(same(x).f, 1/2)
+  assert g(z + 1) == g(z + 1)
+  if (c) {
+    inhale g(1) == 1
+  } else {
+    inhale g(2) == 2
+  }
+  exhale acc(x.f, 1/1)
+}

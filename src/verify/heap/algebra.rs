@@ -1879,42 +1879,70 @@ pub(crate) fn merge_heaps(
     }
     for kind in &kinds {
         let (then_c, els_c) = (h_then.chunks_of(kind), h_els.chunks_of(kind));
-        let ids: Vec<egg::Id> = then_c.iter().chain(els_c).map(|c| c.addr).collect();
-        // Chunks line up by address class: ground's, or once the rules run on the
-        // working graph its classes with nothing assumed, which hold on every path
-        // to the join (see `find_chunk_consolidated`). No fact is recorded here.
-        // The join's own facts (the arms', handed over at the close) are run only
-        // when a chunk of each arm is left without a partner, the one case a new
-        // equality can pair.
-        let mut keys = ctx
-            .work_classes(&ids, false)
-            .unwrap_or_else(|| ids.iter().map(|&a| ctx.egraph.find(a)).collect());
-        let n = then_c.len();
-        let unpaired =
-            |side: &[egg::Id], other: &[egg::Id]| side.iter().any(|k| !other.contains(k));
-        if unpaired(&keys[..n], &keys[n..])
-            && unpaired(&keys[n..], &keys[..n])
-            && let Some(fresh) = ctx.work_classes(&ids, true)
-        {
-            keys = fresh;
-        }
-        let (then_k, els_k) = keys.split_at(n);
-        let mut addrs: Vec<egg::Id> = Vec::new();
-        for k in &keys {
-            if !addrs.contains(k) {
-                addrs.push(*k);
+        // Chunks line up one to one by address class, ground's first: a class can
+        // hold several chunks of an arm (stored apart, equated later), and each
+        // is paired at most once, never dropped. Once the rules run on the
+        // working graph ground no longer derives every equality that pairs them,
+        // so what ground leaves without a partner on both arms is paired by the
+        // working graph's classes with nothing assumed, which hold on every path
+        // to the join (see `find_chunk_consolidated`), where a class holds exactly
+        // one such chunk of each arm. No fact is recorded here. The join's own
+        // facts (the arms', handed over at the close) are run only when the graph
+        // as it stands still leaves a chunk of each arm without a partner.
+        let find = |ctx: &VerifyContext<'_>, c: &Chunk| ctx.egraph.find(c.addr);
+        let mut partner: Vec<Option<usize>> = vec![None; then_c.len()];
+        let mut taken = vec![false; els_c.len()];
+        for (i, a) in then_c.iter().enumerate() {
+            let k = find(ctx, a);
+            if let Some(j) = (0..els_c.len()).find(|&j| !taken[j] && find(ctx, &els_c[j]) == k) {
+                partner[i] = Some(j);
+                taken[j] = true;
             }
         }
-        let at = |chunks: &[Chunk], ks: &[egg::Id], k: egg::Id| {
-            chunks
-                .iter()
-                .zip(ks)
-                .find(|(_, ck)| **ck == k)
-                .map(|(c, _)| c.clone())
-        };
-        for addr in addrs {
-            let ct = at(then_c, then_k, addr);
-            let ce = at(els_c, els_k, addr);
+        let open_t: Vec<usize> = (0..then_c.len())
+            .filter(|&i| partner[i].is_none())
+            .collect();
+        let open_e: Vec<usize> = (0..els_c.len()).filter(|&j| !taken[j]).collect();
+        if !open_t.is_empty() && !open_e.is_empty() {
+            let ids: Vec<egg::Id> = (open_t.iter().map(|&i| then_c[i].addr))
+                .chain(open_e.iter().map(|&j| els_c[j].addr))
+                .collect();
+            // (then index, else index) of every class holding exactly one open
+            // chunk of each arm.
+            let pairs = |keys: &[egg::Id]| -> Vec<(usize, usize)> {
+                let (tk, ek) = keys.split_at(open_t.len());
+                let once =
+                    |side: &[egg::Id], k: egg::Id| side.iter().filter(|x| **x == k).count() == 1;
+                tk.iter()
+                    .enumerate()
+                    .filter_map(|(a, k)| {
+                        let b = ek.iter().position(|x| x == k)?;
+                        (once(tk, *k) && once(ek, *k)).then_some((open_t[a], open_e[b]))
+                    })
+                    .collect()
+            };
+            let mut found = ctx.work_classes(&ids, false).map(|k| pairs(&k));
+            if found
+                .as_ref()
+                .is_some_and(|p| p.len() < open_t.len().min(open_e.len()))
+                && let Some(fresh) = ctx.work_classes(&ids, true)
+            {
+                found = Some(pairs(&fresh));
+            }
+            for (i, j) in found.unwrap_or_default() {
+                partner[i] = Some(j);
+                taken[j] = true;
+            }
+        }
+        let slots: Vec<(Option<Chunk>, Option<Chunk>)> = (then_c.iter().zip(&partner))
+            .map(|(a, p)| (Some(a.clone()), p.map(|j| els_c[j].clone())))
+            .chain(
+                (els_c.iter().zip(&taken))
+                    .filter(|(_, t)| !**t)
+                    .map(|(b, _)| (None, Some(b.clone()))),
+            )
+            .collect();
+        for (ct, ce) in slots {
             let chunk = match (ct, ce) {
                 (Some(a), Some(b)) => {
                     let value = if ctx.egraph.find(a.value) == ctx.egraph.find(b.value) {
