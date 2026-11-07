@@ -113,7 +113,9 @@ impl FunctionCallSearcher {
 }
 impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
     fn vars(&self) -> Vec<Var> {
-        vec![]
+        let mut vars = self.arg_vars.clone();
+        vars.push(self.tok_var);
+        vars
     }
 
     fn search_with_limit(

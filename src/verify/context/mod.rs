@@ -875,9 +875,10 @@ fn no_match_lost(
     }
     let mut missed = Vec::new();
     if changed(&mut g, before) {
-        // name the rules: again, one at a time
-        let mut g = egraph.clone();
+        // name the rules: again, each alone on a fresh copy, since one rule's
+        // merges would make the next rule's matches look lost
         for (rule, rest) in &lost {
+            let mut g = egraph.clone();
             let before = (g.total_size(), g.number_of_classes());
             rule.apply(&mut g, rest);
             if changed(&mut g, before) {
