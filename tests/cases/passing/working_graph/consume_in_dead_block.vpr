@@ -1,0 +1,53 @@
+// A block whose cube contradicts what holds on every path to it is unreachable,
+// and once the rules run on the working graph that graph decides it: with the
+// cube assumed it is inconsistent. An inconsistent graph runs no rules, so the
+// address the block consumes never meets the held chunk it equals (`same_is_id`)
+// and the consume would go to the summary over every chunk of the predicate,
+// whose permission tree doubles with each address it cannot decide (22 chunks:
+// 0.8 GB, 2^22 leaves). Its consumes take nothing instead, as every obligation
+// of the block holds. (Reduced from `mio`'s `Interest` formatter, which ran out
+// of memory.)
+predicate U(r: Ref, t: Int)
+
+domain D {
+  function g(x: Int): Int
+  function same(r: Ref): Ref
+  axiom same_is_id { forall r: Ref :: { same(r) } same(r) == r }
+}
+
+method consume_in_dead_block(q: Ref, z: Int,
+  r0: Ref, r1: Ref, r2: Ref, r3: Ref, r4: Ref, r5: Ref, r6: Ref, r7: Ref,
+  r8: Ref, r9: Ref, r10: Ref, r11: Ref, r12: Ref, r13: Ref, r14: Ref, r15: Ref,
+  r16: Ref, r17: Ref, r18: Ref, r19: Ref, r20: Ref, r21: Ref)
+  requires acc(U(r0, 0))
+  requires acc(U(r1, 0))
+  requires acc(U(r2, 0))
+  requires acc(U(r3, 0))
+  requires acc(U(r4, 0))
+  requires acc(U(r5, 0))
+  requires acc(U(r6, 0))
+  requires acc(U(r7, 0))
+  requires acc(U(r8, 0))
+  requires acc(U(r9, 0))
+  requires acc(U(r10, 0))
+  requires acc(U(r11, 0))
+  requires acc(U(r12, 0))
+  requires acc(U(r13, 0))
+  requires acc(U(r14, 0))
+  requires acc(U(r15, 0))
+  requires acc(U(r16, 0))
+  requires acc(U(r17, 0))
+  requires acc(U(r18, 0))
+  requires acc(U(r19, 0))
+  requires acc(U(r20, 0))
+  requires acc(U(r21, 0))
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (z == 3) {
+    if (z > 4) {
+      assert g(z + 1) == g(z + 1)
+      inhale acc(U(same(q), 0))
+      exhale acc(U(q, 0))
+    }
+  }
+}

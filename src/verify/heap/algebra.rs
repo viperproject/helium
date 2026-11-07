@@ -1062,6 +1062,15 @@ pub(crate) fn heap_subtract(
     pc_lits: &[(egg::Id, Polarity)],
     demand: Demand,
 ) -> Result<Heap, VerifyError> {
+    // An unreachable block consumes nothing, as every obligation it has holds
+    // (`prove_under_pc`'s dead-block tier). Once the rules run on the working graph
+    // this is decided there, and must be decided first: a graph that is
+    // inconsistent runs no rules, so no address it is asked about meets a held
+    // chunk, and the summarized fallbacks then work through every chunk of the
+    // group.
+    if ctx.work_refutes_block() {
+        return Ok(h1.clone());
+    }
     heap_subtract_inner(ctx, h1, kind, chunk2, pc_lits, demand, ConsumePass::First)
 }
 
