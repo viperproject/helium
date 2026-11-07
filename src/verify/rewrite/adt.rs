@@ -322,13 +322,59 @@ pub fn is_excl_rule(testers: Arc<[FuncId]>) -> Rule {
     )
 }
 
-/// Searcher for [`is_excl_rule`]: every class that holds a tester of the head
-/// and whose value is known. Reads the testers' `classes_by_op` buckets and one
-/// class datum per class; inspects no node. One empty subst per class; the
-/// applier re-reads the nodes.
+/// Searcher for [`is_excl_rule`]: every tester application of the head whose
+/// value is known, one match each: the flat pattern of the application (the
+/// tester and its type args), binding `?x` to its argument.
 #[derive(Clone)]
 pub(super) struct DecidedTesterSearcher {
     pub(super) testers: Arc<[FuncId]>,
+}
+
+impl DecidedTesterSearcher {
+    /// The match of `node` in `eclass` if it applies a tester of the head.
+    fn tester_match(
+        &self,
+        eclass: Id,
+        node: &Symbolic,
+    ) -> Option<SearchMatches<'static, Symbolic>> {
+        let Symbolic::FuncApp(f, tys, args) = node else {
+            return None;
+        };
+        if args.len() != 1 || !self.testers.contains(f) {
+            return None;
+        }
+        let mut ast = PatternAst::default();
+        let x = ast.add(egg::ENodeOrVar::Var(arg_x()));
+        ast.add(egg::ENodeOrVar::ENode(Symbolic::FuncApp(
+            *f,
+            tys.clone(),
+            Box::new([x]),
+        )));
+        let mut subst = Subst::default();
+        subst.insert(arg_x(), args[0]);
+        Some(SearchMatches {
+            eclass,
+            substs: vec![subst],
+            ast: Some(std::borrow::Cow::Owned(ast)),
+        })
+    }
+
+    /// The matches of the tester applications in `eclass`, if its value is known.
+    fn decided_matches(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        out: &mut Vec<SearchMatches<'static, Symbolic>>,
+    ) {
+        if known_bool(egraph, eclass).is_some() {
+            out.extend(
+                egraph[eclass]
+                    .nodes
+                    .iter()
+                    .filter_map(|n| self.tester_match(eclass, n)),
+            );
+        }
+    }
 }
 
 impl Searcher<Symbolic, ConstFold> for DecidedTesterSearcher {
@@ -358,18 +404,57 @@ impl Searcher<Symbolic, ConstFold> for DecidedTesterSearcher {
         // `true` and `false` hold testers of several variants, so they sit in
         // several buckets: report each class once.
         let mut seen = HashSet::default();
-        self.testers
+        let mut out = Vec::new();
+        for c in self
+            .testers
             .iter()
             .filter_map(|&t| egraph.classes_for_op(&Discriminant::FuncApp(t)))
             .flatten()
-            .filter(|&c| known_bool(egraph, c).is_some() && seen.insert(c))
-            .take(limit)
-            .map(|eclass| SearchMatches {
-                eclass,
-                substs: vec![Subst::default()],
-                ast: None,
-            })
-            .collect()
+        {
+            if seen.insert(c) {
+                self.decided_matches(egraph, c, &mut out);
+            }
+        }
+        out.truncate(limit);
+        out
+    }
+
+    /// A decided tester application matches anew when it is new to its class
+    /// (added, moved into `true` or `false`, or its argument merged), when its
+    /// class becomes decided, or when a tester of another variant over the same
+    /// argument appears: the applier reads those siblings, and for the last
+    /// variant their values, which reach it through the siblings' own matches.
+    fn search_changes(
+        &self,
+        egraph: &EGraph<Symbolic, ConstFold>,
+        changes: &Changes<Symbolic>,
+        _limit: usize,
+    ) -> Vec<SearchMatches<'_, Symbolic>> {
+        let mut out = Vec::new();
+        for &t in self.testers.iter() {
+            for (class, node) in changes.nodes(&Discriminant::FuncApp(t)) {
+                if known_bool(egraph, *class).is_some() {
+                    out.extend(self.tester_match(*class, node));
+                }
+                // the decided siblings of a new tester
+                let Symbolic::FuncApp(_, tys, args) = node else {
+                    continue;
+                };
+                for &sib in self.testers.iter().filter(|&&s| s != t) {
+                    let probe = Symbolic::FuncApp(sib, tys.clone(), args.clone());
+                    if let Some(c) = egraph.lookup(probe)
+                        && known_bool(egraph, c).is_some()
+                    {
+                        let node = Symbolic::FuncApp(sib, tys.clone(), args.clone());
+                        out.extend(self.tester_match(c, &node));
+                    }
+                }
+            }
+        }
+        for &class in changes.data() {
+            self.decided_matches(egraph, class, &mut out);
+        }
+        out
     }
 
     fn vars(&self) -> Vec<Var> {
@@ -479,27 +564,46 @@ impl Applier<Symbolic, ConstFold> for IsExclApplier {
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         matches: &[SearchMatches<Symbolic>],
-        _: Symbol,
+        rule: Symbol,
     ) -> Vec<Id> {
         let mut walked = HashSet::default();
         let mut changed = vec![];
         for m in matches {
-            if walked.insert(egraph.find(m.eclass)) {
+            if m.ast.is_some() {
+                for subst in &m.substs {
+                    changed.extend(self.apply_one(egraph, m.eclass, subst, m.ast.as_deref(), rule));
+                }
+            } else if walked.insert(egraph.find(m.eclass)) {
                 changed.extend(self.apply_class(egraph, m.eclass));
             }
         }
         changed
     }
 
+    /// One tester application, as [`DecidedTesterSearcher`] matched it, or (with
+    /// no pattern) every one in `eclass`.
     fn apply_one(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        _: &Subst,
-        _: Option<&PatternAst<Symbolic>>,
+        subst: &Subst,
+        ast: Option<&PatternAst<Symbolic>>,
         _: Symbol,
     ) -> Vec<Id> {
-        self.apply_class(egraph, eclass)
+        let Some(ast) = ast else {
+            return self.apply_class(egraph, eclass);
+        };
+        let egg::ENodeOrVar::ENode(Symbolic::FuncApp(f, tys, _)) = &ast[ast.root()] else {
+            return vec![];
+        };
+        let (Some(&variant), Some(holds)) = (self.variant_of.get(f), known_bool(egraph, eclass))
+        else {
+            return vec![];
+        };
+        let mut changed = vec![];
+        let x = egraph.find(subst[arg_x()]);
+        self.apply_app(egraph, holds, variant, tys.clone(), x, &mut changed);
+        changed
     }
     fn vars(&self) -> Vec<Var> {
         vec![]
