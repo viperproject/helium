@@ -1,0 +1,109 @@
+// A `refute` whose expression is proven fails, however many instances the
+// pass that proved it deferred: knowing more cannot unprove it. Proven here by
+// the generation-bounded first pass, where `grow` (a cubic matching loop) ends
+// at a fixpoint; without the bound it reaches the growth limit before the
+// 90-deep unfolding of `c90` finishes, and the proof would fail.
+domain Cube {
+  function a(i: Int): Bool
+  function b(i: Int): Bool
+  function c(i: Int): Bool
+  function h(i: Int, j: Int, k: Int): Bool
+  axiom grow { forall i: Int, j: Int, k: Int :: { a(i), b(j), c(k) } a(i + 1) && b(j + 1) && c(k + 1) && h(i, j, k) }
+}
+function c0(x: Int): Int { x }
+function c1(x: Int): Int { c0(x) }
+function c2(x: Int): Int { c1(x) }
+function c3(x: Int): Int { c2(x) }
+function c4(x: Int): Int { c3(x) }
+function c5(x: Int): Int { c4(x) }
+function c6(x: Int): Int { c5(x) }
+function c7(x: Int): Int { c6(x) }
+function c8(x: Int): Int { c7(x) }
+function c9(x: Int): Int { c8(x) }
+function c10(x: Int): Int { c9(x) }
+function c11(x: Int): Int { c10(x) }
+function c12(x: Int): Int { c11(x) }
+function c13(x: Int): Int { c12(x) }
+function c14(x: Int): Int { c13(x) }
+function c15(x: Int): Int { c14(x) }
+function c16(x: Int): Int { c15(x) }
+function c17(x: Int): Int { c16(x) }
+function c18(x: Int): Int { c17(x) }
+function c19(x: Int): Int { c18(x) }
+function c20(x: Int): Int { c19(x) }
+function c21(x: Int): Int { c20(x) }
+function c22(x: Int): Int { c21(x) }
+function c23(x: Int): Int { c22(x) }
+function c24(x: Int): Int { c23(x) }
+function c25(x: Int): Int { c24(x) }
+function c26(x: Int): Int { c25(x) }
+function c27(x: Int): Int { c26(x) }
+function c28(x: Int): Int { c27(x) }
+function c29(x: Int): Int { c28(x) }
+function c30(x: Int): Int { c29(x) }
+function c31(x: Int): Int { c30(x) }
+function c32(x: Int): Int { c31(x) }
+function c33(x: Int): Int { c32(x) }
+function c34(x: Int): Int { c33(x) }
+function c35(x: Int): Int { c34(x) }
+function c36(x: Int): Int { c35(x) }
+function c37(x: Int): Int { c36(x) }
+function c38(x: Int): Int { c37(x) }
+function c39(x: Int): Int { c38(x) }
+function c40(x: Int): Int { c39(x) }
+function c41(x: Int): Int { c40(x) }
+function c42(x: Int): Int { c41(x) }
+function c43(x: Int): Int { c42(x) }
+function c44(x: Int): Int { c43(x) }
+function c45(x: Int): Int { c44(x) }
+function c46(x: Int): Int { c45(x) }
+function c47(x: Int): Int { c46(x) }
+function c48(x: Int): Int { c47(x) }
+function c49(x: Int): Int { c48(x) }
+function c50(x: Int): Int { c49(x) }
+function c51(x: Int): Int { c50(x) }
+function c52(x: Int): Int { c51(x) }
+function c53(x: Int): Int { c52(x) }
+function c54(x: Int): Int { c53(x) }
+function c55(x: Int): Int { c54(x) }
+function c56(x: Int): Int { c55(x) }
+function c57(x: Int): Int { c56(x) }
+function c58(x: Int): Int { c57(x) }
+function c59(x: Int): Int { c58(x) }
+function c60(x: Int): Int { c59(x) }
+function c61(x: Int): Int { c60(x) }
+function c62(x: Int): Int { c61(x) }
+function c63(x: Int): Int { c62(x) }
+function c64(x: Int): Int { c63(x) }
+function c65(x: Int): Int { c64(x) }
+function c66(x: Int): Int { c65(x) }
+function c67(x: Int): Int { c66(x) }
+function c68(x: Int): Int { c67(x) }
+function c69(x: Int): Int { c68(x) }
+function c70(x: Int): Int { c69(x) }
+function c71(x: Int): Int { c70(x) }
+function c72(x: Int): Int { c71(x) }
+function c73(x: Int): Int { c72(x) }
+function c74(x: Int): Int { c73(x) }
+function c75(x: Int): Int { c74(x) }
+function c76(x: Int): Int { c75(x) }
+function c77(x: Int): Int { c76(x) }
+function c78(x: Int): Int { c77(x) }
+function c79(x: Int): Int { c78(x) }
+function c80(x: Int): Int { c79(x) }
+function c81(x: Int): Int { c80(x) }
+function c82(x: Int): Int { c81(x) }
+function c83(x: Int): Int { c82(x) }
+function c84(x: Int): Int { c83(x) }
+function c85(x: Int): Int { c84(x) }
+function c86(x: Int): Int { c85(x) }
+function c87(x: Int): Int { c86(x) }
+function c88(x: Int): Int { c87(x) }
+function c89(x: Int): Int { c88(x) }
+function c90(x: Int): Int { c89(x) }
+
+method m(y: Int)
+  requires a(0) && b(0) && c(0)
+{
+  refute c90(y) == y
+}

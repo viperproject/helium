@@ -67,9 +67,14 @@ impl VerifyError {
         }
     }
 
-    /// The innermost error, peeling any `AtInst` wrapping. Used by tests to
-    /// assert on the underlying cause.
-    #[cfg(test)]
+    /// Whether the failure rests on a proof rather than on a failure to prove:
+    /// a `refute` whose expression was proven. Knowing more facts cannot undo
+    /// it.
+    pub(crate) fn rests_on_proof(&self) -> bool {
+        matches!(self.root_cause(), Self::RefuteFailed)
+    }
+
+    /// The innermost error, peeling any `AtInst` wrapping.
     pub(crate) fn root_cause(&self) -> &VerifyError {
         match self {
             Self::AtInst { source, .. } => source.root_cause(),

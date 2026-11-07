@@ -17,6 +17,7 @@ use crate::{
             gate_perm_by_guard,
         },
         lang::Symbolic,
+        rewrite::forall::pass,
         stats,
         viz::Snapshotter,
     },
@@ -1230,10 +1231,9 @@ fn eval_method_inst(
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
-            // For an opaque heap-free `#requires` token this proves the callee-cert
-            // formula and releases the token (mirrors `eval_snap`); otherwise a
-            // plain `prove_under_pc`.
-            if !ctx.prove_under_pc(id, &pc_lits) {
+            // A value obligation: a unit's second pass takes it as proven if the
+            // first pass proved it (see `VerifyContext::prove_obligation`).
+            if !ctx.prove_obligation(id, &pc_lits) {
                 if std::env::var_os("SILVER_OXIDE_TRACE_ASSERT").is_some() {
                     eprintln!(
                         "[assert-fail] Assert inst, pc={} lits:\n{}",
@@ -1260,9 +1260,16 @@ fn eval_method_inst(
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
+            // On the second pass, the `refute` the first pass proved fails
+            // without a proof here, which a termination bound could stop.
+            if pass::refuted_by_first_pass() {
+                stats::bump(|s| s.prove_first_pass += 1);
+                return Err(VerifyError::RefuteFailed);
+            }
             if ctx.prove_under_pc(id, &pc_lits) {
                 return Err(VerifyError::RefuteFailed);
             }
+            pass::note_passed_on_failure();
         }
     }
     Ok(())
@@ -1558,7 +1565,7 @@ fn walk_footprint(
     match direction {
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {
-            if !ctx.prove_under_pc(bool_id, bool_guard) {
+            if !ctx.prove_obligation(bool_id, bool_guard) {
                 if std::env::var_os("SILVER_OXIDE_TRACE_ASSERT").is_some() {
                     eprintln!(
                         "[assert-fail] resource-bool consume, pc={} lits:\n{}",
@@ -2349,9 +2356,18 @@ fn walk_body(
                 heaps_before,
             )
         };
+        ctx.inst_proven = pass::enter_inst();
         let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
+        // A framed read's obligation is a heap obligation (see
+        // [`VerifyContext::prove_obligation`]); the others are value side
+        // conditions.
+        let framing = matches!(inst.kind, InstKind::Pure(_, PureInst::Deref(..)));
         for (goal, err) in inst_obligations(ctx, state, &inst.kind, &pc_lits) {
-            if !ctx.prove_under_pc(goal, &pc_lits) {
+            let proven = match framing {
+                true => ctx.prove_under_pc(goal, &pc_lits),
+                false => ctx.prove_obligation(goal, &pc_lits),
+            };
+            if !proven {
                 if crate::verify::viz::dump_perm_enabled() {
                     eprintln!(
                         "[perm-dump] failed obligation goal:\n{}",
@@ -2371,7 +2387,9 @@ fn walk_body(
         // [`check_forall_wd`]). It happens here, not in the evaluator, because it
         // needs the path condition — and here it cannot be forgotten by one of the
         // three drivers. Axiom bodies never reach this walk: they stay trusted.
-        if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
+        // Its obligations are value side conditions, proven on a clone that
+        // leaves nothing behind, so one the unit's first pass proved is skipped.
+        if let (InstKind::Pure(_, PureInst::Forall(q)), false) = (&inst.kind, ctx.inst_proven) {
             if let Err(err) = check_forall_wd(ctx, q, state, &pc_lits) {
                 let inst_text = inst_text(program);
                 if snap.enabled() {
@@ -2390,6 +2408,7 @@ fn walk_body(
             return Err(err.with_inst(inst_text, inst_idx, insts.len()));
         }
         stats::bump(|s| s.insts_processed += 1);
+        pass::complete_inst();
         if snap.enabled() {
             let highlight =
                 (state.vals.len() > vals_before).then(|| state.vals[state.vals.len() - 1]);
@@ -2397,6 +2416,7 @@ fn walk_body(
             snap.snapshot(ctx, &heaps, &inst_text(program), highlight);
         }
     }
+    ctx.inst_proven = false;
     Ok(())
 }
 

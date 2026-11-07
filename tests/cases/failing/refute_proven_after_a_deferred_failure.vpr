@@ -1,0 +1,66 @@
+// A `refute` whose expression is proven fails, also after an earlier
+// obligation the generation-bounded first pass failed, assumed and left to the
+// second pass (`assert s(30)`, past the bound). The first pass proves the
+// refute's expression and stops there. The second pass proves `s(30)` without
+// the bound, but its runs reach the growth limit on `grow` (a cubic matching
+// loop) before the 40-deep unfolding of `c40` finishes, so proving the
+// expression again would fail and the refute would pass. It fails where the
+// first pass proved it, once the obligations before it are checked.
+domain Cube {
+  function a(i: Int): Bool
+  function b(i: Int): Bool
+  function c(i: Int): Bool
+  function h(i: Int, j: Int, k: Int): Bool
+  axiom grow { forall i: Int, j: Int, k: Int :: { a(i), b(j), c(k) } a(i + 1) && b(j + 1) && c(k + 1) && h(i, j, k) }
+}
+domain Succ {
+  function s(i: Int): Bool
+  axiom step { forall i: Int :: { s(i) } s(i) == s(i + 1) }
+}
+function c0(x: Int): Int { x }
+function c1(x: Int): Int { c0(x) }
+function c2(x: Int): Int { c1(x) }
+function c3(x: Int): Int { c2(x) }
+function c4(x: Int): Int { c3(x) }
+function c5(x: Int): Int { c4(x) }
+function c6(x: Int): Int { c5(x) }
+function c7(x: Int): Int { c6(x) }
+function c8(x: Int): Int { c7(x) }
+function c9(x: Int): Int { c8(x) }
+function c10(x: Int): Int { c9(x) }
+function c11(x: Int): Int { c10(x) }
+function c12(x: Int): Int { c11(x) }
+function c13(x: Int): Int { c12(x) }
+function c14(x: Int): Int { c13(x) }
+function c15(x: Int): Int { c14(x) }
+function c16(x: Int): Int { c15(x) }
+function c17(x: Int): Int { c16(x) }
+function c18(x: Int): Int { c17(x) }
+function c19(x: Int): Int { c18(x) }
+function c20(x: Int): Int { c19(x) }
+function c21(x: Int): Int { c20(x) }
+function c22(x: Int): Int { c21(x) }
+function c23(x: Int): Int { c22(x) }
+function c24(x: Int): Int { c23(x) }
+function c25(x: Int): Int { c24(x) }
+function c26(x: Int): Int { c25(x) }
+function c27(x: Int): Int { c26(x) }
+function c28(x: Int): Int { c27(x) }
+function c29(x: Int): Int { c28(x) }
+function c30(x: Int): Int { c29(x) }
+function c31(x: Int): Int { c30(x) }
+function c32(x: Int): Int { c31(x) }
+function c33(x: Int): Int { c32(x) }
+function c34(x: Int): Int { c33(x) }
+function c35(x: Int): Int { c34(x) }
+function c36(x: Int): Int { c35(x) }
+function c37(x: Int): Int { c36(x) }
+function c38(x: Int): Int { c37(x) }
+function c39(x: Int): Int { c38(x) }
+function c40(x: Int): Int { c39(x) }
+method m(y: Int)
+  requires a(0) && b(0) && c(0) && s(0)
+{
+  assert s(30)
+  refute c40(y) == y
+}

@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::translate;
+use crate::verify::rewrite::forall::pass::verify_unit;
 use crate::viper::{
     GlobalsCollector, IdentCollector, disambiguate, inline_macros, typecheck_program, viper_parser,
     walk::AstWalkable,
@@ -395,12 +396,14 @@ fn verify_named_resource(program: &vmir::Program, name: &str) -> Result<(), Veri
         }
         if let vmir::Declaration::Resource(cr) = decl {
             let cname = program.name(cid).to_string();
-            if let Ok(cert) = verify_resource(program, &cname, cr, &certs, &fn_certs, &mut alloc) {
+            if let Ok(cert) =
+                verify_unit(|| verify_resource(program, &cname, cr, &certs, &fn_certs, &mut alloc))
+            {
                 certs.insert(cid, cert);
             }
         }
     }
-    verify_resource(program, name, r, &certs, &fn_certs, &mut alloc).map(|_| ())
+    verify_unit(|| verify_resource(program, name, r, &certs, &fn_certs, &mut alloc)).map(|_| ())
 }
 
 /// Verify every function in `program` except `skip` (test helper), caching
@@ -424,9 +427,9 @@ fn build_fn_certs_except(
             }
             if let vmir::Declaration::Function(f) = decl {
                 let name = program.name(id).to_string();
-                if let Ok(Some(cert)) =
+                if let Ok(Some(cert)) = verify_unit(|| {
                     verify_function(program, &name, id, f, &no_certs, &fn_certs, None, alloc)
-                {
+                }) {
                     fn_certs.insert(id, cert);
                     progress = true;
                 }
@@ -514,16 +517,18 @@ fn build_all_certs(
             match decl {
                 vmir::Declaration::Resource(r) if !certs.contains_key(&id) => {
                     let name = program.name(id).to_string();
-                    if let Ok(cert) = verify_resource(program, &name, r, &certs, &fn_certs, alloc) {
+                    if let Ok(cert) =
+                        verify_unit(|| verify_resource(program, &name, r, &certs, &fn_certs, alloc))
+                    {
                         certs.insert(id, cert);
                         progress = true;
                     }
                 }
                 vmir::Declaration::Function(f) if !fn_certs.contains_key(&id) => {
                     let name = program.name(id).to_string();
-                    if let Ok(Some(cert)) =
+                    if let Ok(Some(cert)) = verify_unit(|| {
                         verify_function(program, &name, id, f, &certs, &fn_certs, None, alloc)
-                    {
+                    }) {
                         fn_certs.insert(id, cert);
                         progress = true;
                     }
@@ -548,7 +553,7 @@ fn verify_named_method(program: &vmir::Program, name: &str) -> Result<(), Verify
     };
     let mut alloc = crate::verify::func_registry::FuncRegistry::new(program);
     let (certs, fn_certs) = build_all_certs(program, &mut alloc);
-    verify_method(program, name, m, &certs, &fn_certs, &mut alloc)
+    verify_unit(|| verify_method(program, name, m, &certs, &fn_certs, &mut alloc))
 }
 
 /// Verify the function `name` with all other members' certs built (test
@@ -566,7 +571,8 @@ fn verify_named_function(program: &vmir::Program, name: &str) -> Result<(), Veri
     // Re-verify the target itself so a failing target returns its `Err` (the
     // fixpoint helper swallowed it).
     fn_certs.remove(&id);
-    verify_function(program, name, id, f, &certs, &fn_certs, None, &mut alloc).map(|_| ())
+    verify_unit(|| verify_function(program, name, id, f, &certs, &fn_certs, None, &mut alloc))
+        .map(|_| ())
 }
 
 #[test]

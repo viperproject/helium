@@ -213,7 +213,8 @@ impl<'a> VerifyContext<'a> {
     /// 4. `memo` — the implication itself is already `true` (a prior identical
     ///    obligation merged it, or it is trivial), or sits in `proven_imps`.
     /// 5. `saturate` — saturate the live graph (only **unconditional** facts
-    ///    live there) and re-check. No clone.
+    ///    live there) and re-check. No clone. Then, for an obligation the unit's
+    ///    first pass proved, `first_pass` (see [`Self::prove_obligation`]).
     /// 6. `probe` — the only tier that clones: the block scratch, or (functions
     ///    and resources, which have no CFG) a ground clone with the path condition
     ///    assumed and saturated.
@@ -236,6 +237,93 @@ impl<'a> VerifyContext<'a> {
         &mut self,
         goal: egg::Id,
         pc_lits: &[(egg::Id, Polarity)],
+    ) -> bool {
+        self.prove(goal, pc_lits, false)
+    }
+
+    /// [`Self::prove_under_pc`] for an obligation whose goal is the value of
+    /// what the program states: an assertion, the boolean part of a consumed
+    /// resource, a value side condition (a divisor, a permission amount's sign).
+    ///
+    /// In a unit's second pass ([`pass::verify_unit`]), such an obligation of an
+    /// instruction the first pass completed without a failure is taken as
+    /// proven: after the saturation the proof would run, `pc ⇒ goal` is
+    /// recorded as a proof records it. This is sound because the goal is
+    /// exact. The first pass's facts hold in every execution in which the
+    /// obligations it assumed hold (deferring instances only drops facts), so
+    /// its proof shows the stated expression true in every such execution that
+    /// reaches the instruction under its path condition. The second pass's
+    /// `pc` and `goal` are terms for the same branch conditions and the same
+    /// expression, and a term denotes its expression's value in each execution:
+    /// the property every proof relies on. So `pc ⇒ goal` holds there, and
+    /// assuming it excludes no such execution. (The second pass re-proves the
+    /// framing of every heap read the expression makes, which is what makes a
+    /// read value that value.)
+    ///
+    /// A heap obligation (the permission a lookup finds, a framed read) is not
+    /// exact, and goes through [`Self::prove_under_pc`]: its goal names the
+    /// chunks the pass's heap lookup selected, which depend on what that pass
+    /// knew, so the first pass's proof says nothing about the second's goal.
+    /// One that finds no chunk asks `0 < 0`, which assuming would refute the
+    /// path.
+    ///
+    /// On the first pass, a failure after an instance was deferred is left to
+    /// the second pass and the obligation assumed, so the first pass goes on
+    /// ([`pass::defer_failure`]). Its later proofs then hold wherever the
+    /// assumed obligation does, which the second pass checks.
+    ///
+    /// [`pass::verify_unit`]: crate::verify::rewrite::forall::pass::verify_unit
+    /// [`pass::defer_failure`]: crate::verify::rewrite::forall::pass::defer_failure
+    pub(crate) fn prove_obligation(
+        &mut self,
+        goal: egg::Id,
+        pc_lits: &[(egg::Id, Polarity)],
+    ) -> bool {
+        if self.prove(goal, pc_lits, self.inst_proven) {
+            return true;
+        }
+        if !crate::verify::rewrite::forall::pass::defer_failure() {
+            return false;
+        }
+        stats::bump(|s| s.prove_failed_first_pass += 1);
+        let true_ = expr!(self, true);
+        let imp = self.implication(goal, pc_lits.iter().rev().copied());
+        self.record_under_cube(goal, imp, pc_lits, true_);
+        true
+    }
+
+    /// Record a proven `pc ⇒ goal` (`imp`) under the **full** path condition.
+    /// `pc_lits` is only the instruction's delta; a method block's cube is
+    /// ambient — assumed by the scratch, absent from `imp`. Recording `imp`
+    /// would publish a verdict that only holds under the cube as if it held
+    /// under the delta alone, and for an empty delta that is the bare goal: a
+    /// dead arm's `assert false` merged `false` with `true` in ground and
+    /// poisoned every later block. Guarded by the cube it is exactly the fact
+    /// the arm licenses (`¬b ⇒ false`), true even where the cube is unsat.
+    /// Outside a block the cube is empty and this records `imp`.
+    fn record_under_cube(
+        &mut self,
+        goal: egg::Id,
+        imp: egg::Id,
+        pc_lits: &[(egg::Id, Polarity)],
+        true_: egg::Id,
+    ) {
+        let cube = std::mem::take(&mut self.current_cube);
+        let (full_imp, full_empty) = if cube.is_empty() {
+            (imp, pc_lits.is_empty())
+        } else {
+            let lits: Vec<_> = cube.iter().chain(pc_lits).rev().copied().collect();
+            (self.implication(goal, lits.into_iter()), false)
+        };
+        self.current_cube = cube;
+        self.record_proven(full_imp, true_, full_empty);
+    }
+
+    fn prove(
+        &mut self,
+        goal: egg::Id,
+        pc_lits: &[(egg::Id, Polarity)],
+        first_pass_proved: bool,
     ) -> bool {
         stats::bump(|s| s.prove_calls += 1);
         // Inconsistent: the held facts are contradictory (e.g. a field location
@@ -279,6 +367,16 @@ impl<'a> VerifyContext<'a> {
             return true;
         }
 
+        // `first_pass`: an obligation the unit's first pass proved (see
+        // [`Self::prove_obligation`]). Recorded as a proof here would be, after
+        // the saturation a proof here would run, so the unit's later runs and
+        // facts are those of a pass in which this proof succeeded.
+        if first_pass_proved {
+            stats::bump(|s| s.prove_first_pass += 1);
+            self.record_under_cube(goal, imp, pc_lits, true_);
+            return true;
+        }
+
         // Inside a method block, discharge `probe`-tier proving against the per-block scratch
         // graph (reused across the block's obligations) instead of cloning ground
         // per obligation: it is warm, cube-assumed and kept in sync with ground, and
@@ -291,23 +389,7 @@ impl<'a> VerifyContext<'a> {
             // scratch (translation.typ, "Inputs").
             let proven = self.prove_via_scratch(goal, pc_lits) || self.prove_by_z3(goal, pc_lits);
             if proven {
-                // Export under the **full** path condition. `pc_lits` is only the
-                // instruction's delta; the block's cube is ambient — assumed by the
-                // scratch, absent from `imp`. Recording `imp` would publish a verdict
-                // that only holds under the cube as if it held under the delta alone,
-                // and for an empty delta that is the bare goal: a dead arm's
-                // `assert false` merged `false` with `true` in ground and poisoned
-                // every later block. Guarded by the cube it is exactly the fact the
-                // arm licenses (`¬b ⇒ false`), true even where the cube is unsat.
-                let cube = std::mem::take(&mut self.current_cube);
-                let (full_imp, full_empty) = if cube.is_empty() {
-                    (imp, pc_lits.is_empty())
-                } else {
-                    let lits: Vec<_> = cube.iter().chain(pc_lits).rev().copied().collect();
-                    (self.implication(goal, lits.into_iter()), false)
-                };
-                self.current_cube = cube;
-                self.record_proven(full_imp, true_, full_empty);
+                self.record_under_cube(goal, imp, pc_lits, true_);
             }
             return proven;
         }

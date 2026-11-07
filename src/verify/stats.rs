@@ -103,6 +103,11 @@ pub struct VerifyStats {
     pub inst_deferred: u64,
     /// The deepest generation of a quantifier instance built.
     pub inst_generation_peak: u64,
+    /// Units verified a second time without the generation bound (the first
+    /// pass deferred an instance and could not stand), and how many of them
+    /// that verified.
+    pub unit_reruns: u64,
+    pub unit_reruns_verified: u64,
     /// peak e-graph size observed in any iteration.
     pub egraph_nodes_peak: usize,
     pub egraph_classes_peak: usize,
@@ -129,6 +134,11 @@ pub struct VerifyStats {
     pub prove_goal_true: u64,
     pub prove_memo: u64,
     pub prove_saturate: u64,
+    /// Obligations (and a `refute`'s expression) a unit's second pass took as
+    /// proven by its first, and obligations the first pass failed after
+    /// deferring an instance, assumed and left to the second.
+    pub prove_first_pass: u64,
+    pub prove_failed_first_pass: u64,
     pub prove_probe: u64,
     /// Goals discharged by the last tier — non-forking `ite`-goal decomposition
     /// (a constant branch reduces the goal to its other branch, no case split).
@@ -307,6 +317,8 @@ impl VerifyStats {
             sat_bound_stops,
             inst_deferred,
             inst_generation_peak,
+            unit_reruns,
+            unit_reruns_verified,
             egraph_nodes_peak,
             egraph_classes_peak,
             insts_processed,
@@ -318,6 +330,8 @@ impl VerifyStats {
             prove_goal_true,
             prove_memo,
             prove_saturate,
+            prove_first_pass,
+            prove_failed_first_pass,
             prove_probe,
             prove_ite_decompose,
             timing,
@@ -341,6 +355,8 @@ impl VerifyStats {
             ("sat_bound_stops", n(sat_bound_stops)),
             ("inst_deferred", n(inst_deferred)),
             ("inst_generation_peak", n(inst_generation_peak)),
+            ("unit_reruns", n(unit_reruns)),
+            ("unit_reruns_verified", n(unit_reruns_verified)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
             ("insts_processed", n(insts_processed)),
@@ -351,6 +367,8 @@ impl VerifyStats {
             ("prove_goal_true", n(prove_goal_true)),
             ("prove_memo", n(prove_memo)),
             ("prove_saturate", n(prove_saturate)),
+            ("prove_first_pass", n(prove_first_pass)),
+            ("prove_failed_first_pass", n(prove_failed_first_pass)),
             ("prove_probe", n(prove_probe)),
             ("prove_ite_decompose", n(prove_ite_decompose)),
             (

@@ -1,0 +1,13 @@
+// `f(30) > 7` needs both the quantifier chain `f(i) == f(i + 1)` 30 instances
+// deep and arithmetic over `y + z`: the last prove rung (Z3) must be handed the
+// chain's full depth.
+domain D {
+  function f(i: Int): Int
+  axiom step { forall i: Int :: { f(i) } f(i) == f(i + 1) }
+}
+
+method m(y: Int, z: Int)
+  requires f(0) == y + z && y > 3 && z > 3
+{
+  assert f(30) > 7
+}

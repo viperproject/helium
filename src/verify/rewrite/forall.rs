@@ -277,7 +277,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                     let Some(sigma): Option<Vec<Id>> = sigma.slots.into_iter().collect() else {
                         continue;
                     };
-                    if generation > MAX_GENERATION {
+                    if generation > MAX_GENERATION && !pass::lifted() {
                         deferred += 1;
                         continue;
                     }
@@ -291,6 +291,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             }
         }
         if deferred > 0 {
+            pass::note_deferred();
             stats::bump(|s| s.inst_deferred += deferred);
         }
         if let Some(peak) = instances.iter().map(|i| i.2).max() {
@@ -365,17 +366,179 @@ impl Sigma {
     }
 }
 
-/// The deepest instance generation built. A termination bound: a matching loop
-/// (an instance that builds a new term its own trigger matches) has no fixpoint,
-/// and there are finitely many instances of each generation, since every class
-/// of generation `g` holds a node built by an instance of generation at most `g`
-/// or by the other rules from such classes (which terminate on their own).
+/// The deepest instance generation built on a unit's first verification pass.
+/// It makes that pass's saturation runs terminate at a fixpoint: a matching loop
+/// (an instance that builds a new term its own trigger matches) has none, but
+/// there are finitely many instances of each generation, since every class of
+/// generation `g` holds a node built by an instance of generation at most `g` or
+/// by the other rules from such classes (which terminate on their own). Below
+/// the iteration limit, so a matching loop ends its run at a fixpoint.
 ///
-/// Sized above the depth proofs need: the deepest measured is 11 (a crate's
-/// type-level arithmetic; a bound of 8 loses proofs there). Z3's defaults
-/// instantiate eagerly up to cost 10 and at a final check up to 20. Below the
-/// iteration limit, so a matching loop ends its run at a fixpoint.
+/// It is not what decides a verdict (see [`pass::verify_unit`]): a unit whose
+/// first pass deferred an instance and failed to prove something is verified
+/// again without the bound. Its value sets how often that happens, so it sits
+/// above the deepest chain measured on the corpora (generation 11, a crate's
+/// type-level arithmetic).
 pub(crate) const MAX_GENERATION: u32 = 16;
+
+/// A unit's verification passes: the first defers instances past
+/// [`MAX_GENERATION`], the second, run only when the first cannot stand, builds
+/// every instance.
+pub(crate) mod pass {
+    use std::cell::{Cell, RefCell};
+
+    use crate::verify::{error::VerifyError, stats};
+
+    thread_local! {
+        /// Whether the running pass builds instances past the bound.
+        static LIFTED: Cell<bool> = const { Cell::new(false) };
+        /// Whether the running pass deferred an instance, on any of the unit's
+        /// graphs (ground, the block scratch, probe clones).
+        static DEFERRED: Cell<bool> = const { Cell::new(false) };
+        /// Whether the running pass passed a check because a proof failed.
+        static PASSED_ON_FAILURE: Cell<bool> = const { Cell::new(false) };
+        /// Instructions the running pass has completed, in walk order.
+        static COMPLETED: Cell<usize> = const { Cell::new(0) };
+        /// The instructions, ascending, with an obligation the first pass
+        /// failed after deferring, and assumed.
+        static FAILED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+        /// On the second pass: how many instructions the first pass completed.
+        static PROVEN: Cell<usize> = const { Cell::new(0) };
+        /// On the second pass: the instruction at which the first pass proved
+        /// a `refute`'s expression, and stopped.
+        static REFUTED: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn lifted() -> bool {
+        LIFTED.get()
+    }
+
+    pub(super) fn note_deferred() {
+        DEFERRED.set(true);
+    }
+
+    /// A check passed because its proof failed (a `refute`): the bound can be
+    /// what made the proof fail, so the verdict needs the second pass.
+    pub(crate) fn note_passed_on_failure() {
+        PASSED_ON_FAILURE.set(true);
+    }
+
+    /// A value obligation of the instruction being walked failed. On the first
+    /// pass, once it has deferred an instance, the failure may be the bound's:
+    /// it is recorded for the second pass to decide, and the pass goes on with
+    /// the obligation assumed (see [`verify_unit`]). Returns whether it does.
+    /// Before any deferral the pass so far is the unbounded one, and the
+    /// failure stands.
+    pub(crate) fn defer_failure() -> bool {
+        if LIFTED.get() || !DEFERRED.get() {
+            return false;
+        }
+        let at = COMPLETED.get();
+        FAILED.with_borrow_mut(|f| {
+            if f.last() != Some(&at) {
+                f.push(at);
+            }
+        });
+        true
+    }
+
+    /// The walk enters its next instruction. Returns whether the first pass
+    /// completed it and proved all its obligations.
+    pub(crate) fn enter_inst() -> bool {
+        let at = COMPLETED.get();
+        at < PROVEN.get() && FAILED.with_borrow(|f| f.binary_search(&at).is_err())
+    }
+
+    /// On the second pass, whether the `refute` being walked is the one whose
+    /// expression the first pass proved (see [`verify_unit`]).
+    pub(crate) fn refuted_by_first_pass() -> bool {
+        REFUTED.get() == Some(COMPLETED.get())
+    }
+
+    /// The walk completed the instruction it entered last.
+    pub(crate) fn complete_inst() {
+        COMPLETED.set(COMPLETED.get() + 1);
+    }
+
+    /// Verifies one unit (`verify` runs it from scratch) so that its verdict does
+    /// not depend on the generation bound.
+    ///
+    /// - If the first pass deferred nothing, the bound never applied: it ran
+    ///   exactly what the second pass would.
+    /// - Otherwise its verdict stands if it rests on proofs alone: it failed no
+    ///   obligation, and it succeeded without passing a check on a failed
+    ///   proof, or failed a `refute` whose expression it proved. The deferred
+    ///   instances are facts it did not assume, and a proof from fewer facts is
+    ///   sound (as is one from a run any termination bound cut short).
+    /// - Any other verdict rests on a failure to prove, and a second pass
+    ///   without the bound decides it. Its only stops are the saturation runs'
+    ///   termination bounds (the iteration and growth limits).
+    ///
+    /// The second pass replays the unit rather than re-checking the failed goal:
+    /// an internal heap query, Z3, a probe or the block scratch sees its graph
+    /// without a rung of its own, and the depth a chain needs accumulates in
+    /// place, as without generations. It keeps the first pass's proofs. The
+    /// first pass goes on past a value obligation it fails after deferring,
+    /// with the obligation assumed, as a verifier reporting every failure does,
+    /// and stops only where it cannot go on (a heap operation that fails). Both
+    /// passes walk the same instructions in the same order, so the second takes
+    /// the value obligations of every instruction the first completed without
+    /// a failure as proven ([`VerifyContext::prove_obligation`]), and checks
+    /// the rest. Each obligation then holds in every execution in which the
+    /// earlier ones hold: one the first pass proved, from facts that hold
+    /// there, the earlier failed ones assumed; any other, by the second pass's
+    /// proof from such facts. By induction over the walk, a unit the second
+    /// pass verifies satisfies all its obligations. A termination bound that
+    /// stops the second pass's runs before they derive what the first pass's
+    /// did cannot undo the first pass's proofs.
+    ///
+    /// A `refute` whose expression the first pass proved after assuming a
+    /// failed obligation is where that pass stopped. Its proof holds in every
+    /// execution in which the earlier obligations hold, so the second pass,
+    /// once it has checked all of them and reached that `refute`, fails it
+    /// without asking again ([`refuted_by_first_pass`]).
+    ///
+    /// [`VerifyContext::prove_obligation`]: crate::verify::context::VerifyContext::prove_obligation
+    pub(crate) fn verify_unit<T>(
+        mut verify: impl FnMut() -> Result<T, VerifyError>,
+    ) -> Result<T, VerifyError> {
+        DEFERRED.set(false);
+        PASSED_ON_FAILURE.set(false);
+        COMPLETED.set(0);
+        FAILED.with_borrow_mut(Vec::clear);
+        let first = verify();
+        let refuted = matches!(&first, Err(e) if e.rests_on_proof());
+        let rests_on_proofs = FAILED.with_borrow(Vec::is_empty)
+            && match &first {
+                Ok(_) => !PASSED_ON_FAILURE.get(),
+                Err(_) => refuted,
+            };
+        if !DEFERRED.get() || rests_on_proofs {
+            return first;
+        }
+        stats::bump(|s| s.unit_reruns += 1);
+        struct Second;
+        impl Drop for Second {
+            fn drop(&mut self) {
+                LIFTED.set(false);
+                PROVEN.set(0);
+                REFUTED.set(None);
+                FAILED.with_borrow_mut(Vec::clear);
+            }
+        }
+        LIFTED.set(true);
+        // A walk stops at its first error, so the first pass's refute is the
+        // instruction after the last it completed.
+        REFUTED.set(refuted.then(|| COMPLETED.get()));
+        PROVEN.set(COMPLETED.replace(0));
+        let _second = Second;
+        let second = verify();
+        if second.is_ok() {
+            stats::bump(|s| s.unit_reruns_verified += 1);
+        }
+        second
+    }
+}
 
 #[cfg(test)]
 mod tests {

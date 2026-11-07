@@ -130,6 +130,10 @@ pub(crate) struct VerifyContext<'a> {
     /// Unlike [`Self::is_inconsistent`] this is a fact about the *scratch*, so it
     /// must never be consulted outside the block that established it.
     block_dead: bool,
+    /// Whether the instruction being walked was completed by the unit's first
+    /// verification pass, which proved its obligations (see
+    /// [`Self::prove_obligation`]). Set by the body walk per instruction.
+    pub(crate) inst_proven: bool,
 
     /// Sort and datatype caches of the Z3 translation (`verify::z3`).
     pub(crate) z3translator: Z3Translation,
@@ -204,6 +208,7 @@ impl<'a> VerifyContext<'a> {
             in_block: false,
             scratch: None,
             block_dead: false,
+            inst_proven: false,
             z3translator: Z3Translation::default(),
         }
     }
