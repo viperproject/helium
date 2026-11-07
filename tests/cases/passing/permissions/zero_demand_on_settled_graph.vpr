@@ -5,8 +5,8 @@
 //
 // These verify even without that: a consume that mints its chunk value before
 // the lookup dirties the graph, so the retry asks anyway. The four companions in
-// `zero_demand_probe_on_settled_graph.vpr` fail without it once a consume takes
-// its value from the chunks it finds instead.
+// `zero_demand_probe_on_settled_graph.vpr` do not once a consume takes its value
+// from the chunks it finds instead.
 predicate P(x: Ref)
 predicate Q(x: Ref)
 field f: Int

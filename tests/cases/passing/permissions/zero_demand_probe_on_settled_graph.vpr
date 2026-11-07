@@ -1,10 +1,10 @@
-// KNOWN LIMITATION. A consume of a location that holds nothing owes nothing
-// where the state is infeasible. The zero-demand probe answers it, but only the
-// consume's retry asks it, and the retry skips it when the graph was already
-// saturated before its own saturate. The first pass never asks, so on a graph
-// that is settled as the consume starts nobody asks, and the consume reports
+// A consume of a location that holds nothing owes nothing where the state is
+// infeasible. The zero-demand probe answers it; only the consume's retry asks
+// it, and it must ask even when the graph was already saturated before its own
+// saturate. Skipping it there left nobody asking on a graph that is settled as
+// the consume starts (the first pass never asks), and the consume reported
 // insufficient permission. Silicon verifies all four methods. Companions of
-// `tests/cases/passing/permissions/zero_demand_on_settled_graph.vpr`.
+// `zero_demand_on_settled_graph.vpr`.
 predicate P(x: Ref)
 predicate Q(x: Ref)
 field f: Int
