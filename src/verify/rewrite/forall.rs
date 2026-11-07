@@ -9,7 +9,8 @@ use std::sync::{Arc, RwLock};
 use crate::dhash::HashMap;
 
 use egg::{
-    Applier, Changes, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var,
+    Applier, Changes, EGraph, ENodeOrVar, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst,
+    Symbol, Var,
 };
 
 use crate::verify::analysis::ConstFold;
@@ -154,6 +155,57 @@ fn anchor() -> Var {
     var("?anchor")
 }
 
+/// The variable bound to a quantifier's `i`-th capture by [`quantifier_match`].
+fn capture(i: usize) -> Var {
+    var(&format!("?cap{i}"))
+}
+
+/// The match of the one quantifier `node` (if it is one) in `eclass`: the flat
+/// pattern `forall#r(?cap0 ..)` binding the captures.
+fn quantifier_match(eclass: Id, node: &Symbolic) -> Option<SearchMatches<'static, Symbolic>> {
+    let Symbolic::Forall(rid, caps) = node else {
+        return None;
+    };
+    let mut ast = PatternAst::default();
+    let mut subst = Subst::default();
+    let vars: Box<[Id]> = caps
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            subst.insert(capture(i), c);
+            ast.add(ENodeOrVar::Var(capture(i)))
+        })
+        .collect();
+    ast.add(ENodeOrVar::ENode(Symbolic::Forall(*rid, vars)));
+    Some(SearchMatches {
+        eclass,
+        substs: vec![subst],
+        ast: Some(std::borrow::Cow::Owned(ast)),
+    })
+}
+
+/// What a match asks of the quantifiers in its class.
+#[derive(Clone)]
+enum Want {
+    /// Every quantifier of the class, where a trigger term matches at the anchor
+    /// class, or (`None`) anywhere.
+    All(Option<Id>),
+    /// The one quantifier (recipe, captures), anywhere: a [`quantifier_match`].
+    One(RecipeId, Vec<Id>),
+}
+
+impl Want {
+    fn of(subst: &Subst, ast: Option<&PatternAst<Symbolic>>) -> Self {
+        match ast.map(|ast| &ast[ast.root()]) {
+            Some(ENodeOrVar::ENode(Symbolic::Forall(rid, vars))) => {
+                let caps = (0..vars.len()).map(|i| subst[capture(i)]).collect();
+                Want::One(*rid, caps)
+            }
+            _ => Want::All(subst.get(anchor()).copied()),
+        }
+    }
+}
+
 impl PreparedTerm {
     /// Adds the functions and literals of this term to `funcs` and `lits`, and
     /// returns its height (an `App` over leaves is 1).
@@ -185,19 +237,20 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
             return Vec::new();
         };
         classes
-            .take(limit)
-            .map(|eclass| SearchMatches {
-                eclass,
-                // One empty subst: the applier reads the node itself (recipe
-                // + captures), which an egg `Subst` cannot carry.
-                substs: vec![Subst::default()],
-                ast: None,
+            .flat_map(|eclass| {
+                egraph[eclass]
+                    .nodes
+                    .iter()
+                    .filter_map(move |n| quantifier_match(eclass, n))
             })
+            .take(limit)
             .collect()
     }
 
-    /// A quantifier new to its class (or whose captures changed) is instantiated in
-    /// full. Every other quantifier only at the classes where one of its trigger
+    /// A quantifier that is new (or whose captures changed) is instantiated in
+    /// full; one a union only moved into another class is not, since its
+    /// instances are already built behind its old class, which the union merged.
+    /// Every other quantifier only at the classes where one of its trigger
     /// terms may match anew: those holding a changed application or literal of a
     /// trigger, and the classes above them through trigger applications, up to the
     /// height of the tallest trigger term. A match binds such a class to
@@ -209,12 +262,13 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
         changes: &Changes<Symbolic>,
         _limit: usize,
     ) -> Vec<SearchMatches<'_, Symbolic>> {
-        let mut found: Vec<(Id, Subst)> = changes
-            .nodes(&Discriminant::Forall)
-            .map(|(class, _)| (*class, Subst::default()))
+        let new: Vec<SearchMatches<'_, Symbolic>> = changes
+            .added(&Discriminant::Forall)
+            .filter_map(|(class, node)| quantifier_match(*class, node))
             .collect();
+        let mut found: Vec<(Id, Subst)> = Vec::new();
         let Some(quants) = egraph.classes_for_op(&Discriminant::Forall) else {
-            return group_matches(found);
+            return new;
         };
         // Each quantifier class with the root functions of its trigger terms, and
         // the shape of all of them.
@@ -289,7 +343,9 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
                 }
             }
         }
-        group_matches(found)
+        let mut found = group_matches(found);
+        found.extend(new);
+        found
     }
 
     fn search_eclass_with_limit(
@@ -298,6 +354,7 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
         eclass: Id,
         _limit: usize,
     ) -> Option<SearchMatches<'_, Symbolic>> {
+        // Every quantifier of the class, in full.
         egraph[eclass]
             .nodes
             .iter()
@@ -334,9 +391,9 @@ pub(super) struct ForallApplier {
 }
 
 impl ForallApplier {
-    /// The new instances of the quantifiers in `eclass` under `substs`, recorded in
-    /// the memo. With an anchor, only the σ under which some trigger term matches at
-    /// the anchor class are new (see `ForallSearcher::search_changes`).
+    /// The new instances that `wants` asks of the quantifiers in `eclass`, recorded
+    /// in the memo. With an anchor, only the σ under which some trigger term matches
+    /// at the anchor class are new (see `ForallSearcher::search_changes`).
     ///
     /// A group's terms are matched anywhere at most once per call, and the
     /// partial σ are joined with those matches on the binders they share: matching
@@ -347,44 +404,56 @@ impl ForallApplier {
         &self,
         egraph: &EGraph<Symbolic, ConstFold>,
         eclass: Id,
-        substs: &[Subst],
+        wants: &[Want],
     ) -> Vec<(RecipeId, Vec<Id>)> {
-        // Distinct capture tuples in one e-class are distinct quantifiers (each
-        // yields its own instances); the guard is this e-class either way.
-        let quants: Vec<(RecipeId, Box<[Id]>)> = egraph[eclass]
-            .nodes
-            .iter()
-            .filter_map(|n| match n {
-                Symbolic::Forall(rid, caps) => Some((*rid, caps.clone())),
-                _ => None,
-            })
-            .collect();
-
         // The anchors as classes now: rules applied earlier in the iteration may
         // have merged several (typically into a hub such as `true`), whose terms
         // are then matched once.
-        let mut anchors: Vec<Option<Id>> = substs
+        let mut anchors: Vec<Option<Id>> = wants
             .iter()
-            .map(|s| s.get(anchor()).map(|&a| egraph.find(a)))
+            .filter_map(|w| match w {
+                Want::All(at) => Some(at.map(|a| egraph.find(a))),
+                Want::One(..) => None,
+            })
             .collect();
         anchors.sort_unstable();
         anchors.dedup();
+        // Distinct capture tuples in one e-class are distinct quantifiers (each
+        // yields its own instances); the guard is this e-class either way.
+        let mut quants: Vec<(RecipeId, Vec<Id>, Vec<Option<Id>>)> = Vec::new();
+        if !anchors.is_empty() {
+            quants.extend(egraph[eclass].nodes.iter().filter_map(|n| match n {
+                Symbolic::Forall(rid, caps) => Some((*rid, caps.to_vec(), anchors.clone())),
+                _ => None,
+            }));
+        }
+        // A quantifier asked for in full, unless all of them are.
+        if anchors.first() != Some(&None) {
+            for w in wants {
+                if let Want::One(rid, caps) = w {
+                    quants.push((*rid, caps.clone(), vec![None]));
+                }
+            }
+        }
 
         let table = self.table.read().expect("recipe table lock");
         // Collect the instances first: `build_instance` needs `&mut egraph`.
         let mut instances: Vec<(RecipeId, Vec<Id>)> = Vec::new();
-        for (rid, caps) in &quants {
+        crate::verify::stats::bump(|s| {
+            s.forall_joins += quants.iter().map(|q| q.2.len() as u64).sum::<u64>()
+        });
+        for (rid, caps, anchors) in &quants {
             let recipe = table.get(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
             for group in &recipe.groups {
                 let empty: Sigma = vec![None; recipe.n_bound];
                 let mut anywhere: Vec<Option<Vec<Sigma>>> = vec![None; group.len()];
                 let mut sigmas = Vec::new();
-                for &at in &anchors {
+                for at in anchors {
                     // Which term is matched first, and where: the whole group's
                     // first term anywhere, or (anchored) each term at the anchor in
                     // turn.
-                    let starts: Vec<(usize, Vec<Sigma>)> = match at {
+                    let starts: Vec<(usize, Vec<Sigma>)> = match *at {
                         None if group.is_empty() => vec![],
                         None => vec![(0, Vec::new())],
                         Some(at) => (0..group.len())
@@ -474,16 +543,32 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
     /// would let the joins of later anchors pick up the terms of earlier
     /// instances, chaining a matching loop through one application instead of one
     /// level per iteration.
+    ///
+    /// Matches are taken per class as it is now: rules applied earlier in the
+    /// iteration may have merged many matched quantifier classes (typically into
+    /// `true`), and instantiating the merged class once per match would join every
+    /// quantifier it holds once per class it absorbed.
     fn apply_matches(
         &self,
         egraph: &mut EGraph<Symbolic, ConstFold>,
         matches: &[SearchMatches<Symbolic>],
         _rule_name: Symbol,
     ) -> Vec<Id> {
+        let mut by_class: Vec<(Id, Want)> = matches
+            .iter()
+            .flat_map(|m| {
+                let class = egraph.find(m.eclass);
+                let ast = m.ast.as_deref();
+                m.substs.iter().map(move |s| (class, Want::of(s, ast)))
+            })
+            .collect();
+        by_class.sort_by_key(|&(class, _)| class);
         let mut changed = Vec::new();
-        for m in matches {
-            let instances = self.instances(egraph, m.eclass, &m.substs);
-            changed.extend(self.build(egraph, m.eclass, instances));
+        for group in by_class.chunk_by(|a, b| a.0 == b.0) {
+            let class = group[0].0;
+            let wants: Vec<Want> = group.iter().map(|(_, w)| w.clone()).collect();
+            let instances = self.instances(egraph, class, &wants);
+            changed.extend(self.build(egraph, class, instances));
         }
         changed
     }
@@ -493,10 +578,11 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         egraph: &mut EGraph<Symbolic, ConstFold>,
         eclass: Id,
         subst: &Subst,
-        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        searcher_ast: Option<&PatternAst<Symbolic>>,
         _rule_name: Symbol,
     ) -> Vec<Id> {
-        let instances = self.instances(egraph, eclass, std::slice::from_ref(subst));
+        let want = Want::of(subst, searcher_ast);
+        let instances = self.instances(egraph, eclass, &[want]);
         self.build(egraph, eclass, instances)
     }
 

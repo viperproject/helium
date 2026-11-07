@@ -758,7 +758,11 @@ pub(super) fn run_rules_until<'r>(
         let mut applied = Vec::new();
         let mut matched_classes = 0;
         for (rule, found) in rules.iter().zip(matches) {
-            matched_classes += found.len();
+            // a searcher may report several matches at one class
+            let mut at: Vec<egg::Id> = found.iter().map(|m| m.eclass).collect();
+            at.sort_unstable();
+            at.dedup();
+            matched_classes += at.len();
             // Seen before its matches are applied, so the log keeps the changes
             // the application makes for the rule's next search.
             egraph.mark_seen(rule.name, now);
@@ -803,8 +807,8 @@ pub(super) fn run_rules_until<'r>(
 /// clone); a change is a match incremental search lost.
 ///
 /// A pending match that binds the forall searcher's anchor covers its whole
-/// class (the full search matches a quantifier class with an empty
-/// substitution); every other match is compared by class and substitution.
+/// class (the full search matches each quantifier of a class); every other match
+/// is compared by class and substitution.
 fn no_match_lost(
     egraph: &egg::EGraph<Symbolic, ConstFold>,
     rules: &[&egg::Rewrite<Symbolic, ConstFold>],
@@ -812,11 +816,23 @@ fn no_match_lost(
     use crate::dhash::HashSet;
     let _memos = rewrite::ReadOnlyMemos::enter();
     let anchor: egg::Var = "?anchor".parse().expect("var");
-    let key = |vars: &[egg::Var], class: egg::Id, subst: &egg::Subst| {
+    // A match by its class and the bindings of the searcher's variables and of its
+    // pattern's, if it names one (a single quantifier: its captures). Not by the
+    // pattern itself: a searcher may name it in a full search and not in its search
+    // of the changes.
+    let key = |vars: &[egg::Var], m: &egg::SearchMatches<Symbolic>, subst: &egg::Subst| {
+        let ast_vars = m.ast.as_deref().into_iter().flat_map(|a| {
+            a.iter().filter_map(|n| match n {
+                egg::ENodeOrVar::Var(v) if !vars.contains(v) => Some(*v),
+                _ => None,
+            })
+        });
         let bound = vars
             .iter()
-            .map(|v| subst.get(*v).map(|&id| egraph.find(id)));
-        (egraph.find(class), bound.collect::<Vec<_>>())
+            .copied()
+            .chain(ast_vars)
+            .map(|v| subst.get(v).map(|&id| egraph.find(id)));
+        (egraph.find(m.eclass), bound.collect::<Vec<_>>())
     };
     let mut lost = Vec::new();
     for rule in rules {
@@ -836,15 +852,18 @@ fn no_match_lost(
                 if subst.get(anchor).is_some() {
                     pending_classes.insert(egraph.find(m.eclass));
                 }
-                pending_matches.insert(key(&vars, m.eclass, subst));
+                pending_matches.insert(key(&vars, m, subst));
             }
         }
         let rest: Vec<egg::SearchMatches<Symbolic>> = full
             .into_iter()
             .filter(|m| !pending_classes.contains(&egraph.find(m.eclass)))
             .map(|mut m| {
-                m.substs
-                    .retain(|s| !pending_matches.contains(&key(&vars, m.eclass, s)));
+                let substs = std::mem::take(&mut m.substs);
+                m.substs = substs
+                    .into_iter()
+                    .filter(|s| !pending_matches.contains(&key(&vars, &m, s)))
+                    .collect();
                 m
             })
             .filter(|m| !m.substs.is_empty())
