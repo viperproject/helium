@@ -1,0 +1,45 @@
+// The passing twin of `failing/predicates/gate_split_needs_a_decided_gate.vpr`:
+// the branch tests `value(tmp) == 1`, so on the taken path the gate
+// `isnap(discr(s)) == cons(1)` of `Outer`'s second conjunct is decided and
+// `acc(Q(s))` can be unfolded.
+//
+// The decision travels through the function `isnap`: `tmp` is bound to a call
+// of it, whose definition is released behind the call's `isnap%pre` token. The
+// token appears after the call was first matched, so incremental matching must
+// find the call again through its token (`FunctionCallSearcher::search_changes`);
+// without that, the debug check of incremental matching fails on this file.
+domain S {
+  function cons(arg0: Int): S
+  function value(arg0: S): Int
+
+  axiom ax_cons { (forall s: S :: { value(s) } cons(value(s)) == s) }
+  axiom ax_value { (forall v: Int :: { cons(v) } value(cons(v)) == v) }
+}
+
+field val: S
+
+predicate Inner(x: Ref) { acc(x.val, write) }
+
+function isnap(x: Ref): S
+  requires acc(Inner(x), write)
+{ (unfolding acc(Inner(x), write) in x.val) }
+
+function discr(s: Ref): Ref
+
+predicate Q(s: Ref) { acc(s.val, write) }
+
+predicate Outer(s: Ref) {
+  acc(Inner(discr(s)), write) &&
+  (isnap(discr(s)) == cons(1) ==> acc(Q(s), write))
+}
+
+method m(s: Ref)
+  requires acc(Outer(s), write)
+{
+  var tmp: S
+  tmp := (unfolding acc(Outer(s), wildcard) in isnap(discr(s)))
+  if (value(tmp) == 1) {
+    unfold acc(Outer(s), write)
+    unfold acc(Q(s), write)
+  }
+}
