@@ -1071,7 +1071,7 @@ impl<'a> VerifyContext<'a> {
         let tg = self.tr(goal);
         let tpc: Vec<(egg::Id, Polarity)> =
             pc_lits.iter().map(|(id, p)| (self.tr(*id), *p)).collect();
-        // Saturate (at most once per walk step): once the rules run here this is the
+        // Saturate (once per walk step, first): once the rules run here this is the
         // `saturate` tier, which ground no longer runs. Reducing first and
         // saturating only when the goal stays open defers the run to a later
         // obligation, when the graph holds every term walked since; measured, that
@@ -1080,6 +1080,16 @@ impl<'a> VerifyContext<'a> {
         self.saturate_work();
         if self.work_decided(tg) {
             return true;
+        }
+        // The step's run is a schedule, not a fixpoint: an obligation built after it
+        // (a call's precondition after the call's permissions) has terms no rule has
+        // seen, and the rungs below instantiate no quantifier over the graph itself.
+        // So a goal still open over a graph changed since the run runs it again.
+        if self.work.as_ref().is_some_and(|w| w.dirty) {
+            self.run_work();
+            if self.work_decided(tg) {
+                return true;
+            }
         }
         let w = self.work.as_ref().expect("working graph");
         let all_sat = tpc.iter().all(|(tid, pol)| {

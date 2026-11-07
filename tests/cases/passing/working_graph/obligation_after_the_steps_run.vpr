@@ -1,0 +1,48 @@
+// The working graph runs its rules once per walk step, at the step's first
+// obligation that reaches it. A call consumes its permissions first (here the
+// demand `h(1/2)` needs an instance of `h_id`, so the run happens there) and
+// builds its pure precondition after, over the snapshot it consumed: the run has
+// not seen `pre(snap(r))`, and only an instance of `pre_holds` over it proves it;
+// the rungs below the run instantiate nothing. A goal still open over a graph
+// changed since the run runs it again. (Reduced from
+// `errno::sys::from_utf8_lossy`, an `Index` call's blanket precondition.)
+field f: Int
+
+predicate P(r: Ref) {
+  acc(r.f)
+}
+
+function snap(r: Ref): Int
+  requires acc(P(r), wildcard)
+{
+  unfolding acc(P(r), wildcard) in r.f
+}
+
+domain Pre {
+  function pre(x: Int): Bool
+  function g(x: Int): Int
+  function h(p: Perm): Perm
+  axiom pre_holds { forall x: Int :: { pre(x) } pre(x) }
+  axiom h_id { forall p: Perm :: { h(p) } h(p) == p }
+}
+
+method callee(r: Ref)
+  requires acc(P(r), h(1/2))
+  requires pre(snap(r))
+  ensures acc(P(r), 1/2)
+
+method precondition_after_permission(r: Ref, z: Int)
+  requires acc(P(r), 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  callee(r)
+}
+
+method precondition_in_arm(r: Ref, z: Int, c: Bool)
+  requires acc(P(r), 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    callee(r)
+  }
+}
