@@ -277,7 +277,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                     let Some(sigma): Option<Vec<Id>> = sigma.slots.into_iter().collect() else {
                         continue;
                     };
-                    if generation > MAX_GENERATION {
+                    if generation > MAX_GENERATION && !pass::lifted() {
                         deferred += 1;
                         continue;
                     }
@@ -291,6 +291,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             }
         }
         if deferred > 0 {
+            pass::note_deferred();
             stats::bump(|s| s.inst_deferred += deferred);
         }
         if let Some(peak) = instances.iter().map(|i| i.2).max() {
@@ -365,17 +366,91 @@ impl Sigma {
     }
 }
 
-/// The deepest instance generation built. A termination bound: a matching loop
-/// (an instance that builds a new term its own trigger matches) has no fixpoint,
-/// and there are finitely many instances of each generation, since every class
-/// of generation `g` holds a node built by an instance of generation at most `g`
-/// or by the other rules from such classes (which terminate on their own).
+/// The deepest instance generation built on a unit's first verification pass.
+/// It makes that pass's saturation runs terminate at a fixpoint: a matching loop
+/// (an instance that builds a new term its own trigger matches) has none, but
+/// there are finitely many instances of each generation, since every class of
+/// generation `g` holds a node built by an instance of generation at most `g` or
+/// by the other rules from such classes (which terminate on their own). Below
+/// the iteration limit, so a matching loop ends its run at a fixpoint.
 ///
-/// Sized above the depth proofs need: the deepest measured is 11 (a crate's
-/// type-level arithmetic; a bound of 8 loses proofs there). Z3's defaults
-/// instantiate eagerly up to cost 10 and at a final check up to 20. Below the
-/// iteration limit, so a matching loop ends its run at a fixpoint.
+/// It decides no verdict (see [`pass::verify_unit`]): a unit whose first pass
+/// deferred an instance and failed is verified again without the bound. Its
+/// value sets only how often that happens, so it sits above the deepest chain
+/// measured on the corpora (generation 11, a crate's type-level arithmetic).
 pub(crate) const MAX_GENERATION: u32 = 16;
+
+/// A unit's verification passes: the first defers instances past
+/// [`MAX_GENERATION`], the second, run only when the first cannot stand, builds
+/// every instance.
+pub(crate) mod pass {
+    use std::cell::Cell;
+
+    use crate::verify::stats;
+
+    thread_local! {
+        /// Whether the running pass builds instances past the bound.
+        static LIFTED: Cell<bool> = const { Cell::new(false) };
+        /// Whether the running pass deferred an instance, on any of the unit's
+        /// graphs (ground, the block scratch, probe clones).
+        static DEFERRED: Cell<bool> = const { Cell::new(false) };
+        /// Whether the running pass passed a check because a proof failed.
+        static PASSED_ON_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn lifted() -> bool {
+        LIFTED.get()
+    }
+
+    pub(super) fn note_deferred() {
+        DEFERRED.set(true);
+    }
+
+    /// A check passed because its proof failed (a `refute`): the bound can be
+    /// what made the proof fail, so the verdict needs the second pass.
+    pub(crate) fn note_passed_on_failure() {
+        PASSED_ON_FAILURE.set(true);
+    }
+
+    /// Verifies one unit (`verify` runs it from scratch) so that its verdict does
+    /// not depend on the generation bound.
+    ///
+    /// - If the first pass deferred nothing, the bound never applied: it ran
+    ///   exactly what the second pass would.
+    /// - Otherwise a success stands if it rests on proofs alone: the deferred
+    ///   instances are facts it did not assume, and a proof from fewer facts is
+    ///   sound (as is one from a run any termination bound cut short).
+    /// - A failure, or a success that rests on a failed proof, is decided by a
+    ///   second pass without the bound. Its only stops are the saturation runs'
+    ///   termination bounds (the iteration and growth limits).
+    ///
+    /// Replaying the unit rather than re-checking the failed goal reaches every
+    /// query the first pass made: an internal heap query, Z3, a probe or the
+    /// block scratch sees the second pass's graph without a rung of its own, and
+    /// the depth a chain needs accumulates in place, as without generations.
+    pub(crate) fn verify_unit<T, E>(mut verify: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+        DEFERRED.set(false);
+        PASSED_ON_FAILURE.set(false);
+        let first = verify();
+        if !DEFERRED.get() || (first.is_ok() && !PASSED_ON_FAILURE.get()) {
+            return first;
+        }
+        stats::bump(|s| s.unit_reruns += 1);
+        struct Lift;
+        impl Drop for Lift {
+            fn drop(&mut self) {
+                LIFTED.set(false);
+            }
+        }
+        LIFTED.set(true);
+        let _lift = Lift;
+        let second = verify();
+        if second.is_ok() {
+            stats::bump(|s| s.unit_reruns_verified += 1);
+        }
+        second
+    }
+}
 
 #[cfg(test)]
 mod tests {

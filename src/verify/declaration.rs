@@ -1263,6 +1263,7 @@ fn eval_method_inst(
             if ctx.prove_under_pc(id, &pc_lits) {
                 return Err(VerifyError::RefuteFailed);
             }
+            crate::verify::rewrite::forall::pass::note_passed_on_failure();
         }
     }
     Ok(())

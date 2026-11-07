@@ -48,6 +48,7 @@ pub fn verify_with_stats(
     Vec<(String, std::time::Duration)>,
     VerifyStats,
 ) {
+    use rewrite::forall::pass::verify_unit;
     stats::reset_stats();
     let program = &analyzed.program;
     let mut results = Vec::new();
@@ -98,16 +99,18 @@ pub fn verify_with_stats(
                     unreachable!("analyze guarantees a recursive SCC contains only functions");
                 };
                 let start = std::time::Instant::now();
-                let outcome = match declaration::verify_function(
-                    program,
-                    &name,
-                    id,
-                    f,
-                    &certs,
-                    &fn_certs,
-                    Some(&scc),
-                    &mut alloc,
-                ) {
+                let outcome = match verify_unit(|| {
+                    declaration::verify_function(
+                        program,
+                        &name,
+                        id,
+                        f,
+                        &certs,
+                        &fn_certs,
+                        Some(&scc),
+                        &mut alloc,
+                    )
+                }) {
                     Ok(None) => None,
                     Ok(Some(cert)) => {
                         batch_defs.push((id, cert));
@@ -131,8 +134,9 @@ pub fn verify_with_stats(
         let start = std::time::Instant::now();
         let outcome = match &program.decls[id] {
             vmir::Declaration::Resource(r) => {
-                match declaration::verify_resource(program, &name, r, &certs, &fn_certs, &mut alloc)
-                {
+                match verify_unit(|| {
+                    declaration::verify_resource(program, &name, r, &certs, &fn_certs, &mut alloc)
+                }) {
                     Ok(cert) => {
                         certs.insert(id, cert);
                         Some(Ok(()))
@@ -141,9 +145,11 @@ pub fn verify_with_stats(
                 }
             }
             vmir::Declaration::Function(f) => {
-                match declaration::verify_function(
-                    program, &name, id, f, &certs, &fn_certs, None, &mut alloc,
-                ) {
+                match verify_unit(|| {
+                    declaration::verify_function(
+                        program, &name, id, f, &certs, &fn_certs, None, &mut alloc,
+                    )
+                }) {
                     Ok(None) => None,
                     Ok(Some(cert)) => {
                         fn_certs.insert(id, cert);
@@ -154,9 +160,9 @@ pub fn verify_with_stats(
                     Err(e) => Some(Err(e)),
                 }
             }
-            vmir::Declaration::Method(m) => Some(declaration::verify_method(
-                program, &name, m, &certs, &fn_certs, &mut alloc,
-            )),
+            vmir::Declaration::Method(m) => Some(verify_unit(|| {
+                declaration::verify_method(program, &name, m, &certs, &fn_certs, &mut alloc)
+            })),
             _ => None,
         };
         let elapsed = start.elapsed();

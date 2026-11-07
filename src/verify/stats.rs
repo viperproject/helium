@@ -103,6 +103,11 @@ pub struct VerifyStats {
     pub inst_deferred: u64,
     /// The deepest generation of a quantifier instance built.
     pub inst_generation_peak: u64,
+    /// Units verified a second time without the generation bound (the first
+    /// pass deferred an instance and could not stand), and how many of them
+    /// that verified.
+    pub unit_reruns: u64,
+    pub unit_reruns_verified: u64,
     /// peak e-graph size observed in any iteration.
     pub egraph_nodes_peak: usize,
     pub egraph_classes_peak: usize,
@@ -307,6 +312,8 @@ impl VerifyStats {
             sat_bound_stops,
             inst_deferred,
             inst_generation_peak,
+            unit_reruns,
+            unit_reruns_verified,
             egraph_nodes_peak,
             egraph_classes_peak,
             insts_processed,
@@ -341,6 +348,8 @@ impl VerifyStats {
             ("sat_bound_stops", n(sat_bound_stops)),
             ("inst_deferred", n(inst_deferred)),
             ("inst_generation_peak", n(inst_generation_peak)),
+            ("unit_reruns", n(unit_reruns)),
+            ("unit_reruns_verified", n(unit_reruns_verified)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
             ("insts_processed", n(insts_processed)),

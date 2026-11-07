@@ -1,0 +1,15 @@
+// `refute` passes only when its expression is not provable, so a verifier that
+// knows less passes more refutes. `f(30)` is provable through the chain
+// `f(i) == f(i + 1)`, 30 instances deep: the refute must fail even though a
+// verification pass that defers instances at the generation bound cannot
+// prove `f(30)`.
+domain Succ {
+  function f(i: Int): Bool
+  axiom step { forall i: Int :: { f(i) } f(i) == f(i + 1) }
+}
+
+method m()
+  requires f(0)
+{
+  refute f(30)
+}

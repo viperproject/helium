@@ -1,0 +1,14 @@
+// A goal that is false in a model of a divergent axiom: `f(i) == f(i + 1)` from
+// `f(0)` only ever derives `f(k)`, never `!f(30)`. Instantiation never reaches a
+// fixpoint here, so the search must end at a termination bound, and the goal
+// fails.
+domain Succ {
+  function f(i: Int): Bool
+  axiom step { forall i: Int :: { f(i) } f(i) == f(i + 1) }
+}
+
+method m()
+  requires f(0)
+{
+  assert !f(30)
+}

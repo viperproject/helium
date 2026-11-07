@@ -1,0 +1,17 @@
+// A permission amount known only through a quantifier chain 30 instances deep.
+// `p(i) == p(i + 1)` is a matching loop: each instance builds the next trigger
+// term. The heap's permission query (is the held amount at least `write`) must
+// see the whole chain, not only the depth the generation bound lets a first
+// verification pass build.
+domain P {
+  function p(i: Int): Perm
+  axiom step { forall i: Int :: { p(i) } p(i) == p(i + 1) }
+}
+
+field v: Int
+
+method m(x: Ref)
+  requires p(0) == write && acc(x.v, p(30))
+{
+  x.v := 1
+}

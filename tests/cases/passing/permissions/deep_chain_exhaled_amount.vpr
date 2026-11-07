@@ -1,0 +1,15 @@
+// The held amount is `p(0)`; the chain `p(i) == p(i + 1)` relates it to
+// `p(30) == write`, 30 instances deep. Exhaling `write` asks the heap whether the
+// held amount covers it: that internal query must see the whole chain.
+domain P {
+  function p(i: Int): Perm
+  axiom step { forall i: Int :: { p(i) } p(i) == p(i + 1) }
+}
+
+field v: Int
+
+method m(x: Ref)
+  requires p(30) == write && acc(x.v, p(0))
+{
+  exhale acc(x.v, write)
+}

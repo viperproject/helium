@@ -1,0 +1,14 @@
+// A quantifier chain 150 instances deep: deeper than one saturation run goes
+// (its iteration limit is 100), so the proof needs the depth a chain
+// accumulates over the unit's successive runs on its graph, as it does without
+// instance generations.
+domain Succ {
+  function f(i: Int): Bool
+  axiom step { forall i: Int :: { f(i) } f(i) == f(i + 1) }
+}
+
+method m()
+  requires f(0)
+{
+  assert f(150)
+}

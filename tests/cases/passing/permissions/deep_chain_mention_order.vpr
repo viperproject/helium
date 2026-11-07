@@ -1,0 +1,32 @@
+// Three equivalent methods: the permission amount `p(20)` equals `write` through
+// the chain `p(i) == p(i + 1)`, 20 instances deep. They differ only in when the
+// program first names `p(1)` and `p(5)`, which changes the instance generation
+// of the chain's terms (a term keeps the generation it was created at). The
+// verdict must not depend on it.
+domain P {
+  function p(i: Int): Perm
+  axiom step { forall i: Int :: { p(i) } p(i) == p(i + 1) }
+}
+
+field v: Int
+
+method named_in_the_precondition(x: Ref)
+  requires p(0) == write && p(5) == p(5) && acc(x.v, p(20))
+{
+  x.v := 1
+}
+
+method named_in_the_body(x: Ref)
+  requires p(0) == write && acc(x.v, p(20))
+{
+  assert p(5) == p(5)
+  x.v := 1
+}
+
+method named_after_a_proof(x: Ref)
+  requires p(0) == write && acc(x.v, p(20))
+{
+  assert p(1) == write
+  assert p(5) == p(5)
+  x.v := 1
+}
