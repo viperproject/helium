@@ -1,0 +1,18 @@
+// A loop inside an arm of an outer loop's body: the inner head's reach condition
+// is the outer body's cube plus the arm's literal. Its `x != y` must not reach
+// the rest of the outer body, where `c` may be false. Silicon rejects.
+field f: Int
+
+method loop_head_in_arm_of_loop_body(x: Ref, y: Ref, c: Bool, n: Int)
+{
+  var i: Int := 0
+  while (i < n) invariant true {
+    if (c) {
+      inhale acc(x.f) && acc(y.f)
+      var j: Int := 0
+      while (j < n) invariant acc(x.f) && acc(y.f) { j := j + 1 }
+    }
+    assert x != y
+    i := i + 1
+  }
+}

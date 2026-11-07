@@ -1,0 +1,20 @@
+// `inner_join_in_arm.vpr` with the second permission produced by a call's
+// postcondition. Silicon rejects.
+field f: Int
+
+method give(r: Ref)
+  ensures acc(r.f)
+
+method call_then_join_in_arm(a: Ref, b: Ref, e: Bool, d: Bool)
+  requires acc(a.f)
+{
+  if (e) {
+    give(b)
+    if (d) {
+      inhale a.f == 1
+    } else {
+      inhale a.f == 2
+    }
+  }
+  assert a != b
+}

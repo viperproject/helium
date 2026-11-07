@@ -1,0 +1,18 @@
+// A loop in an arm that is also left by a `goto`: the label after the loop is a
+// join of the loop's exit and the jump, both under the arm. Its `x != y` must
+// not reach the code after the arm. Silicon rejects.
+field f: Int
+
+method loop_exit_goto_in_arm(x: Ref, y: Ref, c: Bool, n: Int)
+{
+  if (c) {
+    inhale acc(x.f) && acc(y.f)
+    var i: Int := 0
+    while (i < n) invariant acc(x.f) && acc(y.f) {
+      if (i == 3) { goto out }
+      i := i + 1
+    }
+    label out
+  }
+  assert x != y
+}
