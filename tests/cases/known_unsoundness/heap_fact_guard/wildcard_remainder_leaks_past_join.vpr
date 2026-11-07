@@ -1,0 +1,19 @@
+// A wildcard exhale on one arm must not teach the other path that the location
+// held a positive amount.
+//
+// The consume hands back a fresh remainder `r` with `0 < r` and assumes
+// `r < held`, i.e. `0 < p` here. That fact holds only where the exhale ran. It
+// used to be assumed under the instruction's pc *delta* — empty for a statement
+// in a block body — instead of the block cube plus the delta, so it reached
+// ground unguarded and proved `p > none` on the `!c` path too. Silicon rejects.
+field f: Int
+
+method wildcard_remainder_leaks_past_join(x: Ref, p: Perm, c: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    inhale p > none
+    exhale acc(x.f, wildcard)
+  }
+  assert p > none
+}
