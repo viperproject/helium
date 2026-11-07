@@ -1,0 +1,19 @@
+// `inner_join_in_arm.vpr` with an else-if chain inside the arm, i.e. a cascade
+// of inner joins. Silicon rejects.
+field f: Int
+
+method else_chain_in_arm(a: Ref, b: Ref, e: Bool, k: Int)
+  requires acc(a.f)
+{
+  if (e) {
+    inhale acc(b.f)
+    if (k == 0) {
+      inhale a.f == 0
+    } elseif (k == 1) {
+      inhale a.f == 1
+    } else {
+      inhale a.f == 2
+    }
+  }
+  assert a != b
+}

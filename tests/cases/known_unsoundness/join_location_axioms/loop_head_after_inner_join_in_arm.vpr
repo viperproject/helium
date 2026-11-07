@@ -1,0 +1,14 @@
+// A loop head after an inner join inside an arm: its reach condition is the arm's
+// literal, and its `x != y` must not make the other arm infeasible. Silicon
+// rejects.
+field f: Int
+
+method loop_head_after_inner_join_in_arm(x: Ref, y: Ref, c: Bool, d: Bool, n: Int)
+{
+  if (c) {
+    inhale acc(x.f) && acc(y.f)
+    if (d) { } else { }
+    while (n > 0) invariant acc(x.f) && acc(y.f) { }
+  }
+  if (!c) { assume x == y; assert false }
+}
