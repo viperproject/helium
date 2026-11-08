@@ -1,0 +1,9 @@
+// SOUNDNESS. A wand is not duplicable (Silicon: magic wand instance not
+// found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method duplicate_in_postcondition(x: Ref)
+  requires P(x) --* Q(x)
+  ensures (P(x) --* Q(x)) && (P(x) --* Q(x))
+{}

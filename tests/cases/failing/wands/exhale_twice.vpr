@@ -1,0 +1,11 @@
+// SOUNDNESS. Exhaling a wand gives it up (Silicon: magic wand instance not
+// found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method exhale_twice(x: Ref)
+  requires P(x) --* Q(x)
+{
+  exhale P(x) --* Q(x)
+  exhale P(x) --* Q(x)
+}

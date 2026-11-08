@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use crate::dhash::{HashMap, HashSet};
 use itertools::Itertools;
 use lasso::Spur;
@@ -16,9 +18,11 @@ use crate::viper::{
 
 mod error;
 mod lattice;
+mod wand;
 
 pub use error::TypeError;
 use lattice::{ViperTcType, type_to_tc};
+use wand::{WandTable, mentions_wand};
 
 // ==========================================
 // 3. Context types
@@ -104,6 +108,8 @@ fn check_type(
 struct LocalEnv<'g> {
     globals: &'g Globals,
     interner: &'g Interner,
+    /// The program's wand structures, shared by all its declarations.
+    wands: &'g RefCell<WandTable>,
     locals: HashMap<Spur, Type>,
     labels: HashSet<Spur>,
     /// Every label of the method, wherever it sits (`labels` leaves out those
@@ -119,10 +125,11 @@ struct LocalEnv<'g> {
 }
 
 impl<'g> LocalEnv<'g> {
-    fn new(globals: &'g Globals, interner: &'g Interner) -> Self {
+    fn new(globals: &'g Globals, interner: &'g Interner, wands: &'g RefCell<WandTable>) -> Self {
         Self {
             globals,
             interner,
+            wands,
             locals: HashMap::default(),
             labels: HashSet::default(),
             all_labels: HashSet::default(),
@@ -231,6 +238,27 @@ impl<'g> LocalEnv<'g> {
         LoweringCtx::new(self, &table).lower_spatial::<Ext>(exp)
     }
 
+    /// Typecheck `apply A --* B`: the wand resource it consumes, and its two
+    /// sides in the applying state.
+    fn typecheck_apply(&self, exp: &mut viper::Exp) -> Result<typed::Statement, TypeError> {
+        if !matches!(*exp.kind, viper::ExpKind::MagicWand(..)) {
+            return Err(TypeError::Other("`apply` needs a magic wand".to_string()));
+        }
+        let mut c = ConstraintCtx::new(self, None);
+        c.constrain_spatial(exp)?;
+        c.resolve_shared_destructors()?;
+        let table = c.tc.type_check().map_err(TypeError::from)?;
+        let lowerer = LoweringCtx::new(self, &table);
+        let viper::ExpKind::MagicWand(lhs, rhs) = &*exp.kind else {
+            unreachable!("checked above")
+        };
+        Ok(typed::Statement::Apply {
+            wand: lowerer.lower_spatial(exp)?,
+            lhs: lowerer.lower_spatial(lhs)?,
+            rhs: lowerer.lower_spatial(rhs)?,
+        })
+    }
+
     /// Typecheck a `acc(pred(..), perm)` location used by fold/unfold.
     fn typecheck_pred_with_perm<Ext: PureExt>(
         &self,
@@ -253,6 +281,7 @@ impl<'g> LocalEnv<'g> {
                     "fold/unfold requires a predicate, not a field".to_string(),
                 ));
             }
+            ResourceExpKind::Wand(..) => unreachable!("`lower_resource` makes no wand"),
         };
         check_predicate_foldable(self.globals, self.interner, pred_call.name.0)?;
         Ok(PredicateWithPerm { pred_call, perm })
@@ -823,6 +852,13 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
             }
 
+            // A wand is an assertion, not a boolean.
+            ExpKind::MagicWand(..) => {
+                return Err(TypeError::Other(
+                    "a magic wand in a pure expression".to_string(),
+                ));
+            }
+
             _ => {
                 return Err(TypeError::Other(format!(
                     "unsupported pure expression: {:?}",
@@ -1196,11 +1232,30 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
     fn constrain_spatial(&mut self, exp: &mut viper::Exp) -> Result<(), TypeError> {
         use viper::ExpKind;
 
-        // A bare predicate call in assertion position is shorthand for full permission.
-        if let ExpKind::Call(call) = exp.kind.as_mut() {
-            if matches!(call.kind, Some(viper::ExpCallKind::Predicate)) {
-                return self.constrain_predicate_resource(call);
-            }
+        // A bare predicate call in assertion position is shorthand for full
+        // permission. Spelled out, so that `P(x)` and `acc(P(x))` have one shape
+        // (a wand's structure depends on it).
+        if let ExpKind::Call(call) = exp.kind.as_ref()
+            && matches!(call.kind, Some(viper::ExpCallKind::Predicate))
+        {
+            let call = std::mem::replace(&mut *exp.kind, ExpKind::Result);
+            *exp.kind = ExpKind::Acc(viper::AccExp {
+                loc: viper::Exp::impure(call),
+                perm: ExpKind::write(),
+            });
+        }
+        // A connective is a boolean too: a wand's hole may be one that holds no
+        // resource (`c ==> d` on a wand's side), lowered as a pure expression.
+        if matches!(
+            *exp.kind,
+            ExpKind::BinOp(viper::BinOp::And | viper::BinOp::Implies, ..)
+                | ExpKind::Ternary(..)
+                | ExpKind::LetIn(..)
+        ) {
+            let key = self.tc.new_term_key();
+            self.tc
+                .impose(key.concretizes_explicit(ViperTcType::Bool))?;
+            exp.ty = viper::InferenceType::Infer(key);
         }
 
         match exp.kind.as_mut() {
@@ -1227,6 +1282,23 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .impose(cond_key.concretizes_explicit(ViperTcType::Bool))?;
                 self.constrain_spatial(then)?;
                 self.constrain_spatial(else_)
+            }
+            ExpKind::MagicWand(l, r) => {
+                self.constrain_spatial(l)?;
+                self.constrain_spatial(r)
+            }
+            ExpKind::LetIn(binder, value, body) => {
+                let value_key = self.constrain_pure(value)?;
+                let binder_spur = binder.0.id();
+                if self.env.declared(binder_spur) || self.let_bindings.contains_key(&binder_spur) {
+                    return Err(TypeError::ShadowedName(
+                        self.env.interner.resolve(&binder_spur).to_string(),
+                    ));
+                }
+                self.let_bindings.insert(binder_spur, value_key);
+                self.constrain_spatial(body)?;
+                self.let_bindings.remove(&binder_spur);
+                Ok(())
             }
             _ => {
                 let pure_key = self.constrain_pure(exp)?;
@@ -1315,6 +1387,9 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     ResourceExpKind::PredicateCall(call) => call,
                     ResourceExpKind::Field(..) => {
                         return Err(TypeError::Other("cannot unfold a field".to_string()));
+                    }
+                    ResourceExpKind::Wand(..) => {
+                        unreachable!("`lower_resource` makes no wand")
                     }
                 };
                 check_predicate_foldable(self.env.globals, self.env.interner, pred_call.name.0)?;
@@ -1478,18 +1553,21 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
         ))))
     }
 
+    /// `A --* B` as a resource: an instance of its structure at its holes'
+    /// values (see [`wand`]).
+    fn lower_wand<Ext: PureExt>(&self, wand: &viper::Exp) -> Result<ResourceExp<Ext>, TypeError> {
+        let (structure, holes) = self.env.wands.borrow().split(wand);
+        let holes = holes
+            .iter()
+            .map(|h| self.lower_pure::<Ext>(h))
+            .collect::<Result<Vec<_>, _>>()?;
+        let types = holes.iter().map(|h| h.ty.clone()).collect();
+        let id = self.env.wands.borrow_mut().intern(structure, types);
+        Ok(ResourceExp(Box::new(ResourceExpKind::Wand(id, holes))))
+    }
+
     fn lower_spatial<Ext: PureExt>(&self, exp: &viper::Exp) -> Result<SpatialExp<Ext>, TypeError> {
         use viper::ExpKind;
-
-        if let ExpKind::Call(call) = &*exp.kind {
-            if matches!(call.kind, Some(viper::ExpCallKind::Predicate)) {
-                let resource = self.lower_predicate_resource::<Ext>(call)?;
-                return Ok(SpatialExp(Box::new(SpatialExpKind::Acc(
-                    resource,
-                    write_perm(),
-                ))));
-            }
-        }
 
         match &*exp.kind {
             ExpKind::Acc(acc_exp) => {
@@ -1522,6 +1600,18 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     else_: else_s,
                 })))
             }
+
+            // A wand is held in full or not at all.
+            ExpKind::MagicWand(..) => Ok(SpatialExp(Box::new(SpatialExpKind::Acc(
+                self.lower_wand::<Ext>(exp)?,
+                write_perm(),
+            )))),
+
+            ExpKind::LetIn(binder, value, body) => Ok(SpatialExp(Box::new(SpatialExpKind::Let {
+                binder: Ident(binder.0.id()),
+                value: self.lower_pure::<Ext>(value)?,
+                body: self.lower_spatial::<Ext>(body)?,
+            }))),
 
             _ => {
                 let pure_exp = self.lower_pure::<Ext>(exp)?;
@@ -1664,8 +1754,14 @@ fn lower_statement(
         // `scan_unsupported` normally rejects the declaration before we get
         // here, so this is the backstop.
         S::Unsupported(what) => Err(TypeError::Unsupported(what)),
+        S::Package(..) => Err(TypeError::Unsupported("package")),
+        S::Apply(e) => ctx.typecheck_apply(e),
         S::Assume(e) => Ok(typed::Statement::Assume(ctx.typecheck_spatial(e)?)),
         S::Assert(e) => Ok(typed::Statement::Assert(ctx.typecheck_spatial(e)?)),
+        // Silver types `refute` as `Bool`, which a wand is not.
+        S::Refute(e) if mentions_wand(e) => Err(TypeError::Other(
+            "found incompatible type `<wand>`, expected `Bool`".to_string(),
+        )),
         S::Refute(e) => Ok(typed::Statement::Refute(ctx.typecheck_spatial(e)?)),
         S::Inhale(e) => Ok(typed::Statement::Inhale(ctx.typecheck_spatial(e)?)),
         S::Exhale(e) => Ok(typed::Statement::Exhale(ctx.typecheck_spatial(e)?)),
@@ -2066,17 +2162,30 @@ fn add_arg_locals(ctx: &mut LocalEnv, args: &[viper::ArgOrType]) -> Result<(), T
     Ok(())
 }
 
+/// Silver's resolver rejects a wand in a function precondition or a predicate
+/// body (`checkNoMagicWands`), so no function value or predicate snapshot
+/// depends on a wand.
+fn wand_in_function_or_predicate() -> TypeError {
+    TypeError::Other(
+        "magic wands are not supported in function preconditions or predicates".to_string(),
+    )
+}
+
 fn typecheck_predicate(
     pred: &mut viper::Predicate,
     globals: &Globals,
     interner: &Interner,
+    wands: &RefCell<WandTable>,
 ) -> Result<typed::Declaration, TypeError> {
     let name = Ident(pred.signature.name.0.id());
     let params = collect_params(&pred.signature.args);
 
-    let mut ctx = LocalEnv::new(globals, interner);
+    let mut ctx = LocalEnv::new(globals, interner, wands);
     add_arg_locals(&mut ctx, &pred.signature.args)?;
 
+    if pred.body.as_ref().is_some_and(|b| mentions_wand(&b.0)) {
+        return Err(wand_in_function_or_predicate());
+    }
     let body = pred
         .body
         .as_mut()
@@ -2094,6 +2203,7 @@ fn typecheck_function(
     func: &mut viper::Function,
     globals: &Globals,
     interner: &Interner,
+    wands: &RefCell<WandTable>,
 ) -> Result<typed::Declaration, TypeError> {
     let func_spur = func.signature.name.0.id();
     let name = Ident(func_spur);
@@ -2109,10 +2219,13 @@ fn typecheck_function(
             ))
         })?;
 
-    let mut ctx = LocalEnv::new(globals, interner);
+    let mut ctx = LocalEnv::new(globals, interner, wands);
     add_arg_locals(&mut ctx, &func.signature.args)?;
     ctx.check_type(func.signature.ret[0].ty())?;
 
+    if func.contract.precondition.iter().any(mentions_wand) {
+        return Err(wand_in_function_or_predicate());
+    }
     let requires = combine_spatial::<typed::HeapExt>(&mut func.contract.precondition, &ctx)?;
 
     // Body cannot mention `result` (only postconditions can): pass None.
@@ -2149,12 +2262,13 @@ fn typecheck_method(
     method: &mut viper::Method,
     globals: &Globals,
     interner: &Interner,
+    wands: &RefCell<WandTable>,
 ) -> Result<typed::Declaration, TypeError> {
     let name = Ident(method.signature.name.0.id());
     let params = collect_params(&method.signature.args);
     let rets = collect_params(&method.signature.ret);
 
-    let mut ctx = LocalEnv::new(globals, interner);
+    let mut ctx = LocalEnv::new(globals, interner, wands);
 
     // Collect all label names from the body before processing anything.
     if let Some(body) = &method.body {
@@ -2345,6 +2459,7 @@ pub fn typecheck_program_reporting(
 ) -> (typed::Program, Vec<(String, TypeError)>) {
     let mut decls = Vec::new();
     let mut errors: Vec<(String, TypeError)> = Vec::new();
+    let wands = RefCell::new(WandTable::new(program));
 
     // Domain functions/axioms are separate `DomainElement` decls; gather the
     // functions and axioms per owning domain so each `Domain` can carry them.
@@ -2403,7 +2518,7 @@ pub fn typecheck_program_reporting(
                 .get(&de.domain.id())
                 .cloned()
                 .unwrap_or_default();
-            let env = LocalEnv::new(globals, &interner);
+            let env = LocalEnv::new(globals, &interner, &wands);
             let result = env.typecheck_axiom(&mut ax.exp.0, &params).and_then(|exp| {
                 check_axiom_function_calls(&exp, &fns_with_precond, &interner)?;
                 Ok(typed::Axiom {
@@ -2424,13 +2539,13 @@ pub fn typecheck_program_reporting(
                 typecheck_field(field, globals, &interner).map(Some)
             }
             viper::Declaration::Predicate(pred) => {
-                typecheck_predicate(pred, globals, &interner).map(Some)
+                typecheck_predicate(pred, globals, &interner, &wands).map(Some)
             }
             viper::Declaration::Function(func) => {
-                typecheck_function(func, globals, &interner).map(Some)
+                typecheck_function(func, globals, &interner, &wands).map(Some)
             }
             viper::Declaration::Method(method) => {
-                typecheck_method(method, globals, &interner).map(Some)
+                typecheck_method(method, globals, &interner, &wands).map(Some)
             }
             viper::Declaration::Adt(adt) => typecheck_adt(adt, globals, &interner).map(Some),
             viper::Declaration::Domain(domain) => {
@@ -2458,7 +2573,15 @@ pub fn typecheck_program_reporting(
         .into_iter()
         .map(|(name, e)| (name, e.with_names(&interner)))
         .collect();
-    (typed::Program { decls, interner }, errors)
+    let wands = wands.into_inner().wands;
+    (
+        typed::Program {
+            decls,
+            wands,
+            interner,
+        },
+        errors,
+    )
 }
 
 /// The name a declaration is reported under, matching `viper::units::unit_name`
@@ -3634,5 +3757,123 @@ method m(a: A) {
 "#,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    // ---- Magic-wand structures ----
+
+    /// The hole types of each wand structure `src` mentions, in interning order.
+    fn wand_structures(src: &str) -> Vec<Vec<Type>> {
+        let header = r#"
+field f: Int
+predicate P(x: Ref)
+predicate Q(x: Ref)
+predicate R(i: Int)
+function pure_id(x: Ref): Ref
+function snap(x: Ref): Ref
+  requires P(x)
+function pre_pure(x: Ref): Ref
+  requires x != null
+"#;
+        let program = run_pipeline(&format!("{header}{src}")).expect("expected Ok");
+        program.wands.into_iter().map(|w| w.holes).collect()
+    }
+
+    const REF_WAND: [Type; 4] = [Type::Ref, Type::Real, Type::Ref, Type::Real];
+
+    #[test]
+    fn wand_structure_abstracts_hole_values() {
+        // Variables, literals and permission amounts are holes; how an amount
+        // is spelled does not matter.
+        let wands = wand_structures(
+            r#"
+method m(x: Ref, y: Ref)
+  requires (P(x) --* Q(x)) && (P(y) --* Q(x)) && (acc(P(x), 1/2) --* acc(Q(x), write))
+"#,
+        );
+        assert_eq!(wands, vec![REF_WAND.to_vec()]);
+    }
+
+    #[test]
+    fn wand_structure_keeps_current_heap_reads() {
+        // `x.f` reads the current heap, so it is structure (only `x` is a
+        // hole); under `old` it is a hole of its own.
+        let wands = wand_structures(
+            r#"
+method m(x: Ref)
+  requires acc(x.f) && (R(x.f) --* Q(x)) && (R(1) --* Q(x))
+  ensures R(old(x.f)) --* Q(x)
+"#,
+        );
+        let int_wand = vec![Type::Int, Type::Real, Type::Ref, Type::Real];
+        assert_eq!(wands, vec![REF_WAND.to_vec(), int_wand]);
+    }
+
+    #[test]
+    fn wand_structure_follows_could_be_heap_dependent() {
+        // A call is a hole unless its function's precondition reads the heap
+        // (a pure precondition does not).
+        let wands = wand_structures(
+            r#"
+method m(x: Ref, y: Ref)
+  requires P(x)
+  requires (Q(pure_id(x)) --* Q(x)) && (Q(pre_pure(x)) --* Q(x)) && (Q(y) --* Q(x))
+  requires Q(snap(x)) --* Q(x)
+"#,
+        );
+        assert_eq!(wands, vec![REF_WAND.to_vec(), REF_WAND.to_vec()]);
+    }
+
+    #[test]
+    fn wand_structure_binders_are_not_holes() {
+        // A `let` around a wand binds a hole value; a name bound inside the
+        // wand stays in the structure.
+        let wands = wand_structures(
+            r#"
+method m(x: Ref)
+  requires let r == (x) in (Q(r) --* Q(x))
+  requires (let r == (x) in Q(r)) --* Q(x)
+"#,
+        );
+        assert_eq!(wands, vec![REF_WAND.to_vec(), REF_WAND.to_vec()]);
+    }
+
+    #[test]
+    fn wand_structure_connective_without_resource_is_one_hole() {
+        let wands = wand_structures(
+            r#"
+method m(x: Ref, b: Bool)
+  requires (P(x) && (b ==> x != null)) --* Q(x)
+"#,
+        );
+        let holes = vec![Type::Ref, Type::Real, Type::Bool, Type::Ref, Type::Real];
+        assert_eq!(wands, vec![holes]);
+    }
+
+    /// The type error `src` (after a `P`/`Q` header) fails with.
+    fn wand_error(src: &str) -> String {
+        let header = "predicate P(x: Ref)\npredicate Q(x: Ref)\n";
+        let errors = run_pipeline(&format!("{header}{src}")).expect_err("expected an error");
+        assert!(
+            errors.iter().all(|e| !e.is_unsupported()),
+            "an ill-formed program, not a missing feature: {errors:?}"
+        );
+        errors[0].to_string()
+    }
+
+    #[test]
+    fn wand_in_function_precondition_or_predicate_is_an_error() {
+        // As Silver's `checkNoMagicWands`: anywhere in the assertion.
+        const MSG: &str = "magic wands are not supported in function preconditions or predicates";
+        let pre = "function f(x: Ref, b: Bool): Int\n  requires P(x) && (b ==> (P(x) --* Q(x)))";
+        assert_eq!(wand_error(pre), MSG);
+        assert_eq!(wand_error("predicate W(x: Ref) { P(x) --* Q(x) }"), MSG);
+    }
+
+    #[test]
+    fn refuted_wand_is_an_error() {
+        assert_eq!(
+            wand_error("method m(x: Ref) { refute P(x) --* Q(x) }"),
+            "found incompatible type `<wand>`, expected `Bool`"
+        );
     }
 }

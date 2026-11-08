@@ -1,0 +1,13 @@
+// SOUNDNESS. A loop body that applies the wand does not preserve an invariant
+// holding it (Silicon: magic wand instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method loop_body_spends_wand(x: Ref, n: Int)
+  requires P(x) && (P(x) --* P(x))
+{
+  var i: Int := 0
+  while (i < n)
+    invariant P(x) && (P(x) --* P(x))
+  { apply P(x) --* P(x); i := i + 1 }
+}

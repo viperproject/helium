@@ -1,0 +1,11 @@
+// SOUNDNESS. One wand instance is applied at most once: no rule duplicates it
+// (Silicon: magic wand instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method apply_twice(x: Ref)
+  requires P(x) && (P(x) --* P(x))
+{
+  apply P(x) --* P(x)
+  apply P(x) --* P(x)
+}

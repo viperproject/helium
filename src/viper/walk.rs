@@ -422,6 +422,8 @@ walk_enum!(
     Var(vars, e),
     While(e, invs, decs, b),
     If(e, then, else_),
+    Package(e, b),
+    Apply(e),
     Assign(lhs, rhs),
     Block(b),
     Unsupported(what)

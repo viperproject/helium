@@ -1,0 +1,12 @@
+// `P(x)`, `acc(P(x))` and `acc(P(x), write)` assert the same resource, so they
+// are one wand structure. Silicon rejects this file (magic wand instance not
+// found): its structure records whether an amount was written, so it tells
+// `acc(Q(x), write)` and `Q(x)` apart although they denote the same wand. A
+// deliberate, sound departure.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method permission_spellings(x: Ref)
+  requires P(x) && (acc(P(x)) --* acc(Q(x), write))
+  ensures Q(x)
+{ apply P(x) --* Q(x) }

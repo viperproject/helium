@@ -1,0 +1,11 @@
+// SOUNDNESS. `true --* true` is a resource like any other wand: an invariant
+// that holds one fails on entry unless it was obtained (Silicon: magic wand
+// instance not found). Prusti emits this placeholder in loop invariants.
+
+method unpackaged_trivial_invariant(n: Int)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant true --* true
+  { i := i + 1 }
+}

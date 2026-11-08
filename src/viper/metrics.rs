@@ -136,7 +136,11 @@ impl<'a> AstWalker<'a> for Counter<'_, '_> {
             Statement::Assign(_, AssignRhs::Call(call))
             | Statement::Var(_, Some(AssignRhs::Call(call))) => self.call_rhs(call),
             Statement::Assign(..) | Statement::Var(_, Some(_)) => c.assigns += 1,
-            Statement::Var(_, None) | Statement::Block(_) | Statement::Unsupported(_) => {}
+            Statement::Var(_, None)
+            | Statement::Block(_)
+            | Statement::Package(..)
+            | Statement::Apply(_)
+            | Statement::Unsupported(_) => {}
         }
         stmt.walk_children(self);
     }

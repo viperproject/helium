@@ -1,0 +1,13 @@
+// SOUNDNESS. A join that merges two instances of one wand (whose values the
+// heap equates) derives nothing: wand values are never read (Silicon: assertion
+// false might not hold).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method join_derives_nothing(x: Ref, b: Bool)
+  requires P(x) && (P(x) --* Q(x))
+  ensures false
+{
+  if (b) { exhale P(x) --* Q(x); inhale P(x) --* Q(x) }
+  apply P(x) --* Q(x)
+}

@@ -1,0 +1,12 @@
+// SOUNDNESS. A label (loop-head) invariant holding a wand is checked on entry
+// like any resource (the goto-CFG form of `unpackaged_trivial_invariant`).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method label_invariant_wand(x: Ref, b: Bool)
+  requires P(x)
+{
+  label head
+    invariant P(x) --* Q(x)
+  if (b) { goto head }
+}

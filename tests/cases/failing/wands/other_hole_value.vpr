@@ -1,0 +1,8 @@
+// SOUNDNESS. A wand for `x` is not a wand for `y` (Silicon: magic wand
+// instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method other_hole_value(x: Ref, y: Ref)
+  requires P(y) && (P(x) --* Q(x))
+{ apply P(y) --* Q(y) }

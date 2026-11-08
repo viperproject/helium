@@ -1,0 +1,9 @@
+// SOUNDNESS. The right-hand side of a wand from a contract is produced with
+// fresh values: nothing says `x.f` is still 3 (Silicon: assertion might not
+// hold).
+field f: Int
+
+method rhs_values_are_fresh(x: Ref)
+  requires acc(x.f) && x.f == 3 && (acc(x.f) --* acc(x.f))
+  ensures acc(x.f) && x.f == 3
+{ apply acc(x.f) --* acc(x.f) }

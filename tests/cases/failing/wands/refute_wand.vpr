@@ -1,0 +1,7 @@
+// Ill-formed: Silver types `refute` as `Bool`, and a wand is not one ("found
+// incompatible type `<wand>`, expected `Bool`").
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method refute_unheld_wand(x: Ref)
+{ refute P(x) --* Q(x) }

@@ -5,6 +5,8 @@ use crate::viper::Interner;
 #[derive(Debug, PartialEq)]
 pub struct Program {
     pub decls: Vec<Declaration>,
+    /// Every magic-wand structure the program mentions, indexed by [`WandId`].
+    pub wands: Vec<Wand>,
     /// The symbol alphabet every `Spur` in this program resolves through.
     pub interner: Interner,
 }
@@ -20,7 +22,7 @@ pub struct TypedIdent {
     pub ty: Type,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinCollection {
     Seq(Box<Type>),
     Set(Box<Type>),
@@ -28,7 +30,7 @@ pub enum BuiltinCollection {
     Map(Box<Type>, Box<Type>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Bool,
     Int,
@@ -176,6 +178,13 @@ pub enum SpatialExpKind<PureExt> {
     },
     /// Represents `acc(resource, perm)`.
     Acc(ResourceExp<PureExt>, TypedPureExp<PureExt>),
+    /// `let binder == (value) in body`: `value` is evaluated once, where the
+    /// `let` is, and every use of `binder` in `body` denotes that value.
+    Let {
+        binder: Ident,
+        value: TypedPureExp<PureExt>,
+        body: SpatialExp<PureExt>,
+    },
     /// Lifts a pure boolean expression into the spatial context.
     Pure(TypedPureExp<PureExt>),
 }
@@ -190,6 +199,24 @@ pub enum ResourceExpKind<PureExt> {
     Field(TypedPureExp<PureExt>, Ident),
     /// A spatial predicate: `P(args)`
     PredicateCall(Call<PureExt>),
+    /// A magic wand `A --* B`: an instance of the program's wand structure
+    /// `WandId`, at the values of that structure's holes.
+    Wand(WandId, Vec<TypedPureExp<PureExt>>),
+}
+
+/// Index of a magic-wand structure in [`Program::wands`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WandId(pub usize);
+
+/// A magic-wand structure: a wand `A --* B` with each of its holes — the
+/// maximal subexpressions that read no current heap and mention no variable
+/// bound inside the wand (Silver's `subexpressionsToEvaluate`) — replaced by a
+/// placeholder of the hole's type. Two wands are the same resource exactly when
+/// they have the same structure and equal hole values, so a structure is a
+/// bodyless predicate whose parameters are the holes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Wand {
+    pub holes: Vec<Type>,
 }
 
 /// A predicate call bundled with an explicit permission amount.
@@ -300,6 +327,13 @@ pub enum Statement {
     Block(StmtBlock),
     Fold(PredicateWithPerm<MethodBodyExt>),
     Unfold(PredicateWithPerm<MethodBodyExt>),
+    /// `apply A --* B`: gives up the wand (`acc` of the wand resource) and `A`,
+    /// and gets `B`.
+    Apply {
+        wand: SpatialMethodExp,
+        lhs: SpatialMethodExp,
+        rhs: SpatialMethodExp,
+    },
     /// Label marking a heap state for `old[L](...)` to refer back to; also a
     /// jump target for `goto`.
     ///

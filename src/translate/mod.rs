@@ -113,6 +113,8 @@ pub fn translate_reporting(
         }
     }
 
+    let wands = decl::WandTranslator::declare(&program.wands, &mut ctx, &mut builder);
+
     // Barrier: `name_map` is complete. Snapshot the group interner into `ctx`
     // (owned, independent of `builder` from here on) — every group tag any
     // body-lowering helper looks up was registered during declare.
@@ -175,6 +177,7 @@ pub fn translate_reporting(
             .into_iter()
             .filter_map(|(n, t)| t.define(&ctx, &mut builder).err().map(|e| (n, e))),
     );
+    wands.define(&ctx, &mut builder);
     // Domains take `&mut ctx`: axiom lowering scopes the axiom's type
     // parameters into `ctx.decl_generics` (cleared before returning).
     errors.extend(

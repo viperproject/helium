@@ -35,12 +35,59 @@ use crate::vmir;
 enum PredSlots {
     /// A concrete predicate: one resource under the bare name.
     Concrete(DeclSlot<vmir::Resource>),
-    /// An abstract predicate: the location function under the bare name, then
-    /// the opaque snapshot domain under `{name}#snap`.
-    Abstract {
-        loc: DeclSlot<vmir::Function>,
-        snap: DeclSlot<vmir::Domain>,
-    },
+    /// An abstract predicate: an opaque location under the bare name.
+    Abstract(OpaqueSlots),
+}
+
+/// The two declarations of an opaque location (an abstract predicate, a magic
+/// wand structure): the location function under the bare name, then the opaque
+/// snapshot domain under `{name}#snap`.
+pub(super) struct OpaqueSlots {
+    loc: DeclSlot<vmir::Function>,
+    snap: DeclSlot<vmir::Domain>,
+}
+
+impl OpaqueSlots {
+    /// Reserve the slots — function first, then domain, which fixes the dump
+    /// order — returning the location function's id and the location's value
+    /// type.
+    pub(super) fn declare(
+        d: &mut impl Declarator,
+        name: &str,
+    ) -> (Self, vmir::MemberId, vmir::Type) {
+        let (loc_id, loc) = d.alloc_slot::<vmir::Function>(name);
+        let (snap_id, snap) = d.alloc_slot::<vmir::Domain>(&format!("{name}#snap"));
+        (
+            OpaqueSlots { loc, snap },
+            loc_id,
+            vmir::Type::domain(snap_id),
+        )
+    }
+
+    /// The location function, from `params` to the address type `ret`, and its
+    /// value domain.
+    pub(super) fn define(
+        self,
+        definer: &mut impl Definer,
+        name: &str,
+        params: Vec<vmir::Type>,
+        ret: vmir::Type,
+    ) {
+        let fn_name = definer.intern_name(name);
+        definer.define_function(
+            self.loc,
+            vmir::Function {
+                name: fn_name,
+                params: params.into(),
+                ret,
+                body: None,
+                requires: None,
+                ensures: None,
+            },
+        );
+        let snap_name = definer.intern_name(&format!("{name}#snap"));
+        definer.define_domain(self.snap, vmir::Domain { name: snap_name });
+    }
 }
 
 pub(crate) struct PredicateTranslator<'a, P = Declared> {
@@ -71,14 +118,9 @@ impl<'a> PredicateTranslator<'a, Declared> {
             ctx.pred_resources.insert(p.name.0, id);
             (PredSlots::Concrete(slot), vmir::Type::Snap(id))
         } else {
-            // Function first, then domain — this fixes the dump order.
-            let (loc_id, loc) = d.alloc_slot::<vmir::Function>(&name_str);
+            let (slots, loc_id, value) = OpaqueSlots::declare(d, &name_str);
             ctx.name_map.insert(p.name.0, loc_id);
-            let (snap_id, snap) = d.alloc_slot::<vmir::Domain>(&format!("{name_str}#snap"));
-            (
-                PredSlots::Abstract { loc, snap },
-                vmir::Type::domain(snap_id),
-            )
+            (PredSlots::Abstract(slots), value)
         };
         ctx.addr_types.insert(
             p.name.0,
@@ -112,9 +154,9 @@ impl PredicateTranslator<'_, Metaed> {
         let p = self.src;
         let params: Vec<vmir::Type> = p.params.iter().map(|pp| ctx.lower_type(&pp.ty)).collect();
         let name_str = ctx.interner.resolve(&self.silver_name).to_owned();
-        let name = definer.intern_name(&name_str);
         match self.slots {
             PredSlots::Concrete(slot) => {
+                let name = definer.intern_name(&name_str);
                 let body_exp = p
                     .body
                     .as_ref()
@@ -147,7 +189,7 @@ impl PredicateTranslator<'_, Metaed> {
                     },
                 );
             }
-            PredSlots::Abstract { loc, snap } => {
+            PredSlots::Abstract(slots) => {
                 // The location function: the predicate's arguments in, its
                 // (unbounded) address out. The same shape a field's lowers to.
                 let ret = ctx
@@ -155,19 +197,7 @@ impl PredicateTranslator<'_, Metaed> {
                     .get(&self.silver_name)
                     .expect("declare publishes every predicate's address type")
                     .clone();
-                definer.define_function(
-                    loc,
-                    vmir::Function {
-                        name,
-                        params: params.into(),
-                        ret,
-                        body: None,
-                        requires: None,
-                        ensures: None,
-                    },
-                );
-                let snap_name = definer.intern_name(&format!("{name_str}#snap"));
-                definer.define_domain(snap, vmir::Domain { name: snap_name });
+                slots.define(definer, &name_str, params, ret);
             }
         }
         Ok(())

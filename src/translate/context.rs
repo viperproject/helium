@@ -58,6 +58,9 @@ pub(crate) struct TranslationContext<'a> {
     /// miss here *is* the "cannot fold an abstract predicate" error, with no
     /// explicit abstractness test anywhere.
     pub pred_resources: HashMap<Spur, vmir::MemberId>,
+    /// Each magic-wand structure's location function and `Type::Addr`,
+    /// indexed by `typed::WandId`.
+    pub wands: Vec<(vmir::MemberId, vmir::Type)>,
     /// A method's `Spur` to its contract resource ids.
     pub contracts: HashMap<Spur, MethodContracts>,
     /// ADT constructor/destructor metadata.
@@ -76,6 +79,7 @@ impl<'a> TranslationContext<'a> {
             name_map: HashMap::default(),
             addr_types: HashMap::default(),
             pred_resources: HashMap::default(),
+            wands: Vec::new(),
             contracts: HashMap::default(),
             adt: AdtInfo::default(),
             groups: Rodeo::new(),

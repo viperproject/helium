@@ -1,0 +1,23 @@
+// Ill-formed: Silver rejects a wand in a predicate body ("magic wands are not
+// supported in function preconditions or predicates"), so the predicate is a
+// type error and both methods are skipped.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+predicate W(x: Ref) { P(x) --* Q(x) }
+
+method unfold_gives_wand(x: Ref)
+  requires P(x) && W(x)
+  ensures Q(x)
+{
+  unfold W(x)
+  apply P(x) --* Q(x)
+}
+
+method fold_takes_wand(x: Ref)
+  requires W(x)
+  ensures P(x) --* Q(x)
+{
+  unfold W(x)
+  fold W(x)
+}

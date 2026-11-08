@@ -1,0 +1,8 @@
+// SOUNDNESS. `apply` consumes the left-hand side: holding only the wand is not
+// enough (Silicon: insufficient permission to access P(x)).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method apply_without_lhs(x: Ref)
+  requires P(x) --* Q(x)
+{ apply P(x) --* Q(x) }
