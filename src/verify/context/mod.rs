@@ -625,15 +625,44 @@ pub(super) fn run_rules<'r>(
     egraph: egg::EGraph<Symbolic, ConstFold>,
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
     iter_limit: Option<usize>,
-) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
+) -> (egg::EGraph<Symbolic, ConstFold>, Vec<RunIteration>) {
     run_rules_until(egraph, rules, iter_limit, None)
 }
 
-/// As [`run_rules`], but stopping as soon as `goal` is settled.
+/// One iteration of [`run_rules_until`]: what it applied and what it cost.
+pub(crate) struct RunIteration {
+    /// Graph size when the iteration started.
+    pub(crate) egraph_nodes: usize,
+    pub(crate) egraph_classes: usize,
+    /// Per rule, the e-classes its application changed.
+    pub(crate) applied: Vec<(egg::Symbol, usize)>,
+    /// The e-classes the rules were searched at and their matches applied to.
+    pub(crate) matched_classes: usize,
+    pub(crate) search_time: f64,
+    pub(crate) apply_time: f64,
+    pub(crate) rebuild_time: f64,
+}
+
+/// Graph size past which a run stops after the current rule (egg's `Runner`
+/// node limit, kept as it was).
+const NODE_LIMIT: usize = 100_000;
+
+/// Saturates `egraph` under `rules`, stopping as soon as `goal` is settled.
 ///
-/// egg checks a `Runner`'s hooks at the start of every iteration and treats an
-/// `Err` as a stop, so this costs one class lookup per iteration and saves every
-/// iteration after the answer exists.
+/// **Semi-naive.** The e-graph logs its changes (`EGraph::track_changes`), and
+/// each rule remembers, in the e-graph, how far it has consumed them (keyed by its
+/// name). An iteration searches each rule only for the matches that involve
+/// something changed since that rule last ran (`Searcher::search_changes`), so its
+/// cost follows what changed rather than the size of the graph. A rule that never
+/// ran on this graph searches all of it. A rule's position advances only once its
+/// matches have been applied, so a run cut short leaves the rest pending for the
+/// next run. Clones carry the positions, so a clone continues where its source
+/// left off; a checkpoint rollback restores them.
+///
+/// An iteration finds exactly the new matches a full search would (the old ones
+/// were applied already, and applying a match again changes nothing), so the
+/// fixpoint is the one full matching reaches: debug builds check that a full
+/// search of every rule at the fixpoint changes nothing.
 ///
 /// **`goal` is only sound on a throwaway graph.** The returned e-graph is *not*
 /// saturated, so a caller that records it as clean — `VerifyContext::saturate`
@@ -647,11 +676,11 @@ pub(super) fn run_rules<'r>(
 /// `run_rules` refuses to start on one, so abandoning its saturation cannot change
 /// a verdict either.
 pub(super) fn run_rules_until<'r>(
-    egraph: egg::EGraph<Symbolic, ConstFold>,
+    mut egraph: egg::EGraph<Symbolic, ConstFold>,
     rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
     iter_limit: Option<usize>,
     goal: Option<egg::Id>,
-) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
+) -> (egg::EGraph<Symbolic, ConstFold>, Vec<RunIteration>) {
     // A contradictory graph proves everything, so no rule can change any verdict
     // it yields — stop running them. This is the single choke point for every
     // graph (ground saturate/reduce, scratch saturate/reduce, every probe), and
@@ -663,49 +692,329 @@ pub(super) fn run_rules_until<'r>(
     // The observation cache describes the graph this run walks; a run on a
     // different graph must not read it (ground and its clones share ids).
     crate::verify::rewrite::diseq::new_scan_generation();
-    // Explicit limits: egg's defaults (30 iterations, 10k nodes, **5 seconds**)
-    // are SILENT truncation points — a run that hits one simply stops
-    // mid-saturation and the caller sees an ordinary "not proven", which surfaced
-    // as a false insufficient-permission at ~20 match arms (one tower level
+    let rules: Vec<&egg::Rewrite<Symbolic, ConstFold>> = rules.into_iter().collect();
+    // A rule's progress is kept under its name, so the names must tell rules apart.
+    debug_assert!(
+        {
+            let mut names: Vec<_> = rules.iter().map(|r| r.name.as_str()).collect();
+            names.sort_unstable();
+            names.windows(2).all(|w| w[0] != w[1])
+        },
+        "two rules share a name"
+    );
+    // The limits are explicit and reproducible: iterations (one tower level
     // collapses per iteration, so deep-but-terminating collapses need iterations
-    // ∝ depth).
-    //
-    // The time limit is the worst of the three, because it makes a *verdict*
-    // depend on wall clock: `enum_v8_p2::m_e_guarded` was measured failing on a
-    // 119s run and verifying on a 149s one, same binary and input. That also
-    // silently falsifies the premise `perf_regression` rests on ("egg is
-    // deterministic for a fixed rule set + input") for any program whose
-    // saturation approaches it. Disabled outright — the node and iteration limits
-    // are the real backstops, and unlike a clock they are reproducible.
-    let mut runner = egg::Runner::default()
-        .with_scheduler(egg::SimpleScheduler)
-        .with_node_limit(100_000)
-        .with_iter_limit(iter_limit.unwrap_or(100))
-        .with_time_limit(std::time::Duration::MAX)
-        .with_egraph(egraph)
+    // ∝ depth) and graph size. There is deliberately no time limit, which would
+    // make a *verdict* depend on wall clock.
+    let iter_limit = iter_limit.unwrap_or(100);
+    egraph.track_changes();
+    egraph.rebuild();
+    let mut iterations = Vec::new();
+    while iterations.len() < iter_limit && egraph.total_size() <= NODE_LIMIT {
         // Contradiction reached mid-run: every remaining iteration is spent
         // elaborating a graph that already proves everything.
-        .with_hook(|r| {
-            if graph_inconsistent(&r.egraph) {
-                stats::bump(|s| s.probe_early_stops += 1);
-                return Err("inconsistent".to_owned());
+        //
+        // `ConstFold` settles a goal class without merging it into `true`, so ask
+        // the analysis rather than comparing canonical ids.
+        if graph_inconsistent(&egraph)
+            || goal.is_some_and(|goal| {
+                matches!(
+                    egraph[egraph.find(goal)].data.known(),
+                    Some(Literal::Bool(true))
+                )
+            })
+        {
+            stats::bump(|s| s.probe_early_stops += 1);
+            break;
+        }
+        let (nodes, classes) = (egraph.total_size(), egraph.number_of_classes());
+        let search = std::time::Instant::now();
+        let now = egraph.change_pos().expect("changes are tracked");
+        // The rules usually share a position (they ran together last time), so
+        // the changes are read once per distinct position.
+        let mut changes: Vec<(egg::ChangePos, egg::Changes<Symbolic>)> = Vec::new();
+        let mut matches = Vec::with_capacity(rules.len());
+        for rule in &rules {
+            let found = match egraph.seen(rule.name) {
+                Some(seen) => {
+                    let i = match changes.iter().position(|(pos, _)| *pos == seen) {
+                        Some(i) => i,
+                        None => {
+                            let delta =
+                                egraph.changes_since(seen).expect("unseen changes are kept");
+                            changes.push((seen, delta));
+                            changes.len() - 1
+                        }
+                    };
+                    rule.search_changes(&egraph, &changes[i].1)
+                }
+                None => rule.search(&egraph),
+            };
+            matches.push(found);
+        }
+        drop(changes);
+        let search_time = search.elapsed().as_secs_f64();
+        let apply = std::time::Instant::now();
+        let mut applied = Vec::new();
+        let mut matched_classes = 0;
+        for (rule, found) in rules.iter().zip(matches) {
+            // a searcher may report several matches at one class
+            let mut at: Vec<egg::Id> = found.iter().map(|m| m.eclass).collect();
+            at.sort_unstable();
+            at.dedup();
+            matched_classes += at.len();
+            // Seen before its matches are applied, so the log keeps the changes
+            // the application makes for the rule's next search.
+            egraph.mark_seen(rule.name, now);
+            let n = rule.apply(&mut egraph, &found).len();
+            if n > 0 {
+                applied.push((rule.name, n));
             }
-            Ok(())
-        });
-    if let Some(goal) = goal {
-        runner = runner.with_hook(move |r| {
-            // `ConstFold` settles a class without merging it into `true`, so ask
-            // the analysis rather than comparing canonical ids.
-            if matches!(
-                r.egraph[r.egraph.find(goal)].data.known(),
-                Some(Literal::Bool(true))
-            ) {
-                stats::bump(|s| s.probe_early_stops += 1);
-                return Err("goal proven".to_owned());
+            if egraph.total_size() > NODE_LIMIT {
+                break;
             }
-            Ok(())
+        }
+        let apply_time = apply.elapsed().as_secs_f64();
+        let rebuild = std::time::Instant::now();
+        egraph.rebuild();
+        let saturated = applied.is_empty()
+            && nodes == egraph.total_size()
+            && classes == egraph.number_of_classes();
+        iterations.push(RunIteration {
+            egraph_nodes: nodes,
+            egraph_classes: classes,
+            applied,
+            matched_classes,
+            search_time,
+            apply_time,
+            rebuild_time: rebuild.elapsed().as_secs_f64(),
         });
+        if saturated {
+            break;
+        }
     }
-    let runner = runner.run(rules);
-    (runner.egraph, runner.iterations)
+    debug_assert!(graph_inconsistent(&egraph) || no_match_lost(&egraph, &rules));
+    (egraph, iterations)
+}
+
+/// Whether every match a full search of `rules` finds in `egraph` is either
+/// applied already (applying it again changes nothing) or still pending: found by
+/// the rule's search of the changes since its position. Holds wherever a run
+/// stops — at a fixpoint, where nothing is pending, as well as at a limit or a
+/// settled goal. Checked on a clone, applying the matches that are not pending
+/// with the appliers' memos read-only (they answer as the run's do, so an
+/// instance the run remembers is not rebuilt, and remember nothing of the
+/// clone); a change is a match incremental search lost.
+///
+/// A pending match that binds the forall searcher's anchor covers its whole
+/// class (the full search matches each quantifier of a class); every other match
+/// is compared by class, substitution and its pattern's root node.
+fn no_match_lost(
+    egraph: &egg::EGraph<Symbolic, ConstFold>,
+    rules: &[&egg::Rewrite<Symbolic, ConstFold>],
+) -> bool {
+    use crate::dhash::HashSet;
+    let _memos = rewrite::ReadOnlyMemos::enter();
+    let anchor: egg::Var = "?anchor".parse().expect("var");
+    // A match by its class, its pattern's root node and the bindings of the
+    // searcher's variables and of its pattern's, if it names one (a single
+    // quantifier: its recipe and captures). A searcher may name the pattern in a
+    // full search and not in its search of the changes, so a pending match that
+    // names none covers the same bindings under any pattern.
+    let key = |vars: &[egg::Var], m: &egg::SearchMatches<Symbolic>, subst: &egg::Subst| {
+        let root = m.ast.as_deref().map(|a| a[a.root()].clone());
+        let ast_vars = m.ast.as_deref().into_iter().flat_map(|a| {
+            a.iter().filter_map(|n| match n {
+                egg::ENodeOrVar::Var(v) if !vars.contains(v) => Some(*v),
+                _ => None,
+            })
+        });
+        let bound = vars
+            .iter()
+            .copied()
+            .chain(ast_vars)
+            .map(|v| subst.get(v).map(|&id| egraph.find(id)));
+        (egraph.find(m.eclass), root, bound.collect::<Vec<_>>())
+    };
+    let mut lost = Vec::new();
+    for rule in rules {
+        let full = rule.search(egraph);
+        let pending = match egraph.seen(rule.name) {
+            Some(seen) => {
+                let changes = egraph.changes_since(seen).expect("unseen changes are kept");
+                rule.search_changes(egraph, &changes)
+            }
+            None => continue,
+        };
+        let vars = rule.searcher.vars();
+        let mut pending_matches = HashSet::default();
+        let mut pending_classes = HashSet::default();
+        for m in &pending {
+            for subst in &m.substs {
+                if subst.get(anchor).is_some() {
+                    pending_classes.insert(egraph.find(m.eclass));
+                }
+                pending_matches.insert(key(&vars, m, subst));
+            }
+        }
+        let rest: Vec<egg::SearchMatches<Symbolic>> = full
+            .into_iter()
+            .filter(|m| !pending_classes.contains(&egraph.find(m.eclass)))
+            .map(|mut m| {
+                let substs = std::mem::take(&mut m.substs);
+                m.substs = substs
+                    .into_iter()
+                    .filter(|s| {
+                        let (class, root, bound) = key(&vars, &m, s);
+                        !pending_matches.contains(&(class, None, bound.clone()))
+                            && !pending_matches.contains(&(class, root, bound))
+                    })
+                    .collect();
+                m
+            })
+            .filter(|m| !m.substs.is_empty())
+            .collect();
+        lost.push((rule, rest));
+    }
+    // In a scratch scope the memos only know what was instantiated since the
+    // graph was copied, so an applier may rebuild an instance the copy inherited
+    // in a redundant variant (a function's post replayed under the call's token,
+    // where the copy holds it unguarded). There only merges of classes that
+    // already existed count as lost; in a live run any change does.
+    let live = rewrite::in_live_scope();
+    let classes: Vec<egg::Id> = egraph.classes().map(|c| c.id).collect();
+    let mut g = egraph.clone();
+    let changed = |g: &mut egg::EGraph<Symbolic, ConstFold>, before: (usize, usize)| {
+        g.rebuild();
+        let merged = {
+            let mut roots: Vec<egg::Id> = classes.iter().map(|&c| g.find(c)).collect();
+            roots.sort_unstable();
+            roots.dedup();
+            roots.len() != classes.len()
+        };
+        merged || (live && (g.total_size(), g.number_of_classes()) != before)
+    };
+    let before = (g.total_size(), g.number_of_classes());
+    for (rule, rest) in &lost {
+        rule.apply(&mut g, rest);
+    }
+    let mut missed = Vec::new();
+    if changed(&mut g, before) {
+        // name the rules: again, each alone on a fresh copy, since one rule's
+        // merges would make the next rule's matches look lost
+        for (rule, rest) in &lost {
+            let mut g = egraph.clone();
+            let before = (g.total_size(), g.number_of_classes());
+            rule.apply(&mut g, rest);
+            if changed(&mut g, before) {
+                missed.push(rule.name);
+            }
+        }
+        missed.push("(together)".into());
+    }
+    assert!(
+        missed.is_empty(),
+        "semi-naive matching lost matches of {missed:?}"
+    );
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vmir::BinOp;
+    use egg::{ENodeOrVar, Pattern, PatternAst, SearchMatches, Searcher, Var};
+
+    fn x() -> Var {
+        "?x".parse().expect("var")
+    }
+
+    /// The flat pattern `?x op ?x`.
+    fn flat(op: BinOp) -> Pattern<Symbolic> {
+        let mut ast = PatternAst::default();
+        let x = ast.add(ENodeOrVar::Var(x()));
+        ast.add(ENodeOrVar::ENode(Symbolic::Binary(op, [x, x])));
+        Pattern::new(ast)
+    }
+
+    /// Searches `?x + ?x` and `?x * ?x` in full, and among the changes only the
+    /// first unless `changes_find_both`.
+    struct Doubled {
+        add: Pattern<Symbolic>,
+        mul: Pattern<Symbolic>,
+        changes_find_both: bool,
+    }
+
+    impl Searcher<Symbolic, ConstFold> for Doubled {
+        fn search_eclass_with_limit(
+            &self,
+            _: &egg::EGraph<Symbolic, ConstFold>,
+            _: egg::Id,
+            _: usize,
+        ) -> Option<SearchMatches<'_, Symbolic>> {
+            unreachable!("searched as a whole")
+        }
+
+        fn search_with_limit(
+            &self,
+            egraph: &egg::EGraph<Symbolic, ConstFold>,
+            limit: usize,
+        ) -> Vec<SearchMatches<'_, Symbolic>> {
+            let mut found = self.add.search_with_limit(egraph, limit);
+            found.extend(self.mul.search_with_limit(egraph, limit));
+            found
+        }
+
+        fn search_changes(
+            &self,
+            egraph: &egg::EGraph<Symbolic, ConstFold>,
+            _: &egg::Changes<Symbolic>,
+            limit: usize,
+        ) -> Vec<SearchMatches<'_, Symbolic>> {
+            if self.changes_find_both {
+                self.search_with_limit(egraph, limit)
+            } else {
+                self.add.search_with_limit(egraph, limit)
+            }
+        }
+
+        fn vars(&self) -> Vec<Var> {
+            vec![x()]
+        }
+    }
+
+    /// Checks a graph where `a + a` and `a * a` share a class, neither match
+    /// applied yet (as at a stop with work pending), for a rule whose search of
+    /// the changes finds one or both of them.
+    fn check(changes_find_both: bool) -> bool {
+        let searcher = Doubled {
+            add: flat(BinOp::AddI),
+            mul: flat(BinOp::MulI),
+            changes_find_both,
+        };
+        let rule = egg::Rewrite::new("doubled", searcher, flat(BinOp::SubI)).expect("rule");
+        let mut egraph = egg::EGraph::<Symbolic, ConstFold>::default();
+        egraph.track_changes();
+        let a = egraph.add(Symbolic::Fresh(0));
+        let add = egraph.add(Symbolic::Binary(BinOp::AddI, [a, a]));
+        let mul = egraph.add(Symbolic::Binary(BinOp::MulI, [a, a]));
+        egraph.union(add, mul);
+        egraph.rebuild();
+        let pos = egraph.change_pos().expect("changes are tracked");
+        egraph.mark_seen(rule.name, pos);
+        no_match_lost(&egraph, &[&rule])
+    }
+
+    /// Matches in one class with equal bindings are told apart by their pattern:
+    /// a pending match of one does not hide a lost match of the other.
+    #[test]
+    #[should_panic(expected = "semi-naive matching lost matches")]
+    fn lost_match_beside_a_pending_one_of_another_pattern() {
+        check(false);
+    }
+
+    #[test]
+    fn pending_matches_of_both_patterns() {
+        assert!(check(true));
+    }
 }

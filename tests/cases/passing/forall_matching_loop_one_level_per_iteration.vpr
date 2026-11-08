@@ -1,0 +1,28 @@
+// A matching loop must grow by one level per iteration, as with full matching.
+// `loop` instantiates for every pair of an `f` and a `g` term, and each instance
+// adds a `g` term. The 17 `f` terms appear after the quantifier was saturated,
+// so its matches are anchored at the classes that changed. Two ways to get this
+// wrong, both of which take minutes here instead of a second:
+// - joining a later anchor against the instances built for earlier ones chains
+//   the loop through one application (2^17 instances);
+// - matching the same class once per anchor, after earlier rules of the
+//   iteration merged the anchors into `true`, re-derives every match per anchor.
+// `k`'s unfolding must still happen before the loop reaches the node limit.
+
+domain L {
+    function f(x: Int): Bool
+    function g(x: Int): Bool
+    function h(x: Int, y: Int): Int
+    axiom loop { forall x: Int, y: Int :: {f(x), g(y)} g(h(x, y)) }
+}
+
+function k(x: Int): Int { x + 1 }
+
+method m(a: Int)
+    requires g(a)
+{
+    // saturates the graph that already holds the quantifier and `g(a)`
+    assert a + 0 == a
+    assume f(1) && f(2) && f(3) && f(4) && f(5) && f(6) && f(7) && f(8) && f(9) && f(10) && f(11) && f(12) && f(13) && f(14) && f(15) && f(16) && f(17)
+    assert k(a) == a + 1
+}

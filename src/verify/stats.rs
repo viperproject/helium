@@ -104,6 +104,15 @@ pub struct VerifyStats {
     pub insts_processed: u64,
     /// total rule applications, and a per-rule breakdown.
     pub rule_applications: u64,
+    /// E-classes at which a rule's search reported matches, summed over rules and
+    /// iterations: the classes the appliers then visit. Matching is semi-naive, so
+    /// this follows what changed between iterations rather than the graph size.
+    pub matched_classes: u64,
+    /// Quantifiers whose trigger groups `forall-instantiate` joined against the
+    /// graph, once per quantifier and anchor class (or in full): the matching
+    /// work of instantiation, which follows the quantifiers a change can match
+    /// rather than all quantifiers present.
+    pub forall_joins: u64,
     pub per_rule: BTreeMap<String, u64>,
     /// `prove_under_pc` calls, and how many reached the expensive `probe`
     /// clone+saturate path (the clearest deterioration signal).
@@ -251,6 +260,7 @@ impl VerifyStats {
             self.egraph_classes_peak
         ));
         s.push_str(&format!("rule_applications={}\n", self.rule_applications));
+        s.push_str(&format!("matched_classes={}\n", self.matched_classes));
         s.push_str(&format!("prove_calls={}\n", self.prove_calls));
         s.push_str(&format!("prove_probe={}\n", self.prove_probe));
         // `per_rule` is a BTreeMap → already sorted, hence deterministic.
@@ -261,9 +271,10 @@ impl VerifyStats {
     }
 
     /// Fold one finished `Runner`'s iterations into the stats.
-    pub(crate) fn record_run(&mut self, iterations: &[egg::Iteration<()>]) {
+    pub(crate) fn record_run(&mut self, iterations: &[crate::verify::context::RunIteration]) {
         for it in iterations {
             self.sat_iterations += 1;
+            self.matched_classes += it.matched_classes as u64;
             self.egraph_nodes_peak = self.egraph_nodes_peak.max(it.egraph_nodes);
             self.egraph_classes_peak = self.egraph_classes_peak.max(it.egraph_classes);
             for (rule, n) in &it.applied {
@@ -299,6 +310,8 @@ impl VerifyStats {
             egraph_classes_peak,
             insts_processed,
             rule_applications,
+            matched_classes,
+            forall_joins,
             per_rule,
             prove_calls,
             prove_inconsistent,
@@ -330,6 +343,8 @@ impl VerifyStats {
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
             ("insts_processed", n(insts_processed)),
             ("rule_applications", n(rule_applications)),
+            ("matched_classes", n(matched_classes)),
+            ("forall_joins", n(forall_joins)),
             ("prove_calls", n(prove_calls)),
             ("prove_inconsistent", n(prove_inconsistent)),
             ("prove_dead_block", n(prove_dead_block)),

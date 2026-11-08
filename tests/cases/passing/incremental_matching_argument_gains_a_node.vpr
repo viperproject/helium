@@ -1,0 +1,43 @@
+// Incremental (semi-naive) matching must find a match that is new only because a
+// class below its root gained a node: `f(b)` exists before `b == g(a)` is known,
+// and only then does it match the nested trigger `f(g(x))`. Likewise a projection
+// whose argument only later equals a constructor application, and a quantifier
+// whose second trigger term appears after the first. Each method saturates the
+// graph in between, so the later match has to come from the changes.
+
+domain D {
+    function f(x: Int): Int
+    function g(x: Int): Int
+    function h(x: Int): Int
+    axiom fg { forall x: Int :: {f(g(x))} f(g(x)) == x + 1 }
+    axiom gh { forall x: Int :: {g(x), h(x)} g(x) == h(x) }
+}
+
+adt Pair {
+    P(fst: Int, snd: Int)
+}
+
+method nested_trigger(a: Int, b: Int)
+    requires f(b) > 0
+{
+    // saturates (`add-zero`) the graph that already holds `f(b)`
+    assert f(b) + 0 > 0
+    assume b == g(a)
+    assert f(b) == a + 1
+}
+
+method projection(p: Pair, a: Int)
+    requires p.fst > 0
+{
+    assert p.fst + 0 > 0
+    assume p == P(a, 3)
+    assert p.fst == a
+}
+
+method multi_term(a: Int)
+    requires g(a) > 0
+{
+    assert g(a) + 0 > 0
+    assume h(a) > 0
+    assert g(a) == h(a)
+}

@@ -1,0 +1,51 @@
+// Testers whose argument becomes a constructor only after the tester was
+// searched and its graph saturated: through a chain of unions of opaque
+// classes, through a function's postcondition, and through an `ite` whose
+// condition is decided later. Each time the tester is not new; what changed is
+// its argument's class, which its incremental search must look at again.
+
+adt List {
+  Nil()
+  Cons(head: Int, tail: List)
+}
+
+function f(l: List): Int
+
+function mk(): List
+  ensures result == Nil()
+
+// The tester's argument reaches a constructor through a chain of unions of
+// opaque classes, each saturated in between.
+method tester_chain(x: List, y: List, z: List, k: Int)
+  requires f(x) > k && f(y) > k && f(z) > k
+{
+  var b: Bool := x.isNil
+  assert f(x) > k - 1
+  assume x == y
+  assert f(y) > k - 1
+  assume y == z
+  assert f(z) > k - 1
+  assume z == Nil()
+  assert b
+}
+
+// ... through a function's postcondition.
+method tester_via_post(x: List, k: Int)
+  requires f(x) > k
+{
+  var b: Bool := x.isNil
+  assert f(x) > k - 1
+  assume x == mk()
+  assert b
+}
+
+// ... through an `ite` whose condition is decided later.
+method tester_via_ite(x: List, c: Bool, k: Int)
+  requires f(x) > k
+{
+  var b: Bool := x.isCons
+  assume x == (c ? Cons(1, Nil()) : Nil())
+  assert f(x) > k - 1
+  assume c
+  assert b
+}
