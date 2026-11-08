@@ -1,0 +1,13 @@
+// A quantifier whose whole body is a captured Bool variable yields exactly
+// that value at an instance, not some other captured value: knowing `b` says
+// nothing about `c`. Silicon rejects this (assertion might not hold).
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(b: Bool, c: Bool) {
+  inhale forall i: Int :: { t(i) } b
+  assume t(0)
+  assert c
+}

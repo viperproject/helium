@@ -1,0 +1,19 @@
+// A quantifier whose whole body is a captured Bool variable: the body has no
+// instruction, only the captured result, and an instance must yield that value.
+// Silicon verifies this.
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method variable_body(b: Bool) {
+  inhale forall i: Int :: { t(i) } b
+  assume t(0)
+  assert b
+}
+
+method nested_variable_body(b: Bool) {
+  inhale forall i: Int :: { t(i) } forall j: Int :: { t(j) } b
+  assume t(0)
+  assert b
+}
