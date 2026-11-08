@@ -1,0 +1,20 @@
+// `repeated_slot_value_in_arm` through a `fold`: `P(x, x)` reads both slot values
+// from the heap before the fold, so the second carries `x.f`'s value onto the `y.f`
+// chunk the working graph matches in the arm.
+//
+// Must FAIL (the assert after the join). Silicon rejects it.
+field f: Int
+
+predicate P(a: Ref, b: Ref) { acc(a.f, 1/2) && acc(b.f, 1/2) }
+
+method m(x: Ref, y: Ref, n: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && n > 0
+{
+  assert n >= 1
+  var vx: Int := x.f
+  var vy: Int := y.f
+  if (x == y) {
+    fold P(x, x)
+  }
+  assert vx == vy
+}

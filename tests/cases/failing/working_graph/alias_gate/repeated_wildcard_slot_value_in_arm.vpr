@@ -1,0 +1,20 @@
+// `repeated_slot_value_in_arm`, with the second slot a wildcard: the share taken
+// through the working graph's match agrees with the held value only in the arm.
+//
+// Must FAIL (the assert after the join). Silicon rejects it.
+field f: Int
+
+method callee(a: Ref, b: Ref)
+  requires acc(a.f, 1/2) && acc(b.f, wildcard)
+
+method m(x: Ref, y: Ref, n: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && n > 0
+{
+  assert n >= 1
+  var vx: Int := x.f
+  var vy: Int := y.f
+  if (x == y) {
+    callee(x, x)
+  }
+  assert vx == vy
+}

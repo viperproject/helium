@@ -1,0 +1,36 @@
+// A consume resolved by the group summary in an arm: `y.f` is held where `c` holds
+// (a one-sided join), and `x == y` follows from the arm's `c ==> x == y` only with
+// the chunk's guard `c` assumed, so neither ground nor the pc-alias lookup matches
+// it. The summary proves the addresses equal under the guard on the working graph,
+// which has the arm's cube `d` assumed as well; the value agreement it records holds
+// only there, not wherever `c` holds.
+//
+// Must FAIL (the assert after the join: where `c` holds and `d` does not, `x.f` and
+// `y.f` are unrelated). Silicon rejects it.
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+}
+
+method callee(a: Ref, b: Ref, c: Bool)
+  requires acc(a.f, 1/2) && (c ==> acc(b.f, 1/2))
+
+method m(x: Ref, y: Ref, c: Bool, d: Bool, z: Int)
+  requires acc(x.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  var vx: Int := x.f
+  var vy: Int
+  if (c) {
+    inhale acc(y.f, 1/2)
+    vy := y.f
+  }
+  if (d) {
+    inhale c ==> x == y
+    callee(x, x, c)
+  }
+  if (c) {
+    assert vx == vy
+  }
+}

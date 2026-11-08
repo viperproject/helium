@@ -1293,13 +1293,14 @@ pub(crate) fn heap_subtract_inner(
         );
     };
 
+    // A chunk matched only through the working graph sits at `chunk2.addr` only
+    // where the block's cube holds, so the facts the debit records (the value
+    // agreement, a wildcard's remainder bound) are gated by `alias_pc`.
+    let agree_pc = by_work.then(|| alias_pc(ctx, pc_lits));
+
     if demand == Demand::Wildcard {
-        // The remainder bound holds where the match does.
-        let pc = match by_work {
-            true => alias_pc(ctx, pc_lits),
-            false => pc_lits.to_vec(),
-        };
-        return debit_wildcard(ctx, out, kind, &existing, &chunk2, &pc, kept);
+        let pc = agree_pc.clone().unwrap_or_else(|| pc_lits.to_vec());
+        return debit_wildcard(ctx, out, kind, &existing, &chunk2, &pc, by_work, kept);
     }
 
     // Sufficiency `held ≥ needed`, proven per-leaf over the (possibly
@@ -1352,31 +1353,57 @@ pub(crate) fn heap_subtract_inner(
         return r;
     }
 
-    Ok(debit_direct(ctx, out, kind, &existing, &chunk2, kept))
+    Ok(debit_direct(
+        ctx,
+        out,
+        kind,
+        &existing,
+        &chunk2,
+        agree_pc.as_deref(),
+        kept,
+    ))
 }
 
 /// Take `chunk2_perm` off a single chunk whose sufficiency is already proven, and
 /// store the remainder back under `kept`.
 ///
-/// The value union is **unconditional**, unlike the guarded rule [`union_heaps`] and
-/// [`merge_chunks`] use. Sound here because the two sides are not symmetric:
-/// `chunk2.value` is minted fresh by [`heap_acc`] for *this* consume and carries no
-/// prior meaning, so the union constrains only the fresh symbol and cannot corrupt
-/// `existing.value`. (The loop frame restore's bug was the symmetric case — two
-/// pre-existing values, one of them a havoc symbol something downstream reads.) Note
-/// it is NOT implied by the sufficiency proof: `held ≥ needed` permits `needed == 0`,
-/// so a conditional exhale does bind the slot value off-path. Probed with
-/// complementary conditional exhales and with a call whose `requires` has a
-/// conditional footprint; both are correctly rejected.
+/// The consumed value is the held one: `chunk2.value == existing.value`. That value
+/// is not always fresh. An `exhale` of a bare `acc` mints it ([`heap_acc`]), but a
+/// resource consume (a call's precondition, a `fold`) reads every slot's value from
+/// the heap as it was before the consume, by ground class
+/// ([`walk_footprint`]'s `ValueSource::ReadHeap`), so with a repeated argument the
+/// second slot carries the value of the chunk the first slot drained.
+///
+/// - **ground match** — the union is unconditional. The two addresses are equal on
+///   every path, so the read value is the held chunk's own (or `chunk2.value` is
+///   fresh). It is not implied by the sufficiency proof: `held ≥ needed` permits
+///   `needed == 0`, so a conditional exhale does bind the slot value off-path.
+///   Probed with complementary conditional exhales and with a call whose
+///   `requires` has a conditional footprint; both are correctly rejected.
+/// - **matched only through the working graph** (`agree_pc` set) — the addresses
+///   are equal only under the block's cube, and the read value may belong to
+///   another chunk (`callee(x, x)` under `x == y` drains `x.f` and then matches
+///   `y.f`). Unioned, the agreement would equate the two chunks' values on every
+///   path; it is assumed where the match holds and the slot is consumed,
+///   `(agree_pc ∧ 0 < needed) ==> existing.value == chunk2.value`.
 pub(crate) fn debit_direct(
     ctx: &mut VerifyContext<'_>,
     out: Heap,
     kind: &LocationKind,
     existing: &Chunk,
     chunk2: &Chunk,
+    agree_pc: Option<&[(egg::Id, Polarity)]>,
     kept: crate::verify::heap::HeapPc,
 ) -> Heap {
-    ctx.union(existing.value, chunk2.value);
+    match agree_pc {
+        None => {
+            ctx.union(existing.value, chunk2.value);
+        }
+        Some(pc) => {
+            let needed = chunk2.ungated_perm().to_id(ctx);
+            assume_values_agree(ctx, needed, existing.value, chunk2.value, pc);
+        }
+    }
     // Remainder stays structural (leaves get `SubR`); never an `ite` in the graph.
     // Aligned against the *demand's* structure too, so a guarded consume cancels per
     // arm (`c ? 0 : 1/1`) rather than leaving `1/1 - (c ? 1/1 : 0/1)` in every leaf --
@@ -1425,6 +1452,7 @@ pub(crate) fn debit_wildcard(
     existing: &Chunk,
     chunk2: &Chunk,
     pc_lits: &[(egg::Id, Polarity)],
+    by_work: bool,
     kept: crate::verify::heap::HeapPc,
 ) -> Result<Heap, VerifyError> {
     // Walk the DEMAND's branch structure: a gated `exhale b ==> acc(x.f, wildcard)`
@@ -1439,6 +1467,7 @@ pub(crate) fn debit_wildcard(
         existing.value,
         chunk2.value,
         pc_lits,
+        by_work,
     );
     if let Some(e) = err {
         return Err(e);
@@ -1479,6 +1508,7 @@ fn debit_wildcard_walk(
     held_value: egg::Id,
     needed_value: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
+    by_work: bool,
 ) -> (ChunkPerm, egg::Id, Option<VerifyError>) {
     match needed {
         ChunkPerm::Leaf { id, .. } => {
@@ -1496,10 +1526,19 @@ fn debit_wildcard_walk(
                     Some(VerifyError::InsufficientPermission),
                 );
             }
-            // Unconditional union is safe on both counts: `held > 0` was just proven
-            // and a wildcard `needed` is positive by construction, so this is the
-            // both-held case — and `chunk2.value` is fresh besides.
-            ctx.union(held_value, needed_value);
+            // `held > 0` was just proven and a wildcard `needed` is positive by
+            // construction, so this is the both-held case. On a ground match the
+            // union is unconditional (see [`debit_direct`]); a chunk matched only
+            // through the working graph is at this address only under `pc_lits`
+            // (the caller's `alias_pc`), and `needed_value` may be another chunk's.
+            if by_work {
+                let eq = expr!(ctx, { held_value } == { needed_value });
+                let imp = ctx.implication(eq, pc_lits.iter().rev().copied());
+                let true_ = expr!(ctx, true);
+                ctx.union(imp, true_);
+            } else {
+                ctx.union(held_value, needed_value);
+            }
             let remainder = ctx.fresh_wildcard();
             let lt = expr!(ctx, { remainder } < r { held_id });
             ctx.assume_all_guarded([lt], pc_lits);
@@ -1510,11 +1549,12 @@ fn debit_wildcard_walk(
             let mut pc_t = pc_lits.to_vec();
             pc_t.push((*cond, Polarity::Positive));
             let (t, value, e1) =
-                debit_wildcard_walk(ctx, &ht, then, held_value, needed_value, &pc_t);
+                debit_wildcard_walk(ctx, &ht, then, held_value, needed_value, &pc_t, by_work);
             let he = ChunkPerm::restrict(ctx, *cond, held.clone(), false);
             let mut pc_e = pc_lits.to_vec();
             pc_e.push((*cond, Polarity::Negative));
-            let (e, _, e2) = debit_wildcard_walk(ctx, &he, els, held_value, needed_value, &pc_e);
+            let (e, _, e2) =
+                debit_wildcard_walk(ctx, &he, els, held_value, needed_value, &pc_e, by_work);
             (ChunkPerm::select(ctx, *cond, t, e), value, e1.or(e2))
         }
     }
@@ -2051,9 +2091,12 @@ pub(crate) fn merge_heaps(
 /// the chunk's guard carries. Ground `find` cannot see it; a probe under the guard
 /// settles it immediately.
 ///
-/// When the probe succeeds the address gate is dropped entirely and the returned
-/// cube is the chunk's **guard**: the contribution is conditional on presence, not
-/// on an equality, and `held` already encodes that condition. One `prove_under_pc`,
+/// When the probe succeeds the address gate is dropped entirely: the contribution is
+/// conditional on presence, not on an equality, and `held` already encodes that
+/// condition. The returned cube is the one the probe proved the equality under, the
+/// presence cube with the block's cube (which the prover assumes): the value
+/// agreement and the debit it gates hold there, and stated under the guard alone the
+/// agreement would reach every other path through the block. One `prove_under_pc`,
 /// paid only by a chunk that missed on ground and was not disproven — the same
 /// budget the disproof check above already spends.
 ///
@@ -2092,7 +2135,13 @@ pub(crate) fn summarize_perm_at(
                     Some(cube) => cube,
                 };
                 if !c.guard().is_empty() && ctx.prove_under_pc(eq, &presence) {
-                    (held, c.guard_pc())
+                    // Proven under the presence cube *and* the block's cube, which
+                    // the prover has assumed, so the agreement and the debit this
+                    // gates hold there and nowhere else.
+                    let Some(gate) = cube_meet(ctx, ctx.current_cube(), &presence) else {
+                        continue;
+                    };
+                    (held, std::rc::Rc::from(gate))
                 } else {
                     // Structural, not folded into the term. Gating the amount as
                     // `ite(eq, held, 0)` collapses the whole summary to one flat

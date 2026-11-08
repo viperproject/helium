@@ -1,0 +1,66 @@
+// The must-verify twins of `failing/working_graph/alias_gate/repeated_slot_value_in_arm`
+// and its siblings: in the arm, the second slot's value (read at `x.f`) is the value
+// of the `y.f` chunk the consume matches, and the callee's precondition (the
+// predicate's body) needs exactly that agreement. Each method fails when the
+// agreement recorded for a match through the working graph is dropped.
+field f: Int
+
+domain D {
+  function g(x: Int): Int
+}
+
+method callee(a: Ref, b: Ref)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2) && b.f == 5
+
+method callee_w(a: Ref, b: Ref)
+  requires acc(a.f, 1/2) && acc(b.f, wildcard) && b.f == 5
+
+method callee_c(a: Ref, b: Ref, c: Bool, v: Int)
+  requires acc(a.f, 1/2) && (c ==> acc(b.f, 1/2) && b.f == v)
+
+predicate P(a: Ref, b: Ref) { acc(a.f, 1/2) && acc(b.f, 1/2) && b.f == 5 }
+
+method call_fixed(x: Ref, y: Ref, n: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && y.f == 5 && n > 0
+{
+  assert n >= 1
+  if (x == y) {
+    callee(x, x)
+  }
+}
+
+method call_wildcard(x: Ref, y: Ref, n: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && y.f == 5 && n > 0
+{
+  assert n >= 1
+  if (x == y) {
+    callee_w(x, x)
+  }
+}
+
+method fold_in_arm(x: Ref, y: Ref, c: Bool, z: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && y.f == 5
+{
+  if (z == 3) { assert g(z) == g(3) }
+  if (c) {
+    inhale x == y
+    fold P(x, x)
+    assert unfolding P(x, x) in x.f == 5
+  }
+}
+
+// The group summary's match (see `alias_gate/summary_match_value_in_arm`).
+method summary_match(x: Ref, y: Ref, c: Bool, d: Bool, z: Int)
+  requires acc(x.f, 1/2)
+{
+  if (z == 3) { assert g(z) == g(3) }
+  var vy: Int
+  if (c) {
+    inhale acc(y.f, 1/2)
+    vy := y.f
+  }
+  if (d) {
+    inhale c ==> x == y
+    callee_c(x, x, c, vy)
+  }
+}

@@ -1,0 +1,24 @@
+// A call with a repeated argument in an arm where `x == y`: the first slot drains
+// `x.f`, and the second matches `y.f` only through the working graph, which has the
+// arm's cube assumed. The second slot's value is read from the heap before the call,
+// at `x.f`, so it is `vx`; the agreement with the held `vy` holds only in the arm.
+//
+// Must FAIL (the assert after the join: on the other arm `x.f` and `y.f` are
+// unrelated). Silicon rejects it.
+field f: Int
+
+method callee(a: Ref, b: Ref)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+  ensures acc(a.f, 1/2) && acc(b.f, 1/2)
+
+method m(x: Ref, y: Ref, n: Int)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && n > 0
+{
+  assert n >= 1
+  var vx: Int := x.f
+  var vy: Int := y.f
+  if (x == y) {
+    callee(x, x)
+  }
+  assert vx == vy
+}
