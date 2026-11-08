@@ -1,0 +1,43 @@
+// Heap reads inside quantifiers of method-body statements: the current heap,
+// labelled and unlabelled `old`, `perm`, `unfolding`, a read under a binder
+// guard, and a nested quantifier. Every read mentions no binder, so it is taken
+// in the heap of the statement's position. Silicon verifies this.
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+  function u(i: Int, j: Int): Bool
+}
+
+predicate P(x: Ref) { acc(x.f) }
+
+method reads(x: Ref)
+  requires acc(x.f) && x.f == 5
+{
+  label L
+  x.f := 3
+  inhale forall i: Int :: { t(i) } t(i) ==> old[L](x.f) == x.f + i
+  assume t(2)
+  assert old(x.f) == 5
+
+  inhale forall i: Int :: { t(i) } i > 7 ==> x.f < i
+  assume t(9)
+  assert x.f < 9
+
+  inhale forall i: Int :: { t(i) } t(i) ==> perm(x.f) == write
+  assert perm(x.f) == write
+
+  inhale forall i: Int :: { t(i) } forall j: Int :: { u(i, j) } u(i, j) ==> x.f + i == j
+  assume u(2, 5)
+  assert x.f == 3
+}
+
+method unfolds(x: Ref)
+  requires acc(P(x))
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> (unfolding acc(P(x)) in x.f) == i
+  assume t(6)
+  unfold acc(P(x))
+  assert x.f == 6
+}

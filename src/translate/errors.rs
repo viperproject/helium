@@ -13,14 +13,11 @@ pub enum TranslationError {
     /// generic domain would need a *type* trigger to instantiate its axioms, and
     /// Silver has no syntax to write one.
     GenericDomainUnsupported(String),
-    /// A heap-dependent function called inside a `forall` body. Its snapshot
-    /// (a frame-only `exhale`) would have to be taken *per instance*, over a footprint
-    /// that may mention the binders — quantified permissions, which are not
-    /// supported. Even a binder-independent footprint is rejected for now: the
-    /// quantifier's compiled body must stay pure and heap-free, since the
-    /// verifier rebuilds it inside a rewrite rule, where the symbolic heap is out
-    /// of reach and no obligation can be discharged.
-    HeapDepFunctionInQuantifier(String),
+    /// A heap read inside a `forall` body that mentions a binder (the payload
+    /// names what it reads). Its footprint differs per instance, so framing it
+    /// needs quantified permissions, which are not supported. A read that
+    /// mentions no binder is evaluated at the quantifier's position instead.
+    BinderDependentHeapRead(String),
 }
 
 impl fmt::Display for TranslationError {
@@ -36,9 +33,9 @@ impl fmt::Display for TranslationError {
                 f,
                 "domain `{name}` declares type parameters: generic domains are not supported, declare an `adt` instead"
             ),
-            TranslationError::HeapDepFunctionInQuantifier(name) => write!(
+            TranslationError::BinderDependentHeapRead(what) => write!(
                 f,
-                "heap-dependent function `{name}` called inside a `forall`: a quantifier body must be heap-free (this needs quantified permissions)"
+                "read of {what} inside a `forall` depends on a quantified variable (this needs quantified permissions)"
             ),
         }
     }
@@ -53,7 +50,7 @@ impl TranslationError {
             self,
             TranslationError::Unsupported(_)
                 | TranslationError::GenericDomainUnsupported(_)
-                | TranslationError::HeapDepFunctionInQuantifier(_)
+                | TranslationError::BinderDependentHeapRead(_)
         )
     }
 }

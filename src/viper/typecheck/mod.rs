@@ -348,28 +348,30 @@ trait PureExt: Sized {
     /// permissions and other unsupported forms there.
     const LOWER_FORALL: bool = false;
     /// Assemble a lowered `forall` into this context's extension. The innards
-    /// are always [`typed::AxiomExt`]-typed — quantifier bodies are pure and
-    /// heap-free in every host position. Only invoked when
-    /// [`Self::LOWER_FORALL`] is `true`; the default is therefore unreachable.
-    /// `exists` is rejected here.
+    /// are typed in this same extension, as Silver types them (see
+    /// [`typed::Forall`]). Only invoked when [`Self::LOWER_FORALL`] is `true`;
+    /// the default is therefore unreachable. `exists` is rejected here.
     fn build_forall(
         _kind: viper::QuantifierKind,
         _bound: Vec<typed::TypedIdent>,
-        _triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-        _body: TypedPureExp<typed::AxiomExt>,
+        _triggers: Vec<Vec<TypedPureExp<Self>>>,
+        _body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         unreachable!("build_forall on a context with LOWER_FORALL = false")
     }
+    /// The Silver `function` call this extension node is, if it is one: the
+    /// only extension node a trigger may be built from (see `check_triggers`).
+    fn as_function_call(&self) -> Option<&Call<Self>>;
 }
 
 /// Shared `build_forall` body: assemble the [`typed::Forall`] node, rejecting
 /// `exists`. Each `LOWER_FORALL` host wraps the result in its own variant.
-fn assemble_forall(
+fn assemble_forall<Ext>(
     kind: viper::QuantifierKind,
     bound: Vec<typed::TypedIdent>,
-    triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-    body: TypedPureExp<typed::AxiomExt>,
-) -> Result<Box<typed::Forall>, TypeError> {
+    triggers: Vec<Vec<TypedPureExp<Ext>>>,
+    body: TypedPureExp<Ext>,
+) -> Result<Box<typed::Forall<Ext>>, TypeError> {
     match kind {
         viper::QuantifierKind::Forall => Ok(Box::new(typed::Forall {
             bound,
@@ -405,12 +407,18 @@ impl PureExt for typed::AxiomExt {
             typed::HeapNode::Unfolding(..) => Err(TypeError::UnfoldingInAxiom),
         }
     }
+    fn as_function_call(&self) -> Option<&Call<Self>> {
+        match self {
+            typed::AxiomExt::FunctionCall(call) => Some(call),
+            typed::AxiomExt::Forall(_) => None,
+        }
+    }
     const LOWER_FORALL: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-        body: TypedPureExp<typed::AxiomExt>,
+        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(typed::AxiomExt::Forall(assemble_forall(
             kind, bound, triggers, body,
@@ -436,6 +444,9 @@ impl PureExt for ! {
     fn lower_heap(_node: typed::HeapNode<!>) -> Result<!, TypeError> {
         Err(TypeError::HeapInPureContext)
     }
+    fn as_function_call(&self) -> Option<&Call<!>> {
+        match *self {}
+    }
 }
 
 /// Heap context with no state extension (predicate bodies, function pre/body,
@@ -458,12 +469,18 @@ impl PureExt for typed::HeapExt {
     fn lower_heap(node: typed::HeapNode<typed::HeapExt>) -> Result<typed::HeapExt, TypeError> {
         Ok(typed::HeapExt::Heap(node))
     }
+    fn as_function_call(&self) -> Option<&Call<Self>> {
+        match self {
+            typed::HeapExt::Heap(typed::HeapNode::FunctionCall(call)) => Some(call),
+            _ => None,
+        }
+    }
     const LOWER_FORALL: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-        body: TypedPureExp<typed::AxiomExt>,
+        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(typed::HeapExt::Forall(assemble_forall(
             kind, bound, triggers, body,
@@ -492,12 +509,18 @@ impl PureExt for FuncEnsuresExt {
     fn lower_heap(node: typed::HeapNode<FuncEnsuresExt>) -> Result<FuncEnsuresExt, TypeError> {
         Ok(FuncEnsuresExt::Heap(node))
     }
+    fn as_function_call(&self) -> Option<&Call<Self>> {
+        match self {
+            FuncEnsuresExt::Heap(typed::HeapNode::FunctionCall(call)) => Some(call),
+            _ => None,
+        }
+    }
     const LOWER_FORALL: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-        body: TypedPureExp<typed::AxiomExt>,
+        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(FuncEnsuresExt::Forall(assemble_forall(
             kind, bound, triggers, body,
@@ -526,12 +549,18 @@ impl PureExt for MethodEnsuresExt {
     fn lower_heap(node: typed::HeapNode<MethodEnsuresExt>) -> Result<MethodEnsuresExt, TypeError> {
         Ok(MethodEnsuresExt::Heap(node))
     }
+    fn as_function_call(&self) -> Option<&Call<Self>> {
+        match self {
+            MethodEnsuresExt::Heap(typed::HeapNode::FunctionCall(call)) => Some(call),
+            _ => None,
+        }
+    }
     const LOWER_FORALL: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-        body: TypedPureExp<typed::AxiomExt>,
+        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(MethodEnsuresExt::Forall(assemble_forall(
             kind, bound, triggers, body,
@@ -564,12 +593,18 @@ impl PureExt for MethodBodyExt {
     fn lower_heap(node: typed::HeapNode<MethodBodyExt>) -> Result<MethodBodyExt, TypeError> {
         Ok(MethodBodyExt::Heap(node))
     }
+    fn as_function_call(&self) -> Option<&Call<Self>> {
+        match self {
+            MethodBodyExt::Heap(typed::HeapNode::FunctionCall(call)) => Some(call),
+            _ => None,
+        }
+    }
     const LOWER_FORALL: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>>,
-        body: TypedPureExp<typed::AxiomExt>,
+        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(MethodBodyExt::Forall(assemble_forall(
             kind, bound, triggers, body,
@@ -1338,10 +1373,10 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
             // context (axioms, contracts, predicate bodies, method statements);
             // elsewhere (`!`) it is erased to `true` without recursing into the
             // body (so unsupported forms like quantified permissions stay
-            // silently erased). Triggers and body are lowered as `AxiomExt`
-            // regardless of host — quantifier bodies are pure and heap-free, so
-            // `AxiomExt`'s rules reject heap derefs, `unfolding`, `old`,
-            // `result`, and `perm` inside a `forall`.
+            // silently erased). Triggers and body are lowered in the host's
+            // extension, as Silver types them: a heap read or `old` is legal in
+            // a quantifier of a method postcondition and illegal in one of an
+            // axiom, exactly as outside the quantifier.
             ExpKind::Quantifier(kind, bound_vars, triggers, body) => {
                 if !Ext::LOWER_FORALL {
                     return Ok(PureExpKind::Const(Literal::Bool(true)));
@@ -1353,16 +1388,16 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                         ty: Type::from(&bv.ty),
                     })
                     .collect();
-                let lowered_triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>> = triggers
+                let lowered_triggers: Vec<Vec<TypedPureExp<Ext>>> = triggers
                     .iter()
                     .map(|trig| {
                         trig.exp
                             .iter()
-                            .map(|e| self.lower_pure::<typed::AxiomExt>(e))
+                            .map(|e| self.lower_pure::<Ext>(e))
                             .collect::<Result<Vec<_>, _>>()
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let lowered_body = self.lower_pure::<typed::AxiomExt>(body)?;
+                let lowered_body = self.lower_pure::<Ext>(body)?;
                 // Triggers are validated for `forall` only — `build_forall`
                 // rejects `exists` outright, and that is the error worth showing.
                 if matches!(kind, viper::QuantifierKind::Forall) {
@@ -2205,9 +2240,9 @@ fn typecheck_method(
 /// discriminator) whose subterms are variables, literals or nested applications —
 /// interpreted operators cannot be e-matched. The group must mention every bound
 /// variable (at any depth), or a match would leave a binder uninstantiated.
-fn check_triggers(
+fn check_triggers<Ext: PureExt>(
     bound: &[TypedIdent],
-    triggers: &[Vec<TypedPureExp<typed::AxiomExt>>],
+    triggers: &[Vec<TypedPureExp<Ext>>],
     interner: &Interner,
 ) -> Result<(), TypeError> {
     if triggers.is_empty() || triggers.iter().any(|g| g.is_empty()) {
@@ -2232,26 +2267,32 @@ fn check_triggers(
 
 /// Whether a trigger term's root is an application — the only shape a trigger
 /// can match on.
-fn is_trigger_application(term: &TypedPureExp<typed::AxiomExt>) -> bool {
+fn is_trigger_application<Ext: PureExt>(term: &TypedPureExp<Ext>) -> bool {
     use PureExpKind as P;
-    matches!(
-        term.exp.as_ref(),
+    match term.exp.as_ref() {
         P::DomainFunctionCall(_)
-            | P::AdtConstructor(_)
-            | P::AdtDestructor(..)
-            | P::AdtDiscriminator(..)
-            | P::Ext(typed::AxiomExt::FunctionCall(_))
-    )
+        | P::AdtConstructor(_)
+        | P::AdtDestructor(..)
+        | P::AdtDiscriminator(..) => true,
+        P::Ext(ext) => ext.as_function_call().is_some(),
+        _ => false,
+    }
 }
 
 /// Walk a trigger term, rejecting any subterm that is not a variable, a literal
 /// or an application, and recording every variable it mentions in `seen` (the
 /// bound ones among these are what the group covers).
-fn check_trigger_subterms(
-    term: &TypedPureExp<typed::AxiomExt>,
+fn check_trigger_subterms<Ext: PureExt>(
+    term: &TypedPureExp<Ext>,
     seen: &mut HashSet<Spur>,
 ) -> Result<(), TypeError> {
     use PureExpKind as P;
+    let check_args = |call: &Call<Ext>, seen: &mut HashSet<Spur>| {
+        for a in &call.args {
+            check_trigger_subterms(a, seen)?;
+        }
+        Ok(())
+    };
     match term.exp.as_ref() {
         P::Ident(id) => {
             seen.insert(id.0);
@@ -2259,19 +2300,14 @@ fn check_trigger_subterms(
         }
         P::Const(_) => Ok(()),
         P::AdtDestructor(e, _) | P::AdtDiscriminator(e, _) => check_trigger_subterms(e, seen),
-        P::DomainFunctionCall(call)
-        | P::AdtConstructor(call)
-        | P::Ext(typed::AxiomExt::FunctionCall(call)) => {
-            for a in &call.args {
-                check_trigger_subterms(a, seen)?;
-            }
-            Ok(())
+        P::DomainFunctionCall(call) | P::AdtConstructor(call) => check_args(call, seen),
+        P::Ext(ext) => match ext.as_function_call() {
+            Some(call) => check_args(call, seen),
+            None => Err(TypeError::TriggerBadSubterm),
+        },
+        P::Unary(..) | P::Binary(..) | P::Ternary { .. } | P::LetIn { .. } => {
+            Err(TypeError::TriggerBadSubterm)
         }
-        P::Unary(..)
-        | P::Binary(..)
-        | P::Ternary { .. }
-        | P::LetIn { .. }
-        | P::Ext(typed::AxiomExt::Forall(_)) => Err(TypeError::TriggerBadSubterm),
     }
 }
 
@@ -2759,14 +2795,26 @@ method m(i: Int) returns (r: Int)
     }
 
     #[test]
-    fn forall_body_rejects_heap_old_result() {
-        // Quantifier innards are AxiomExt-typed in every host: heap derefs,
-        // `old`, and `result` inside a forall body are errors, not silently
-        // erased.
+    fn forall_body_follows_the_host_rules() {
+        // Quantifier innards are typed in the host's extension, as Silver types
+        // them: heap reads, `old` and `result` inside a forall body are legal
+        // where they are legal outside it, and errors where they are not.
+        let host = run_pipeline(
+            r#"
+field f: Int
+domain D { function t(i: Int): Bool }
+method m(r: Ref) requires acc(r.f, write) ensures acc(r.f, write) && forall x: Int :: {t(x)} t(x) ==> r.f == old(r.f) {
+    inhale forall x: Int :: {t(x)} x == 0 ? true : r.f == 0
+}
+function g(i: Int): Int ensures forall x: Int :: {t(x)} t(x) ==> result == x { i }
+"#,
+        );
+        assert!(host.is_ok(), "expected Ok, got: {host:?}");
+
         let field = run_pipeline(
             r#"
 field f: Int
-method m(r: Ref) requires acc(r.f, write) { inhale forall x: Int :: x == 0 ? true : r.f == 0 }
+domain D { function t(i: Int): Bool  axiom { forall r: Ref :: {t(r.f)} t(r.f) } }
 "#,
         );
         assert!(
@@ -2778,7 +2826,9 @@ method m(r: Ref) requires acc(r.f, write) { inhale forall x: Int :: x == 0 ? tru
 
         let old = run_pipeline(
             r#"
-method m(i: Int) ensures forall x: Int :: old(i) == x { }
+field f: Int
+domain D { function t(i: Int): Bool }
+predicate p(r: Ref) { acc(r.f) && forall x: Int :: {t(x)} old(r.f) == x }
 "#,
         );
         assert!(
@@ -2789,7 +2839,8 @@ method m(i: Int) ensures forall x: Int :: old(i) == x { }
 
         let res = run_pipeline(
             r#"
-function g(i: Int): Int ensures forall x: Int :: result == x { i }
+domain D { function t(i: Int): Bool }
+method m(i: Int) ensures forall x: Int :: {t(x)} result == x
 "#,
         );
         assert!(

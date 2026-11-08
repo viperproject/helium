@@ -1,0 +1,17 @@
+// A trigger term is evaluated in the heap too: `get(x)` in the trigger needs
+// `acc(x.f)` where the quantifier is stated, and nothing holds it. Silicon
+// rejects this (precondition of function `get` might not hold).
+
+field f: Int
+
+domain D {
+  function s(v: Int, i: Int): Bool
+}
+
+function get(x: Ref): Int
+  requires acc(x.f)
+
+method m(x: Ref)
+{
+  inhale forall i: Int :: { s(get(x), i) } s(get(x), i)
+}

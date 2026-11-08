@@ -1,0 +1,14 @@
+// An unframed read inside a quantifier stays unframed under a guard on the
+// binder: `i == 0` holds for some instance, and that instance reads `x.f`
+// without permission. Silicon rejects this (insufficient permission).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref)
+{
+  inhale forall i: Int :: { t(i) } i == 0 ==> x.f > 0
+}

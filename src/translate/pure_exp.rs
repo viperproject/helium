@@ -34,12 +34,26 @@ pub(crate) struct HeapCtx<'a> {
     /// postcondition (`FuncEnsuresExt::Result`); `None` everywhere else. Held by
     /// reference so `HeapCtx` stays `Copy` (`Val` is not `Copy`).
     pub result: Option<&'a Val>,
-    /// Set while lowering a `forall` body. There is no heap in there (`value` and
-    /// `perm` are the inert `Empty`) and there cannot be one: the body is compiled
-    /// into a recipe the verifier rebuilds inside a rewrite rule, which can
-    /// neither read the symbolic heap nor discharge an obligation. It gates the
-    /// one construct that would need both — a heap-dependent call's `Snap`.
-    pub in_quantifier: bool,
+    /// `Some` while lowering a `forall` body: the heap reads of the body, already
+    /// evaluated at the quantifier's position (see [`lower_forall`]). There is no
+    /// heap in the body itself (`value` and `perm` are the inert `Empty`) and
+    /// there cannot be one: the body is compiled into a recipe the verifier
+    /// rebuilds inside a rewrite rule, which can neither read the symbolic heap
+    /// nor discharge an obligation. A heap read missing from the map is one that
+    /// depends on a binder.
+    pub hoisted: Option<&'a Hoisted>,
+}
+
+/// The heap reads of a `forall` body that mention no binder, each evaluated
+/// once at the quantifier's position, keyed by the address of its extension
+/// node in the typed body (the body is borrowed, so the addresses are stable
+/// for the whole lowering). A body occurrence lowers to the value here, which
+/// the quantifier then captures like any other enclosing value.
+pub(crate) type Hoisted = HashMap<*const (), Val>;
+
+/// The key of an extension node in [`Hoisted`].
+fn hoist_key<Ext>(ext: &Ext) -> *const () {
+    std::ptr::from_ref(ext).cast()
 }
 
 impl<'a> HeapCtx<'a> {
@@ -50,7 +64,7 @@ impl<'a> HeapCtx<'a> {
             perm: heap,
             old: Some(old),
             result: None,
-            in_quantifier: false,
+            hoisted: None,
         }
     }
 }
@@ -332,7 +346,10 @@ pub(crate) fn lower<Ext: PureExt>(
                 },
             ))
         }
-        P::Ext(ext) => Ext::lower_ext(b, env, sink, hctx, ty, ext),
+        P::Ext(ext) => match hctx.hoisted.and_then(|h| h.get(&hoist_key(ext))) {
+            Some(v) => Ok(v.clone()),
+            None => Ext::lower_ext(b, env, sink, hctx, ty, ext),
+        },
     }
 }
 
@@ -547,34 +564,15 @@ fn lower_func_app<Ext: PureExt>(
         // Narrow the current value heap to the callee's precondition snapshot.
         // `Snap` implicitly asserts the precondition under the running pc.
         let req_id = requires.expect("heap-dep implies a requires");
-        // A quantifier body has no heap to narrow, and could not have one (see
-        // `HeapCtx::in_quantifier`). A binder-dependent footprint would need
-        // quantified permissions besides.
-        //
-        // The obvious workaround — emit the `Snap` in the *host* scope and let
-        // `vmir::Forall::free_temps` capture it — does not work, for two reasons
-        // worth recording so they are not re-derived:
-        //
-        //  * `Snap` bundles two jobs: it narrows the footprint to a snapshot
-        //    *and* asserts the resource's boolean. Those pull opposite ways here.
-        //    The snapshot wants to be binder-free (one captured value), but the
-        //    boolean must be checked per-binding **under the quantifier's
-        //    antecedent** — for `get(xs, i)` it is typically `0 <= i && i < len(xs)`,
-        //    which only the antecedent establishes. Hoisting asserts it outside the
-        //    antecedent, so it fails exactly where the feature would be wanted.
-        //  * `f#requires` is parameterized by the callee's *whole* param list, so a
-        //    `Snap` for `get(xs, i)` carries `args = [xs, i]` and mentions the
-        //    binder even when no footprint slot does. Hoisting is therefore only
-        //    ever applicable to calls that are already fully binder-free.
-        //
-        // Supporting this properly means splitting those two jobs: a
-        // param-independence analysis over the footprint recipes, a snapshot term
-        // that omits the irrelevant params, and per-binding checking of the
-        // resource boolean under the antecedent.
-        if hctx.in_quantifier {
-            return Err(TranslationError::HeapDepFunctionInQuantifier(
-                b.interner.resolve(&call.name.0).to_string(),
-            ));
+        // A quantifier body has no heap to narrow (see `HeapCtx::hoisted`). A
+        // call mentioning no binder was evaluated at the quantifier's position
+        // instead, so one reaching here mentions a binder: its snapshot would
+        // have to be taken per instance (quantified permissions).
+        if hctx.hoisted.is_some() {
+            return Err(TranslationError::BinderDependentHeapRead(format!(
+                "function `{}`",
+                b.interner.resolve(&call.name.0)
+            )));
         }
         // The implicit precondition check: a frame-only exhale of the callee's
         // `#requires` resource, yielding its snapshot but no heap. `1/1`, not
@@ -633,6 +631,12 @@ pub(crate) fn lower_heap_node<Ext: PureExt>(
     node: &typed::HeapNode<Ext>,
 ) -> Result<Val, TranslationError> {
     use typed::HeapNode as H;
+    // A quantifier body cannot read a heap; the reads it may contain were
+    // evaluated at the quantifier's position (`HeapCtx::hoisted`). A call is
+    // decided by `lower_func_app`: a heap-free callee is fine here.
+    if hctx.hoisted.is_some() && !matches!(node, H::FunctionCall(_)) {
+        return Err(binder_dependent_read(b, &ExtNode::Heap(node)));
+    }
     match node {
         H::Field(base, id) => {
             let base = lower(b, env, sink, hctx, base)?;
@@ -657,7 +661,7 @@ pub(crate) fn lower_heap_node<Ext: PureExt>(
     }
 }
 
-pub(crate) trait PureExt: Sized + Clone + std::fmt::Debug {
+pub(crate) trait PureExt: Sized + Clone + PartialEq + std::fmt::Debug {
     fn lower_ext(
         b: &TranslationContext<'_>,
         env: &HashMap<Spur, Val>,
@@ -666,6 +670,35 @@ pub(crate) trait PureExt: Sized + Clone + std::fmt::Debug {
         ty: vmir::Type,
         ext: &Self,
     ) -> Result<Val, TranslationError>;
+
+    /// What this node is to a quantifier body: which heap it reads and where its
+    /// sub-expressions are (see [`Hoister`]).
+    fn node(&self) -> ExtNode<'_, Self>;
+
+    /// The heap context an [`ExtNode::Old`] node reads its operand in.
+    fn old_ctx<'h>(
+        &self,
+        _b: &TranslationContext<'_>,
+        _hctx: HeapCtx<'h>,
+    ) -> Result<HeapCtx<'h>, TranslationError> {
+        unreachable!("old_ctx on a node that is not `old`")
+    }
+}
+
+/// A context extension node, as seen by a quantifier body.
+pub(crate) enum ExtNode<'e, Ext> {
+    /// `e.f`, a Silver `function` call, `unfolding`: reads the context's heap
+    /// (a call only if its callee is heap-dependent).
+    Heap(&'e typed::HeapNode<Ext>),
+    /// `old(e)` / `old[L](e)`: `e` is read in the heap [`PureExt::old_ctx`] names.
+    Old(&'e typed::TypedPureExp<Ext>),
+    /// `perm(loc)`: reads the context's permission heap.
+    Perm(&'e typed::ResourceExp<Ext>),
+    /// `result`: a value, reads nothing.
+    Result,
+    /// A call to a precondition-free Silver `function` in an axiom: reads nothing.
+    PureCall(&'e typed::Call<Ext>),
+    Forall(&'e typed::Forall<Ext>),
 }
 
 impl PureExt for ! {
@@ -678,6 +711,9 @@ impl PureExt for ! {
         ext: &Self,
     ) -> Result<Val, TranslationError> {
         match *ext {}
+    }
+    fn node(&self) -> ExtNode<'_, Self> {
+        match *self {}
     }
 }
 
@@ -692,7 +728,13 @@ impl PureExt for typed::HeapExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::HeapExt::Heap(node) => lower_heap_node(b, env, sink, hctx, ty, node),
-            typed::HeapExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::HeapExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn node(&self) -> ExtNode<'_, Self> {
+        match self {
+            typed::HeapExt::Heap(node) => ExtNode::Heap(node),
+            typed::HeapExt::Forall(q) => ExtNode::Forall(q),
         }
     }
 }
@@ -712,7 +754,13 @@ impl PureExt for typed::AxiomExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::AxiomExt::FunctionCall(call) => lower_func_app(b, env, sink, hctx, ty, call),
-            typed::AxiomExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::AxiomExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn node(&self) -> ExtNode<'_, Self> {
+        match self {
+            typed::AxiomExt::FunctionCall(call) => ExtNode::PureCall(call),
+            typed::AxiomExt::Forall(q) => ExtNode::Forall(q),
         }
     }
 }
@@ -723,20 +771,62 @@ impl PureExt for typed::AxiomExt {
 /// through the enclosing `env` to the very temp it already has — nothing to
 /// collect, nothing to remap.
 ///
-/// The step's own temp `p` is allocated first, since the body is numbered *from*
-/// it (`binder_base == p`, see [`vmir::Forall`]): the first binder shadows the
-/// `forall`'s own boolean, so the quantifier cannot refer to itself. This sink's
-/// counter is left at `p + 1`, so the enclosing stream shadows the body's temps
-/// rather than skipping past them; the two scopes never overlap in time, so that
-/// is sound and it keeps the verifier's positional value table dense.
-fn lower_forall(
+/// The body may read the heap of the quantifier's position (and `old` heaps),
+/// as Silver allows in an assertion, but only through reads that mention no
+/// binder: those are evaluated here, in the enclosing stream, before the step
+/// is allocated ([`Hoister`]), and the body uses their values, which the
+/// quantifier captures. A closed read has one value for every instance, and its
+/// well-definedness (permission, a callee's precondition) is checked here under
+/// the enclosing path condition: what Silicon checks per instance, minus the
+/// body's own guards on the way to the read. Dropping those guards strengthens
+/// the check, so it stays sound; it rejects only a read that the enclosing state
+/// does not frame but every instance reaching it does, through its guard (a
+/// vacuous guard, or one whose satisfiability implies the permission). A read
+/// that mentions a binder needs a per-instance footprint, i.e. quantified
+/// permissions, and is rejected.
+///
+/// The step's own temp `p` is allocated after those reads, since the body is
+/// numbered *from* it (`binder_base == p`, see [`vmir::Forall`]): the first
+/// binder shadows the `forall`'s own boolean, so the quantifier cannot refer to
+/// itself. This sink's counter is left at `p + 1`, so the enclosing stream
+/// shadows the body's temps rather than skipping past them; the two scopes never
+/// overlap in time, so that is sound and it keeps the verifier's positional
+/// value table dense.
+fn lower_forall<Ext: PureExt>(
     b: &TranslationContext<'_>,
     env: &HashMap<Spur, Val>,
     sink: &mut Sink,
-    q: &typed::Forall,
+    hctx: HeapCtx<'_>,
+    q: &typed::Forall<Ext>,
 ) -> Result<Val, TranslationError> {
     let n = q.bound.len();
     let bound: Vec<vmir::Type> = q.bound.iter().map(|bv| b.lower_type(&bv.ty)).collect();
+
+    // The closed reads, in the enclosing stream. A nested quantifier's were
+    // collected with its encloser's (the walk descends into nested bodies), so
+    // it reuses that map.
+    let mut own = Hoisted::default();
+    let hoisted = match hctx.hoisted {
+        Some(outer) => outer,
+        None => {
+            let mut hoister = Hoister {
+                b,
+                env,
+                sink: &mut *sink,
+                local: Vec::new(),
+                done: Vec::new(),
+                out: &mut own,
+            };
+            hoister.forall(hctx, q)?;
+            &own
+        }
+    };
+    let body_hctx = HeapCtx {
+        value: HeapVal::Empty,
+        perm: HeapVal::Empty,
+        hoisted: Some(hoisted),
+        ..hctx
+    };
 
     // The step's temp, then the frame it opens.
     let step = sink.next_val_temp();
@@ -760,7 +850,16 @@ fn lower_forall(
     for group in &q.triggers {
         let terms = group
             .iter()
-            .map(|t| lower_trig_term(b, t, &inner_env))
+            .map(|t| match &*t.exp {
+                // A closed heap read at a term's root was evaluated to a value
+                // above, leaving no application to match on.
+                typed::PureExpKind::Ext(ext) if hoisted.contains_key(&hoist_key(ext)) => {
+                    Err(TranslationError::Unsupported(
+                        "a trigger term that reads the heap and mentions no quantified variable",
+                    ))
+                }
+                _ => lower_trig_term(b, t, &inner_env, hoisted),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         triggers.push(vmir::QuantTrigger {
             terms: terms.into(),
@@ -770,14 +869,7 @@ fn lower_forall(
     // Lower the body in an inner sink whose params (everything up to and including
     // the binders) occupy `Val::Temp(0..binder_base + n)`.
     let mut inner = Sink::new(binder_base + n, 0);
-    let hctx = HeapCtx {
-        value: HeapVal::Empty,
-        perm: HeapVal::Empty,
-        old: None,
-        result: None,
-        in_quantifier: true,
-    };
-    let res = lower(b, &inner_env, &mut inner, hctx, &q.body)?;
+    let res = lower(b, &inner_env, &mut inner, body_hctx, &q.body)?;
     let body = vmir::FunctionBody {
         insts: inner.insts,
         res,
@@ -796,22 +888,218 @@ fn lower_forall(
     Ok(step)
 }
 
+/// The walk that evaluates a quantifier's closed heap reads in the enclosing
+/// stream (see [`lower_forall`]). It descends top-down, so a read is taken as a
+/// whole as soon as it mentions no name bound inside the quantifier; only a read
+/// that does mention one is looked into: `old(e)` for closed reads of `e` in the
+/// old heap, anything else is rejected.
+struct Hoister<'b, 'c, 's, 'e, Ext> {
+    b: &'b TranslationContext<'c>,
+    env: &'b HashMap<Spur, Val>,
+    sink: &'s mut Sink,
+    /// The names bound between the outermost quantifier and the current node:
+    /// binders of it and of nested quantifiers, and `let` binders.
+    local: Vec<Spur>,
+    /// The reads evaluated so far, with the heaps they were read in: a read
+    /// written twice (in a trigger and in the body, say) is evaluated, and
+    /// checked, once.
+    done: Vec<(HeapVal, HeapVal, &'e typed::TypedPureExp<Ext>, Val)>,
+    out: &'s mut Hoisted,
+}
+
+impl<'e, Ext: PureExt> Hoister<'_, '_, '_, 'e, Ext> {
+    fn forall(
+        &mut self,
+        hctx: HeapCtx<'_>,
+        q: &'e typed::Forall<Ext>,
+    ) -> Result<(), TranslationError> {
+        let depth = self.local.len();
+        self.local.extend(q.bound.iter().map(|bv| bv.name.0));
+        let r = q
+            .triggers
+            .iter()
+            .flatten()
+            .chain(std::iter::once(&q.body))
+            .try_for_each(|e| self.exp(hctx, e));
+        self.local.truncate(depth);
+        r
+    }
+
+    fn exp(
+        &mut self,
+        hctx: HeapCtx<'_>,
+        exp: &'e typed::TypedPureExp<Ext>,
+    ) -> Result<(), TranslationError> {
+        use typed::PureExpKind as P;
+        match &*exp.exp {
+            P::Ident(_) | P::Const(_) => Ok(()),
+            P::Unary(_, e) | P::AdtDestructor(e, _) | P::AdtDiscriminator(e, _) => {
+                self.exp(hctx, e)
+            }
+            P::Binary(_, l, r) => {
+                self.exp(hctx, l)?;
+                self.exp(hctx, r)
+            }
+            P::Ternary { if_, then, else_ } => {
+                self.exp(hctx, if_)?;
+                self.exp(hctx, then)?;
+                self.exp(hctx, else_)
+            }
+            P::LetIn { binder, value, exp } => {
+                self.exp(hctx, value)?;
+                self.local.push(binder.0);
+                let r = self.exp(hctx, exp);
+                self.local.pop();
+                r
+            }
+            P::DomainFunctionCall(call) | P::AdtConstructor(call) => self.args(hctx, call),
+            P::Ext(ext) => match ext.node() {
+                ExtNode::Forall(q) => self.forall(hctx, q),
+                ExtNode::PureCall(call) => self.args(hctx, call),
+                ExtNode::Result => Ok(()),
+                ExtNode::Heap(typed::HeapNode::FunctionCall(call))
+                    if !self
+                        .b
+                        .contracts
+                        .get(&call.name.0)
+                        .is_some_and(|c| c.heap_dep) =>
+                {
+                    self.args(hctx, call)
+                }
+                _ if !mentions(exp, &self.local) => self.hoist(hctx, exp, ext),
+                ExtNode::Old(inner) => {
+                    let old = ext.old_ctx(self.b, hctx)?;
+                    self.exp(old, inner)
+                }
+                node => Err(binder_dependent_read(self.b, &node)),
+            },
+        }
+    }
+
+    fn args(
+        &mut self,
+        hctx: HeapCtx<'_>,
+        call: &'e typed::Call<Ext>,
+    ) -> Result<(), TranslationError> {
+        call.args.iter().try_for_each(|a| self.exp(hctx, a))
+    }
+
+    /// Evaluate the closed read `exp` (extension node `ext`) here, in the
+    /// enclosing stream, exactly as it would be evaluated outside the quantifier.
+    fn hoist(
+        &mut self,
+        hctx: HeapCtx<'_>,
+        exp: &'e typed::TypedPureExp<Ext>,
+        ext: &'e Ext,
+    ) -> Result<(), TranslationError> {
+        let seen = self
+            .done
+            .iter()
+            .find(|(v, p, e, _)| *v == hctx.value && *p == hctx.perm && *e == exp);
+        let val = match seen {
+            Some((.., val)) => val.clone(),
+            None => {
+                let val = lower(self.b, self.env, self.sink, hctx, exp)?;
+                self.done.push((hctx.value, hctx.perm, exp, val.clone()));
+                val
+            }
+        };
+        self.out.insert(hoist_key(ext), val);
+        Ok(())
+    }
+}
+
+/// The error for a heap read that mentions a binder, naming what it reads.
+fn binder_dependent_read<Ext>(
+    b: &TranslationContext<'_>,
+    node: &ExtNode<'_, Ext>,
+) -> TranslationError {
+    let what = match node {
+        ExtNode::Heap(typed::HeapNode::Field(_, f)) => {
+            format!("field `{}`", b.interner.resolve(&f.0))
+        }
+        ExtNode::Heap(typed::HeapNode::FunctionCall(call)) => {
+            format!("function `{}`", b.interner.resolve(&call.name.0))
+        }
+        ExtNode::Heap(typed::HeapNode::Unfolding(pwp, _)) => {
+            format!(
+                "`unfolding` of `{}`",
+                b.interner.resolve(&pwp.pred_call.name.0)
+            )
+        }
+        ExtNode::Perm(_) => "`perm`".to_string(),
+        ExtNode::Old(_) | ExtNode::Result | ExtNode::PureCall(_) | ExtNode::Forall(_) => {
+            unreachable!("not a heap read")
+        }
+    };
+    TranslationError::BinderDependentHeapRead(what)
+}
+
+/// Whether `exp` mentions any of `names`. Shadowing inside `exp` is ignored, so
+/// this may say yes for a name rebound before its use; the caller then treats
+/// the expression as binder-dependent, which only ever rejects more.
+fn mentions<Ext: PureExt>(exp: &typed::TypedPureExp<Ext>, names: &[Spur]) -> bool {
+    use typed::PureExpKind as P;
+    let any = |es: &[typed::TypedPureExp<Ext>]| es.iter().any(|e| mentions(e, names));
+    match &*exp.exp {
+        P::Ident(id) => names.contains(&id.0),
+        P::Const(_) => false,
+        P::Unary(_, e) | P::AdtDestructor(e, _) | P::AdtDiscriminator(e, _) => mentions(e, names),
+        P::Binary(_, l, r)
+        | P::LetIn {
+            value: l, exp: r, ..
+        } => mentions(l, names) || mentions(r, names),
+        P::Ternary { if_, then, else_ } => {
+            mentions(if_, names) || mentions(then, names) || mentions(else_, names)
+        }
+        P::DomainFunctionCall(call) | P::AdtConstructor(call) => any(&call.args),
+        P::Ext(ext) => match ext.node() {
+            ExtNode::Heap(typed::HeapNode::Field(e, _)) | ExtNode::Old(e) => mentions(e, names),
+            ExtNode::Heap(typed::HeapNode::FunctionCall(call)) | ExtNode::PureCall(call) => {
+                any(&call.args)
+            }
+            ExtNode::Heap(typed::HeapNode::Unfolding(pwp, body)) => {
+                any(&pwp.pred_call.args) || mentions(&pwp.perm, names) || mentions(body, names)
+            }
+            ExtNode::Perm(res) => match &*res.0 {
+                typed::ResourceExpKind::Field(e, _) => mentions(e, names),
+                typed::ResourceExpKind::PredicateCall(call) => any(&call.args),
+            },
+            ExtNode::Result => false,
+            ExtNode::Forall(q) => q.triggers.iter().any(|g| any(g)) || mentions(&q.body, names),
+        },
+    }
+}
+
 /// Lower one trigger term into its VMIR pattern tree. A variable resolves through
 /// `env` to the temp it names — a binder or an enclosing value, told apart later
-/// by `binder_base` alone; a literal to `Lit`; anything else is an application,
-/// lowered to the same head the body's `PureInst` would produce, with its
-/// arguments lowered recursively (a trigger may nest arbitrarily). Shapes outside
-/// this grammar were rejected at typecheck (`check_triggers`).
-fn lower_trig_term(
+/// by `binder_base` alone; a literal to `Lit`; a closed heap read to the value it
+/// was evaluated to (`hoisted`), an enclosing value like a variable; anything
+/// else is an application, lowered to the same head the body's `PureInst` would
+/// produce, with its arguments lowered recursively (a trigger may nest
+/// arbitrarily). Shapes outside this grammar were rejected at typecheck
+/// (`check_triggers`).
+fn lower_trig_term<Ext: PureExt>(
     b: &TranslationContext<'_>,
-    term: &typed::TypedPureExp<typed::AxiomExt>,
+    term: &typed::TypedPureExp<Ext>,
     env: &HashMap<Spur, Val>,
+    hoisted: &Hoisted,
 ) -> Result<vmir::TrigTerm, TranslationError> {
     use typed::PureExpKind as P;
-    let lower_args = |args: &[typed::TypedPureExp<typed::AxiomExt>]| {
+    let lower_args = |args: &[typed::TypedPureExp<Ext>]| {
         args.iter()
-            .map(|a| lower_trig_term(b, a, env))
+            .map(|a| lower_trig_term(b, a, env, hoisted))
             .collect::<Result<Vec<_>, _>>()
+    };
+    let func = |call: &typed::Call<Ext>| -> Result<vmir::TrigTerm, TranslationError> {
+        let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
+            TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
+        })?;
+        Ok(vmir::TrigTerm::App {
+            head: vmir::TrigHead::Func(function),
+            type_args: Vec::new(),
+            args: lower_args(&call.args)?.into(),
+        })
     };
     match term.exp.as_ref() {
         P::Ident(id) => match env.get(&id.0) {
@@ -824,16 +1112,17 @@ fn lower_trig_term(
             )),
         },
         P::Const(lit) => Ok(vmir::TrigTerm::Lit(lower_literal(lit)?)),
-        P::DomainFunctionCall(call) | P::Ext(typed::AxiomExt::FunctionCall(call)) => {
-            let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
-                TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
-            })?;
-            Ok(vmir::TrigTerm::App {
-                head: vmir::TrigHead::Func(function),
-                type_args: Vec::new(),
-                args: lower_args(&call.args)?.into(),
-            })
-        }
+        P::DomainFunctionCall(call) => func(call),
+        P::Ext(ext) => match (hoisted.get(&hoist_key(ext)), ext.node()) {
+            (Some(Val::Temp(k)), _) => Ok(vmir::TrigTerm::Var(*k)),
+            (Some(Val::Literal(lit)), _) => Ok(vmir::TrigTerm::Lit(lit.clone())),
+            // Not hoisted, so heap-free: the head is the plain function.
+            (
+                None,
+                ExtNode::Heap(typed::HeapNode::FunctionCall(call)) | ExtNode::PureCall(call),
+            ) => func(call),
+            (None, _) => unreachable!("typecheck rejects non-matchable trigger subterms"),
+        },
         P::AdtConstructor(call) => {
             let &(adt_spur, variant) = b.adt.ctor_variant.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
@@ -856,7 +1145,7 @@ fn lower_trig_term(
                     field,
                 },
                 type_args: adt_type_args(b, &base.ty),
-                args: Box::new([lower_trig_term(b, base, env)?]),
+                args: Box::new([lower_trig_term(b, base, env, hoisted)?]),
             })
         }
         // `{ e.isCons }` triggers on the tester the discriminator lowers to, the
@@ -872,14 +1161,10 @@ fn lower_trig_term(
                     variant,
                 },
                 type_args: adt_type_args(b, &base.ty),
-                args: Box::new([lower_trig_term(b, base, env)?]),
+                args: Box::new([lower_trig_term(b, base, env, hoisted)?]),
             })
         }
-        P::Unary(..)
-        | P::Binary(..)
-        | P::Ternary { .. }
-        | P::LetIn { .. }
-        | P::Ext(typed::AxiomExt::Forall(_)) => {
+        P::Unary(..) | P::Binary(..) | P::Ternary { .. } | P::LetIn { .. } => {
             unreachable!("typecheck rejects non-matchable trigger subterms")
         }
     }
@@ -896,32 +1181,39 @@ impl PureExt for typed::MethodEnsuresExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::MethodEnsuresExt::Heap(node) => lower_heap_node(b, env, sink, hctx, ty, node),
-            // old(e): re-read `e` against the method pre-state. For a two-state
-            // ensures that heap is the one its entry bound `inhale` reconstructs
-            // from the trailing snapshot parameter, supplied as the `old`
-            // baseline by `lower_spatial_ensures`. Ensures-`old` is always
-            // unlabeled (`old[L]` is a type error). A self-framed ensures has no
-            // pre-state (`hctx.old == None`): `old` there needs a `requires` to
-            // frame it.
             typed::MethodEnsuresExt::Old(inner) => {
-                let old = hctx.old.ok_or(TranslationError::Unsupported(
-                    "`old` in method ensures needs a precondition framing it",
-                ))?;
-                let heap = old.baseline;
-                lower(
-                    b,
-                    env,
-                    sink,
-                    HeapCtx {
-                        value: heap,
-                        perm: heap,
-                        ..hctx
-                    },
-                    inner,
-                )
+                lower(b, env, sink, ext.old_ctx(b, hctx)?, inner)
             }
-            typed::MethodEnsuresExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::MethodEnsuresExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
         }
+    }
+    fn node(&self) -> ExtNode<'_, Self> {
+        match self {
+            typed::MethodEnsuresExt::Heap(node) => ExtNode::Heap(node),
+            typed::MethodEnsuresExt::Old(inner) => ExtNode::Old(inner),
+            typed::MethodEnsuresExt::Forall(q) => ExtNode::Forall(q),
+        }
+    }
+    // old(e): re-read `e` against the method pre-state. For a two-state
+    // ensures that heap is the one its entry bound `inhale` reconstructs
+    // from the trailing snapshot parameter, supplied as the `old`
+    // baseline by `lower_spatial_ensures`. Ensures-`old` is always
+    // unlabeled (`old[L]` is a type error). A self-framed ensures has no
+    // pre-state (`hctx.old == None`): `old` there needs a `requires` to
+    // frame it.
+    fn old_ctx<'h>(
+        &self,
+        _b: &TranslationContext<'_>,
+        hctx: HeapCtx<'h>,
+    ) -> Result<HeapCtx<'h>, TranslationError> {
+        let old = hctx.old.ok_or(TranslationError::Unsupported(
+            "`old` in method ensures needs a precondition framing it",
+        ))?;
+        Ok(HeapCtx {
+            value: old.baseline,
+            perm: old.baseline,
+            ..hctx
+        })
     }
 }
 
@@ -936,40 +1228,57 @@ impl PureExt for typed::MethodBodyExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::MethodBodyExt::Heap(node) => lower_heap_node(b, env, sink, hctx, ty, node),
-            // old(e) / old[L](e): re-read `e` against an earlier heap. Unlabeled
-            // → the post-requires-inhale baseline; labeled → the heap captured
-            // at `label L`. The `old` context is carried along so nested `old`s
-            // still resolve.
-            typed::MethodBodyExt::Old(label, inner) => {
-                let old = hctx
-                    .old
-                    .ok_or(TranslationError::Unsupported("`old` outside method body"))?;
-                let heap = match label {
-                    None => old.baseline,
-                    Some(l) => *old.labeled.get(l).ok_or_else(|| {
-                        TranslationError::UnknownIdent(b.interner.resolve(l).to_string())
-                    })?,
-                };
-                lower(
-                    b,
-                    env,
-                    sink,
-                    HeapCtx {
-                        value: heap,
-                        perm: heap,
-                        ..hctx
-                    },
-                    inner,
-                )
+            typed::MethodBodyExt::Old(_, inner) => {
+                lower(b, env, sink, ext.old_ctx(b, hctx)?, inner)
             }
-            // perm(loc): query the permission held at `loc` in the perm heap.
+            // perm(loc): query the permission held at `loc` in the perm heap. A
+            // quantifier body has none (`HeapCtx::hoisted`).
+            typed::MethodBodyExt::Perm(res) if hctx.hoisted.is_some() => {
+                Err(binder_dependent_read(b, &ExtNode::Perm(res)))
+            }
             typed::MethodBodyExt::Perm(res) => {
                 let addr =
                     crate::translate::resource::lower_resource_addr(b, env, sink, hctx, res)?;
                 Ok(sink.emit_pure(ty, PureInst::Perm(hctx.perm, addr)))
             }
-            typed::MethodBodyExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::MethodBodyExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
         }
+    }
+    fn node(&self) -> ExtNode<'_, Self> {
+        match self {
+            typed::MethodBodyExt::Heap(node) => ExtNode::Heap(node),
+            typed::MethodBodyExt::Old(_, inner) => ExtNode::Old(inner),
+            typed::MethodBodyExt::Perm(res) => ExtNode::Perm(res),
+            typed::MethodBodyExt::Forall(q) => ExtNode::Forall(q),
+        }
+    }
+    // old(e) / old[L](e): re-read `e` against an earlier heap. Unlabeled
+    // → the post-requires-inhale baseline; labeled → the heap captured
+    // at `label L`. The `old` context is carried along so nested `old`s
+    // still resolve.
+    fn old_ctx<'h>(
+        &self,
+        b: &TranslationContext<'_>,
+        hctx: HeapCtx<'h>,
+    ) -> Result<HeapCtx<'h>, TranslationError> {
+        let typed::MethodBodyExt::Old(label, _) = self else {
+            unreachable!("old_ctx on a node that is not `old`")
+        };
+        let old = hctx
+            .old
+            .ok_or(TranslationError::Unsupported("`old` outside method body"))?;
+        let heap = match label {
+            None => old.baseline,
+            Some(l) => *old
+                .labeled
+                .get(l)
+                .ok_or_else(|| TranslationError::UnknownIdent(b.interner.resolve(l).to_string()))?,
+        };
+        Ok(HeapCtx {
+            value: heap,
+            perm: heap,
+            ..hctx
+        })
     }
 }
 
@@ -989,12 +1298,27 @@ impl PureExt for typed::FuncEnsuresExt {
             typed::FuncEnsuresExt::Result => hctx.result.cloned().ok_or(
                 TranslationError::Unsupported("`result` outside a function postcondition"),
             ),
-            // A function is single-state: `old(e)` reads the same (only) heap the
-            // postcondition is framed by, so it re-reads `e` against the current
-            // context.
-            typed::FuncEnsuresExt::Old(inner) => lower(b, env, sink, hctx, inner),
-            typed::FuncEnsuresExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::FuncEnsuresExt::Old(inner) => lower(b, env, sink, ext.old_ctx(b, hctx)?, inner),
+            typed::FuncEnsuresExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
         }
+    }
+    fn node(&self) -> ExtNode<'_, Self> {
+        match self {
+            typed::FuncEnsuresExt::Heap(node) => ExtNode::Heap(node),
+            typed::FuncEnsuresExt::Result => ExtNode::Result,
+            typed::FuncEnsuresExt::Old(inner) => ExtNode::Old(inner),
+            typed::FuncEnsuresExt::Forall(q) => ExtNode::Forall(q),
+        }
+    }
+    // A function is single-state: `old(e)` reads the same (only) heap the
+    // postcondition is framed by, so it re-reads `e` against the current
+    // context.
+    fn old_ctx<'h>(
+        &self,
+        _b: &TranslationContext<'_>,
+        hctx: HeapCtx<'h>,
+    ) -> Result<HeapCtx<'h>, TranslationError> {
+        Ok(hctx)
     }
 }
 
@@ -1100,7 +1424,7 @@ pub(crate) fn lower_function_body<Ext: PureExt>(
         perm: heap,
         old: None,
         result: result.as_ref(),
-        in_quantifier: false,
+        hoisted: None,
     };
     // Entry: assume the precondition. (Heap-dependent bodies skip this — the
     // the bound `inhale` above assumes the requires resource's bool implicitly.)
@@ -1151,7 +1475,7 @@ pub(crate) fn lower_axiom_body(
         perm: HeapVal::Empty,
         old: None,
         result: None,
-        in_quantifier: false,
+        hoisted: None,
     };
     let res = lower(b, env, &mut sink, hctx, exp)?;
     Ok(vmir::FunctionBody {

@@ -1,0 +1,23 @@
+// A quantifier whose whole body is a heap-dependent function call that mentions
+// no binder captures the call's value in the heap where the quantifier is
+// stated; after `x.f := 0` the current `gb(x)` is a different value, and it is
+// false. Silicon rejects this (assertion might not hold).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+function gb(x: Ref): Bool
+  requires acc(x.f)
+{ x.f > 0 }
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } gb(x)
+  x.f := 0
+  assume t(0)
+  assert gb(x)
+}

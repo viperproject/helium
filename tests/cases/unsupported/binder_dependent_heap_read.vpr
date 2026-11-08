@@ -1,0 +1,23 @@
+// A heap read inside a quantifier whose receiver is a binder reads a different
+// location per instance, so framing it needs a per-instance footprint
+// (quantified permissions), which is not implemented. Silicon accepts
+// `quantified` (every instance that reads `r.f` has `r == x`); here it is
+// reported unsupported, and `fine`, whose quantifier reads only `x.f`, still
+// verifies.
+
+field f: Int
+
+domain D {
+  function t(r: Ref): Bool
+  function u(i: Int): Bool
+}
+
+method quantified(x: Ref)
+  requires acc(x.f) && forall r: Ref :: { t(r) } r == x ==> r.f > 0
+
+method fine(x: Ref)
+  requires acc(x.f) && forall i: Int :: { u(i) } u(i) ==> x.f > i
+{
+  assume u(1)
+  assert x.f > 1
+}

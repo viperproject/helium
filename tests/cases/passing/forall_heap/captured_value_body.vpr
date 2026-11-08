@@ -1,0 +1,52 @@
+// A quantifier whose whole body is a heap read that mentions no binder: the
+// read is evaluated before the quantifier (a heap-dependent function, a Bool
+// field, `old`, `unfolding`), so the body is no instruction at all, only the
+// captured result, and an instance must yield that value. Silicon verifies this.
+
+field f: Int
+field g: Bool
+
+domain D {
+  function t(i: Int): Bool
+}
+
+function gb(x: Ref): Bool
+  requires acc(x.f)
+{ x.f > 0 }
+
+predicate P(x: Ref) { acc(x.g) }
+
+method function_body(x: Ref)
+  requires acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } gb(x)
+  assume t(0)
+  assert gb(x)
+  assert x.f > 0
+}
+
+method field_body(x: Ref)
+  requires acc(x.g)
+{
+  inhale forall i: Int :: { t(i) } x.g
+  assume t(0)
+  assert x.g
+}
+
+method old_body(x: Ref)
+  requires acc(x.g)
+{
+  inhale forall i: Int :: { t(i) } old(x.g)
+  x.g := false
+  assume t(0)
+  assert old(x.g)
+}
+
+method unfolding_body(x: Ref)
+  requires P(x)
+{
+  inhale forall i: Int :: { t(i) } unfolding P(x) in x.g
+  assume t(0)
+  unfold P(x)
+  assert x.g
+}
