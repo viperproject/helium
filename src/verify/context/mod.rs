@@ -808,7 +808,7 @@ pub(super) fn run_rules_until<'r>(
 ///
 /// A pending match that binds the forall searcher's anchor covers its whole
 /// class (the full search matches each quantifier of a class); every other match
-/// is compared by class and substitution.
+/// is compared by class, substitution and its pattern's root node.
 fn no_match_lost(
     egraph: &egg::EGraph<Symbolic, ConstFold>,
     rules: &[&egg::Rewrite<Symbolic, ConstFold>],
@@ -816,11 +816,13 @@ fn no_match_lost(
     use crate::dhash::HashSet;
     let _memos = rewrite::ReadOnlyMemos::enter();
     let anchor: egg::Var = "?anchor".parse().expect("var");
-    // A match by its class and the bindings of the searcher's variables and of its
-    // pattern's, if it names one (a single quantifier: its captures). Not by the
-    // pattern itself: a searcher may name it in a full search and not in its search
-    // of the changes.
+    // A match by its class, its pattern's root node and the bindings of the
+    // searcher's variables and of its pattern's, if it names one (a single
+    // quantifier: its recipe and captures). A searcher may name the pattern in a
+    // full search and not in its search of the changes, so a pending match that
+    // names none covers the same bindings under any pattern.
     let key = |vars: &[egg::Var], m: &egg::SearchMatches<Symbolic>, subst: &egg::Subst| {
+        let root = m.ast.as_deref().map(|a| a[a.root()].clone());
         let ast_vars = m.ast.as_deref().into_iter().flat_map(|a| {
             a.iter().filter_map(|n| match n {
                 egg::ENodeOrVar::Var(v) if !vars.contains(v) => Some(*v),
@@ -832,7 +834,7 @@ fn no_match_lost(
             .copied()
             .chain(ast_vars)
             .map(|v| subst.get(v).map(|&id| egraph.find(id)));
-        (egraph.find(m.eclass), bound.collect::<Vec<_>>())
+        (egraph.find(m.eclass), root, bound.collect::<Vec<_>>())
     };
     let mut lost = Vec::new();
     for rule in rules {
@@ -862,7 +864,11 @@ fn no_match_lost(
                 let substs = std::mem::take(&mut m.substs);
                 m.substs = substs
                     .into_iter()
-                    .filter(|s| !pending_matches.contains(&key(&vars, &m, s)))
+                    .filter(|s| {
+                        let (class, root, bound) = key(&vars, &m, s);
+                        !pending_matches.contains(&(class, None, bound.clone()))
+                            && !pending_matches.contains(&(class, root, bound))
+                    })
                     .collect();
                 m
             })
@@ -911,4 +917,104 @@ fn no_match_lost(
         "semi-naive matching lost matches of {missed:?}"
     );
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vmir::BinOp;
+    use egg::{ENodeOrVar, Pattern, PatternAst, SearchMatches, Searcher, Var};
+
+    fn x() -> Var {
+        "?x".parse().expect("var")
+    }
+
+    /// The flat pattern `?x op ?x`.
+    fn flat(op: BinOp) -> Pattern<Symbolic> {
+        let mut ast = PatternAst::default();
+        let x = ast.add(ENodeOrVar::Var(x()));
+        ast.add(ENodeOrVar::ENode(Symbolic::Binary(op, [x, x])));
+        Pattern::new(ast)
+    }
+
+    /// Searches `?x + ?x` and `?x * ?x` in full, and among the changes only the
+    /// first unless `changes_find_both`.
+    struct Doubled {
+        add: Pattern<Symbolic>,
+        mul: Pattern<Symbolic>,
+        changes_find_both: bool,
+    }
+
+    impl Searcher<Symbolic, ConstFold> for Doubled {
+        fn search_eclass_with_limit(
+            &self,
+            _: &egg::EGraph<Symbolic, ConstFold>,
+            _: egg::Id,
+            _: usize,
+        ) -> Option<SearchMatches<'_, Symbolic>> {
+            unreachable!("searched as a whole")
+        }
+
+        fn search_with_limit(
+            &self,
+            egraph: &egg::EGraph<Symbolic, ConstFold>,
+            limit: usize,
+        ) -> Vec<SearchMatches<'_, Symbolic>> {
+            let mut found = self.add.search_with_limit(egraph, limit);
+            found.extend(self.mul.search_with_limit(egraph, limit));
+            found
+        }
+
+        fn search_changes(
+            &self,
+            egraph: &egg::EGraph<Symbolic, ConstFold>,
+            _: &egg::Changes<Symbolic>,
+            limit: usize,
+        ) -> Vec<SearchMatches<'_, Symbolic>> {
+            if self.changes_find_both {
+                self.search_with_limit(egraph, limit)
+            } else {
+                self.add.search_with_limit(egraph, limit)
+            }
+        }
+
+        fn vars(&self) -> Vec<Var> {
+            vec![x()]
+        }
+    }
+
+    /// Checks a graph where `a + a` and `a * a` share a class, neither match
+    /// applied yet (as at a stop with work pending), for a rule whose search of
+    /// the changes finds one or both of them.
+    fn check(changes_find_both: bool) -> bool {
+        let searcher = Doubled {
+            add: flat(BinOp::AddI),
+            mul: flat(BinOp::MulI),
+            changes_find_both,
+        };
+        let rule = egg::Rewrite::new("doubled", searcher, flat(BinOp::SubI)).expect("rule");
+        let mut egraph = egg::EGraph::<Symbolic, ConstFold>::default();
+        egraph.track_changes();
+        let a = egraph.add(Symbolic::Fresh(0));
+        let add = egraph.add(Symbolic::Binary(BinOp::AddI, [a, a]));
+        let mul = egraph.add(Symbolic::Binary(BinOp::MulI, [a, a]));
+        egraph.union(add, mul);
+        egraph.rebuild();
+        let pos = egraph.change_pos().expect("changes are tracked");
+        egraph.mark_seen(rule.name, pos);
+        no_match_lost(&egraph, &[&rule])
+    }
+
+    /// Matches in one class with equal bindings are told apart by their pattern:
+    /// a pending match of one does not hide a lost match of the other.
+    #[test]
+    #[should_panic(expected = "semi-naive matching lost matches")]
+    fn lost_match_beside_a_pending_one_of_another_pattern() {
+        check(false);
+    }
+
+    #[test]
+    fn pending_matches_of_both_patterns() {
+        assert!(check(true));
+    }
 }
