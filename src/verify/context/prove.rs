@@ -393,6 +393,28 @@ impl<'a> VerifyContext<'a> {
         self.block_dead = false;
     }
 
+    /// Treat the rest of the current block as unreachable, so its obligations
+    /// hold vacuously: the walk knows control cannot arrive here (every
+    /// predecessor of the block is dead), which no graph has to rediscover.
+    pub(crate) fn mark_unreachable(&mut self) {
+        self.block_dead = true;
+    }
+
+    /// Whether the current block's exit is unreachable as far as its own walk
+    /// knows: it was marked so, or its scratch refuted the cube. The scratch is
+    /// ground plus the cube and the block's assumptions, each implied by ground
+    /// under the cube, so its contradiction proves that no execution leaves the
+    /// block, exactly as a cube literal folded against its polarity in ground
+    /// does. Unsaturated unions only need congruence to surface, hence the
+    /// rebuild — the scratch is about to be dropped anyway.
+    pub(crate) fn block_refuted(&mut self) -> bool {
+        if let Some(sc) = self.scratch.as_mut() {
+            sc.egraph.rebuild();
+            self.block_dead |= graph_inconsistent(&sc.egraph);
+        }
+        self.block_dead
+    }
+
     /// Build the block scratch if absent: clone ground, assume the block cube.
     /// Ids present now are identical in both graphs (clone preserves them), so
     /// the translation map starts empty.
@@ -429,7 +451,7 @@ impl<'a> VerifyContext<'a> {
         // once; every later obligation short-circuits at the top of
         // `prove_under_pc`. (The implication form would be strictly weaker —
         // const-fold does not collapse the `ite` chain of an unsatisfiable pc.)
-        self.block_dead = graph_inconsistent(&egraph);
+        self.block_dead |= graph_inconsistent(&egraph);
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
             eprintln!(
                 "[scratch-build] ground {}n/{}c ids {} cube {} | clone+union {:?} rebuild {:?}",

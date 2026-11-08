@@ -1,0 +1,29 @@
+// Regression: the blocks a scratch-refuted arm dominates are dead too.
+//
+// The inner else arm of `scratch_refuted_arm_join_value.vpr` goes on to a
+// branch, a join and a loop. Every block after it has only dead predecessors,
+// so the asserts in their bodies, which hold only because the code is
+// unreachable, hold without a scratch of their own, and each of them is dead
+// at the next join.
+field f: Int
+function h(i: Int): Int
+function g(i: Int): Int
+
+method m(x: Ref, y: Int, k: Int, n: Int, b: Bool)
+  requires acc(x.f)
+  requires forall i: Int :: {h(i), g(i)} h(i) == g(i)
+{
+  if (y == k) {
+    if (h(y) == g(k)) { x.f := n } else {
+      assert x.f == n
+      if (b) { x.f := n - 1 } else { x.f := n - 2 }
+      assert x.f == n
+      var i: Int := 0
+      while (i < 3)
+        invariant acc(x.f) && x.f == n
+      { i := i + 1 }
+      x.f := n - 1
+    }
+  } else { x.f := n }
+  assert x.f == n
+}

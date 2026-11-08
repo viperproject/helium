@@ -1,0 +1,16 @@
+// Regression: `scratch_refuted_arm_join_value.vpr` with the dead arm giving its
+// permission away. The join drops the arm's heap, so the write after it holds
+// `acc(x.f)` from the live arms alone.
+field f: Int
+function h(i: Int): Int
+function g(i: Int): Int
+
+method m(x: Ref, y: Int, k: Int, n: Int)
+  requires acc(x.f)
+  requires forall i: Int :: {h(i), g(i)} h(i) == g(i)
+{
+  if (y == k) {
+    if (h(y) == g(k)) { x.f := n } else { assert x.f == n; exhale acc(x.f) }
+  } else { x.f := n }
+  x.f := 0
+}

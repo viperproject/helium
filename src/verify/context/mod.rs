@@ -126,9 +126,10 @@ pub(crate) struct VerifyContext<'a> {
     scratch: Option<BlockScratch>,
     /// Whether the current block's control cube is unsatisfiable — the block is
     /// unreachable, so every obligation in it holds vacuously. Set when the
-    /// scratch is built (assuming the cube contradicts), cleared per block.
-    /// Unlike [`Self::is_inconsistent`] this is a fact about the *scratch*, so it
-    /// must never be consulted outside the block that established it.
+    /// scratch refutes the cube, or for a block whose predecessors are all dead
+    /// ([`Self::mark_unreachable`]); cleared per block. Unlike
+    /// [`Self::is_inconsistent`] this is a fact about the *block*, so it must
+    /// never be consulted outside the block that established it.
     block_dead: bool,
 
     /// Sort and datatype caches of the Z3 translation (`verify::z3`).
