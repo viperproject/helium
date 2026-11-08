@@ -33,13 +33,7 @@ for stem in "${stems[@]}"; do
         echo "[no-vpr] $stem (run ./encode_all.sh)" >&2
         continue
     fi
-    # See strip_prelude.py: `old` under a quantifier does not lower yet, and Prusti's
-    # dead slice/array prelude uses it. Strip into the workdir so vpr/ stays as emitted.
-    if ! python3 "$here/strip_prelude.py" "$vpr" "$work/$stem.vpr" >/dev/null; then
-        echo "[strip-failed] $stem" >&2
-        continue
-    fi
-    "$verify" "$work/$stem.vpr" > "$work/$stem.out" 2>/dev/null
+    "$verify" "$vpr" > "$work/$stem.out" 2>/dev/null
 
     while read -r s member want; do
         [[ "$s" == "$stem" ]] || continue
