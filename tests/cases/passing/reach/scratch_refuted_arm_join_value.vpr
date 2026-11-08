@@ -1,0 +1,24 @@
+// Regression: a block whose cube only its own scratch refutes is dead at the
+// join, like one whose cube ground refutes.
+//
+// The inner else arm is infeasible: under `y == k` its condition says
+// `h(y) != g(y)`, which the quantifier contradicts. Only that arm's block
+// scratch sees it: assuming `y == k` there merges `y` with `k`, which completes
+// the multi-pattern `{h(i), g(i)}`. Ground never holds `h` and `g` of one
+// class, and Z3 is given no quantifiers. The arm's assert holds vacuously; its
+// heap, where `x.f == n - 1`, must then not reach the join, or the final assert
+// needs the case split over the arms that only Z3 does -- and Z3 cannot refute
+// the arm either.
+field f: Int
+function h(i: Int): Int
+function g(i: Int): Int
+
+method m(x: Ref, y: Int, k: Int, n: Int)
+  requires acc(x.f)
+  requires forall i: Int :: {h(i), g(i)} h(i) == g(i)
+{
+  if (y == k) {
+    if (h(y) == g(k)) { x.f := n } else { assert x.f == n; x.f := n - 1 }
+  } else { x.f := n }
+  assert x.f == n
+}

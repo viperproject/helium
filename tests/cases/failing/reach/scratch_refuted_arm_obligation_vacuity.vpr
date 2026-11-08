@@ -1,0 +1,17 @@
+// SOUNDNESS CANARY for tagging a block dead when its scratch refutes its cube.
+//
+// The assert inside the `c` arm holds vacuously, but only under its own guard
+// `!c`, which contradicts the cube: that is a fact about the obligation, not
+// about the block. The arm is live, exhales `acc(z.f)`, and the write after
+// the join must fail.
+field f: Int
+
+method m(x: Ref, z: Ref, c: Bool, n: Int)
+  requires acc(z.f) && acc(x.f)
+{
+  if (c) {
+    assert !c ==> x.f == n
+    exhale acc(z.f)
+  }
+  z.f := 1
+}

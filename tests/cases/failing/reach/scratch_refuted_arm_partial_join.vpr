@@ -1,0 +1,18 @@
+// SOUNDNESS CANARY for propagating scratch-refuted deadness.
+//
+// The inner else arm is dead (see `scratch_refuted_arm_join_value.vpr`), but
+// its sibling is not: a join with one dead arm is live, so `assert false`
+// after it must still fail.
+field f: Int
+function h(i: Int): Int
+function g(i: Int): Int
+
+method m(x: Ref, y: Int, k: Int, n: Int)
+  requires acc(x.f)
+  requires forall i: Int :: {h(i), g(i)} h(i) == g(i)
+{
+  if (y == k) {
+    if (h(y) == g(k)) { x.f := n } else { assert x.f == n; x.f := n - 1 }
+    assert false
+  }
+}
