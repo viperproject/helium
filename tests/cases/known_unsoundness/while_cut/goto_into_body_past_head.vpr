@@ -1,0 +1,23 @@
+// A `goto` into the body of a `while` whose head is also entered from outside.
+// The head does not dominate its body, so the `while` is not cut: on the path
+// through the head the invariant is not checked on entry. Silicon checks it
+// there. Not fixed: cutting the head path while the `goto` path runs the same
+// blocks uncut would need the shared blocks split per entry.
+//
+// Must FAIL. Silicon: "Loop invariant acc(x.f, write) && x.f == 4 might not
+// hold on entry."
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  if (d) { goto inside }
+  while (c)
+    invariant acc(x.f) && x.f == 4
+  {
+    label inside
+    goto out
+  }
+  label out
+}

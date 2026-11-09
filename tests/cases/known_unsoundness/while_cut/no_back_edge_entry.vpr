@@ -1,0 +1,18 @@
+// A `while` whose body always leaves by `goto` has no back edge, but it is still
+// a loop: its invariant must hold on entry.
+//
+// Must FAIL. Silicon: "Loop invariant acc(x.f, write) && x.f == 4 might not
+// hold on entry."
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f) && x.f == 4
+  {
+    goto out
+  }
+  label out
+}
