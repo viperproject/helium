@@ -1,0 +1,21 @@
+// `fold_value_agreement_leaks_to_sibling.vpr` across a join, with the fold one
+// branch deeper and the read on the complementary path of a second `if`.
+// Silicon rejects.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f, 1/2) }
+
+method fold_value_agreement_leaks_past_join(x: Ref, y: Int, c: Bool, d: Bool)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (c) {
+    if (d) {
+      inhale acc(x.f, 1/2)
+      x.f := y
+      fold acc(P(x), 1/2)
+      inhale false
+    }
+  }
+  unfold acc(P(x), 1/2)
+  assert x.f == y
+}

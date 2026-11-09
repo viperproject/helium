@@ -1,0 +1,15 @@
+// `wildcard_remainder_leaks_past_join.vpr` two branches deep: the fact must stay
+// under both cube literals and survive neither join. Silicon rejects.
+field f: Int
+
+method wildcard_remainder_nested_arm(x: Ref, p: Perm, c: Bool, d: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    if (d) {
+      inhale p > none
+      exhale acc(x.f, wildcard)
+    }
+  }
+  assert p > none
+}
