@@ -1561,6 +1561,34 @@ fn present_amount(
     }
 }
 
+/// Golden rule over a summarized `set`: `value` is the location's value, and each
+/// member agrees with it where it **holds** the location -- in this block, on this
+/// instruction's path, at its address (its cube), with positive permission. A
+/// member drained to zero on this path (a pc-gated debit leaves `1 - (b ? 1 : 0)`)
+/// is still in the heap with its old value; equating that with `value` is unsound.
+pub(crate) fn assume_holders_agree(
+    ctx: &mut VerifyContext<'_>,
+    set: &[(Chunk, crate::verify::heap::HeapPc)],
+    value: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) {
+    for (chunk, cube) in set {
+        let hold = present_amount(ctx, chunk, pc_lits).to_id(ctx);
+        let mut guards: Vec<_> = ctx
+            .current_cube()
+            .iter()
+            .chain(pc_lits)
+            .chain(cube.iter())
+            .copied()
+            .collect();
+        if !perm_known_positive(ctx, hold) {
+            guards.push((expr!(ctx, (0 / 1) < r { hold }), Polarity::Positive));
+        }
+        let agree = expr!(ctx, { chunk.value } == { value });
+        ctx.assume_guarded(agree, guards.into_iter().rev());
+    }
+}
+
 /// Build the pc-alias flavour of a [`heap_subtract_summarized`] set: `existing` (when
 /// a chunk did match on ground) followed by the pc-alias `partners`, every member
 /// gated by the *same* cube — the pc.
@@ -1642,8 +1670,8 @@ pub(crate) fn pc_alias_set(
 ///   probe: parking leaves a partner reading `1/2` when the location holds nothing,
 ///   so `exhale acc(y.f,1/2)` would wrongly succeed without ever reaching this
 ///   function. Distributing drives every member of the set to its true remainder.
-/// - **Value agreement** is likewise assumed only under each member's own cube:
-///   unioning the values outright would claim `x.f == y.f` where `x != y`.
+/// - **Value agreement** is likewise assumed only where each member holds the
+///   location, see [`assume_holders_agree`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn heap_subtract_summarized(
     ctx: &mut VerifyContext<'_>,
@@ -1671,13 +1699,7 @@ pub(crate) fn heap_subtract_summarized(
         }
         return Err(VerifyError::InsufficientPermission);
     }
-    // Golden rule, but only where the locations coincide — each member under its own
-    // gate, so a chunk that is only conditionally at this address claims value
-    // agreement only under that condition.
-    for (chunk, cube) in set {
-        let agree = expr!(ctx, { chunk.value } == { chunk2.value });
-        ctx.assume_guarded(agree, cube.iter().rev().copied());
-    }
+    assume_holders_agree(ctx, set, chunk2.value, pc_lits);
 
     // Greedy distribution over the set, demanded chunk first.
     let mut out = out;

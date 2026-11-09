@@ -10,9 +10,9 @@ use crate::{
         heap::{
             Chunk, ChunkPerm, Heap, LocationKind,
             algebra::{
-                Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
-                merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
-                summarize_perm_at, union_heaps,
+                Demand, assume_holders_agree, chunk_under_pc, find_chunk_consolidated,
+                heap_subtract, heap_union, merge_heaps, perm_held_at, prove_perm_positive,
+                prove_perm_write, summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
         },
@@ -1429,8 +1429,14 @@ fn walk_footprint(
         let addr = ctx.egraph.find(addr);
         let elem = slot.elem.clone();
         let (value, recipe) = match &source {
-            // Values are read from the *original* heap (aliased slots agree);
-            // the hit chunk's recipe provenance rides along.
+            // A fresh value the consume (or frame check) below binds to the chunks
+            // it takes the permission from: the chunk at this address may hold none
+            // on this path and carry a stale value.
+            ValueSource::ReadHeap(_) if ctx.recipe.is_none() => {
+                (ctx.fresh_symbolic_value(elem.clone()), None)
+            }
+            // A certificate walk reads the *original* heap (aliased slots agree)
+            // for the hit chunk's recipe provenance.
             ValueSource::ReadHeap(h) => h
                 .entries()
                 .find_map(|(_, c)| {
@@ -1508,7 +1514,12 @@ fn walk_footprint(
                         let held = c.gated_perm(ctx);
                         let mut pc = pc_lits.to_vec();
                         pc.push((guard, Polarity::Positive));
-                        prove_perm_positive(ctx, &held, &pc)
+                        let ok = prove_perm_positive(ctx, &held, &pc);
+                        // Read only where it holds; `value` is fresh, as at a consume.
+                        if ok && ctx.recipe.is_none() {
+                            ctx.union(value, c.value);
+                        }
+                        ok
                     }
                     // No chunk held here: sound only if the slot is not required
                     // on this path (`guard` is false).
@@ -1530,7 +1541,11 @@ fn walk_footprint(
                     let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
                     let mut pc = pc_lits.to_vec();
                     pc.push((guard, Polarity::Positive));
-                    !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
+                    let ok = !set.is_empty() && prove_perm_positive(ctx, &total, &pc);
+                    if ok && ctx.recipe.is_none() {
+                        assume_holders_agree(ctx, &set, value, &pc);
+                    }
+                    ok
                 };
                 if !suff {
                     return Err(VerifyError::InsufficientPermission);
@@ -1631,21 +1646,20 @@ fn eval_sub_yield(
     // unless the permission is held, so `None` is reachable only at a
     // provably-non-positive permission.
     //
-    // A miss of this canonical-address scan is not yet a missing permission: the
-    // subtraction below also matches a chunk whose address equals the demand only
-    // under the path condition, and owes nothing on a dead path -- a plain
-    // `exhale` of the same location succeeds in both cases. So stand in a fresh
-    // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
-    // consumes. A certificate walk needs the held chunk's recipe, so there a miss
-    // stays a failure.
+    // Outside a certificate walk, stand in a fresh value, as the plain `Sub` does,
+    // and let `heap_subtract` bind it to the chunks it takes the permission from.
+    // Reading the chunk at this address instead can pick up a stale value: it may
+    // hold no permission on this path, and the subtraction then draws on a chunk
+    // that only aliases it under the path condition. A certificate walk needs the
+    // held chunk's recipe, so there it scans, and a miss stays a failure.
     let a = ctx.egraph.find(addr);
-    let hit = base_h
-        .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
-    let (held, held_recipe) = match hit {
-        Some(x) => x,
-        None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
-        None => return Err(VerifyError::InsufficientPermission),
+    let (held, held_recipe) = if ctx.recipe.is_none() {
+        (ctx.fresh_symbolic_value(kind.value.clone()), None)
+    } else {
+        base_h
+            .entries()
+            .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())))
+            .ok_or(VerifyError::InsufficientPermission)?
     };
     if ctx.recipe.is_some() && held_recipe.is_none() {
         return Err(VerifyError::Unimplemented(
