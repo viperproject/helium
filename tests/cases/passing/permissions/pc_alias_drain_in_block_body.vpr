@@ -1,10 +1,10 @@
-// KNOWN LIMITATION. A consume in a block body that draws on chunks aliased only
-// under the block's cube (pc-alias) debits each member by `cube ? take : 0`. A
-// drained member is then left at `held - (cube ? held : 0)`: zero wherever the
-// block's heap exists, but not unconditionally, so it is never dropped, and what
-// is re-inhaled, written and read afterwards at the location meets a stale second
+// A consume in a block body that draws on chunks aliased only under the block's
+// cube (pc-alias) leaves the cube out of its debit gate. Gated by it, a drained
+// member was left at `held - (cube ? held : 0)`: zero wherever the block's heap
+// exists, but not unconditionally, so it was never dropped, and what is
+// re-inhaled, written and read afterwards at the location met a stale second
 // chunk. Silicon verifies every method. Companions of
-// `tests/cases/passing/permissions/pc_alias_in_block_body.vpr`.
+// `pc_alias_in_block_body.vpr`.
 field f: Int
 
 // Drain through `y`, re-inhale and write through `x`, read through `y`.

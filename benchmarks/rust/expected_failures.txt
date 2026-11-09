@@ -16,3 +16,10 @@
 
 # Previously here: shape_area's `m_shape_grow` and `m_shape_translate`,
 # fixed 2026-08-14 by splitting a gate amount in `sufficient_leaf`.
+
+# Truncated by the e-graph's 100 000-node saturation limit (`with_node_limit` in
+# `VerifyContext`) since heap-operation facts are guarded by the effective path
+# condition (PR #54): the method's graph peaks at the limit and fails with insufficient
+# permission; with the limit raised to 400 000 it verifies. Accepted in #54 as a
+# resource-limit regression, not a lost heap fact. Delete once the node limit goes (#40).
+enum_v8_p3 m_e_guarded
