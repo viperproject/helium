@@ -345,8 +345,8 @@ pub(crate) fn lower_method(
 
         // --- join phase: reach/edge emissions ---
         let join_mark = sink.insts.len();
-        let (pc, edges) = if is_entry {
-            (PathConds::default(), Vec::new())
+        let (pc, edges, edge_pcs) = if is_entry {
+            (PathConds::default(), Vec::new(), Vec::new())
         } else {
             // The reach is the OR of the incoming edges' conditions; in the same
             // pass build the per-pred materialized `Val` that phis reconcile over.
@@ -411,14 +411,34 @@ pub(crate) fn lower_method(
                         part
                     })
                     .collect(),
-                _ => edge_pcs,
+                _ => edge_pcs.clone(),
             };
-            (pc, edges)
+            (pc, edges, edge_pcs)
         };
         reach_pc[bid] = pc.clone();
-        // Reach insts precede every phi; carried into the real block's join
-        // (k ≤ 2) or the innermost synthetic block (n-ary), so all `ev` defs come
-        // first in the flattened stream.
+
+        // Each predecessor's heap on its edge into this block. An edge that leaves
+        // loops restores their frames, innermost first: the body holds the
+        // invariant's footprint, the head set the rest aside, and after the loop we
+        // hold their sum. The frame comes back on that edge alone, under the edge's
+        // condition, before the join merges it with the other edges: restored after
+        // the merge it would also land on the paths of the others, and once per
+        // edge leaving the loop.
+        let mut edge_h: HashMap<vmir::BlockId, HeapVal> = HashMap::default();
+        for ((p, _), epc) in edges.iter().zip(&edge_pcs) {
+            let mut h = h_out_of[&vmir_id[p]];
+            for li in cfg.loops.classify(*p, bid).exits {
+                if let Some(&frame) = frame_of.get(&cfg.loops.loops[li].head) {
+                    h = sink.with_conds(epc, |sink| {
+                        sink.emit_heap_guarded(HeapInst::Union { a: h, b: frame })
+                    });
+                }
+            }
+            edge_h.insert(vmir_id[p], h);
+        }
+        // Reach insts and frame restores precede every phi; carried into the real
+        // block's join (k ≤ 2) or the innermost synthetic block (n-ary), so all
+        // `ev` defs come first in the flattened stream.
         let reach_insts = sink.take_since(join_mark);
 
         // --- entry env + Preds (+ synthetic binary-join blocks for n-ary) ---
@@ -518,8 +538,8 @@ pub(crate) fn lower_method(
                                     let m = sink.with_conds(&syn_pc, |sink| {
                                         sink.emit_heap_guarded(HeapInst::Merge {
                                             cond: ev.clone(),
-                                            then_h: h_out_of[&then_],
-                                            els_h: h_out_of[&els],
+                                            then_h: edge_h[&then_],
+                                            els_h: edge_h[&els],
                                         })
                                     });
                                     join.extend(sink.take_since(mark));
@@ -533,6 +553,7 @@ pub(crate) fn lower_method(
                                     h_out: syn_h_out,
                                 });
                                 h_out_of.insert(sid, syn_h_out);
+                                edge_h.insert(sid, syn_h_out);
                                 acc_ref = sid;
                                 acc_env = new_env;
                             }
@@ -546,7 +567,7 @@ pub(crate) fn lower_method(
         // `HeapInst::Merge` into the join phase, before the body reads it.
         let h_in = match &preds_kind {
             vmir::Preds::Entry => baseline,
-            vmir::Preds::From(p) => h_out_of[p],
+            vmir::Preds::From(p) => edge_h[p],
             vmir::Preds::Join { cond, then_, els } => {
                 let mark = sink.insts.len();
                 // Emit under the block cube so the Merge inst carries it as its
@@ -554,8 +575,8 @@ pub(crate) fn lower_method(
                 let m = sink.with_conds(&pc, |sink| {
                     sink.emit_heap_guarded(HeapInst::Merge {
                         cond: cond.clone(),
-                        then_h: h_out_of[then_],
-                        els_h: h_out_of[els],
+                        then_h: edge_h[then_],
+                        els_h: edge_h[els],
                     })
                 });
                 real_join.extend(sink.take_since(mark));
@@ -571,30 +592,6 @@ pub(crate) fn lower_method(
         // the whole framing story, and it falls out of permission arithmetic
         // rather than any modifies analysis.
         let mut env = env;
-        // An edge that leaves a loop restores that loop's frame: the body holds
-        // the invariant's footprint, the head set the rest aside, and after the
-        // loop we hold their sum. Innermost first, since leaving nested loops
-        // must restore inner before outer.
-        let h_in = {
-            let mut h = h_in;
-            let exits: Vec<BlockId> = cfg_preds[bid]
-                .iter()
-                .filter(|(p, _)| reachable.contains(p))
-                .flat_map(|(p, _)| cfg.loops.classify(*p, bid).exits.clone())
-                .map(|li| cfg.loops.loops[li].head)
-                .collect();
-            for head in exits {
-                let Some(&frame) = frame_of.get(&head) else {
-                    continue;
-                };
-                let mark = sink.insts.len();
-                h = sink.with_conds(&pc, |sink| {
-                    sink.emit_heap_guarded(HeapInst::Union { a: h, b: frame })
-                });
-                real_join.extend(sink.take_since(mark));
-            }
-            h
-        };
         let h_in = if let Some(l) = cfg.loops.at_head(bid) {
             let mark = sink.insts.len();
             let invs = cfg.blocks[bid].invs.clone();
@@ -709,7 +706,15 @@ pub(crate) fn lower_method(
                 // block is a leaf and no successor ever reads `heap`. Matching
                 // Silicon, the residual is not required to be empty — permission
                 // left over at the back edge is simply lost.
+                // A back edge out of an inner loop's body (a `goto` to an outer
+                // loop's head) also leaves the inner loops: their frames come back
+                // first, as on any edge that leaves them.
                 Terminator::Goto(t) if cfg.loops.is_back_edge(bid, *t) => {
+                    for li in cfg.loops.classify(bid, *t).exits {
+                        if let Some(&frame) = frame_of.get(&cfg.loops.loops[li].head) {
+                            heap = sink.emit_heap_guarded(HeapInst::Union { a: heap, b: frame });
+                        }
+                    }
                     let old = pure_exp::OldHeaps {
                         baseline,
                         labeled: Some(&labels),

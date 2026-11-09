@@ -1,0 +1,21 @@
+// A path that never enters the loop joins a `goto` exit of the `while` at
+// `out`. The frame comes back on the exit's edge only, so the path that skipped
+// the loop holds only the precondition's half of `x.f`.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the exhale).
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool, d: Bool)
+  requires acc(x.f, 1/2)
+{
+  if (b) { goto out }
+  while (c)
+    invariant true
+  {
+    if (d) { goto out }
+  }
+  assume false
+  label out
+  if (b) { exhale acc(x.f, 1/2) && acc(x.f, 1/2) }
+}

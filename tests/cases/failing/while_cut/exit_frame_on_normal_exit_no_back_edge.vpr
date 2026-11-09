@@ -1,0 +1,18 @@
+// exit_frame_on_normal_exit.vpr for a `while` without a back edge: its body
+// always leaves by `goto`, and that exit joins the normal exit at `out`.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the exhale).
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f, 1/2)
+{
+  while (c)
+    invariant true
+  {
+    goto out
+  }
+  label out
+  if (!c) { exhale acc(x.f, 1/2) && acc(x.f, 1/2) }
+}

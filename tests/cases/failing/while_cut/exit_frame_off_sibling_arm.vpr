@@ -1,0 +1,22 @@
+// A `while` in an `if` arm leaves by `goto` to a label that the other arm
+// reaches by falling through. The frame comes back on the `goto`'s edge only,
+// so the other arm's path holds only the precondition's half of `x.f`.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the exhale).
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f, 1/2)
+{
+  if (b) {
+    while (c)
+      invariant true
+    {
+      goto out
+    }
+    assume false
+  }
+  label out
+  if (!b) { exhale acc(x.f, 1/2) && acc(x.f, 1/2) }
+}
