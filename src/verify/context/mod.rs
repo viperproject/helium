@@ -538,73 +538,20 @@ impl<'a> VerifyContext<'a> {
     /// it must prove. With empty `guards` this degenerates to an unconditional
     /// assumption, correct only when the fact holds on all paths (a domain axiom).
     ///
+    /// The block scratch gets the same guarded implication (via [`Self::union`]'s
+    /// mirror), never the bare `fact`: the scratch assumes the block **cube**, but
+    /// `guards` may be finer (a ternary's or an implication's condition, an address
+    /// equality, a presence guard). `ite-reduce` lifts the cube literals out of the
+    /// chain there; any residual guard collapses in the probe clone, which assumes
+    /// the obligation's extra pc literals (see [`Self::prove_via_scratch`]).
+    ///
     /// `guards` are in innermost-first fold order, matching [`Self::implication`].
     pub(crate) fn assume_guarded(
         &mut self,
         fact: egg::Id,
         guards: impl Iterator<Item = (egg::Id, Polarity)>,
     ) {
-        let guards: Vec<(egg::Id, Polarity)> = guards.collect();
-        let imp = self.implication(fact, guards.iter().copied());
-        let true_ = expr!(self, true);
-        self.union(imp, true_);
-        // Invariant 4: ground guarded, scratch unguarded -- by the cube only.
-        let scratch_fact = self.scratch_fact(fact, &guards);
-        self.scratch_assume_unguarded(scratch_fact);
-        self.egraph.rebuild();
-    }
-
-    /// What the block scratch may assume of `guards ==> fact`. The scratch has
-    /// assumed the block cube and nothing finer, so exactly the cube literals of
-    /// `guards` may be dropped; every other literal (an intra-block path condition,
-    /// an address equality, a presence guard) stays an antecedent. Dropping one
-    /// assumed the fact on the block's paths where it does not hold.
-    ///
-    /// `guards` are in innermost-first fold order, matching [`Self::implication`].
-    fn scratch_fact(&mut self, fact: egg::Id, guards: &[(egg::Id, Polarity)]) -> egg::Id {
-        let own: Vec<(egg::Id, Polarity)> = guards
-            .iter()
-            .filter(|lit| {
-                !crate::verify::heap::cube_entails(
-                    self,
-                    self.current_cube(),
-                    std::slice::from_ref(*lit),
-                )
-            })
-            .copied()
-            .collect();
-        self.implication(fact, own.into_iter())
-    }
-
-    /// [`Self::assume_guarded`] for a **release key** rather than a fact about
-    /// program state: a callee's `f%pre` token, minted at a call site under that
-    /// call's path condition. Records the ground guarded implication exactly like
-    /// [`Self::assume_guarded`], but deliberately **skips** the scratch-unguarded
-    /// half of invariant 4.
-    ///
-    /// Why skip it: that invariant's licence is that the block scratch already
-    /// bakes in the block PC — but it bakes in the block **cube**, and this token
-    /// exists to carry the *finer* intra-block path condition (a call under a
-    /// ternary or an implication; the same observation as the invariant-5 note in
-    /// [`Self::prove_under_pc`]). Unioning `tok == true` in the warm scratch would
-    /// make the callee's facts available on sibling intra-block paths there —
-    /// precisely the leak this gating closes.
-    ///
-    /// Nothing is lost by skipping it: [`Self::union`] already mirrors the guarded
-    /// implication into the scratch, so the cube prefix of the guard chain
-    /// collapses there via `ite-reduce` (cube literals *are* unguarded in the
-    /// scratch), and any residual intra-block guard collapses in the probe clone,
-    /// which assumes the obligation's extra pc literals (see
-    /// [`Self::prove_via_scratch`]). The token therefore ends up true in the
-    /// scratch on exactly the paths an obligation is taken under.
-    ///
-    /// `guards` are in innermost-first fold order, matching [`Self::implication`].
-    pub(crate) fn assume_token_guarded(
-        &mut self,
-        token: egg::Id,
-        guards: impl Iterator<Item = (egg::Id, Polarity)>,
-    ) {
-        let imp = self.implication(token, guards);
+        let imp = self.implication(fact, guards);
         let true_ = expr!(self, true);
         self.union(imp, true_);
         self.egraph.rebuild();
@@ -623,9 +570,6 @@ impl<'a> VerifyContext<'a> {
         for fact in facts {
             let imp = self.implication(fact, guards.iter().copied());
             self.union(imp, true_);
-            // Invariant 4: ground guarded, scratch unguarded -- by the cube only.
-            let scratch_fact = self.scratch_fact(fact, guards);
-            self.scratch_assume_unguarded(scratch_fact);
         }
         self.egraph.rebuild();
     }

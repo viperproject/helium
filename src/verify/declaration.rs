@@ -440,7 +440,7 @@ fn eval_pure_inst(
                 let name = ctx.member_name(fc.function);
                 let tok = ctx.alloc.fn_pre_token(fc.function, &name);
                 let tok_id = ctx.add(Symbolic::FuncApp(tok, Box::new([]), args.into()));
-                ctx.assume_token_guarded(tok_id, pc_lits.iter().rev().copied());
+                ctx.assume_guarded(tok_id, pc_lits.iter().rev().copied());
             }
             let recipe = if ctx.recipe.is_some() {
                 let args: Vec<Val> = fc
