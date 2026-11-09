@@ -631,7 +631,16 @@ pub(crate) fn lower_method(
         let (new_heap, cond): (HeapVal, Option<Val>) = sink.with_ambient_cube(&pc, |sink| {
             let mut heap = h_in;
             for stmt in &blk.stmts {
-                heap = lower_stmt(b, &mut env, sink, heap, baseline, &mut labeled, stmt)?;
+                heap = lower_stmt(
+                    b,
+                    &mut env,
+                    sink,
+                    heap,
+                    baseline,
+                    &mut labeled,
+                    &var_types,
+                    stmt,
+                )?;
             }
             let cond = match &blk.term {
                 Terminator::Branch { cond, .. } => {
@@ -857,6 +866,7 @@ fn lower_stmt(
     current_heap: HeapVal,
     baseline: HeapVal,
     labeled: &mut HashMap<Spur, HeapVal>,
+    var_types: &HashMap<Spur, Type>,
     stmt: &typed::Statement,
 ) -> Result<HeapVal, TranslationError> {
     use typed::Statement as S;
@@ -912,21 +922,25 @@ fn lower_stmt(
                     }
                 }
             }
+            // Each fresh return value takes its lhs variable's declared type. The
+            // typechecker has matched those against the callee's return
+            // signature, so they are also the types its `#ensures` expects.
             let ret_types: Vec<vmir::Type> = ret_names
                 .iter()
                 .map(|spur| {
-                    env.get(spur)
-                        .map(|_| ())
-                        .ok_or_else(|| {
-                            TranslationError::UnknownIdent(b.interner.resolve(spur).to_string())
-                        })
-                        // type is recovered from env via name lookup, but env stores Val.
-                        // For Phase 2 minimal scope, accept that the LHS variables have been
-                        // declared earlier with `var` and assume their types match the
-                        // callee's return signature. We use Fresh-typed Int as a placeholder
-                        // only when we cannot resolve — better solution lands with proper type
-                        // tracking in the env.
-                        .map(|_| vmir::Type::Int)
+                    if !env.contains_key(spur) {
+                        return Err(TranslationError::UnknownIdent(
+                            b.interner.resolve(spur).to_string(),
+                        ));
+                    }
+                    let ty = var_types.get(spur).unwrap_or_else(|| {
+                        panic!(
+                            "`{}` is bound but has no recorded type: params, rets and every \
+                             `var` are collected into `var_types` before lowering",
+                            b.interner.resolve(spur)
+                        )
+                    });
+                    Ok(ty.clone())
                 })
                 .collect::<Result<_, _>>()?;
             lower_method_call(
