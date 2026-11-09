@@ -2035,12 +2035,14 @@ pub(crate) fn perm_held_at(
 /// See `tests/cases/failing/loops/cond_inv_frame_value.vpr`; Silicon rejects it.
 ///
 /// So the equality is earned, not assumed:
-/// - **both fractions provably positive** — `ctx.union`, collapsing the classes.
-///   This is the common case (`half_perm_frame`, `peano_frame`), where the
-///   agreement is genuinely load-bearing: it carries a value established before a
-///   loop across a cut whose invariant never mentions it. [`prove_perm_positive`]
-///   decides it per leaf, so a join `Select` never materializes, and its
-///   `known_real` fast path settles literal fractions without a prove call.
+/// - **both fractions provably positive** — the values agree under the pc the
+///   proofs ran under: `pc ⟹ valueₐ == value_b`, collapsing the classes outright
+///   when the pc is empty. This is the common case (`half_perm_frame`,
+///   `peano_frame`), where the agreement is genuinely load-bearing: it carries a
+///   value established before a loop across a cut whose invariant never mentions
+///   it. [`prove_perm_positive`] decides it per leaf, so a join `Select` never
+///   materializes, and its `known_real` fast path settles literal fractions
+///   without a prove call.
 /// - **otherwise** — [`merge_values`]: `permₐ > 0 ? valueₐ : value_b`, plus the
 ///   guarded equality, which still fuses the two once saturation establishes both
 ///   fractions positive.
@@ -2085,10 +2087,19 @@ pub(crate) fn union_heaps(
         let b_held = prove_perm_positive(ctx, &pb, pc_lits);
         let (ia, ib) = (pa.to_id(ctx), pb.to_id(ctx));
         let value = match (a_held, b_held) {
-            // Both definitely held: the values agree outright, so collapse the
-            // classes. No ternary, no implication — the cheap common case.
+            // Both definitely held, but only under `pc_lits`, which is all the two
+            // proofs establish: the values agree there. Collapse the classes only
+            // when that pc is empty. A loop exit's pc is its own reach, and a
+            // refuted one (the normal exit of a loop whose guard never fails)
+            // proves both positive vacuously; an outright union then equated the
+            // frame's value with the head's havoc on every other exit.
             (true, true) => {
-                ctx.union(ca.value, cb.value);
+                if pc_lits.is_empty() {
+                    ctx.union(ca.value, cb.value);
+                } else {
+                    let eq = expr!(ctx, { ca.value } == { cb.value });
+                    ctx.assume_guarded(eq, pc_lits.iter().rev().copied());
+                }
                 ca.value
             }
             // One side definitely held: take its value and make the agreement
