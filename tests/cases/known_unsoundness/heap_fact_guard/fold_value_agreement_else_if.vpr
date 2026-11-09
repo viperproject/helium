@@ -1,0 +1,21 @@
+// The fold's value agreement (see `fold_value_agreement_leaks_to_sibling.vpr`)
+// must not reach an arm of an `elseif` chain other than the one that folded. The
+// folding arm's cube is two literals deep and its statements' pc delta is empty,
+// so under the delta the agreement held on every path. Silicon rejects.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method fold_value_agreement_else_if(x: Ref, y: Int, k: Int)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (k == 0) {
+  } elseif (k == 1) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+  } else {
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}
