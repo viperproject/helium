@@ -1,0 +1,22 @@
+// The loop's normal exit is dead (`c` stays true), so the frame restore there
+// runs under a refuted pc and proves both the frame residual `1 - q` and the
+// invariant's `q` positive vacuously. Equating the frame's value 3 with the
+// head's havoc there must not reach the live exit by `goto out`, where `q` may
+// be `write` and the frame holds nothing.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, q: Perm, b: Bool)
+  requires none < q && q <= write && acc(x.f)
+{
+  x.f := 3
+  var c: Bool := true
+  while (c)
+    invariant acc(x.f, q)
+  {
+    if (b) { goto out }
+  }
+  label out
+  assert x.f == 3
+}
