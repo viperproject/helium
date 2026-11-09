@@ -1,0 +1,19 @@
+// The postcondition of a method called into an already-declared variable is
+// usable through that variable, at the variable's declared (ADT) type. The
+// rejecting twin is `failing/method_call_assign_keeps_lhs_type.vpr`.
+adt List {
+  Nil()
+  Cons(head: Int, tail: List)
+}
+
+function wrap(x: Int): List
+
+method mklist(a: Int) returns (r: List)
+  ensures r == wrap(a)
+
+method m(b: Int)
+{
+  var v: List
+  v := mklist(b)
+  assert v == wrap(b)
+}

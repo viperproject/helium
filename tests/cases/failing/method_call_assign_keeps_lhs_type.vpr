@@ -1,0 +1,22 @@
+// Calling a method into an already-declared variable (`v := mklist(b)`, not
+// `var v: List := mklist(b)`) must give the call's fresh return value the
+// variable's declared type. It used to be lowered as `Int`, so `mklist`'s
+// postcondition `r == wrap(a)` merged an `Int` with a `List` in one e-class and
+// the Z3 rung panicked ("e-class mixes types" in debug, `SortDiffers` in
+// release) instead of rejecting the `assert false`.
+adt List {
+  Nil()
+  Cons(head: Int, tail: List)
+}
+
+function wrap(x: Int): List
+
+method mklist(a: Int) returns (r: List)
+  ensures r == wrap(a)
+
+method m(b: Int)
+{
+  var v: List
+  v := mklist(b)
+  assert false
+}
