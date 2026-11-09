@@ -1,0 +1,15 @@
+// A pc-alias consume drains `x.f`, and the location is produced again under its
+// alias with a fresh value. The value `x.f` had before the drain must not leak
+// into the location: `x.f` (which is `y.f`) is unknown here.
+
+field f: Int
+
+method m(x: Ref, y: Ref)
+    requires acc(x.f) && x.f == 1
+{
+    if (x == y) {
+        exhale acc(y.f)
+        inhale acc(y.f)
+        assert y.f == 1
+    }
+}

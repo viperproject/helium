@@ -1,0 +1,14 @@
+// A pc-alias consume drains `x.f` (`y == x` holds in the arm), and the drained
+// chunk is dropped. Reading the location afterwards, under either name, must be
+// rejected for want of permission, not answered with the value `x.f` had.
+
+field f: Int
+
+method m(x: Ref, y: Ref)
+    requires acc(x.f) && x.f == 1
+{
+    if (x == y) {
+        exhale acc(y.f)
+        assert x.f == 1
+    }
+}

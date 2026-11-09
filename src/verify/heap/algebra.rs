@@ -1654,9 +1654,12 @@ pub(crate) fn pc_alias_set(
 ///   guards the chunks already carry, so it is finite and fixed by the CFG, never
 ///   searched.
 /// - **The debit is guarded and _distributed_** across the set, greedily: each chunk
-///   gives up `min(it holds, still needed)`, gated by `cube ? take : 0`, and the demand
-///   is retired by that **gated** amount. No chunk is merged — where the cube fails the
-///   locations are genuinely distinct and nothing there was given up.
+///   gives up `take = min(it holds, still open)`, gated by `gate ? take : 0`, where the
+///   gate is the literals of its cube that neither its presence guard nor the block
+///   cube implies. Its *region* is the gate together with the guard, and the demand
+///   is retired by `region ? take : 0`: the demand a later member sees subtracts only
+///   what members in an overlapping region gave. No chunk is merged — where the cube
+///   fails the locations are genuinely distinct and nothing there was given up.
 ///
 ///   Distribution (rather than parking the whole debit on the demanded chunk as a
 ///   guarded negative) keeps every *later* operation correct without another alias
@@ -1695,53 +1698,67 @@ pub(crate) fn heap_subtract_summarized(
     assume_holders_agree(ctx, set, chunk2.value, pc_lits);
 
     // Greedy distribution over the set, demanded chunk first.
+    //
+    // Each member is debited only where its remainder can be read: inside its own
+    // presence guard (its amount means nothing outside it) and inside this block (the
+    // heap is the block's own and reaches any other path only through the block's
+    // exits). So the gate on the debit keeps only the literals of the member's cube
+    // that neither its guard nor the block cube implies, and the member's *region* is
+    // that gate together with its guard. Gating by the implied literals as well is
+    // equal wherever the remainder is read, but it leaves a drained member at
+    // `1/1 - (g ? 1/1 : 0/1)`, which no fold sees as zero, so it is never dropped.
+    // Such a residue looks held: a join gives it a `Select` against the other arm,
+    // and every later summarized consume sums it in, enumerating the product of the
+    // members' branch structure (in a sequence of conditional calls on one reference,
+    // each call multiplied the leaves by a factor that itself grew with the calls).
+    //
+    // For the same reason the demand a member sees subtracts only what members in an
+    // *overlapping* region took: a member whose region is disjoint from an earlier
+    // one's (complementary literals, decided by e-class identity) cannot have been
+    // served by it, so that debit would only keep the open demand from folding.
     let mut out = out;
-    let mut remaining = chunk2_perm;
+    let mut retired: Vec<(Vec<(egg::Id, Polarity)>, egg::Id)> = Vec::new();
     for (chunk, cube) in set.iter().cloned() {
-        // What the chunk can give up is what it holds where it is present: an
-        // absent member (its guard false) must neither be debited nor retire any
-        // of the demand, or a present member is left holding permission it had
-        // in fact given away.
-        let hold = present_amount(ctx, &chunk, pc_lits).to_id(ctx);
-        // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
-        // fractions fold it away.
-        // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
-        // fractions fold it away.
-        let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
-        // The gate leaves out the literals of the block's cube: this heap is the
-        // block's own and reaches any other path only through the block's exits,
-        // so they hold wherever the amount is read. Gating by them too left a
-        // drained member at `hold - (cube ? hold : 0)`, zero wherever the heap
-        // exists but not unconditionally, so it was never dropped.
         let gate: Vec<(egg::Id, Polarity)> = cube
             .iter()
             .filter(|lit| {
-                !crate::verify::heap::cube_entails(
-                    ctx,
-                    ctx.current_cube(),
-                    std::slice::from_ref(*lit),
-                )
+                let lit = std::slice::from_ref(*lit);
+                !crate::verify::heap::cube_entails(ctx, chunk.guard(), lit)
+                    && !crate::verify::heap::cube_entails(ctx, ctx.current_cube(), lit)
             })
             .copied()
             .collect();
-        let gated = gate_amount_by_pc(ctx, take, &gate);
-        let rest = perm_sub(ctx, chunk.ungated_perm(), gated);
-        // Debit `remaining` by what was actually taken — the **gated** amount, not
-        // `take`. With one shared cube (the pc-alias caller) the two coincide on-path
-        // and both are `0` off-path, so this is that path unchanged. With per-chunk
-        // cubes they diverge, and using `take` would be unsound: a member whose gate
-        // is false gives up nothing, yet would still retire part of the demand,
-        // leaving the later members to cover less than `needed` and the heap holding
-        // permission it had in fact given away.
-        remaining = ctx.add(Symbolic::Binary(BinOp::SubR, [remaining, gated]));
+        // A member never at the address where it is present gives up nothing.
+        let Some(region) = crate::verify::heap::cube_meet(ctx, chunk.guard(), &gate) else {
+            continue;
+        };
+        let mut open = chunk2_perm;
+        for (r, given) in &retired {
+            if crate::verify::heap::cube_meet(ctx, r, &region).is_some() {
+                open = ctx.add(Symbolic::Binary(BinOp::SubR, [open, *given]));
+            }
+        }
+        // `min(hold, open)` — a symbolic hold needs the `ite`; concrete fractions
+        // fold it away. Bare, not gated by the guard: it is only ever applied inside
+        // the region, which contains the guard.
+        let hold = chunk.ungated_perm().to_id(ctx);
+        let take = expr!(ctx, if ({hold} <r {open}) then {hold} else {open});
+        let debit = gate_amount_by_pc(ctx, take, &gate);
+        let rest = perm_sub(ctx, chunk.ungated_perm(), debit);
+        // The demand is retired by what was actually taken: `take` inside the
+        // region, nothing outside it. Retiring `take` outright would be unsound: a
+        // member whose gate is false gives up nothing, yet would still retire part of
+        // the demand, leaving the later members to cover less than `needed` and the
+        // heap holding permission it had in fact given away.
+        let given = gate_amount_by_pc(ctx, take, &region);
+        retired.push((region, given));
         // Same hygiene as the plain path: drop a chunk only when the remainder is
-        // *unconditionally* zero (off-path the permission was never given up).
+        // zero wherever it is read.
         if perm_all_zero(ctx, &rest) {
             out = out.without_chunk(kind, chunk.addr);
         } else {
             // The member's own presence guard is carried through untouched: unlike
-            // the plain path, this one never folded it into the amount — `hold` is
-            // the raw perm and the debit is gated by the member's `cube` — so the
+            // the plain path, this one never folded it into the amount, so the
             // remainder is still held exactly under that guard. Dropping it here
             // was what destroyed the flat cube on the first consume at a location
             // and left every later one with conditionality it could only see as

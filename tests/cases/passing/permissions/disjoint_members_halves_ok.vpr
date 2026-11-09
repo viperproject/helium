@@ -1,0 +1,17 @@
+// Passing counterpart of failing/permissions/disjoint_members_halves.vpr: after
+// the join `r.f` is held by one of two chunks under complementary guards, and two
+// half consumes take it on either path.
+
+field f: Int
+
+method m(b: Bool)
+{
+    var r: Ref
+    if (b) {
+        r := new(f)
+    } else {
+        r := new(f)
+    }
+    exhale acc(r.f, 1/2)
+    exhale acc(r.f, 1/2)
+}

@@ -1,0 +1,46 @@
+// Eight conditional calls on one reference. Each call consumes `W` at an address
+// read off `P`, which the call re-produces, so after `k` joins `W` is held at one
+// of `k + 1` addresses, one per path, and the next consume is summarized over
+// them. A summarized consume used to leave each drained member holding a residue
+// that no fold saw as zero; every join turned the residues into permission trees
+// and every later consume enumerated their product (2535 prove calls here, and
+// the fifth consume failed). Drained members are now dropped, so each consume
+// pays for the live members only.
+predicate P(x: Ref)
+predicate W(y: Ref)
+function inner(x: Ref): Ref
+  requires acc(P(x))
+
+method wr(x: Ref)
+  requires acc(P(x)) && acc(W(inner(x)))
+  ensures acc(P(x)) && acc(W(inner(x)))
+
+method client(x: Ref, b0: Bool, b1: Bool, b2: Bool, b3: Bool, b4: Bool, b5: Bool, b6: Bool, b7: Bool)
+  requires acc(P(x)) && acc(W(inner(x)))
+  ensures acc(P(x)) && acc(W(inner(x)))
+{
+  if (b0) {
+    wr(x)
+  }
+  if (b1) {
+    wr(x)
+  }
+  if (b2) {
+    wr(x)
+  }
+  if (b3) {
+    wr(x)
+  }
+  if (b4) {
+    wr(x)
+  }
+  if (b5) {
+    wr(x)
+  }
+  if (b6) {
+    wr(x)
+  }
+  if (b7) {
+    wr(x)
+  }
+}

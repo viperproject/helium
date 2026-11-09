@@ -1,0 +1,14 @@
+// A pc-alias consume inside a branch drains `x.f` there (`y == x` holds only in the
+// arm). The drained chunk holds nothing on that arm, so after the join `x.f` is held
+// only on the path that skipped the branch, and consuming it must be rejected.
+
+field f: Int
+
+method m(x: Ref, y: Ref)
+    requires acc(x.f)
+{
+    if (x == y) {
+        exhale acc(y.f)
+    }
+    exhale acc(x.f)
+}

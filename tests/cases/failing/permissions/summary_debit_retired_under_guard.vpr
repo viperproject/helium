@@ -1,0 +1,19 @@
+// A summarized member whose presence guard is left out of its debit gate still
+// retires the demand only inside that guard. After the join `r.f` is the chunk
+// allocated on `b` (present under `b` only, so its gate is empty) or `x.f` on `!b`.
+// The re-inhale puts `x.f` after the allocated chunk, so the allocated chunk is
+// debited first. Had it retired the demand outside its guard too, `x.f` would see
+// none left and keep its permission on `!b`; the last exhale must be rejected.
+
+field f: Int
+
+method m(x: Ref, b: Bool)
+    requires acc(x.f)
+{
+    var r: Ref
+    if (b) { r := new(f) } else { r := x }
+    exhale acc(x.f)
+    inhale acc(x.f)
+    exhale acc(r.f)
+    exhale acc(x.f)
+}

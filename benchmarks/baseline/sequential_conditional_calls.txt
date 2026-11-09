@@ -1,0 +1,10 @@
+saturations=52
+reduces=32
+sat_iterations=411
+egraph_nodes_peak=1137
+egraph_classes_peak=659
+rule_applications=2298
+prove_calls=89
+prove_probe=0
+rule.eq-refl=44
+rule.ite-reduce=2254
