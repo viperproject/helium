@@ -1,0 +1,16 @@
+// Passing counterpart of failing/permissions/summary_debit_retired_under_guard.vpr:
+// on `b` the summarized consume of `acc(r.f)` took the allocated location, so `x.f`
+// is still held there.
+
+field f: Int
+
+method m(x: Ref, b: Bool)
+    requires acc(x.f)
+{
+    var r: Ref
+    if (b) { r := new(f) } else { r := x }
+    exhale acc(x.f)
+    inhale acc(x.f)
+    exhale acc(r.f)
+    exhale b ==> acc(x.f)
+}

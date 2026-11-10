@@ -1,0 +1,15 @@
+// Passing counterpart of failing/permissions/drained_alias_absent_after_join.vpr:
+// the arm drains `x.f` through its alias `y` and produces it again under that
+// name, so after the join `x.f` is held on both paths.
+
+field f: Int
+
+method m(x: Ref, y: Ref)
+    requires acc(x.f)
+    ensures acc(x.f)
+{
+    if (x == y) {
+        exhale acc(y.f)
+        inhale acc(y.f)
+    }
+}

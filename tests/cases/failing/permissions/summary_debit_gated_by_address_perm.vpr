@@ -1,0 +1,14 @@
+// Variant of summary_debit_gated_by_address.vpr observed through `perm`: on `b` the
+// summarized consume of `acc(r.f)` took the allocated location, not `x.f`, so
+// `x.f` is still held there and `perm(x.f) == none` must not be provable.
+
+field f: Int
+
+method m(x: Ref, b: Bool)
+    requires acc(x.f)
+{
+    var r: Ref
+    if (b) { r := new(f) } else { r := x }
+    exhale acc(r.f)
+    assert b ==> perm(x.f) == none
+}

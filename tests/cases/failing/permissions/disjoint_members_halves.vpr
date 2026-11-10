@@ -1,0 +1,19 @@
+// Each arm allocates its own location, so after the join `r.f` is held by one of two
+// chunks under complementary guards. Two half consumes take the location; a third
+// must be rejected. Each member serves its own path only, so the first half must not
+// be counted against the other member's path twice, nor not at all.
+
+field f: Int
+
+method m(b: Bool)
+{
+    var r: Ref
+    if (b) {
+        r := new(f)
+    } else {
+        r := new(f)
+    }
+    exhale acc(r.f, 1/2)
+    exhale acc(r.f, 1/2)
+    exhale acc(r.f, 1/2)
+}

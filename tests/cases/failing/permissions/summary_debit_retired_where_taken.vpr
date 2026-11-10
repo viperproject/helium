@@ -1,0 +1,17 @@
+// A summarized consume retires the demand only where the member it debited is the
+// location. After the join `r` is `x` on `b` and `y` on `!b`, so the summary of
+// `acc(r.f)` debits `x.f` under `r == x` and `y.f` under `r == y`. Had the first
+// member retired the demand everywhere, `y.f` would see none left and keep its
+// permission on `!b`, where it was in fact given away; the second exhale must be
+// rejected.
+
+field f: Int
+
+method m(x: Ref, y: Ref, b: Bool)
+    requires acc(x.f) && acc(y.f)
+{
+    var r: Ref
+    if (b) { r := x } else { r := y }
+    exhale acc(r.f)
+    exhale !b ==> acc(y.f)
+}

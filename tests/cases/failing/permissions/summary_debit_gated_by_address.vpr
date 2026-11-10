@@ -1,0 +1,17 @@
+// A summarized member that is the location only under an address equality is
+// debited only under it: that literal is implied neither by the member's guard nor
+// by the block cube, so it stays in the gate. After the join `r` is a fresh
+// allocation on `b` and `x` on `!b`. Debiting `x.f` without the gate `r == x`
+// would drain it on `b` too and retire the demand there, leaving the allocated
+// chunk untouched; the second exhale must be rejected.
+
+field f: Int
+
+method m(x: Ref, b: Bool)
+    requires acc(x.f)
+{
+    var r: Ref
+    if (b) { r := new(f) } else { r := x }
+    exhale acc(r.f)
+    exhale b ==> acc(r.f, 1/100)
+}

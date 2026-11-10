@@ -1,0 +1,14 @@
+// Within one block, a pc-alias consume drains `x.f` and the drained chunk is
+// dropped. A second consume of the same location, by either name, must be
+// rejected.
+
+field f: Int
+
+method m(x: Ref, y: Ref)
+    requires acc(x.f)
+{
+    if (x == y) {
+        exhale acc(y.f)
+        exhale acc(x.f)
+    }
+}
