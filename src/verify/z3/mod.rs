@@ -3,6 +3,8 @@ use itertools::Itertools;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
+use crate::verify::quant::RecipeTable;
+use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 use crate::verify::stats;
 use crate::vmir::{BinOp, Literal, MemberId, Polarity, SeqOp, Type, Val};
 use crate::{HashMap, vmir};
@@ -11,8 +13,6 @@ use std::borrow::Cow;
 use z3::ast::{Ast, Bool, Dynamic};
 use z3::datatype_builder::create_datatypes;
 use z3::{DatatypeAccessor, DatatypeBuilder, DatatypeSort, FuncDecl, Solver, Sort};
-use crate::verify::quant::RecipeTable;
-use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 
 /// The translator's caches, kept in `VerifyContext::z3translator` so sorts and
 /// datatypes are created once per context. The translation itself is the free
@@ -541,7 +541,11 @@ fn translate_val(ctxt: &mut VerifyContext, lookup: &[Dynamic], instr: &Val) -> O
 /// One value step of a recipe body over the environment `lookup`. Operands are
 /// Z3 terms here, not e-classes, so each carries its own sort; a step whose
 /// operands do not fit is `None` (Z3 would reject it).
-fn translate_axiom_pure(ctxt: &mut VerifyContext, lookup: &[Dynamic], instr: &AxiomPure) -> Option<Dynamic> {
+fn translate_axiom_pure(
+    ctxt: &mut VerifyContext,
+    lookup: &[Dynamic],
+    instr: &AxiomPure,
+) -> Option<Dynamic> {
     match instr {
         AxiomPure::Binary(op, lhs, rhs) => {
             let lhs_value = translate_val(ctxt, lookup, lhs)?;
@@ -549,7 +553,7 @@ fn translate_axiom_pure(ctxt: &mut VerifyContext, lookup: &[Dynamic], instr: &Ax
             if lhs_value.get_sort() != rhs_value.get_sort() {
                 return None;
             }
-            let res: Dynamic  = match op {
+            let res: Dynamic = match op {
                 BinOp::AddI => (lhs_value.as_int()? + rhs_value.as_int()?).into(),
                 BinOp::AddR => (lhs_value.as_real()? + rhs_value.as_real()?).into(),
                 BinOp::SubI => (lhs_value.as_int()? - rhs_value.as_int()?).into(),
@@ -624,7 +628,12 @@ fn translate_for_all(
     caps: &[Dynamic],
 ) -> Option<Bool> {
     let recipe = table.get(rid);
-    debug_assert_eq!(recipe.n_caps, caps.len(), "capture arity of forall#{}", rid.0);
+    debug_assert_eq!(
+        recipe.n_caps,
+        caps.len(),
+        "capture arity of forall#{}",
+        rid.0
+    );
     let bounds: Vec<Dynamic> = recipe
         .bound
         .iter()
@@ -731,10 +740,7 @@ fn seq_param_types(op: SeqOp, elem_ty: &Type) -> Vec<Type> {
 fn seq_signature(head: SeqHead, elem_ty: &Type) -> (Vec<Type>, Type) {
     match head {
         SeqHead::Op(op) => (seq_param_types(op, elem_ty), op.result_type(elem_ty)),
-        SeqHead::Singleton => (
-            vec![elem_ty.clone()],
-            Type::Seq(Box::new(elem_ty.clone())),
-        ),
+        SeqHead::Singleton => (vec![elem_ty.clone()], Type::Seq(Box::new(elem_ty.clone()))),
     }
 }
 
@@ -923,7 +929,12 @@ fn apply_function_checked(
 }
 
 /// `f[ty](args)` over arguments already translated to their parameter sorts.
-fn apply_function(ctxt: &mut VerifyContext, f_id: &FuncId, ty: &[Type], args: &[Dynamic]) -> Dynamic {
+fn apply_function(
+    ctxt: &mut VerifyContext,
+    f_id: &FuncId,
+    ty: &[Type],
+    args: &[Dynamic],
+) -> Dynamic {
     let function_type = ctxt.alloc.kind(f_id);
 
     match function_type {
