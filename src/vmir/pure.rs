@@ -115,7 +115,6 @@ pub fn write() -> Val {
     Val::Literal(Literal::Real(num::BigInt::from(1).into()))
 }
 
-
 /// A sequence operation. Shared by `PureInst::Seq`, `TrigHead::Seq` and
 /// `Symbolic::Seq`, so the three layers cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -146,8 +145,12 @@ impl SeqOp {
         match self {
             SeqOp::Empty => 0,
             SeqOp::Len => 1,
-            SeqOp::Concat | SeqOp::Index | SeqOp::Take | SeqOp::Drop
-            | SeqOp::Contains | SeqOp::Range => 2,
+            SeqOp::Concat
+            | SeqOp::Index
+            | SeqOp::Take
+            | SeqOp::Drop
+            | SeqOp::Contains
+            | SeqOp::Range => 2,
             SeqOp::Update => 3,
         }
     }
@@ -164,9 +167,12 @@ impl SeqOp {
             SeqOp::Len => Type::Int,
             SeqOp::Contains => Type::Bool,
             SeqOp::Index => elem_ty.clone(),
-            SeqOp::Concat | SeqOp::Update | SeqOp::Take | SeqOp::Drop | SeqOp::Range | SeqOp::Empty => {
-                Type::Seq(Box::new(elem_ty.clone()))
-            }
+            SeqOp::Concat
+            | SeqOp::Update
+            | SeqOp::Take
+            | SeqOp::Drop
+            | SeqOp::Range
+            | SeqOp::Empty => Type::Seq(Box::new(elem_ty.clone())),
         }
     }
 
@@ -247,7 +253,10 @@ pub enum PureInst {
     /// The singleton sequence `Seq(elem)`. A longer literal is a right-nested
     /// concatenation of these, `Seq(a, b, c)` being `Seq(a) ++ (Seq(b) ++ Seq(c))`,
     /// and an empty one is `SeqOp::Empty`.
-    SeqLit { elem_ty: Type, elem: Val },
+    SeqLit {
+        elem_ty: Type,
+        elem: Val,
+    },
     /// A sequence operation. Build it with `PureInst::seq`, which checks the arity.
     /// `elem_ty` is the element type of the sequence it works on (`Int` for `Range`):
     /// the result does not always say, as `|s|` shows.
@@ -293,7 +302,12 @@ impl PureInst {
         }
     }
     pub fn seq(elem_ty: Type, op: SeqOp, args: Vec<Val>) -> PureInst {
-        assert_eq!(args.len(), op.arity(), "`{op:?}` takes {} operands, got {args:?}", op.arity());
+        assert_eq!(
+            args.len(),
+            op.arity(),
+            "`{op:?}` takes {} operands, got {args:?}",
+            op.arity()
+        );
         PureInst::Seq { elem_ty, op, args }
     }
 }
@@ -397,7 +411,10 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 (SeqOp::Drop, [s, n]) => write!(f, "{s}[{n}..]"),
                 (SeqOp::Contains, [s, x]) => write!(f, "{x} in {s}"),
                 (SeqOp::Range, [a, b]) => write!(f, "[{a}..{b})"),
-                (op, args) => unreachable!("`{op:?}` with {} operands; `PureInst::seq` checks arity", args.len()),
+                (op, args) => unreachable!(
+                    "`{op:?}` with {} operands; `PureInst::seq` checks arity",
+                    args.len()
+                ),
             },
         }
     }

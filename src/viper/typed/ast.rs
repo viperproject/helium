@@ -51,7 +51,8 @@ impl From<&crate::viper::parsed::ast::Type> for Type {
             A::Domain(id, args) => {
                 Type::Domain(Ident(id.id()), args.iter().map(Self::from).collect())
             }
-            A::Seq(ty) => Type::Collection(BuiltinCollection::Seq(Box::new(Self::from(&**ty)))),        }
+            A::Seq(ty) => Type::Collection(BuiltinCollection::Seq(Box::new(Self::from(&**ty)))),
+        }
     }
 }
 

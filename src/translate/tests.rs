@@ -1528,14 +1528,27 @@ domain D {
 
     let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
     assert_eq!(*head, TrigHead::Seq(SeqOp::Contains));
-    assert_eq!(args, &[TrigTerm::Var(0), TrigTerm::Var(1)], "sequence first");
+    assert_eq!(
+        args,
+        &[TrigTerm::Var(0), TrigTerm::Var(1)],
+        "sequence first"
+    );
 
     let (head, args) = only_app(only_group(axiom_forall(&p, "slice")));
     assert_eq!(*head, TrigHead::Seq(SeqOp::Drop));
-    let take = app(TrigHead::Seq(SeqOp::Take), vec![TrigTerm::Var(0), TrigTerm::Var(2)]);
+    let take = app(
+        TrigHead::Seq(SeqOp::Take),
+        vec![TrigTerm::Var(0), TrigTerm::Var(2)],
+    );
     assert_eq!(args, &[take, TrigTerm::Var(1)]);
 
-    let [TrigTerm::App { head, type_args, args }] = &only_group(axiom_forall(&p, "lit")).terms[..]
+    let [
+        TrigTerm::App {
+            head,
+            type_args,
+            args,
+        },
+    ] = &only_group(axiom_forall(&p, "lit")).terms[..]
     else {
         panic!("expected one application");
     };
@@ -1588,11 +1601,25 @@ fn seq_literal_lowers_to_concatenated_singletons() {
 
     let steps = seq_steps("method m(a: Int, b: Int, c: Int) { var s: Seq[Int] := Seq(a, b, c) }");
     let [
-        PureInst::SeqLit { elem: Val::Temp(a), .. },
-        PureInst::SeqLit { elem: Val::Temp(b), .. },
-        PureInst::SeqLit { elem: Val::Temp(c), .. },
-        PureInst::Seq { op: SeqOp::Concat, args: inner, .. },
-        PureInst::Seq { op: SeqOp::Concat, args: outer, .. },
+        PureInst::SeqLit {
+            elem: Val::Temp(a), ..
+        },
+        PureInst::SeqLit {
+            elem: Val::Temp(b), ..
+        },
+        PureInst::SeqLit {
+            elem: Val::Temp(c), ..
+        },
+        PureInst::Seq {
+            op: SeqOp::Concat,
+            args: inner,
+            ..
+        },
+        PureInst::Seq {
+            op: SeqOp::Concat,
+            args: outer,
+            ..
+        },
     ] = &steps[..]
     else {
         panic!("expected three singletons and two concatenations, got {steps:?}");
@@ -1605,10 +1632,21 @@ fn seq_literal_lowers_to_concatenated_singletons() {
     };
     let first = *tail - 1;
     assert_eq!(inner, &[Val::Temp(first + 1), Val::Temp(first + 2)]);
-    assert_eq!(outer, &[Val::Temp(first), Val::Temp(first + 3)], "right-nested");
+    assert_eq!(
+        outer,
+        &[Val::Temp(first), Val::Temp(first + 3)],
+        "right-nested"
+    );
 
     let steps = seq_steps("method m() { var s: Seq[Int] := Seq[Int]() }");
-    let [PureInst::Seq { elem_ty: vmir::Type::Int, op: SeqOp::Empty, args }] = &steps[..] else {
+    let [
+        PureInst::Seq {
+            elem_ty: vmir::Type::Int,
+            op: SeqOp::Empty,
+            args,
+        },
+    ] = &steps[..]
+    else {
         panic!("expected one empty sequence, got {steps:?}");
     };
     assert!(args.is_empty());

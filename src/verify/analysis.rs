@@ -220,7 +220,7 @@ impl ConstFold {
                 Unknown => Unknown,
             },
             Symbolic::Seq(..) => Unknown,
-            Symbolic::SeqLit(_,_) => Unknown,
+            Symbolic::SeqLit(_, _) => Unknown,
         }
     }
 

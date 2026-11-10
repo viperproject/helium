@@ -331,7 +331,12 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                                 .collect::<Vec<_>>()
                         };
                         let (c, s) = vals.split_at(recipe.n_caps);
-                        println!("[forall] recipe #{} caps={:?} sigma={:?}", rid.0, show(c), show(s));
+                        println!(
+                            "[forall] recipe #{} caps={:?} sigma={:?}",
+                            rid.0,
+                            show(c),
+                            show(s)
+                        );
                         instances.push((*rid, vals, generation));
                     }
                 }

@@ -41,9 +41,7 @@ impl FunctionBody {
                     | PureInst::AdtProj { type_args, .. }
                     | PureInst::AdtIs { type_args, .. } => type_args.iter_mut().for_each(&mut *f),
                     PureInst::Forall(q) => forall_types_mut(q, f),
-                    PureInst::Seq { elem_ty, .. } | PureInst::SeqLit { elem_ty, .. } => {
-                        f(elem_ty)
-                    }
+                    PureInst::Seq { elem_ty, .. } | PureInst::SeqLit { elem_ty, .. } => f(elem_ty),
                     _ => {}
                 }
             }

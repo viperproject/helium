@@ -1,8 +1,8 @@
-use egg::*;
-use std::fmt::{Display, Formatter};
-use crate::vmir::{BinOp, SeqOp};
 use crate::vmir::Literal;
 use crate::vmir::Type;
+use crate::vmir::{BinOp, SeqOp};
+use egg::*;
+use std::fmt::{Display, Formatter};
 
 /// A verifier-allocated function-application id in the e-graph. **Disconnected
 /// from VMIR `MemberId`**: the verifier assigns these (see `verify::func_registry`) — a
@@ -103,7 +103,7 @@ impl Language for Symbolic {
             S::RealCast(_) => D::RealCast,
             S::Forall(..) => D::Forall,
             S::Seq(_, op, _) => D::Seq(*op),
-            S::SeqLit(..) => D::SeqLit
+            S::SeqLit(..) => D::SeqLit,
         }
     }
 

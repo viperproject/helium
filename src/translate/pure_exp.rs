@@ -7,7 +7,10 @@ use lasso::Spur;
 use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
-use crate::vmir::{self, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp, Val, FALSE, TRUE, Type};
+use crate::vmir::{
+    self, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp, TRUE, Type,
+    Val,
+};
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
 /// body. `baseline` is the post-requires-inhale heap (target of unlabeled
@@ -357,7 +360,10 @@ pub(crate) fn lower<Ext: PureExt>(
                     let i = lower(b, env, sink, hctx, i)?;
                     let v = lower(b, env, sink, hctx, v)?;
                     Ok(sink.with_heap(hctx.value, |sink| {
-                        sink.emit_pure_guarded(ty, PureInst::seq(elem_ty, SeqOp::Update, vec![s, i, v]))
+                        sink.emit_pure_guarded(
+                            ty,
+                            PureInst::seq(elem_ty, SeqOp::Update, vec![s, i, v]),
+                        )
                     }))
                 }
                 // Total: Viper clamps the bounds.
@@ -373,7 +379,10 @@ pub(crate) fn lower<Ext: PureExt>(
                 I::Slice(a, z) => {
                     let a = lower(b, env, sink, hctx, a)?;
                     let z = lower(b, env, sink, hctx, z)?;
-                    let taken = sink.emit_pure(ty.clone(), PureInst::seq(elem_ty.clone(), SeqOp::Take, vec![s, z]));
+                    let taken = sink.emit_pure(
+                        ty.clone(),
+                        PureInst::seq(elem_ty.clone(), SeqOp::Take, vec![s, z]),
+                    );
                     Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![taken, a])))
                 }
             }
@@ -589,10 +598,19 @@ fn lower_binary<Ext: PureExt>(
         B::Iff => sink.emit_pure(ty, PureInst::Binary(V::Eq, lv, rv)),
         // `ty` is the node's own type: `Seq<T>` for `++`, `Seq<Int>` for `[a..b)`,
         // `Bool` for `in`.
-        B::Concat => sink.emit_pure(ty, PureInst::seq(seq_elem(b, &l.ty), SeqOp::Concat, vec![lv, rv])),
-        B::Range => sink.emit_pure(ty, PureInst::seq(vmir::Type::Int, SeqOp::Range, vec![lv, rv])),
+        B::Concat => sink.emit_pure(
+            ty,
+            PureInst::seq(seq_elem(b, &l.ty), SeqOp::Concat, vec![lv, rv]),
+        ),
+        B::Range => sink.emit_pure(
+            ty,
+            PureInst::seq(vmir::Type::Int, SeqOp::Range, vec![lv, rv]),
+        ),
         // `x in s` is `Contains(s, x)`: the sequence comes first.
-        B::In => sink.emit_pure(ty, PureInst::seq(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv])),
+        B::In => sink.emit_pure(
+            ty,
+            PureInst::seq(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv]),
+        ),
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
             return Err(TranslationError::Unsupported("collection operator"));
         }
@@ -987,11 +1005,13 @@ fn lower_trig_term(
         // concatenations of singletons, or `SeqOp::Empty`.
         P::SeqLit(elems) => {
             let elem_ty = seq_elem(b, &term.ty);
-            let singletons = lower_args(elems)?.into_iter().map(|elem| vmir::TrigTerm::App {
-                head: vmir::TrigHead::SeqLit,
-                type_args: vec![elem_ty.clone()],
-                args: Box::new([elem]),
-            });
+            let singletons = lower_args(elems)?
+                .into_iter()
+                .map(|elem| vmir::TrigTerm::App {
+                    head: vmir::TrigHead::SeqLit,
+                    type_args: vec![elem_ty.clone()],
+                    args: Box::new([elem]),
+                });
             Ok(singletons
                 .rev()
                 .reduce(|tail, head| seq_trig(&elem_ty, vmir::SeqOp::Concat, [head, tail]))
@@ -1014,9 +1034,11 @@ fn lower_trig_term(
                 }
             })
         }
-        P::Unary(typed::UnOp::Cardinality, s) => {
-            Ok(seq_trig(&seq_elem(b, &s.ty), vmir::SeqOp::Len, [lower_trig_term(b, s, env)?]))
-        }
+        P::Unary(typed::UnOp::Cardinality, s) => Ok(seq_trig(
+            &seq_elem(b, &s.ty),
+            vmir::SeqOp::Len,
+            [lower_trig_term(b, s, env)?],
+        )),
         P::Binary(op @ (typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range), l, r) => {
             let (l_ty, r_ty) = (&l.ty, &r.ty);
             let l = lower_trig_term(b, l, env)?;

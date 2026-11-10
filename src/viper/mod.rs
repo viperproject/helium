@@ -10,8 +10,8 @@ pub mod walk;
 mod globals;
 mod interner;
 mod parser;
-mod typecheck;
 pub mod prelude;
+mod typecheck;
 
 pub use parsed::*;
 pub use typed::{Show, show};

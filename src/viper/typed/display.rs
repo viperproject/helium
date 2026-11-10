@@ -10,7 +10,13 @@
 use std::fmt::{self, Display, Formatter};
 
 use crate::viper::interner::Interner;
-use crate::viper::typed::{AssignLhs, AssignRhs, AxiomExt, BinOp, BuiltinCollection, Call, Declaration, Domain, DomainFunction, Field, Forall, FuncEnsuresExt, Function, HeapExt, HeapNode, Ident, Literal, Method, MethodBodyExt, MethodEnsuresExt, Predicate, PredicateWithPerm, Program, PureExpKind, ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, StarOrFields, Statement, StmtBlock, Type, TypedIdent, TypedPureExp, UnOp};
+use crate::viper::typed::{
+    AssignLhs, AssignRhs, AxiomExt, BinOp, BuiltinCollection, Call, Declaration, Domain,
+    DomainFunction, Field, Forall, FuncEnsuresExt, Function, HeapExt, HeapNode, Ident, Literal,
+    Method, MethodBodyExt, MethodEnsuresExt, Predicate, PredicateWithPerm, Program, PureExpKind,
+    ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, StarOrFields, Statement, StmtBlock,
+    Type, TypedIdent, TypedPureExp, UnOp,
+};
 
 /// Interner-aware formatting wrapper.
 pub struct Show<'a, T> {
@@ -596,8 +602,12 @@ fn fmt_pure_kind<'a, Ext: ShowExt>(
                 crate::viper::typed::SeqIndexOp::Index(i) => write!(f, "{s}[{}]", show.with(i)),
                 crate::viper::typed::SeqIndexOp::Take(n) => write!(f, "{s}[..{}]", show.with(n)),
                 crate::viper::typed::SeqIndexOp::Drop(n) => write!(f, "{s}[{}..]", show.with(n)),
-                crate::viper::typed::SeqIndexOp::Slice(a, b) => write!(f, "{s}[{}..{}]", show.with(a), show.with(b)),
-                crate::viper::typed::SeqIndexOp::Update(i, v) => write!(f, "{s}[{} := {}]", show.with(i), show.with(v)),
+                crate::viper::typed::SeqIndexOp::Slice(a, b) => {
+                    write!(f, "{s}[{}..{}]", show.with(a), show.with(b))
+                }
+                crate::viper::typed::SeqIndexOp::Update(i, v) => {
+                    write!(f, "{s}[{} := {}]", show.with(i), show.with(v))
+                }
             }
         }
         PureExpKind::Ext(ext) => ext.fmt_ext(f, show.interner),

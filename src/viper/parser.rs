@@ -514,7 +514,10 @@ fn int_lit(n: i64) -> Exp {
 #[test]
 fn seq_literals() {
     let parse = |src| *viper_parser::exp(src).unwrap().kind;
-    assert_eq!(parse("Seq[Int]()"), ExpKind::SeqLit(Some(Type::Int), vec![]));
+    assert_eq!(
+        parse("Seq[Int]()"),
+        ExpKind::SeqLit(Some(Type::Int), vec![])
+    );
     assert_eq!(parse("Seq()"), ExpKind::SeqLit(None, vec![]));
     assert_eq!(
         parse("Seq(1, x)"),
@@ -531,7 +534,10 @@ fn seq_literals() {
 #[test]
 fn seq_length_and_range() {
     let parse = |src| *viper_parser::exp(src).unwrap().kind;
-    assert_eq!(parse("|s|"), ExpKind::UnOp(UnOp::Cardinality, raw_ident("s")));
+    assert_eq!(
+        parse("|s|"),
+        ExpKind::UnOp(UnOp::Cardinality, raw_ident("s"))
+    );
     assert_eq!(
         parse("[0..n)"),
         ExpKind::BinOp(BinOp::Range, int_lit(0), raw_ident("n"))
