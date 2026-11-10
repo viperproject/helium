@@ -27,6 +27,7 @@ use super::*;
 /// `Deref`/`Unfold`/`Snap` into pure terms over the params + snapshot.
 pub(super) struct FunctionUnfoldApplier {
     pub(super) func: FuncId,
+    pub(super) pre_token: FuncId,
     pub(super) def: Arc<FunctionDefinition>,
     /// Guards the releases behind the token (the definitional union and the
     /// post): done at most once per call. Only a call with a token is recorded,
@@ -60,6 +61,7 @@ pub(super) struct FunctionUnfoldApplier {
 /// (`tests/cases/known_limitations/recursive_post_induction_under_branch.vpr`).
 pub(super) struct FunctionPostApplier {
     pub(super) func: FuncId,
+    pub(super) pre_token: FuncId,
     pub(super) def: Arc<FunctionDefinition>,
     /// Guards the post replay: done at most once per call. Only a call with a
     /// token is recorded, so one reached before its token still gets the post.
@@ -143,7 +145,7 @@ impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
         let mut subst: Vec<Subst> = vec![];
 
         for node in &egraph[eclass].nodes {
-            let Symbolic::FuncApp(f, _tys, args) = node else {
+            let Symbolic::FuncApp(f, tys, args) = node else {
                 continue;
             };
             if *f != self.func {
@@ -161,10 +163,14 @@ impl Searcher<Symbolic, ConstFold> for FunctionCallSearcher {
                 s.insert(*var, arg);
             }
 
-            let probe = Symbolic::FuncApp(self.pre_token, Box::new([]), args.clone());
-
-            if let Some(tok) = egraph.lookup(probe) {
-                s.insert(self.tok_var, tok);
+            // A `Subst` cannot carry types, so `?tok` is bound for a ground call only;
+            // an instantiated call's token is looked up per instantiation by the
+            // applier (`call_token`).
+            if tys.is_empty() {
+                let probe = Symbolic::FuncApp(self.pre_token, Box::new([]), args.clone());
+                if let Some(tok) = egraph.lookup(probe) {
+                    s.insert(self.tok_var, tok);
+                }
             }
             subst.push(s)
         }
@@ -356,6 +362,25 @@ impl FunctionUnfoldApplier {
     }
 }
 
+/// The `f%pre` class of the call `f<tys>(args)`. The token is per instantiation —
+/// a precondition holds for one set of type arguments, not for all — so it carries
+/// `tys` like the call does. `searched` is what the searcher bound, which is only
+/// ever a ground call's token; an instantiated call's is looked up here, and a miss
+/// (the graph is not rebuilt mid-iteration) only delays its release to a later one.
+fn call_token(
+    egraph: &EGraph<Symbolic, ConstFold>,
+    pre_token: FuncId,
+    tys: &[Type],
+    args: &[Id],
+    searched: Option<Id>,
+) -> Option<Id> {
+    if tys.is_empty() {
+        return searched;
+    }
+    let probe = Symbolic::FuncApp(pre_token, tys.into(), args.into());
+    egraph.lookup(probe)
+}
+
 impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
     fn apply_one(
         &self,
@@ -400,7 +425,8 @@ impl Applier<Symbolic, ConstFold> for FunctionUnfoldApplier {
         }
         let mut changed = Vec::new();
         for tys in instantiations {
-            self.unfold_call(egraph, eclass, tys, &args, tok_id, &mut changed);
+            let tok = call_token(egraph, self.pre_token, &tys, &args, tok_id);
+            self.unfold_call(egraph, eclass, tys, &args, tok, &mut changed);
         }
         changed
     }
@@ -420,11 +446,6 @@ impl Applier<Symbolic, ConstFold> for FunctionPostApplier {
         _rule_name: Symbol,
     ) -> Vec<Id> {
         let mut changed = Vec::new();
-        // No token, no post (see the struct doc). Not memoized, so a token
-        // minted later still releases it.
-        let Some(tok) = subst.get(self.tok_var).map(|&t| egraph.find(t)) else {
-            return changed;
-        };
         if self.def.post.is_none() {
             return changed;
         }
@@ -449,7 +470,13 @@ impl Applier<Symbolic, ConstFold> for FunctionPostApplier {
                 instantiations.push(tys.clone());
             }
         }
+        let searched = subst.get(self.tok_var).map(|&t| egraph.find(t));
         for tys in instantiations {
+            // No token, no post (see the struct doc). Not memoized, so a token
+            // minted later still releases it.
+            let Some(tok) = call_token(egraph, self.pre_token, &tys, &args, searched) else {
+                continue;
+            };
             if self.memo.insert((tys, args.clone())) {
                 replay_post(egraph, &self.def, &args, tok, &mut changed);
             }
@@ -473,6 +500,7 @@ pub(crate) fn function_rule(
     let searcher = FunctionCallSearcher::new(func, pre_token, def.n_params);
     let applier = FunctionUnfoldApplier {
         func,
+        pre_token,
         tok_var: searcher.tok_var,
         arg_vars: searcher.arg_vars.clone(),
         def,
@@ -499,6 +527,7 @@ pub(crate) fn post_rule(
     let searcher = FunctionCallSearcher::new(func, pre_token, def.n_params);
     let applier = FunctionPostApplier {
         func,
+        pre_token,
         tok_var: searcher.tok_var,
         arg_vars: searcher.arg_vars.clone(),
         def,

@@ -56,6 +56,8 @@ pub(crate) enum AxiomInst {
     /// fails does not fire the callee's own axioms.
     Token {
         func: FuncId,
+        /// The call's type arguments: the token is per instantiation.
+        type_args: Vec<Type>,
         args: Vec<Val>,
         guards: Vec<(Val, Polarity)>,
     },
@@ -307,7 +309,12 @@ pub(super) fn build_instance_vals_impl(
                 let id = egraph.add(Symbolic::Forall(*recipe, caps));
                 vals.push(id);
             }
-            AxiomInst::Token { func, args, guards } => {
+            AxiomInst::Token {
+                func,
+                type_args,
+                args,
+                guards,
+            } => {
                 // A nested callee's `g%pre(gargs)` (Silicon's
                 // `bodyPreconditionPropagation`). Adding the node is what lets `g`
                 // materialize when *this* body is unfolded; releasing its truth is
@@ -318,7 +325,11 @@ pub(super) fn build_instance_vals_impl(
                 // becomes true outright, which is the old presence⇒release
                 // behavior.
                 let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                let tok = egraph.add(Symbolic::FuncApp(*func, Box::new([]), args));
+                let tok = egraph.add(Symbolic::FuncApp(
+                    *func,
+                    type_args.iter().cloned().collect(),
+                    args,
+                ));
                 // Body-internal guards inside the enclosing gate, matching the
                 // function case's `outer ==> (b ==> g%pre(..))`.
                 let guarded = fold_guards(egraph, &vals, guards, tok);

@@ -440,7 +440,13 @@ fn eval_pure_inst(
             {
                 let name = ctx.member_name(fc.function);
                 let tok = ctx.alloc.fn_pre_token(fc.function, &name);
-                let tok_id = ctx.add(Symbolic::FuncApp(tok, Box::new([]), args.into()));
+                // The token carries the call's type arguments: a precondition holds
+                // per instantiation, so `f<Int>(x)` must not release `f<Bool>(x)`.
+                let tok_id = ctx.add(Symbolic::FuncApp(
+                    tok,
+                    fc.type_args.clone().into(),
+                    args.into(),
+                ));
                 ctx.assume_token_guarded(tok_id, pc_lits.iter().rev().copied());
             }
             let recipe = if ctx.recipe.is_some() {
@@ -494,7 +500,7 @@ fn eval_pure_inst(
                 if let Some(g_pre) = g_pre {
                     let tok = rb.emit(AxiomPure::App {
                         func: g_pre,
-                        type_args: Vec::new(),
+                        type_args: fc.type_args.clone(),
                         args,
                     });
                     // The callee-internal pc of *this* call, in recipe space: the
@@ -2159,6 +2165,7 @@ pub(crate) fn prepare_body(
             // identity-wise, so `inst.pc`'s literals transfer directly.
             out.push(AxiomInst::Token {
                 func: alloc.fn_pre_token(fc.function, &names(fc.function)),
+                type_args: fc.type_args.clone(),
                 args,
                 guards: inst.pc.conds.clone(),
             });
