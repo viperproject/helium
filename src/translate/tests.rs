@@ -491,9 +491,10 @@ function len(l: List[Int]): Int
 }
 
 #[test]
-fn generic_domain_functions_and_axioms_use_only_mentioned_params() {
-    // A domain function / axiom is generic over only the domain parameters it
-    // mentions, renumbered from 0.
+fn generic_domain_functions_use_only_mentioned_params_and_axioms_all() {
+    // A domain function is generic over only the domain parameters it mentions,
+    // renumbered from 0. An axiom keeps the domain's arity and is triggered by the
+    // domain's own type.
     let p = run(
         r#"
 domain Two[A, B] {
@@ -513,8 +514,19 @@ domain Two[A, B] {
     assert_eq!(arity("Two"), 2);
     assert_eq!(arity("second"), 1);
     assert_eq!(arity("zero"), 0);
-    assert_eq!(arity("ax"), 1);
-    assert_eq!(arity("closed"), 0);
+    assert_eq!(arity("ax"), 2);
+    assert_eq!(arity("closed"), 2);
+    let two = p.id("Two").unwrap();
+    let vmir::Declaration::Axiom(ax) = &p.decls[p.id("ax").unwrap()] else {
+        unreachable!()
+    };
+    assert_eq!(
+        ax.ty_triggers,
+        vec![vec![vmir::Type::Domain(
+            two,
+            Box::new([vmir::Type::Generic(0), vmir::Type::Generic(1)])
+        )]]
+    );
     let vmir::Declaration::Function(second) = &p.decls[p.id("second").unwrap()] else {
         unreachable!()
     };

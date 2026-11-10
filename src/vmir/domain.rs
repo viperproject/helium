@@ -1,4 +1,4 @@
-use crate::vmir::{FunctionBody, TyParams};
+use crate::vmir::{FunctionBody, TyParams, Type};
 use crate::vmir::display::VmirDisplay;
 use std::fmt::{self, Display, Formatter};
 
@@ -22,8 +22,8 @@ pub struct Domain {
 /// **never verified**: no well-definedness obligations (div-by-zero etc.) are
 /// checked on them. Quantification over *values* is an inline
 /// [`Forall`](crate::vmir::Forall) step in the body. An axiom is generic over
-/// `ty_params` types (`Generic(0..n)`), only those its body mentions: it holds at
-/// every instance. There is no type quantifier in the IR; the verifier picks the
+/// `ty_params` types (`Generic(0..n)`): the type parameters of the domain it came
+/// from. It holds at every instance. There is no type quantifier in the IR; the verifier picks the
 /// instances by matching the type arguments of the triggers of the axiom's
 /// top-level `forall` ([`Axiom::lone_forall`]). A generic axiom without one has
 /// no trigger to pick instances with, and is not supported.
@@ -32,6 +32,7 @@ pub struct Axiom {
     pub name: Option<Spur>,
     pub body: FunctionBody,
     pub ty_params: TyParams,
+    pub ty_triggers: Vec<Vec<Type>>,
 }
 
 impl Axiom {
@@ -66,6 +67,22 @@ impl<'a> Display for VmirDisplay<'a, &'a Axiom> {
             write!(f, " {}", self.interner.resolve(n))?;
         }
         write!(f, "{}", self.item.ty_params)?;
+        // Type-trigger groups, alternatives side by side, as a `forall` prints its
+        // term triggers: `axiom ax<2> :: {Pair<?0, ?1>}{Other<?0>} {`. Within a
+        // group the types are a conjunction, comma-separated.
+        if !self.item.ty_triggers.is_empty() {
+            write!(f, " ::")?;
+            for (g, group) in self.item.ty_triggers.iter().enumerate() {
+                write!(f, "{}{{", if g == 0 { " " } else { "" })?;
+                for (k, ty) in group.iter().enumerate() {
+                    if k > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", self.with(ty))?;
+                }
+                write!(f, "}}")?;
+            }
+        }
         writeln!(f, " {{")?;
         write!(
             f,

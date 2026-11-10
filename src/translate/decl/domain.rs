@@ -4,10 +4,10 @@
 //! stub *and* every function/axiom slot the domain declares.
 //!
 //! Domains may be **generic**. VMIR has no link between a domain and its
-//! functions / axioms, so each of those is generic over only the domain
-//! parameters it actually mentions, renumbered `0..k` (`Generic(i)`): a function
-//! by its signature, an axiom by its body. The domain stub keeps the full
-//! arity.
+//! functions, so each function is generic over only the domain parameters its
+//! signature mentions, renumbered `0..k` (`Generic(i)`). An axiom keeps the
+//! domain's full arity: its type trigger is the domain's own type
+//! `D<?0, .., ?n-1>`, which binds every parameter.
 
 use crate::dhash::HashMap;
 use std::marker::PhantomData;
@@ -158,31 +158,30 @@ impl DomainTranslator<'_, Metaed> {
         let env = HashMap::default();
         // The domain's parameters are in scope for every axiom body.
         ctx.decl_generics = domain_params;
+        // Every axiom of the domain is triggered by the domain's own type, at the
+        // domain's own parameters: `D<?0, .., ?n-1>`. The axiom holds at each
+        // instance of `D` the program mentions.
+        let domain_ty = vmir::Type::Domain(
+            ctx.name_map[&self.silver_name],
+            (0..declared).map(vmir::Type::Generic).collect(),
+        );
         let mut result = Ok(());
         for (i, (ax, aslot)) in self.src.axioms.iter().zip(self.axiom_slots).enumerate() {
-            let mut body = match pure_exp::lower_axiom_body(ctx, &env, &ax.exp) {
+            let body = match pure_exp::lower_axiom_body(ctx, &env, &ax.exp) {
                 Ok(body) => body,
                 Err(e) => {
                     result = Err(e);
                     break;
                 }
             };
-            // Generic over only the parameters the body mentions.
-            let ty_params = body.compact_generics(declared);
+            // Generic over all of the domain's parameters, not just those the
+            // body mentions: the trigger below binds every one of them.
             let axiom = vmir::Axiom {
                 name: None,
                 body,
-                ty_params: ty_params.into(),
+                ty_params: declared.into(),
+                ty_triggers: vec![vec![domain_ty.clone()]],
             };
-            // A generic axiom is instantiated by matching its quantifier's
-            // triggers against the program's type arguments; without a top-level
-            // `forall` it has no trigger, and inferring one is not supported.
-            if ty_params > 0 && axiom.lone_forall().is_none() {
-                result = Err(TranslationError::Unsupported(
-                    "generic domain axiom without a top-level forall",
-                ));
-                break;
-            }
             // The axiom's carried name matches its slot registration: the
             // Silver name when given, the generated `{domain}#axiom{i}` slot
             // name otherwise.
