@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{Inst, MemberId, Type, Val};
+use crate::vmir::{Inst, MemberId, TyParams, Type, Val};
 use lasso::Spur;
 use std::fmt::{self, Display, Formatter};
 
@@ -19,6 +19,7 @@ use std::fmt::{self, Display, Formatter};
 pub struct Function {
     pub name: Spur,
     pub params: Params,
+    pub ty_params: TyParams,
     pub ret: Type,
     /// The function's definition, when it has a body. `None` ⟹ abstract /
     /// uninterpreted. A function with a body and contracts assumes `f#requires`

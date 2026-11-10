@@ -491,21 +491,34 @@ function len(l: List[Int]): Int
 }
 
 #[test]
-fn generic_domain_rejected() {
-    // Generics live on ADTs. A generic domain's axioms could only be
-    // instantiated off a *type* trigger, which Silver has no syntax to write —
-    // rather than infer one, translation refuses the domain.
-    let err = run_err(
+fn generic_domain_functions_and_axioms_use_only_mentioned_params() {
+    // A domain function / axiom is generic over only the domain parameters it
+    // mentions, renumbered from 0.
+    let p = run(
         r#"
-domain Box[T] {
-    function wrap(x: T): T
+domain Two[A, B] {
+    function second(x: B): B
+    function zero(): Int
+    axiom ax { forall b: B :: { second(b) } second(b) == b }
+    axiom closed { zero() == 0 }
 }
 "#,
     );
-    assert_eq!(
-        err,
-        TranslationError::GenericDomainUnsupported("Box".to_string())
-    );
+    let arity = |name: &str| match &p.decls[p.id(name).expect(name)] {
+        vmir::Declaration::Domain(d) => d.ty_params.count(),
+        vmir::Declaration::Function(f) => f.ty_params.count(),
+        vmir::Declaration::Axiom(a) => a.ty_params.count(),
+        _ => panic!("unexpected declaration for {name}"),
+    };
+    assert_eq!(arity("Two"), 2);
+    assert_eq!(arity("second"), 1);
+    assert_eq!(arity("zero"), 0);
+    assert_eq!(arity("ax"), 1);
+    assert_eq!(arity("closed"), 0);
+    let vmir::Declaration::Function(second) = &p.decls[p.id("second").unwrap()] else {
+        unreachable!()
+    };
+    assert_eq!(second.ret, vmir::Type::Generic(0));
 }
 
 /// A heapless obligation (`assert`, division) carries the current check-in heap

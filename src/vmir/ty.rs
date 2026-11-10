@@ -100,6 +100,22 @@ impl Type {
         }
     }
 
+    /// Append each `Generic(i)` index occurring in this type to `out`, in order
+    /// of first occurrence (an index already in `out` is not repeated).
+    pub fn generics_in_order(&self, out: &mut Vec<usize>) {
+        match self {
+            Type::Generic(i) => {
+                if !out.contains(i) {
+                    out.push(*i);
+                }
+            }
+            Type::Domain(_, args) => args.iter().for_each(|a| a.generics_in_order(out)),
+            Type::Option(t) => t.generics_in_order(out),
+            Type::Addr { value, .. } => value.generics_in_order(out),
+            Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => {}
+        }
+    }
+
     /// Substitute each `Generic(i)` with `args[i]`, recursing structurally.
     pub fn subst_generics(&self, args: &[Type]) -> Type {
         match self {

@@ -67,6 +67,10 @@ pub(crate) struct TranslationContext<'a> {
     /// finishes (fields/predicates are the only ones that register groups,
     /// all during `declare`; nothing registers one afterwards).
     pub(crate) groups: Rodeo<Spur>,
+    /// Type parameters in scope while lowering a domain axiom body (the owning
+    /// domain's parameters, in declaration order); empty everywhere else.
+    /// Set and cleared by `DomainTranslator::define`.
+    pub(crate) decl_generics: Vec<Spur>,
 }
 
 impl<'a> TranslationContext<'a> {
@@ -79,6 +83,7 @@ impl<'a> TranslationContext<'a> {
             contracts: HashMap::default(),
             adt: AdtInfo::default(),
             groups: Rodeo::new(),
+            decl_generics: Vec::new(),
         }
     }
 
@@ -92,13 +97,12 @@ impl<'a> TranslationContext<'a> {
         self.contracts.get(&m).and_then(|c| c.ensures)
     }
 
-    /// Lower a type in a monomorphic context — every body VMIR lowers is one
-    /// (domains are monomorphic, methods/functions/resources are too). For
-    /// ADT-declaration field types (which may mention the ADT's type parameters)
-    /// call the free [`super::lower_type`] with the owning ADT's parameter list
-    /// instead.
+    /// Lower a type in the current body. Bodies are monomorphic except a domain
+    /// axiom, whose owning domain's parameters are in `decl_generics`. For ADT
+    /// and domain-function signatures call the free [`super::lower_type`] with
+    /// the owning declaration's parameter list instead.
     pub(crate) fn lower_type(&self, ty: &typed::Type) -> vmir::Type {
-        super::lower_type(&self.name_map, &[], ty)
+        super::lower_type(&self.name_map, &self.decl_generics, ty)
     }
 
     /// The interned group tag for a field/predicate name (registered in the

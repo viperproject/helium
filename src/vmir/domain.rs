@@ -1,16 +1,16 @@
-use crate::vmir::FunctionBody;
+use crate::vmir::{FunctionBody, TyParams};
 use crate::vmir::display::VmirDisplay;
 use std::fmt::{self, Display, Formatter};
 
 use lasso::Spur;
 
-/// A domain — a monomorphic namespace of uninterpreted functions. Generics live
-/// on ADTs: a domain declaring type parameters is rejected at translation
-/// (`GenericDomainUnsupported`), since instantiating its axioms would need a
-/// *type* trigger, which Silver has no syntax to write.
+/// A domain — a namespace of uninterpreted functions, possibly generic
+/// (`ty_params` is its declared arity). Its functions and axioms are separate
+/// declarations, each generic over only the domain parameters it mentions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Domain {
     pub name: Spur,
+    pub ty_params: TyParams,
 }
 
 /// An axiom: a closed boolean fact the verifier **assumes** in every
@@ -22,17 +22,19 @@ pub struct Domain {
 /// **never verified**: no well-definedness obligations (div-by-zero etc.) are
 /// checked on them. Quantification over *values* is an inline
 /// [`Forall`](crate::vmir::Forall) step in the body; there is no quantification
-/// over types.
+/// over types. An axiom is generic over `ty_params` types (`Generic(0..n)`),
+/// only those its body mentions: it holds at every instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Axiom {
     pub name: Option<Spur>,
     pub body: FunctionBody,
+    pub ty_params: TyParams,
 }
 
 impl<'a> Display for VmirDisplay<'a, &'a Domain> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let name = self.interner.resolve(&self.item.name);
-        writeln!(f, "domain {name}")
+        writeln!(f, "domain {name}{}", self.item.ty_params)
     }
 }
 
@@ -42,6 +44,7 @@ impl<'a> Display for VmirDisplay<'a, &'a Axiom> {
         if let Some(n) = &self.item.name {
             write!(f, " {}", self.interner.resolve(n))?;
         }
+        write!(f, "{}", self.item.ty_params)?;
         writeln!(f, " {{")?;
         write!(
             f,

@@ -3,10 +3,11 @@
 //! axioms to a `vmir::Axiom`. One `DomainTranslator` owns the domain
 //! stub *and* every function/axiom slot the domain declares.
 //!
-//! Domains are **monomorphic**: a domain declaring type parameters is rejected
-//! (`GenericDomainUnsupported`). A generic domain's axioms could only be
-//! instantiated off a *type* trigger, which Silver has no syntax to write —
-//! rather than infer one, we refuse. Generics live on ADTs.
+//! Domains may be **generic**. VMIR has no link between a domain and its
+//! functions / axioms, so each of those is generic over only the domain
+//! parameters it actually mentions, renumbered `0..k` (`Generic(i)`): a function
+//! by its signature, an axiom by its body. The domain stub keeps the full
+//! arity.
 
 use crate::dhash::HashMap;
 use std::marker::PhantomData;
@@ -94,24 +95,39 @@ impl DomainTranslator<'_, Metaed> {
         definer: &mut impl Definer,
     ) -> Result<(), TranslationError> {
         let name_str = ctx.interner.resolve(&self.silver_name).to_string();
-        if !self.src.type_params.is_empty() {
-            return Err(TranslationError::GenericDomainUnsupported(name_str));
-        }
         let name = definer.intern_name(&name_str);
-        definer.define_domain(self.slot, vmir::Domain { name });
+        let domain_params: Vec<Spur> = self.src.type_params.iter().map(|i| i.0).collect();
+        let declared = domain_params.len();
+        definer.define_domain(
+            self.slot,
+            vmir::Domain {
+                name,
+                ty_params: declared.into(),
+            },
+        );
         for (df, fslot) in self.src.functions.iter().zip(self.fn_slots) {
-            let params: Vec<vmir::Type> = df
+            let mut params: Vec<vmir::Type> = df
                 .params
                 .iter()
-                .map(|p| lower_type(&ctx.name_map, &[], &p.ty))
+                .map(|p| lower_type(&ctx.name_map, &domain_params, &p.ty))
                 .collect();
-            let ret = lower_type(&ctx.name_map, &[], &df.ret);
+            let mut ret = lower_type(&ctx.name_map, &domain_params, &df.ret);
+            // Generic over only the parameters the signature mentions.
+            let mut order = Vec::new();
+            params.iter().for_each(|t| t.generics_in_order(&mut order));
+            ret.generics_in_order(&mut order);
+            let compact = vmir::compaction(&order, declared);
+            params
+                .iter_mut()
+                .for_each(|t| *t = t.subst_generics(&compact));
+            ret = ret.subst_generics(&compact);
             let fn_name = definer.intern_name(ctx.interner.resolve(&df.name.0));
             definer.define_function(
                 fslot,
                 vmir::Function {
                     name: fn_name,
                     params: params.into(),
+                    ty_params: order.len().into(),
                     ret,
                     body: None,
                     requires: None,
@@ -124,8 +140,19 @@ impl DomainTranslator<'_, Metaed> {
         // `Empty` heap is never read. Axiom bodies are never verified, only
         // assumed.
         let env = HashMap::default();
+        // The domain's parameters are in scope for every axiom body.
+        ctx.decl_generics = domain_params;
+        let mut result = Ok(());
         for (i, (ax, aslot)) in self.src.axioms.iter().zip(self.axiom_slots).enumerate() {
-            let body = pure_exp::lower_axiom_body(ctx, &env, &ax.exp)?;
+            let mut body = match pure_exp::lower_axiom_body(ctx, &env, &ax.exp) {
+                Ok(body) => body,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            };
+            // Generic over only the parameters the body mentions.
+            let ty_params = body.compact_generics(declared);
             // The axiom's carried name matches its slot registration: the
             // Silver name when given, the generated `{domain}#axiom{i}` slot
             // name otherwise.
@@ -139,9 +166,11 @@ impl DomainTranslator<'_, Metaed> {
                 vmir::Axiom {
                     name: Some(name),
                     body,
+                    ty_params: ty_params.into(),
                 },
             );
         }
-        Ok(())
+        ctx.decl_generics.clear();
+        result
     }
 }

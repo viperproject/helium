@@ -1958,6 +1958,11 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         let vmir::Declaration::Axiom(ax) = decl else {
             continue;
         };
+        // A generic axiom needs its type instances chosen first (not implemented):
+        // evaluating it as written would put `Generic` types into the e-graph.
+        if ax.ty_params.count() > 0 {
+            return Err(VerifyError::Unimplemented("generic domain axiom"));
+        }
         let mut state = EvalState::new();
         for inst in &ax.body.insts {
             match &inst.kind {

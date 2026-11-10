@@ -2,6 +2,7 @@ mod adt;
 mod analyze;
 mod domain;
 mod function;
+mod generics;
 mod heap;
 mod inst;
 mod method;
@@ -18,6 +19,7 @@ pub use heap::{Assign, Bind, HeapInst, HeapVal, PermInst, PermVal};
 pub use pure::{BinOp, FALSE, Literal, NULL, PureInst, TRUE, Val, none, write};
 
 pub use adt::TyParams;
+pub(crate) use generics::compaction;
 pub use adt::{Adt, AdtVariant};
 pub use analyze::{AnalysisError, AnalyzedProgram, DepGraph, analyze};
 pub use domain::{Axiom, Domain};
