@@ -31,8 +31,14 @@ method m(a: Box[Int], b: Bool) {
 "#,
     );
     let tys = of_method(&program, "m");
-    assert!(tys.contains(&dom(&program, "Box", vec![Type::Int])), "param");
-    assert!(tys.contains(&dom(&program, "Box", vec![Type::Bool])), "local");
+    assert!(
+        tys.contains(&dom(&program, "Box", vec![Type::Int])),
+        "param"
+    );
+    assert!(
+        tys.contains(&dom(&program, "Box", vec![Type::Bool])),
+        "local"
+    );
     assert!(tys.contains(&Type::Bool));
     // Mentioned only as a type argument, never as the type of a value.
     assert!(!tys.contains(&Type::Real));
@@ -57,7 +63,10 @@ method unwrapped(x: Opt[Box[Int]]) {
     let opt = dom(&program, "Opt", vec![boxed.clone()]);
     let outer = of_method(&program, "outer");
     assert!(outer.contains(&opt));
-    assert!(!outer.contains(&boxed), "`Box<Int>` is only nested in `Opt`");
+    assert!(
+        !outer.contains(&boxed),
+        "`Box<Int>` is only nested in `Opt`"
+    );
     let unwrapped = of_method(&program, "unwrapped");
     assert!(unwrapped.contains(&opt) && unwrapped.contains(&boxed));
 }

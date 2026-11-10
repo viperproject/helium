@@ -43,8 +43,7 @@ impl TranslationError {
     pub fn is_unsupported(&self) -> bool {
         matches!(
             self,
-            TranslationError::Unsupported(_)
-                | TranslationError::HeapDepFunctionInQuantifier(_)
+            TranslationError::Unsupported(_) | TranslationError::HeapDepFunctionInQuantifier(_)
         )
     }
 }

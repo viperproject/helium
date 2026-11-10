@@ -474,16 +474,14 @@ function len(l: List[Int]): Int
 fn generic_domain_members_use_only_mentioned_params() {
     // A domain function or axiom is generic over only the domain parameters it
     // mentions, renumbered from 0; an axiom's type triggers are inferred.
-    let p = run(
-        r#"
+    let p = run(r#"
 domain Two[A, B] {
     function second(x: B): B
     function zero(): Int
     axiom ax { forall b: B :: { second(b) } second(b) == b }
     axiom closed { zero() == 0 }
 }
-"#,
-    );
+"#);
     let arity = |name: &str| match &p.decls[p.id(name).expect(name)] {
         vmir::Declaration::Domain(d) => d.ty_params.count(),
         vmir::Declaration::Function(f) => f.ty_params.count(),

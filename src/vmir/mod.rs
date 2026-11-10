@@ -19,13 +19,13 @@ pub use heap::{Assign, Bind, HeapInst, HeapVal, PermInst, PermVal};
 pub use pure::{BinOp, FALSE, Literal, NULL, PureInst, TRUE, Val, none, write};
 
 pub use adt::TyParams;
-pub(crate) use generics::compaction;
 pub use adt::{Adt, AdtVariant};
 pub use analyze::{AnalysisError, AnalyzedProgram, DepGraph, analyze};
 pub use domain::{Axiom, Domain};
 pub use function::{
     Args, ContractArg, ContractCall, Function, FunctionBody, FunctionCall, Params, Requires,
 };
+pub(crate) use generics::compaction;
 pub use inst::{Inst, InstKind, PathConds, Polarity};
 pub use method::{Block, BlockId, Method, Preds};
 pub use quant::{Forall, QuantTrigger, TrigHead, TrigTerm};

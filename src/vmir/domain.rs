@@ -1,5 +1,5 @@
-use crate::vmir::{FunctionBody, TyParams, Type, compaction};
 use crate::vmir::display::VmirDisplay;
+use crate::vmir::{FunctionBody, TyParams, Type, compaction};
 use std::fmt::{self, Display, Formatter};
 
 use lasso::Spur;
@@ -70,7 +70,8 @@ impl Axiom {
             );
             if triggers.is_empty() {
                 let mut uncovered = order.clone();
-                let gain = |k: usize, un: &[usize]| gens[k].iter().filter(|i| un.contains(i)).count();
+                let gain =
+                    |k: usize, un: &[usize]| gens[k].iter().filter(|i| un.contains(i)).count();
                 let mut group = Vec::new();
                 while let Some(k) = (0..c.len())
                     .max_by_key(|&k| gain(k, &uncovered))

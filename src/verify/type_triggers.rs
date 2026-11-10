@@ -67,7 +67,10 @@ impl<'t> TypeIndex<'t> {
     fn candidates(&self, pattern: &Type) -> &[&'t Type] {
         match pattern {
             Type::Generic(_) => &self.all,
-            _ => self.by_head.get(&Head::of(pattern)).map_or(&[], Vec::as_slice),
+            _ => self
+                .by_head
+                .get(&Head::of(pattern))
+                .map_or(&[], Vec::as_slice),
         }
     }
 }
@@ -219,7 +222,10 @@ mod tests {
     #[test]
     fn a_ground_trigger_matches_only_itself() {
         let trig = vec![vec![dom(BOX, &[])]];
-        assert_eq!(matches(0, &trig, &[dom(BOX, &[])]), vec![Vec::<Type>::new()]);
+        assert_eq!(
+            matches(0, &trig, &[dom(BOX, &[])]),
+            vec![Vec::<Type>::new()]
+        );
         assert!(matches(0, &trig, &[dom(OTHER, &[])]).is_empty());
     }
 }

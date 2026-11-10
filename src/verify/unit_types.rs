@@ -29,7 +29,10 @@
 //! A function carries explicit `requires` / `ensures` links instead.
 
 use crate::dhash::HashSet;
-use crate::vmir::{Declaration, Function, HeapInst, Inst, InstKind, MemberId, Method, Program, PureInst, Resource, Type};
+use crate::vmir::{
+    Declaration, Function, HeapInst, Inst, InstKind, MemberId, Method, Program, PureInst, Resource,
+    Type,
+};
 
 /// The ground types of one verification unit.
 pub(crate) type UnitTypes = HashSet<Type>;
