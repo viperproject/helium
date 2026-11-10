@@ -1,0 +1,4 @@
+// No axiom says anything about `v`.
+domain D[T] { function v(x: T): Int }
+
+method m(x: Bool) { assert v(x) == 1 }

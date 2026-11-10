@@ -1,0 +1,12 @@
+// An ascription picks the instance when no argument does.
+domain Option[T] {
+  function discr(o: Option[T]): Int
+  function nothing(): Option[T]
+
+  axiom none_discr { discr(nothing()) == 0 }
+}
+
+method m() {
+  assert discr((nothing(): Option[Bool])) == 0
+  assert discr((nothing(): Option[Ref])) == 0
+}

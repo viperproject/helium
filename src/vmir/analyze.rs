@@ -374,6 +374,7 @@ mod tests {
         Declaration::Function(Function {
             name: lasso::Spur::try_from_usize(0).unwrap(),
             params: vec![].into(),
+            ty_params: 0.into(),
             ret: Type::Int,
             body: Some(FunctionBody {
                 insts: vec![inst],

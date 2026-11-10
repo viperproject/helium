@@ -9,10 +9,6 @@ pub enum TranslationError {
     /// name. Typecheck rejects this first (`TypeError::AbstractPredicateNotFoldable`);
     /// this is the backstop that keeps the `ResourceCall` unbuildable.
     AbstractPredicateNotFoldable(String),
-    /// A `domain` declaring type parameters. Generics live on ADTs only: a
-    /// generic domain would need a *type* trigger to instantiate its axioms, and
-    /// Silver has no syntax to write one.
-    GenericDomainUnsupported(String),
     /// A heap-dependent function called inside a `forall` body. Its snapshot
     /// (a frame-only `exhale`) would have to be taken *per instance*, over a footprint
     /// that may mention the binders — quantified permissions, which are not
@@ -32,10 +28,6 @@ impl fmt::Display for TranslationError {
                 f,
                 "predicate `{name}` has no body: it cannot be folded, unfolded, or used in `unfolding`"
             ),
-            TranslationError::GenericDomainUnsupported(name) => write!(
-                f,
-                "domain `{name}` declares type parameters: generic domains are not supported, declare an `adt` instead"
-            ),
             TranslationError::HeapDepFunctionInQuantifier(name) => write!(
                 f,
                 "heap-dependent function `{name}` called inside a `forall`: a quantifier body must be heap-free (this needs quantified permissions)"
@@ -51,9 +43,7 @@ impl TranslationError {
     pub fn is_unsupported(&self) -> bool {
         matches!(
             self,
-            TranslationError::Unsupported(_)
-                | TranslationError::GenericDomainUnsupported(_)
-                | TranslationError::HeapDepFunctionInQuantifier(_)
+            TranslationError::Unsupported(_) | TranslationError::HeapDepFunctionInQuantifier(_)
         )
     }
 }

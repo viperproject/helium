@@ -1,4 +1,5 @@
-use crate::dhash::HashMap;
+use crate::dhash::{HashMap, HashSet};
+use crate::verify::type_triggers::{TypeIndex, type_trigger_matches};
 
 use crate::verify::cert::PermRecipe;
 use crate::vmir::display::VmirDisplay;
@@ -439,7 +440,13 @@ fn eval_pure_inst(
             {
                 let name = ctx.member_name(fc.function);
                 let tok = ctx.alloc.fn_pre_token(fc.function, &name);
-                let tok_id = ctx.add(Symbolic::FuncApp(tok, Box::new([]), args.into()));
+                // The token carries the call's type arguments: a precondition holds
+                // per instantiation, so `f<Int>(x)` must not release `f<Bool>(x)`.
+                let tok_id = ctx.add(Symbolic::FuncApp(
+                    tok,
+                    fc.type_args.clone().into(),
+                    args.into(),
+                ));
                 ctx.assume_token_guarded(tok_id, pc_lits.iter().rev().copied());
             }
             let recipe = if ctx.recipe.is_some() {
@@ -493,7 +500,7 @@ fn eval_pure_inst(
                 if let Some(g_pre) = g_pre {
                     let tok = rb.emit(AxiomPure::App {
                         func: g_pre,
-                        type_args: Vec::new(),
+                        type_args: fc.type_args.clone(),
                         args,
                     });
                     // The callee-internal pc of *this* call, in recipe space: the
@@ -1928,12 +1935,53 @@ fn eval_from_snap(
     Ok(out)
 }
 
+/// Assume one **ground** axiom body: evaluate it into the e-graph and merge its
+/// boolean with `true`. A `forall` in it becomes its own lazy-instantiation node.
+fn assume_ground_axiom(
+    ctx: &mut VerifyContext<'_>,
+    body: &vmir::FunctionBody,
+) -> Result<(), VerifyError> {
+    let mut state = EvalState::new();
+    for inst in &body.insts {
+        match &inst.kind {
+            InstKind::Pure(ty, pi) => {
+                // Axiom bodies are heap-free and trusted — no `Deref`, so the
+                // path condition is irrelevant here.
+                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &[], None)?;
+                state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Assume(val) => {
+                let id = state.get_val(ctx, val);
+                let true_ = expr!(ctx, true);
+                ctx.union(id, true_);
+                ctx.egraph.rebuild();
+            }
+            // An axiom body is never verified — a stray obligation
+            // (there are none today: callees are precondition-free)
+            // would be skipped, and heap insts cannot occur.
+            InstKind::Assert(_) => {}
+            _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
+        }
+    }
+    let res = state.get_val(ctx, &body.res);
+    let true_ = expr!(ctx, true);
+    ctx.union(res, true_);
+    ctx.egraph.rebuild();
+    Ok(())
+}
+
 /// Axiomatize the state: make every domain axiom's fact available to the unit
-/// about to be verified. An axiom body is evaluated into the e-graph and its
-/// boolean merged with `true` up front — domains are monomorphic, so there is no
-/// type-σ instantiation; quantification over *values* is a `forall` in the body,
-/// which becomes its own lazy-instantiation rule below. Axiom bodies are trusted
-/// — no obligations (div-by-zero, deref permission) are checked on them.
+/// about to be verified. A ground axiom's body is evaluated into the e-graph and
+/// its boolean merged with `true` up front; quantification over *values* is a
+/// `forall` in the body, which becomes its own lazy-instantiation rule below.
+///
+/// A **generic** axiom (`ty_params > 0`) holds at every instance of its type
+/// parameters. It is not evaluated as written; its `ty_triggers` are matched
+/// against `appearing_types` (the types of this unit, see `verify::unit_types`),
+/// and each distinct assignment found instantiates the axiom body at those types
+/// into a ground axiom, assumed like any other. A group fires only if all of its
+/// patterns match. Axiom bodies are trusted — no obligations (div-by-zero, deref
+/// permission) are checked on them.
 ///
 /// Invariant: the eager ground-axiom evaluation below only ever sees **nullary**
 /// quantifier occurrences — axioms are closed and `let` is rejected in pure
@@ -1941,7 +1989,11 @@ fn eval_from_snap(
 /// captures enter the e-graph when an outer instance's body is built
 /// (`rewrite::build_instance`) or while evaluating a hosting method/resource body,
 /// never eagerly here.
-fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result<(), VerifyError> {
+fn assume_axioms(
+    ctx: &mut VerifyContext<'_>,
+    program: &vmir::Program,
+    appearing_types: &HashSet<Type>,
+) -> Result<(), VerifyError> {
     // One rule instantiates every `forall` in the program: quantifiers are
     // e-nodes (data), not rules, so one generic rule suffices — and a `forall`
     // materialized *during* saturation (by an outer instantiation, or by a
@@ -1954,36 +2006,23 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
     let table = std::sync::Arc::clone(ctx.alloc.quant_table());
     ctx.axiom_rules
         .push(crate::verify::rewrite::forall_rule(table));
+    // Bucketed once, shared by every axiom.
+    let index = TypeIndex::new(appearing_types);
     for decl in program.decls.iter() {
         let vmir::Declaration::Axiom(ax) = decl else {
             continue;
         };
-        let mut state = EvalState::new();
-        for inst in &ax.body.insts {
-            match &inst.kind {
-                InstKind::Pure(ty, pi) => {
-                    // Axiom bodies are heap-free and trusted — no `Deref`, so the
-                    // path condition is irrelevant here.
-                    let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &[], None)?;
-                    state.push_val(id, ty.clone(), None);
-                }
-                InstKind::Assume(val) => {
-                    let id = state.get_val(ctx, val);
-                    let true_ = expr!(ctx, true);
-                    ctx.union(id, true_);
-                    ctx.egraph.rebuild();
-                }
-                // An axiom body is never verified — a stray obligation
-                // (there are none today: callees are precondition-free)
-                // would be skipped, and heap insts cannot occur.
-                InstKind::Assert(_) => {}
-                _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
+
+        // A generic axiom holds at every instance of its type parameters, but only
+        // the instances its type triggers find among the unit's types can matter
+        // to this unit. Each is assumed as the ground axiom it denotes.
+        if ax.ty_params.count() > 0 {
+            for tys in type_trigger_matches(ax.ty_params.count(), &ax.ty_triggers, &index) {
+                assume_ground_axiom(ctx, &ax.body.subst_generics(&tys))?;
             }
+        } else {
+            assume_ground_axiom(ctx, &ax.body)?;
         }
-        let res = state.get_val(ctx, &ax.body.res);
-        let true_ = expr!(ctx, true);
-        ctx.union(res, true_);
-        ctx.egraph.rebuild();
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`
     // guarantees a function only calls functions verified earlier, so every
@@ -2126,6 +2165,7 @@ pub(crate) fn prepare_body(
             // identity-wise, so `inst.pc`'s literals transfer directly.
             out.push(AxiomInst::Token {
                 func: alloc.fn_pre_token(fc.function, &names(fc.function)),
+                type_args: fc.type_args.clone(),
                 args,
                 guards: inst.pc.conds.clone(),
             });
@@ -2410,7 +2450,8 @@ pub(crate) fn verify_method(
 ) -> Result<(), VerifyError> {
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
-    assume_axioms(&mut ctx, program)?;
+    let appearing_types = crate::verify::unit_types::method_types(program, method);
+    assume_axioms(&mut ctx, program, &appearing_types)?;
     let mut state = EvalState::new();
     let mut snap = Snapshotter::from_env(method_name);
     snap.snapshot(&ctx, &[], "init", None);
@@ -2525,7 +2566,8 @@ pub(crate) fn verify_resource(
 
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
-    assume_axioms(&mut ctx, program)?;
+    let appearing_types = crate::verify::unit_types::resource_types(program, resource);
+    assume_axioms(&mut ctx, program, &appearing_types)?;
     // The certificate recipe is built by the walk itself: each `acc` records a
     // footprint slot, `Deref`s resolve through chunk provenance. Installed
     // after `assume_axioms` so axiom bodies don't mirror into the recipe.
@@ -2639,7 +2681,8 @@ pub(crate) fn verify_function(
 
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
-    assume_axioms(&mut ctx, program)?;
+    let appearing_types = crate::verify::unit_types::function_types(program, function);
+    assume_axioms(&mut ctx, program, &appearing_types)?;
     // The certificate recipe is built by the walk itself (single pass): only the
     // limited-twin substitution set is fixed up front. The exported post is not
     // recognized out of the walk at all -- it is built from the declaration's

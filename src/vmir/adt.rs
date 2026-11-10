@@ -3,8 +3,10 @@ use crate::vmir::display::VmirDisplay;
 use lasso::Spur;
 use std::fmt::{self, Display, Formatter};
 
-/// The type-parameter arity of a generic declaration. ADTs are the only generic
-/// declarations: domains, functions, methods and resources are monomorphic.
+/// The type-parameter arity of a generic declaration: an ADT, a domain, a domain
+/// function or a domain axiom. Methods, resources and Silver functions are
+/// monomorphic. A domain function or axiom is generic over only the parameters
+/// its signature / body actually mentions, renumbered `0..n`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TyParams(usize);
 

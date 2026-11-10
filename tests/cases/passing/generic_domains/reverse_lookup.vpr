@@ -1,0 +1,6 @@
+// The program never names `B`: its instance comes from the axiom mentioning `a`.
+domain A[T] { function a(x: T): Int }
+
+domain B[U, V] { axiom ax { forall u: U :: { a(u) } a(u) == 0 } }
+
+method m() { assert a(3) == 0 }

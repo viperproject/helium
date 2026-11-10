@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{Inst, MemberId, Type, Val};
+use crate::vmir::{Inst, MemberId, TyParams, Type, Val};
 use lasso::Spur;
 use std::fmt::{self, Display, Formatter};
 
@@ -19,6 +19,7 @@ use std::fmt::{self, Display, Formatter};
 pub struct Function {
     pub name: Spur,
     pub params: Params,
+    pub ty_params: TyParams,
     pub ret: Type,
     /// The function's definition, when it has a body. `None` ⟹ abstract /
     /// uninterpreted. A function with a body and contracts assumes `f#requires`
@@ -202,11 +203,12 @@ impl Display for VmirDisplay<'_, &'_ Params> {
 impl<'a> Display for VmirDisplay<'a, &'a Function> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let name = self.interner.resolve(&self.item.name);
+        let ty_params = &self.item.ty_params;
         let params = &self.item.params;
         let ret = &self.item.ret;
         write!(
             f,
-            "function {name}{} -> {}",
+            "function {name}{ty_params}{} -> {}",
             self.with(params),
             self.with(ret)
         )?;

@@ -1,0 +1,4 @@
+// `E[Int]` and `E[Bool]` are different types.
+domain E[T] { function mk(): E[T] }
+
+method m(a: E[Int], b: E[Bool]) { assert a == b }

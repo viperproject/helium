@@ -199,6 +199,7 @@ impl FunctionTranslator<'_, Metaed> {
                         vmir::Function {
                             name,
                             params: params.clone().into(),
+                            ty_params: 0.into(),
                             ret: vmir::Type::Bool,
                             body: Some(body),
                             requires: None,
@@ -289,6 +290,7 @@ impl FunctionTranslator<'_, Metaed> {
                 vmir::Function {
                     name,
                     params: ens_params.into(),
+                    ty_params: 0.into(),
                     ret: vmir::Type::Bool,
                     body: Some(body),
                     requires: requires_link(ens_snap),
@@ -363,6 +365,7 @@ impl FunctionTranslator<'_, Metaed> {
             vmir::Function {
                 name,
                 params: fn_params.into(),
+                ty_params: 0.into(),
                 ret,
                 body,
                 requires: requires_link(contract_snap),

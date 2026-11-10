@@ -2,6 +2,7 @@ mod adt;
 mod analyze;
 mod domain;
 mod function;
+mod generics;
 mod heap;
 mod inst;
 mod method;
@@ -24,6 +25,7 @@ pub use domain::{Axiom, Domain};
 pub use function::{
     Args, ContractArg, ContractCall, Function, FunctionBody, FunctionCall, Params, Requires,
 };
+pub(crate) use generics::compaction;
 pub use inst::{Inst, InstKind, PathConds, Polarity};
 pub use method::{Block, BlockId, Method, Preds};
 pub use quant::{Forall, QuantTrigger, TrigHead, TrigTerm};
