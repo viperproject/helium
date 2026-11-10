@@ -25,6 +25,17 @@ pub(crate) struct AdtInfo {
     pub dtor_sem: HashMap<(Spur, Spur), (vmir::MemberId, usize, usize)>,
 }
 
+/// A domain function's lowered signature, generic over only the domain
+/// parameters it mentions (`Generic(0..ty_params)`, in order of first
+/// occurrence). Recorded in `meta`; a call site matches it against the actual
+/// argument / result types to recover the call's type arguments.
+#[derive(Clone)]
+pub(crate) struct DomainFnSig {
+    pub params: Vec<vmir::Type>,
+    pub ret: vmir::Type,
+    pub ty_params: usize,
+}
+
 /// A member's contract ids (`#requires` / `#ensures`), absent when the member
 /// omits that clause. For a **method** both are Resource ids. For a **function**
 /// they are boolean Function ids, except a heap-dependent function's
@@ -71,6 +82,9 @@ pub(crate) struct TranslationContext<'a> {
     /// domain's parameters, in declaration order); empty everywhere else.
     /// Set and cleared by `DomainTranslator::define`.
     pub(crate) decl_generics: Vec<Spur>,
+    /// Each domain function's signature, by id. Silver functions and ADT
+    /// constructors have no entry (a Silver function is monomorphic).
+    pub(crate) domain_fn_sigs: HashMap<vmir::MemberId, DomainFnSig>,
 }
 
 impl<'a> TranslationContext<'a> {
@@ -84,6 +98,7 @@ impl<'a> TranslationContext<'a> {
             adt: AdtInfo::default(),
             groups: Rodeo::new(),
             decl_generics: Vec::new(),
+            domain_fn_sigs: HashMap::default(),
         }
     }
 

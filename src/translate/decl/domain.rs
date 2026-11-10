@@ -14,6 +14,7 @@ use std::marker::PhantomData;
 
 use lasso::Spur;
 
+use crate::translate::context::DomainFnSig;
 use crate::translate::lower_type;
 use crate::translate::{DeclSlot, Declarator, Definer};
 use crate::translate::{Declared, Metaed, TranslationContext, TranslationError, pure_exp};
@@ -75,8 +76,37 @@ impl<'a> DomainTranslator<'a, Declared> {
         }
     }
 
-    /// No `name_map`-dependent metadata to publish.
-    pub(crate) fn meta(self, _ctx: &mut TranslationContext<'_>) -> DomainTranslator<'a, Metaed> {
+    /// Publish each domain function's lowered signature, so a call site (in any
+    /// body, whatever order `define` runs in) can recover the instantiation.
+    pub(crate) fn meta(self, ctx: &mut TranslationContext<'_>) -> DomainTranslator<'a, Metaed> {
+        let domain_params: Vec<Spur> = self.src.type_params.iter().map(|i| i.0).collect();
+        for df in &self.src.functions {
+            let mut params: Vec<vmir::Type> = df
+                .params
+                .iter()
+                .map(|p| lower_type(&ctx.name_map, &domain_params, &p.ty))
+                .collect();
+            let mut ret = lower_type(&ctx.name_map, &domain_params, &df.ret);
+            // Generic over only the parameters the signature mentions,
+            // renumbered `0..k` in order of first occurrence.
+            let mut order = Vec::new();
+            params.iter().for_each(|t| t.generics_in_order(&mut order));
+            ret.generics_in_order(&mut order);
+            let compact = vmir::compaction(&order, domain_params.len());
+            params
+                .iter_mut()
+                .for_each(|t| *t = t.subst_generics(&compact));
+            ret = ret.subst_generics(&compact);
+            let id = ctx.name_map[&df.name.0];
+            ctx.domain_fn_sigs.insert(
+                id,
+                DomainFnSig {
+                    params,
+                    ret,
+                    ty_params: order.len(),
+                },
+            );
+        }
         DomainTranslator {
             src: self.src,
             silver_name: self.silver_name,
@@ -106,29 +136,15 @@ impl DomainTranslator<'_, Metaed> {
             },
         );
         for (df, fslot) in self.src.functions.iter().zip(self.fn_slots) {
-            let mut params: Vec<vmir::Type> = df
-                .params
-                .iter()
-                .map(|p| lower_type(&ctx.name_map, &domain_params, &p.ty))
-                .collect();
-            let mut ret = lower_type(&ctx.name_map, &domain_params, &df.ret);
-            // Generic over only the parameters the signature mentions.
-            let mut order = Vec::new();
-            params.iter().for_each(|t| t.generics_in_order(&mut order));
-            ret.generics_in_order(&mut order);
-            let compact = vmir::compaction(&order, declared);
-            params
-                .iter_mut()
-                .for_each(|t| *t = t.subst_generics(&compact));
-            ret = ret.subst_generics(&compact);
+            let sig = ctx.domain_fn_sigs[&ctx.name_map[&df.name.0]].clone();
             let fn_name = definer.intern_name(ctx.interner.resolve(&df.name.0));
             definer.define_function(
                 fslot,
                 vmir::Function {
                     name: fn_name,
-                    params: params.into(),
-                    ty_params: order.len().into(),
-                    ret,
+                    params: sig.params.into(),
+                    ty_params: sig.ty_params.into(),
+                    ret: sig.ret,
                     body: None,
                     requires: None,
                     ensures: None,
