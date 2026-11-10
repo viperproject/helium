@@ -1,4 +1,4 @@
-use crate::vmir::{FunctionBody, TyParams, Type};
+use crate::vmir::{FunctionBody, TyParams, Type, compaction};
 use crate::vmir::display::VmirDisplay;
 use std::fmt::{self, Display, Formatter};
 
@@ -23,10 +23,10 @@ pub struct Domain {
 /// checked on them. Quantification over *values* is an inline
 /// [`Forall`](crate::vmir::Forall) step in the body. An axiom is generic over
 /// `ty_params` types (`Generic(0..n)`): the type parameters of the domain it came
-/// from. It holds at every instance. There is no type quantifier in the IR; the verifier picks the
-/// instances by matching the type arguments of the triggers of the axiom's
-/// top-level `forall` ([`Axiom::lone_forall`]). A generic axiom without one has
-/// no trigger to pick instances with, and is not supported.
+/// from, restricted to those its body mentions. It holds at every instance. There
+/// is no type quantifier in the IR: the verifier instantiates the axiom at every
+/// match of its `ty_triggers` among the types of a verification unit. Each trigger
+/// is a conjunction of type patterns that must bind all of `ty_params`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Axiom {
     pub name: Option<Spur>,
@@ -36,19 +36,64 @@ pub struct Axiom {
 }
 
 impl Axiom {
-    /// The axiom's `forall`, when the whole body is exactly that one quantifier
-    /// (`e0 := forall ..; result: e0`). A generic axiom must have this shape: the
-    /// quantifier's triggers are what bind its type parameters.
-    pub fn lone_forall(&self) -> Option<&crate::vmir::Forall> {
-        use crate::vmir::{Inst, InstKind, PureInst, Val};
-        match &self.body.insts[..] {
-            [
-                Inst {
-                    kind: InstKind::Pure(_, PureInst::Forall(q)),
-                    ..
-                },
-            ] if self.body.res == Val::Temp(0) => Some(q),
-            _ => None,
+    /// The axiom over `body`, which mentions the `declared` parameters of its domain
+    /// as `Generic(i)`. It is generic over the ones it mentions, renumbered `0..k`
+    /// in order of first occurrence, with the type triggers inferred from `body`.
+    /// Let `P` be the parameters mentioned, and `C` the non-bare types of the
+    /// values and bound variables of `body`:
+    /// 1. `P` empty: closed, no parameters and no trigger.
+    /// 2. Some types of `C` mention all of `P`: each is a trigger of its own.
+    /// 3. Otherwise one trigger: repeatedly the type of `C` that covers most
+    ///    uncovered parameters, then a bare pattern per parameter still uncovered.
+    pub fn infer(name: Option<Spur>, mut body: FunctionBody, declared: usize) -> Axiom {
+        let mut order = Vec::new();
+        body.for_each_type_mut(&mut |t| t.generics_in_order(&mut order));
+        let mut c = Vec::new();
+        body.value_types(&mut c);
+        c.retain(|t| !matches!(t, Type::Generic(_)));
+        c.sort_unstable();
+        c.dedup();
+        let gens: Vec<Vec<usize>> = c
+            .iter()
+            .map(|t| {
+                let mut g = Vec::new();
+                t.generics_in_order(&mut g);
+                g
+            })
+            .collect();
+        let mut triggers: Vec<Vec<Type>> = Vec::new();
+        if !order.is_empty() {
+            triggers.extend(
+                (0..c.len())
+                    .filter(|&k| gens[k].len() == order.len())
+                    .map(|k| vec![c[k].clone()]),
+            );
+            if triggers.is_empty() {
+                let mut uncovered = order.clone();
+                let gain = |k: usize, un: &[usize]| gens[k].iter().filter(|i| un.contains(i)).count();
+                let mut group = Vec::new();
+                while let Some(k) = (0..c.len())
+                    .max_by_key(|&k| gain(k, &uncovered))
+                    .filter(|&k| gain(k, &uncovered) > 0)
+                {
+                    group.push(c[k].clone());
+                    uncovered.retain(|i| !gens[k].contains(i));
+                }
+                group.extend(uncovered.into_iter().map(Type::Generic));
+                triggers.push(group);
+            }
+        }
+        let compact = compaction(&order, declared);
+        body.for_each_type_mut(&mut |t| *t = t.subst_generics(&compact));
+        triggers
+            .iter_mut()
+            .flatten()
+            .for_each(|t| *t = t.subst_generics(&compact));
+        Axiom {
+            name,
+            body,
+            ty_params: order.len().into(),
+            ty_triggers: triggers,
         }
     }
 }

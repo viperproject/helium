@@ -5,9 +5,9 @@
 //!
 //! Domains may be **generic**. VMIR has no link between a domain and its
 //! functions, so each function is generic over only the domain parameters its
-//! signature mentions, renumbered `0..k` (`Generic(i)`). An axiom keeps the
-//! domain's full arity: its type trigger is the domain's own type
-//! `D<?0, .., ?n-1>`, which binds every parameter.
+//! signature mentions, renumbered `0..k` (`Generic(i)`). An axiom is likewise
+//! generic over the parameters its body mentions, with its type triggers
+//! inferred from the body (`vmir::Axiom::infer`).
 
 use crate::dhash::HashMap;
 use std::marker::PhantomData;
@@ -158,13 +158,6 @@ impl DomainTranslator<'_, Metaed> {
         let env = HashMap::default();
         // The domain's parameters are in scope for every axiom body.
         ctx.decl_generics = domain_params;
-        // Every axiom of the domain is triggered by the domain's own type, at the
-        // domain's own parameters: `D<?0, .., ?n-1>`. The axiom holds at each
-        // instance of `D` the program mentions.
-        let domain_ty = vmir::Type::Domain(
-            ctx.name_map[&self.silver_name],
-            (0..declared).map(vmir::Type::Generic).collect(),
-        );
         let mut result = Ok(());
         for (i, (ax, aslot)) in self.src.axioms.iter().zip(self.axiom_slots).enumerate() {
             let body = match pure_exp::lower_axiom_body(ctx, &env, &ax.exp) {
@@ -174,14 +167,6 @@ impl DomainTranslator<'_, Metaed> {
                     break;
                 }
             };
-            // Generic over all of the domain's parameters, not just those the
-            // body mentions: the trigger below binds every one of them.
-            let axiom = vmir::Axiom {
-                name: None,
-                body,
-                ty_params: declared.into(),
-                ty_triggers: vec![vec![domain_ty.clone()]],
-            };
             // The axiom's carried name matches its slot registration: the
             // Silver name when given, the generated `{domain}#axiom{i}` slot
             // name otherwise.
@@ -190,13 +175,7 @@ impl DomainTranslator<'_, Metaed> {
                 None => format!("{name_str}#axiom{i}"),
             };
             let name = definer.intern_name(&ax_name);
-            definer.define_axiom(
-                aslot,
-                vmir::Axiom {
-                    name: Some(name),
-                    ..axiom
-                },
-            );
+            definer.define_axiom(aslot, vmir::Axiom::infer(Some(name), body, declared));
         }
         ctx.decl_generics.clear();
         result

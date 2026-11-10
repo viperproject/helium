@@ -20,26 +20,6 @@ fn run(input: &str) -> vmir::Program {
     translate(&typed).expect("translation failed")
 }
 
-/// Run the pipeline through translation, expecting it to fail, and return the
-/// first `TranslationError`.
-fn run_err(input: &str) -> TranslationError {
-    let mut program = viper_parser::vpr_program(input).expect("parse failed");
-    let mut ident_collector = IdentCollector::default();
-    program.walk_mut(&mut ident_collector);
-    let interner = ident_collector.finalize();
-    let mut globals_collector = GlobalsCollector::new(&interner);
-    program.walk(&mut globals_collector);
-    let globals = globals_collector.finalize().expect("globals error");
-    disambiguate(&mut program, &interner, &globals).expect("disambiguation failed");
-    inline_macros(&mut program, &interner).expect("macro inlining failed");
-    let typed = typecheck_program(&mut program, interner, &globals).expect("typecheck failed");
-    translate(&typed)
-        .expect_err("expected translation to fail")
-        .into_iter()
-        .next()
-        .expect("expected at least one error")
-}
-
 #[test]
 fn translates_number_pred_simpler() {
     let input = r#"
@@ -491,10 +471,9 @@ function len(l: List[Int]): Int
 }
 
 #[test]
-fn generic_domain_functions_use_only_mentioned_params_and_axioms_all() {
-    // A domain function is generic over only the domain parameters it mentions,
-    // renumbered from 0. An axiom keeps the domain's arity and is triggered by the
-    // domain's own type.
+fn generic_domain_members_use_only_mentioned_params() {
+    // A domain function or axiom is generic over only the domain parameters it
+    // mentions, renumbered from 0; an axiom's type triggers are inferred.
     let p = run(
         r#"
 domain Two[A, B] {
@@ -514,42 +493,20 @@ domain Two[A, B] {
     assert_eq!(arity("Two"), 2);
     assert_eq!(arity("second"), 1);
     assert_eq!(arity("zero"), 0);
-    assert_eq!(arity("ax"), 2);
-    assert_eq!(arity("closed"), 2);
-    let two = p.id("Two").unwrap();
-    let vmir::Declaration::Axiom(ax) = &p.decls[p.id("ax").unwrap()] else {
-        unreachable!()
+    // `ax` mentions only `B` and no value has a non-bare type: one bare trigger.
+    assert_eq!(arity("ax"), 1);
+    // `closed` mentions no parameter: an ordinary axiom.
+    assert_eq!(arity("closed"), 0);
+    let ty_triggers = |name: &str| match &p.decls[p.id(name).unwrap()] {
+        vmir::Declaration::Axiom(a) => a.ty_triggers.clone(),
+        _ => unreachable!(),
     };
-    assert_eq!(
-        ax.ty_triggers,
-        vec![vec![vmir::Type::Domain(
-            two,
-            Box::new([vmir::Type::Generic(0), vmir::Type::Generic(1)])
-        )]]
-    );
+    assert_eq!(ty_triggers("ax"), vec![vec![vmir::Type::Generic(0)]]);
+    assert!(ty_triggers("closed").is_empty());
     let vmir::Declaration::Function(second) = &p.decls[p.id("second").unwrap()] else {
         unreachable!()
     };
     assert_eq!(second.ret, vmir::Type::Generic(0));
-}
-
-#[test]
-fn generic_axiom_without_forall_is_unsupported() {
-    // A generic axiom is instantiated through its quantifier's triggers; with no
-    // top-level `forall` there is nothing to match.
-    let err = run_err(
-        r#"
-domain Box[T] {
-    function emp(): Box[T]
-    function full(b: Box[T]): Bool
-    axiom empty_is_not_full { !full(emp()) }
-}
-"#,
-    );
-    assert_eq!(
-        err,
-        TranslationError::Unsupported("generic domain axiom without a top-level forall")
-    );
 }
 
 /// A heapless obligation (`assert`, division) carries the current check-in heap

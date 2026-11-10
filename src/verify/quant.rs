@@ -27,7 +27,7 @@ use crate::verify::declaration::{prepare_body, prepare_trig_term};
 use crate::verify::error::VerifyError;
 use crate::verify::func_registry::FuncRegistry;
 use crate::verify::lang::RecipeId;
-use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm};
+use crate::verify::rewrite::{AxiomInst, PreparedTerm};
 use crate::vmir::{self, InstKind, PureInst, Val};
 
 /// A compiled `forall` body: the pure steps, the boolean result, the binder arity,
@@ -44,29 +44,10 @@ pub(crate) struct QuantRecipe {
     /// arity of every `Symbolic::Forall` node naming this recipe.
     pub(crate) n_caps: usize,
     pub(crate) n_bound: usize,
-    /// The type arity: the recipe is generic over `Generic(0..n_ty)`, the type
-    /// parameters of the generic axiom it came from (0 for a ground quantifier).
-    /// A match must bind all of them — through a trigger's type arguments, or
-    /// from the node's payload when it is nested — before the body is built.
-    pub(crate) n_ty: usize,
     /// Alternative trigger groups; each group is a conjunctive multi-pattern.
     pub(crate) groups: Vec<Vec<PreparedTerm>>,
     pub(crate) insts: Vec<AxiomInst>,
     pub(crate) res: Val,
-}
-
-impl QuantRecipe {
-    /// Whether some trigger group's type arguments bind every one of the recipe's
-    /// type parameters. If none does, no match ever yields a complete type
-    /// substitution and the recipe can never be instantiated.
-    pub(crate) fn binds_all_type_params(&self) -> bool {
-        self.n_ty == 0
-            || self.groups.iter().any(|group| {
-                let mut seen = crate::dhash::HashSet::default();
-                group.iter().for_each(|t| t.collect_generics(&mut seen));
-                (0..self.n_ty).all(|i| seen.contains(&i))
-            })
-    }
 }
 
 /// The identity of a recipe: the canonicalized body **and** its triggers. Two
@@ -79,7 +60,6 @@ impl QuantRecipe {
 struct RecipeKey {
     n_caps: usize,
     n_bound: usize,
-    n_ty: usize,
     groups: Vec<Vec<PreparedTerm>>,
     insts: Vec<AxiomInst>,
     res: Val,
@@ -157,61 +137,6 @@ fn intern_insts(
     Ok(())
 }
 
-/// Record every `Generic(i)` a prepared body's type arguments mention.
-fn collect_inst_generics(insts: &[AxiomInst], out: &mut crate::dhash::HashSet<usize>) {
-    for inst in insts {
-        match inst {
-            AxiomInst::Val(AxiomPure::App { type_args, .. }) => {
-                type_args.iter().for_each(|t| t.collect_generics(out));
-            }
-            AxiomInst::Forall { ty_args, .. } => {
-                ty_args.iter().for_each(|t| t.collect_generics(out));
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Add a compiled recipe, deduplicating onto an existing identical one. Its type
-/// arity is derived from what it mentions.
-fn push_recipe(
-    table: &mut RecipeTable,
-    n_caps: usize,
-    n_bound: usize,
-    groups: Vec<Vec<PreparedTerm>>,
-    insts: Vec<AxiomInst>,
-    res: Val,
-) -> RecipeId {
-    let mut seen = crate::dhash::HashSet::default();
-    groups
-        .iter()
-        .flatten()
-        .for_each(|t| t.collect_generics(&mut seen));
-    collect_inst_generics(&insts, &mut seen);
-    let n_ty = seen.iter().max().map_or(0, |m| m + 1);
-    let key = RecipeKey {
-        n_caps,
-        n_bound,
-        n_ty,
-        groups: groups.clone(),
-        insts: insts.clone(),
-        res: res.clone(),
-    };
-    if let Some(&id) = table.by_key.get(&key) {
-        return id;
-    }
-    let id = table.recipes.push_and_get_key(QuantRecipe {
-        n_caps,
-        n_bound,
-        n_ty,
-        groups,
-        insts,
-        res,
-    });
-    table.by_key.insert(key, id);
-    id
-}
-
 /// Compile one `forall` and intern it, **innermost-first**: its nested `forall`s
 /// are interned first, so this body can name each of them by id (and read back its
 /// capture list) while compiling. Idempotent.
@@ -263,7 +188,28 @@ fn intern(
         })
         .collect();
     let res = rename(&q.body.res);
-    let id = push_recipe(table, n_caps, q.bound.len(), groups, insts, res);
+
+    let key = RecipeKey {
+        n_caps,
+        n_bound: q.bound.len(),
+        groups: groups.clone(),
+        insts: insts.clone(),
+        res: res.clone(),
+    };
+    let id = match table.by_key.get(&key) {
+        Some(&id) => id,
+        None => {
+            let id = table.recipes.push_and_get_key(QuantRecipe {
+                n_caps,
+                n_bound: q.bound.len(),
+                groups,
+                insts,
+                res,
+            });
+            table.by_key.insert(key, id);
+            id
+        }
+    };
     table.by_forall.insert(q.clone(), (id, free.into()));
     Ok(id)
 }

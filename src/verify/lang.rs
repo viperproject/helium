@@ -57,15 +57,7 @@ pub enum Symbolic {
     /// Instantiation adds the guarded clause
     /// `Ite(forall, body[caps, σ], true) == true`, so the instance is released only
     /// once this node merges `true`.
-    ///
-    /// The `Box<[Type]>` is the **type substitution** the node is already
-    /// instantiated at, in the numbering of its recipe's `Generic(i)`s. Empty for
-    /// a ground quantifier, and for a generic one that is still *open*: its
-    /// triggers pick the types (a top-level generic axiom). A quantifier nested
-    /// in a generic body is built with the enclosing instance's types, so it is
-    /// never open. Like a `FuncApp`'s types it lives in the payload, not in
-    /// children, so two instantiations are distinct nodes.
-    Forall(RecipeId, Box<[Type]>, Box<[Id]>),
+    Forall(RecipeId, Box<[Id]>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -120,7 +112,7 @@ impl Language for Symbolic {
             (FuncApp(id1, _, args1), FuncApp(id2, _, args2)) => {
                 id1 == id2 && args1.len() == args2.len()
             }
-            (Forall(r1, _, caps1), Forall(r2, _, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
+            (Forall(r1, caps1), Forall(r2, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
             _ => false,
         }
     }
@@ -135,7 +127,7 @@ impl Language for Symbolic {
             // Type args are in the payload, not children — only value args.
             FuncApp(_, _, ids) => ids,
             // The recipe is payload; the captures are the children.
-            Forall(_, _, caps) => caps,
+            Forall(_, caps) => caps,
         }
     }
 
@@ -147,7 +139,7 @@ impl Language for Symbolic {
             Ite(ids) => ids,
             RealCast(id) => std::slice::from_mut(id),
             FuncApp(_, _, ids) => ids,
-            Forall(_, _, caps) => caps,
+            Forall(_, caps) => caps,
         }
     }
 }
@@ -175,14 +167,7 @@ impl Display for Symbolic {
                     write!(f, "fn{}<{}>", id.0, args.join(", "))
                 }
             }
-            Symbolic::Forall(r, tys, _) => {
-                write!(f, "forall#{}", r.0)?;
-                if !tys.is_empty() {
-                    let args: Vec<String> = tys.iter().map(|t| t.to_string()).collect();
-                    write!(f, "<{}>", args.join(", "))?;
-                }
-                Ok(())
-            }
+            Symbolic::Forall(r, _) => write!(f, "forall#{}", r.0),
         }
     }
 }
