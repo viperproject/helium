@@ -321,7 +321,12 @@ impl RecipeBuilder {
     ) -> Val {
         let v = self.next_temp();
         self.steps
-            .push(RecipeStep::Inst(AxiomInst::Forall { recipe, caps }));
+            .push(RecipeStep::Inst(AxiomInst::Forall {
+                recipe,
+                caps,
+                // A recipe-time quantifier is ground (a method / resource body).
+                ty_args: Vec::new(),
+            }));
         v
     }
 

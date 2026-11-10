@@ -521,6 +521,25 @@ domain Two[A, B] {
     assert_eq!(second.ret, vmir::Type::Generic(0));
 }
 
+#[test]
+fn generic_axiom_without_forall_is_unsupported() {
+    // A generic axiom is instantiated through its quantifier's triggers; with no
+    // top-level `forall` there is nothing to match.
+    let err = run_err(
+        r#"
+domain Box[T] {
+    function emp(): Box[T]
+    function full(b: Box[T]): Bool
+    axiom empty_is_not_full { !full(emp()) }
+}
+"#,
+    );
+    assert_eq!(
+        err,
+        TranslationError::Unsupported("generic domain axiom without a top-level forall")
+    );
+}
+
 /// A heapless obligation (`assert`, division) carries the current check-in heap
 /// on its `Inst`; `assume` (no verification) and a heap-embedding `Deref` do not.
 #[test]

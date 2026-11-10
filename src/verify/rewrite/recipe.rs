@@ -15,8 +15,9 @@ use super::*;
 
 /// A pure step of a prepared body. Mirrors the `PureInst` subset legal in an
 /// axiom, with every callee resolved to its verifier `FuncId` up front (the
-/// applier has no registry access) and its type arguments ground (only ADTs are
-/// generic, and their instantiations are fixed at translation).
+/// applier has no registry access). Its type arguments are ground, except in the
+/// body of a generic axiom, where they mention `Generic(i)`: the instantiating
+/// type substitution replaces those when the instance is built.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum AxiomPure {
     Binary(BinOp, Val, Val),
@@ -42,6 +43,11 @@ pub(crate) enum AxiomInst {
     Forall {
         recipe: RecipeId,
         caps: Vec<Val>,
+        /// The types the nested quantifier is instantiated at, as types of the
+        /// *enclosing* body (`Generic(i)` is the enclosing instance's `i`-th type).
+        /// Substituted with the enclosing σ when the node is built, so an inner
+        /// quantifier of a generic axiom is never open. Empty for a ground one.
+        ty_args: Vec<Type>,
     },
     /// A callee's `f%pre(args)` presence token, materialized alongside the
     /// application it accompanies (the eval walk's `declaration.rs` counterpart
@@ -230,7 +236,7 @@ pub(crate) fn build_instance_vals(
     vals_seed: &[Id],
     changed: &mut Vec<Id>,
 ) -> Vec<Id> {
-    build_instance_vals_impl(egraph, insts, vals_seed, changed, None)
+    build_instance_vals_impl(egraph, insts, vals_seed, &[], changed, None)
 }
 
 /// [`build_instance_vals`] with the enclosing release gate, so a `g%pre` token
@@ -245,7 +251,21 @@ pub(crate) fn build_instance_vals_guarded(
     changed: &mut Vec<Id>,
     token_guard: Option<Id>,
 ) -> Vec<Id> {
-    build_instance_vals_impl(egraph, insts, vals_seed, changed, token_guard)
+    build_instance_vals_impl(egraph, insts, vals_seed, &[], changed, token_guard)
+}
+
+/// [`build_instance_vals_guarded`] for a **generic** body: `tys` is the type
+/// substitution σ (`Generic(i)` ↦ `tys[i]`) applied to every type argument the
+/// body mentions. Empty `tys` is the ground case.
+pub(crate) fn build_instance_vals_typed(
+    egraph: &mut EGraph<Symbolic, ConstFold>,
+    insts: &[AxiomInst],
+    vals_seed: &[Id],
+    tys: &[Type],
+    changed: &mut Vec<Id>,
+    token_guard: Option<Id>,
+) -> Vec<Id> {
+    build_instance_vals_impl(egraph, insts, vals_seed, tys, changed, token_guard)
 }
 
 /// [`build_instance_vals`] with an optional `token_guard` (see
@@ -255,9 +275,19 @@ pub(super) fn build_instance_vals_impl(
     egraph: &mut EGraph<Symbolic, ConstFold>,
     insts: &[AxiomInst],
     vals_seed: &[Id],
+    tys: &[Type],
     changed: &mut Vec<Id>,
     token_guard: Option<Id>,
 ) -> Vec<Id> {
+    // Instantiate a prepared type argument at σ. A ground body has no σ, and its
+    // type arguments pass through untouched.
+    let inst_tys = |tys_in: &[Type]| -> Box<[Type]> {
+        if tys.is_empty() {
+            tys_in.iter().cloned().collect()
+        } else {
+            tys_in.iter().map(|t| t.subst_generics(tys)).collect()
+        }
+    };
     let mut vals: Vec<Id> = vals_seed.to_vec();
     fn get(egraph: &mut EGraph<Symbolic, ConstFold>, vals: &[Id], v: &Val) -> Id {
         resolve_val(egraph, vals, v)
@@ -288,7 +318,7 @@ pub(super) fn build_instance_vals_impl(
                         type_args,
                         args,
                     } => {
-                        let tys: Box<[Type]> = type_args.iter().cloned().collect();
+                        let tys = inst_tys(type_args);
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
                     }
@@ -302,9 +332,13 @@ pub(super) fn build_instance_vals_impl(
                     changed.push(egraph.find(id));
                 }
             }
-            AxiomInst::Forall { recipe, caps } => {
+            AxiomInst::Forall {
+                recipe,
+                caps,
+                ty_args,
+            } => {
                 let caps: Box<[Id]> = caps.iter().map(|v| get(egraph, &vals, v)).collect();
-                let id = egraph.add(Symbolic::Forall(*recipe, caps));
+                let id = egraph.add(Symbolic::Forall(*recipe, inst_tys(ty_args), caps));
                 vals.push(id);
             }
             AxiomInst::Token { func, args, guards } => {

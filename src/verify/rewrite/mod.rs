@@ -23,6 +23,7 @@ pub(crate) use function::{function_post_rule, function_rule, post_rule};
 pub(crate) use memo::{Memo, ScratchScope, new_memo_unit, new_scope_id};
 pub(crate) use recipe::{
     AxiomInst, AxiomPure, build_instance_releasing_tokens, build_instance_vals_guarded,
+    build_instance_vals_typed,
 };
 pub(crate) use timing::take_rule_timing;
 
