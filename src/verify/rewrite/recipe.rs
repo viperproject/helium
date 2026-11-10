@@ -31,7 +31,7 @@ pub(crate) enum AxiomPure {
     Seq {
         elem_ty: Type,
         op: SeqOp,
-        args: Vec<Val>
+        args: Vec<Val>,
     },
     SeqLit {
         elem_ty: Type,

@@ -6,13 +6,13 @@
 //! precondition equality) never rides along into a caller — the caller re-derives
 //! whatever it needs itself. See the plan's Findings B/C.
 
-use egg::{EGraph, Id};
 use crate::verify::analysis::ConstFold;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::LocationKind;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{AxiomInst, AxiomPure};
 use crate::vmir::{MemberId, PermInst, PermVal, Polarity, Type, Val};
+use egg::{EGraph, Id};
 /// A (non-recursive) function's verified body as a **pure term recipe** — the
 /// definition `f(params) == <steps>[res]`, add-only. Unlike a certificate this
 /// imports **no e-classes**: the function unfold rule rebuilds `steps` at each

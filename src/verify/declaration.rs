@@ -1,6 +1,7 @@
 use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
+use crate::vmir::SeqOp;
 use crate::vmir::display::VmirDisplay;
 use crate::{
     verify::{
@@ -25,7 +26,6 @@ use crate::{
         Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
-use crate::vmir::SeqOp;
 
 struct EvalState {
     vals: Vec<egg::Id>,
@@ -701,7 +701,10 @@ fn eval_pure_inst(
             } else {
                 None
             };
-            (ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids)), recipe)
+            (
+                ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids)),
+                recipe,
+            )
         }
         PureInst::SeqLit { elem_ty, elem } => {
             let id = state.get_val(ctx, elem);
@@ -715,7 +718,10 @@ fn eval_pure_inst(
             } else {
                 None
             };
-            (ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), id)), recipe)
+            (
+                ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), id)),
+                recipe,
+            )
         }
     })
 }
@@ -3044,16 +3050,33 @@ fn inst_obligations(
             vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
         }
 
-        InstKind::Pure(_, PureInst::Seq { elem_ty, op, args: val }) if op.has_bound_check() => {
+        InstKind::Pure(
+            _,
+            PureInst::Seq {
+                elem_ty,
+                op,
+                args: val,
+            },
+        ) if op.has_bound_check() => {
             // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
             let s = state.get_val(ctx, &val[0]);
             let i = state.get_val(ctx, &val[1]);
-            let len = ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), SeqOp::Len, Box::new([s])));
+            let len = ctx.add(Symbolic::Seq(
+                Box::new(elem_ty.clone()),
+                SeqOp::Len,
+                Box::new([s]),
+            ));
             let lower = expr!(ctx, not({ i } <i 0));
-            let upper = expr!(ctx, { i } <i { len });
+            let upper = expr!(ctx, { i } < i { len });
             vec![
-                 (lower, VerifyError::SideCondition("sequence index may be negative")),
-                 (upper, VerifyError::SideCondition("sequence index may be out of bounds")),
+                (
+                    lower,
+                    VerifyError::SideCondition("sequence index may be negative"),
+                ),
+                (
+                    upper,
+                    VerifyError::SideCondition("sequence index may be out of bounds"),
+                ),
             ]
         }
         _ => vec![],

@@ -3,18 +3,23 @@ use itertools::Itertools;
 use lasso::Spur;
 use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
 
-use crate::viper::{self, globals::{DtorInfo, GlobalSignature, Globals}, interner::Interner, typed::{
-    self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MethodBodyExt, MethodEnsuresExt,
-    PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind,
-    SeqIndexOp, Type, TypedIdent, TypedPureExp, UnOp,
-}};
+use crate::viper::{
+    self,
+    globals::{DtorInfo, GlobalSignature, Globals},
+    interner::Interner,
+    typed::{
+        self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MethodBodyExt, MethodEnsuresExt,
+        PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp, SpatialExp,
+        SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
+    },
+};
 
 mod error;
 mod lattice;
 
+use crate::viper::typed::BuiltinCollection;
 pub use error::TypeError;
 use lattice::{ViperTcType, type_to_tc};
-use crate::viper::typed::BuiltinCollection;
 // ==========================================
 // 3. Context types
 // ==========================================
@@ -89,7 +94,7 @@ fn check_type(
             args.iter()
                 .try_for_each(|a| check_type(a, globals, interner, is_param))
         }
-        P::Seq(ty) => check_type(ty, globals, interner, is_param)
+        P::Seq(ty) => check_type(ty, globals, interner, is_param),
     }
 }
 
@@ -611,7 +616,9 @@ fn collect_generics(ty: &Type, acc: &mut Vec<Spur>) {
             }
         }
         Type::Collection(BuiltinCollection::Seq(ty)) => {
-            if let Type::Generic(generic) = **ty && !acc.contains(&generic.0) {
+            if let Type::Generic(generic) = **ty
+                && !acc.contains(&generic.0)
+            {
                 acc.push(generic.0);
             }
         }
@@ -892,11 +899,11 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     }
                 }
             }
-            ExpKind::Acc(_) |
-            ExpKind::ForPerm(_, _, _) |
-            ExpKind::MagicWand(_, _) |
-            ExpKind::HeapUpdate(_, _, _) |
-            ExpKind::Unsupported(_) => {
+            ExpKind::Acc(_)
+            | ExpKind::ForPerm(_, _, _)
+            | ExpKind::MagicWand(_, _)
+            | ExpKind::HeapUpdate(_, _, _)
+            | ExpKind::Unsupported(_) => {
                 return Err(TypeError::Other(format!(
                     "unsupported pure expression: {:?}",
                     exp.kind
@@ -1003,7 +1010,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
             viper::UnOp::Cardinality => {
                 let inner_key = self.constrain_pure(inner)?;
-                self.tc.impose(inner_key.concretizes_explicit(ViperTcType::Seq))?;
+                self.tc
+                    .impose(inner_key.concretizes_explicit(ViperTcType::Seq))?;
                 self.tc.impose(key.concretizes_explicit(ViperTcType::Int))?;
             }
         }
@@ -1084,7 +1092,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc.impose(rk.concretizes_explicit(ViperTcType::Int))?;
                 self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
                 let elem = self.tc.get_child_key(key, 0)?;
-                self.tc.impose(elem.concretizes_explicit(ViperTcType::Int))?;
+                self.tc
+                    .impose(elem.concretizes_explicit(ViperTcType::Int))?;
             }
             _ => {
                 return Err(TypeError::Other(format!(
@@ -1480,14 +1489,12 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     viper::IndexOp::Index(i) => SeqIndexOp::Index(self.lower_pure::<Ext>(i)?),
                     viper::IndexOp::UpperBound(n) => SeqIndexOp::Take(self.lower_pure::<Ext>(n)?),
                     viper::IndexOp::LowerBound(n) => SeqIndexOp::Drop(self.lower_pure::<Ext>(n)?),
-                    viper::IndexOp::Range(a, b) => SeqIndexOp::Slice(
-                        self.lower_pure::<Ext>(a)?,
-                        self.lower_pure::<Ext>(b)?,
-                    ),
-                    viper::IndexOp::Assign(i, v) => SeqIndexOp::Update(
-                        self.lower_pure::<Ext>(i)?,
-                        self.lower_pure::<Ext>(v)?,
-                    ),
+                    viper::IndexOp::Range(a, b) => {
+                        SeqIndexOp::Slice(self.lower_pure::<Ext>(a)?, self.lower_pure::<Ext>(b)?)
+                    }
+                    viper::IndexOp::Assign(i, v) => {
+                        SeqIndexOp::Update(self.lower_pure::<Ext>(i)?, self.lower_pure::<Ext>(v)?)
+                    }
                 };
                 Ok(PureExpKind::SeqIndex(base, op))
             }
@@ -2101,9 +2108,10 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
                 .map(|a| type_with_generics(a, type_params))
                 .collect(),
         ),
-        P::Seq(t) => Type::Collection(BuiltinCollection::Seq(Box::new(
-            type_with_generics(t, type_params),
-        )))
+        P::Seq(t) => Type::Collection(BuiltinCollection::Seq(Box::new(type_with_generics(
+            t,
+            type_params,
+        )))),
     }
 }
 
@@ -3626,9 +3634,10 @@ function TryFromBytes_impl(Self$0_trait: Type): Bool
     #[test]
     fn seq_with_wrong_type_argument_count_rejected() {
         for decl in ["method m(x: Seq)", "method m(x: Seq[Int, Int])"] {
-            assert_rejected(decl, |e| {
-                matches!(e, TypeError::WrongTypeArgCount { name, expected: 1, .. } if name == "Seq")
-            });
+            assert_rejected(
+                decl,
+                |e| matches!(e, TypeError::WrongTypeArgCount { name, expected: 1, .. } if name == "Seq"),
+            );
         }
     }
 

@@ -307,10 +307,10 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
             continue;
         }
         if matches!(node, Symbolic::Seq(..)) {
-            continue
+            continue;
         }
         if matches!(node, Symbolic::SeqLit(..)) {
-            continue
+            continue;
         }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {
             eprintln!(
