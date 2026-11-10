@@ -1,0 +1,13 @@
+// The read sits under an implication whose antecedent does not imply that
+// `l` was reached.
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 1
+    label l
+  }
+  assert d ==> old[l](x.f) == 1
+}

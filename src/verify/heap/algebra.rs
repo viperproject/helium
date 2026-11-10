@@ -675,10 +675,16 @@ pub(crate) fn heap_union(
     } else {
         out = out.with_chunk(kind, chunk2);
     }
-    // `heap_union` runs per `inhale`, inside a block's body walk, so the heap
-    // exists on the block's cube.
-    let block = ctx.current_cube().to_vec();
-    assume_location_axioms(ctx, &out, &block);
+    // The heap exists on the effective pc of the instruction that produces it,
+    // not on the ambient block cube: an `inhale` in a join phase — a loop head
+    // re-inhaling its invariant — has no ambient cube at all, and the loop's
+    // reach condition only in `pc_lits`. Callers pass the effective pc, which
+    // in a block body contains the cube; the meet states each literal once.
+    let Some(heap_pc) = cube_meet(ctx, ctx.current_cube(), pc_lits) else {
+        // The instruction's pc contradicts the cube: nothing is reachable here.
+        return out;
+    };
+    assume_location_axioms(ctx, &out, &heap_pc);
     out
 }
 
@@ -1027,27 +1033,15 @@ pub(crate) fn heap_subtract(
 
 /// Where a [`heap_subtract_inner`] call sits in the ground-miss retry cycle.
 ///
-/// A miss first asks whether the demand is provably zero, then saturates and tries
-/// the whole lookup once more. The second pass is what makes a recipe-rebuilt
-/// address meet its chunk — but the *saturation* it depends on is the one
-/// [`VerifyContext::prove_under_pc`] runs at its own `saturate` tier while failing
-/// that zero-demand probe, not the explicit call on the retry line, which is
-/// normally a no-op against an already-clean graph.
-///
-/// So the retry must still happen, while the zero-demand probe must not be re-asked
-/// for nothing: an unchanged graph cannot give a different verdict, and a failed
-/// probe is **not** memoized ([`VerifyContext::prove_under_pc`] records only
-/// successes), so re-asking pays the full ladder — clone and all — a second time.
+/// A miss saturates and tries the whole lookup once more, and only that second
+/// pass asks the pc-alias sum and the zero-demand probe. Each is asked once per
+/// consume, against the saturated graph.
 #[derive(Clone, Copy)]
 pub(crate) enum ConsumePass {
     /// First attempt; the saturate-and-retry rung is still available.
     First,
-    /// The retry. `zero_demand_settled` says the explicit saturate found the graph
-    /// already at a fixpoint, so nothing moved since the first pass asked, and its
-    /// `false` still stands. When the saturate *did* work the question is genuinely
-    /// open again — a gate collapsing to `0` is exactly what the probe looks for —
-    /// and it is re-asked.
-    Retry { zero_demand_settled: bool },
+    /// The retry, after the saturate.
+    Retry,
 }
 
 /// What kind of permission a consume demands, which selects the rule
@@ -1192,40 +1186,23 @@ pub(crate) fn heap_subtract_inner(
         {
             return Ok(h);
         }
-        // Nothing demanded: not (0 < needed). Skipped on a retry whose saturate
-        // was a no-op — see [`ConsumePass::Retry`].
+        // Nothing demanded: not (0 < needed). Asked on the retry only, and there
+        // always: the first pass does not ask, so no earlier answer exists to
+        // reuse, however settled the graph was.
         // Never on the first pass: the saturate-and-retry below is cheap (its
         // `saturate` was measured a no-op in 49 of 49 miss events) and can find the
         // chunk outright, and the alias sum above gets its turn before this probe
         // on the way back — so asking here only pays for an answer the retry
         // usually makes irrelevant. This probe closed 0 of 261 calls corpus-wide.
-        if !matches!(pass, ConsumePass::First)
-            && !matches!(
-                pass,
-                ConsumePass::Retry {
-                    zero_demand_settled: true
-                }
-            )
-        {
+        if matches!(pass, ConsumePass::Retry) {
             let nonpos = expr!(ctx, not((0 / 1) < r { chunk2_perm }));
             if ctx.prove_under_pc(nonpos, pc_lits) {
                 return Ok(out);
             }
         }
         if matches!(pass, ConsumePass::First) {
-            let settled = ctx.is_saturated();
             ctx.saturate();
-            return heap_subtract_inner(
-                ctx,
-                h1,
-                kind,
-                chunk2,
-                pc_lits,
-                demand,
-                ConsumePass::Retry {
-                    zero_demand_settled: settled,
-                },
-            );
+            return heap_subtract_inner(ctx, h1, kind, chunk2, pc_lits, demand, ConsumePass::Retry);
         }
         // Nothing on ground: the demanded address may still match a held chunk under
         // the pc (a `&mut` reborrow inside a branch arm, whose address equality is a
@@ -1731,7 +1708,23 @@ pub(crate) fn heap_subtract_summarized(
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
         // fractions fold it away.
         let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
-        let gated = gate_amount_by_pc(ctx, take, &cube);
+        // The gate leaves out the literals of the block's cube: this heap is the
+        // block's own and reaches any other path only through the block's exits,
+        // so they hold wherever the amount is read. Gating by them too left a
+        // drained member at `hold - (cube ? hold : 0)`, zero wherever the heap
+        // exists but not unconditionally, so it was never dropped.
+        let gate: Vec<(egg::Id, Polarity)> = cube
+            .iter()
+            .filter(|lit| {
+                !crate::verify::heap::cube_entails(
+                    ctx,
+                    ctx.current_cube(),
+                    std::slice::from_ref(*lit),
+                )
+            })
+            .copied()
+            .collect();
+        let gated = gate_amount_by_pc(ctx, take, &gate);
         let rest = perm_sub(ctx, chunk.ungated_perm(), gated);
         // Debit `remaining` by what was actually taken — the **gated** amount, not
         // `take`. With one shared cube (the pc-alias caller) the two coincide on-path
@@ -2042,12 +2035,14 @@ pub(crate) fn perm_held_at(
 /// See `tests/cases/failing/loops/cond_inv_frame_value.vpr`; Silicon rejects it.
 ///
 /// So the equality is earned, not assumed:
-/// - **both fractions provably positive** — `ctx.union`, collapsing the classes.
-///   This is the common case (`half_perm_frame`, `peano_frame`), where the
-///   agreement is genuinely load-bearing: it carries a value established before a
-///   loop across a cut whose invariant never mentions it. [`prove_perm_positive`]
-///   decides it per leaf, so a join `Select` never materializes, and its
-///   `known_real` fast path settles literal fractions without a prove call.
+/// - **both fractions provably positive** — the values agree under the pc the
+///   proofs ran under: `pc ⟹ valueₐ == value_b`, collapsing the classes outright
+///   when the pc is empty. This is the common case (`half_perm_frame`,
+///   `peano_frame`), where the agreement is genuinely load-bearing: it carries a
+///   value established before a loop across a cut whose invariant never mentions
+///   it. [`prove_perm_positive`] decides it per leaf, so a join `Select` never
+///   materializes, and its `known_real` fast path settles literal fractions
+///   without a prove call.
 /// - **otherwise** — [`merge_values`]: `permₐ > 0 ? valueₐ : value_b`, plus the
 ///   guarded equality, which still fuses the two once saturation establishes both
 ///   fractions positive.
@@ -2092,10 +2087,19 @@ pub(crate) fn union_heaps(
         let b_held = prove_perm_positive(ctx, &pb, pc_lits);
         let (ia, ib) = (pa.to_id(ctx), pb.to_id(ctx));
         let value = match (a_held, b_held) {
-            // Both definitely held: the values agree outright, so collapse the
-            // classes. No ternary, no implication — the cheap common case.
+            // Both definitely held, but only under `pc_lits`, which is all the two
+            // proofs establish: the values agree there. Collapse the classes only
+            // when that pc is empty. A loop exit's pc is its own reach, and a
+            // refuted one (the normal exit of a loop whose guard never fails)
+            // proves both positive vacuously; an outright union then equated the
+            // frame's value with the head's havoc on every other exit.
             (true, true) => {
-                ctx.union(ca.value, cb.value);
+                if pc_lits.is_empty() {
+                    ctx.union(ca.value, cb.value);
+                } else {
+                    let eq = expr!(ctx, { ca.value } == { cb.value });
+                    ctx.assume_guarded(eq, pc_lits.iter().rev().copied());
+                }
                 ca.value
             }
             // One side definitely held: take its value and make the agreement
@@ -2546,6 +2550,35 @@ mod tests {
             err.root_cause(),
             VerifyError::InsufficientPermission
         ));
+    }
+
+    // A ground miss whose demand is zero under the pc owes nothing, also when the
+    // graph is already saturated as the consume starts, so that its own saturate
+    // changes nothing. The retry asks the zero-demand probe; the first pass never
+    // does, so a settled graph leaves no earlier answer to reuse.
+    #[test]
+    fn heap_subtract_zero_demand_on_saturated_graph() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = fresh_ctx(&interner);
+
+        let a = ctx.add(Symbolic::Fresh(0));
+        let c = ctx.add(Symbolic::Fresh(1));
+        let (one, zero) = (real(&mut ctx, 1, 1), real(&mut ctx, 0, 1));
+        let demand = expr!(&mut ctx, if {c} then {one} else {zero});
+        // The consume's fresh value, minted before the saturate so that the graph
+        // is settled when the consume starts.
+        let v = ctx.add(Symbolic::Fresh(2));
+        ctx.saturate();
+
+        heap_subtract(
+            &mut ctx,
+            &Heap::empty(),
+            &test_kind(),
+            Chunk::new(a, demand, v),
+            &[(c, Polarity::Negative)],
+            Demand::Concrete,
+        )
+        .expect("a demand that is zero under the pc needs no permission");
     }
 }
 

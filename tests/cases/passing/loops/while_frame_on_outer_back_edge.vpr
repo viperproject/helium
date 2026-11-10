@@ -1,0 +1,52 @@
+// A `goto` from a `while` body to an enclosing label loop's head is a back edge
+// of the outer loop and an exit of the `while`: the `while`'s frame comes back
+// before the outer invariant is exhaled. Silicon verifies every method.
+field f: Int
+
+// The `while` holds half of `x.f`; the outer invariant needs all of it.
+method with_back_edge(x: Ref, c: Bool, n: Int)
+  requires acc(x.f)
+{
+  var i: Int := 0
+  label L
+    invariant acc(x.f)
+  i := i + 1
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (i < n) { goto L }
+  }
+}
+
+// The same for a `while` without a back edge.
+method no_back_edge(x: Ref, c: Bool, n: Int)
+  requires acc(x.f)
+{
+  var i: Int := 0
+  label L
+    invariant acc(x.f)
+  i := i + 1
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (i < n) { goto L }
+    goto out
+  }
+  label out
+}
+
+// The frame also carries the value the outer invariant states.
+method frame_value(x: Ref, c: Bool, n: Int)
+  requires acc(x.f)
+{
+  x.f := 3
+  var i: Int := 0
+  label L
+    invariant acc(x.f) && x.f == 3
+  i := i + 1
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (i < n) { goto L }
+  }
+}

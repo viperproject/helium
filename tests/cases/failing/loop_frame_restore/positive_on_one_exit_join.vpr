@@ -1,0 +1,18 @@
+// As positive_on_one_exit.vpr, read after the two exits join.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  if (b) { exhale acc(x.f, 1/2) }
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (!b) { goto a }
+  }
+  label a
+  assert x.f == 3
+}

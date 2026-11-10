@@ -1,0 +1,112 @@
+// Facts a heap operation assumes are guarded by the instruction's effective pc
+// (block cube plus delta), not dropped: wherever that pc holds they stay usable.
+// Companions of the canaries in `tests/cases/failing/heap_fact_guard/`.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f, 1/2) }
+
+// The wildcard remainder bound, on the arm that ran the exhale.
+method wildcard_remainder_in_arm(x: Ref, p: Perm, c: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    inhale p > none
+    exhale acc(x.f, wildcard)
+    assert none < perm(x.f) && perm(x.f) < p
+  }
+}
+
+// ... in a nested arm, read after the inner join but still under the outer cube.
+method wildcard_remainder_after_inner_join(x: Ref, p: Perm, c: Bool, d: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    inhale p > none
+    if (d) {
+      exhale acc(x.f, wildcard)
+    }
+    assert p > none
+    assert d ==> perm(x.f) < p
+  }
+}
+
+// ... and after the join, as the implication it is.
+method wildcard_remainder_after_join(x: Ref, p: Perm, c: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    inhale p > none
+    exhale acc(x.f, wildcard)
+  }
+  assert c ==> p > none
+}
+
+// ... in a loop body, under the body's cube.
+method wildcard_remainder_loop_body(x: Ref, p: Perm, n: Int)
+  requires p > none && acc(x.f, p)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f, wildcard)
+  {
+    exhale acc(x.f, wildcard)
+    assert perm(x.f) > none
+    i := i + 1
+  }
+}
+
+// The fold's value agreement, on the arm that folded.
+method fold_value_agreement_in_arm(x: Ref, y: Int, c: Bool)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (c) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}
+
+// ... in an `elseif` arm.
+method fold_value_agreement_in_else_if_arm(x: Ref, y: Int, k: Int)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (k == 0) {
+  } elseif (k == 1) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}
+
+// ... and in a later block on the same path.
+method fold_value_agreement_after_join(x: Ref, y: Int, c: Bool)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (c) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+  }
+  if (c) {
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}
+
+// A wildcard `unfolding` under a ternary: its bound holds under the arm's cube
+// and the ternary's condition, in the arm and after the join.
+method wildcard_unfolding_ternary_in_arm(y: Ref, p: Perm, c: Bool, d: Bool)
+  requires p >= none && acc(P(y), p)
+{
+  var v: Int
+  if (c) {
+    inhale d ==> p > none
+    v := d ? (unfolding acc(P(y), wildcard) in y.f) : 0
+    assert d ==> p > none
+  }
+  assert c ==> (d ==> p > none)
+}

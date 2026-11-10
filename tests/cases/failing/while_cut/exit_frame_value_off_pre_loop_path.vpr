@@ -1,0 +1,24 @@
+// exit_frame_off_pre_loop_path.vpr for a value: the frame keeps half of `x.f`
+// at 3, the path that skips the loop writes 7. Restored on that path too, the
+// frame's value would contradict it.
+//
+// Must FAIL. Silicon: "Assertion false might not hold."
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  if (b) {
+    x.f := 7
+    goto out
+  }
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (d) { goto out }
+  }
+  assume false
+  label out
+  if (b) { assert false }
+}

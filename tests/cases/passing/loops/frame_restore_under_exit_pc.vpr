@@ -1,0 +1,98 @@
+// Controls for tests/cases/failing/loop_frame_restore/: where a frame restore
+// proves the frame residual and the invariant's share positive on the exit's
+// path, the frame's value carries across the loop on that path. Silicon
+// verifies every method.
+field f: Int
+
+// The frame keeps `1 - q > 0` at value 3, on every exit.
+method frame_positive_dead_exit(x: Ref, q: Perm, b: Bool)
+  requires none < q && q < write && acc(x.f)
+{
+  x.f := 3
+  var c: Bool := true
+  while (c)
+    invariant acc(x.f, q)
+  {
+    if (b) { goto out }
+  }
+  label out
+  assert x.f == 3
+}
+
+// The frame pins `x.f == 3`, so `d` stays false and the exit by `goto out` is
+// dead, as is the normal exit.
+method frame_refutes_goto_exit(x: Ref, q: Perm)
+  requires none < q && q < write && acc(x.f)
+{
+  x.f := 3
+  var c: Bool := true
+  var d: Bool := false
+  while (c)
+    invariant acc(x.f, q) && (d ==> x.f == 4)
+  {
+    if (d) { goto out }
+    d := x.f == 4
+  }
+  label out
+  assert false
+}
+
+method frame_positive_on_every_exit(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (!b) { goto a }
+  }
+  assert x.f == 3
+  goto end
+  label a
+  assert x.f == 3
+  label end
+  assert x.f == 3
+}
+
+method frame_positive_loop_in_arm(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  if (b) {
+    while (c)
+      invariant acc(x.f, 1/2)
+    {}
+    assert x.f == 3
+  }
+  assert x.f == 3
+}
+
+method frame_positive_loop_in_loop(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f, 3/4)
+  {
+    while (d)
+      invariant acc(x.f, 1/2)
+    {}
+  }
+  assert x.f == 3
+}
+
+// A `goto` loop whose fall-through is dead: the frame keeps half of `x.f` at
+// value 3 on the live exit by `goto out`.
+method frame_positive_label_loop(x: Ref, b: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  var i: Int := 0
+  label L
+    invariant acc(x.f, 1/2)
+  i := i + 1
+  if (b) { goto out }
+  if (true) { goto L }
+  label out
+  assert x.f == 3
+}

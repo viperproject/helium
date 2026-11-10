@@ -1,0 +1,23 @@
+// Both exits are live. The frame residual is `b ? 0 : 1/2`: positive on the
+// exit by `goto a` (under `!b`), zero on the normal exit where `b` may hold.
+// The value agreement proved on the first exit must not hold on the second,
+// where the invariant's half was havocked and the frame holds nothing.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  if (b) { exhale acc(x.f, 1/2) }
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (!b) { goto a }
+  }
+  assert x.f == 3
+  goto end
+  label a
+  label end
+}

@@ -1,0 +1,23 @@
+// An inner loop left by `goto` to a label in the outer body: the inner
+// invariant's half was havocked, and the frame's half cannot be told apart
+// from it.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f)
+  {
+    while (d)
+      invariant acc(x.f, 1/2)
+    {
+      if (b) { goto mid }
+    }
+    label mid
+    assert x.f == 3
+  }
+}

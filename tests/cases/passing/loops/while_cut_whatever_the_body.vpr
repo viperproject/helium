@@ -1,0 +1,159 @@
+// Controls for tests/cases/failing/while_cut/: a `while` is cut at its head
+// whatever its body's edges, and the cut keeps what it should. Silicon verifies
+// every method.
+field f: Int
+
+// No back edge: the frame keeps half of `x.f` at value 3.
+method no_back_edge_half_frame(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    goto out
+  }
+  label out
+  assert x.f == 3
+}
+
+// No back edge: the body and both exits assume the invariant.
+method no_back_edge_assumes_invariant(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 4
+  while (c)
+    invariant acc(x.f) && x.f == 4
+  {
+    assert x.f == 4
+    goto out
+  }
+  assert x.f == 4
+  label out
+  assert x.f == 4
+}
+
+// No back edge: the body runs under the guard.
+method no_back_edge_guard(c: Bool)
+{
+  while (c)
+    invariant true
+  {
+    assert c
+    goto out
+  }
+  label out
+}
+
+// No back edge: what the body writes before leaving survives the exit.
+method no_back_edge_write_then_leave(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 4
+  while (c)
+    invariant acc(x.f)
+  {
+    x.f := 5
+    goto out
+  }
+  assume false
+  label out
+  assert x.f == 5
+}
+
+// No back edge inside a loop body, established on every iteration.
+method no_back_edge_in_loop_body(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  while (c)
+    invariant acc(x.f)
+  {
+    x.f := 3
+    while (d)
+      invariant acc(x.f) && x.f == 3
+    {
+      goto next
+    }
+    label next
+    assert x.f == 3
+  }
+}
+
+// An arm that leaves: the frame keeps half of `x.f` at value 3.
+method leaving_arm_half_frame(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    if (b) { goto out }
+  }
+  label out
+  assert x.f == 3
+}
+
+// An arm that leaves after writing a variable the invariant fixes.
+method leaving_arm_var_invariant(b: Bool, c: Bool)
+{
+  var i: Int := 0
+  while (c)
+    invariant i == 0
+  {
+    if (b) {
+      i := 1
+      goto out
+    }
+  }
+  label out
+}
+
+// A `goto` loop in the body of a `while` without a back edge.
+method no_back_edge_inner_loop_half_frame(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f, 1/2)
+  {
+    label again
+    if (b) { goto again }
+    goto out
+  }
+  label out
+  assert x.f == 3
+}
+
+// A `while` in a `goto` loop, an arm leaving both: the outer frame keeps half
+// of `x.f` at value 3.
+method while_in_goto_loop(x: Ref, b: Bool, c: Bool, n: Int)
+  requires acc(x.f)
+{
+  x.f := 3
+  var i: Int := 0
+  label head
+    invariant acc(x.f, 1/2)
+  i := i + 1
+  while (c)
+    invariant acc(x.f, 1/4)
+  {
+    if (b) { goto out }
+  }
+  if (i < n) { goto head }
+  label out
+  assert x.f == 3
+}
+
+// A `goto` into the body enters past the head: the `while` is no loop of its
+// own, only the cycle through the body's label is.
+method goto_into_body(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  goto inner
+  while (c)
+    invariant acc(x.f) && x.f == 4
+  {
+    label inner
+  }
+}

@@ -1,0 +1,18 @@
+// A variable assigned only in an arm that leaves the loop is still havocked at
+// the head: the havoc set is the whole statement body's.
+//
+// Must FAIL. Silicon: "Assertion i == 0 might not hold."
+method m(b: Bool, c: Bool)
+{
+  var i: Int := 0
+  while (c)
+    invariant true
+  {
+    assert i == 0
+    if (b) {
+      i := 1
+      goto out
+    }
+  }
+  label out
+}

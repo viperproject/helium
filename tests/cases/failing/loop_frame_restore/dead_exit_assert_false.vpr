@@ -1,0 +1,23 @@
+// The dead normal exit's frame restore equates the frame's value 3 with the
+// head's havoc. With that fact on ground the invariant `d ==> x.f == 4` refutes
+// `d`, so the only live exit, `goto out` under `d`, looks dead and `assert false`
+// verifies. `q` may be `write`, and then `x.f == 4` is reachable.
+//
+// Must FAIL. Silicon: "Assertion false might not hold."
+field f: Int
+
+method m(x: Ref, q: Perm)
+  requires none < q && q <= write && acc(x.f)
+{
+  x.f := 3
+  var c: Bool := true
+  var d: Bool := false
+  while (c)
+    invariant acc(x.f, q) && (d ==> x.f == 4)
+  {
+    if (d) { goto out }
+    d := x.f == 4
+  }
+  label out
+  assert false
+}

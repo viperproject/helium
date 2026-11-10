@@ -1,0 +1,22 @@
+// dead_exit_union.vpr for a `goto` loop: its fall-through to `out` is dead
+// (`if (true) { goto L }`), so the frame restore there proves the frame
+// residual `1 - q` and the invariant's `q` positive vacuously. Equating the
+// frame's value 3 with the head's havoc there must not reach the live exit by
+// `goto out`, where `q` may be `write` and the frame holds nothing.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, q: Perm, b: Bool)
+  requires none < q && q <= write && acc(x.f)
+{
+  x.f := 3
+  var i: Int := 0
+  label L
+    invariant acc(x.f, q)
+  i := i + 1
+  if (b) { goto out }
+  if (true) { goto L }
+  label out
+  assert x.f == 3
+}

@@ -1,0 +1,19 @@
+// As dead_exit_union.vpr, with the guard a parameter that an `assume` makes
+// true for good: the normal exit `!c` is refuted by a fact, not by a literal.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, q: Perm, b: Bool, c: Bool)
+  requires none < q && q <= write && acc(x.f)
+{
+  x.f := 3
+  assume c
+  while (c)
+    invariant acc(x.f, q)
+  {
+    if (b) { goto out }
+  }
+  label out
+  assert x.f == 3
+}

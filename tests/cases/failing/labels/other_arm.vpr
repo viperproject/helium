@@ -1,0 +1,12 @@
+// A label read in the sibling arm of the one that declares it.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    label l
+  } else {
+    assert old[l](x.f) == x.f
+  }
+}

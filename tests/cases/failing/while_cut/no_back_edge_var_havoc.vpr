@@ -1,0 +1,15 @@
+// A `while` without a back edge havocs the variables its body assigns.
+//
+// Must FAIL. Silicon: "Assertion i == 0 might not hold."
+method m(c: Bool)
+{
+  var i: Int := 0
+  while (c)
+    invariant true
+  {
+    assert i == 0
+    i := 1
+    goto out
+  }
+  label out
+}

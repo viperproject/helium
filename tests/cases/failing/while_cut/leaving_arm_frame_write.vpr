@@ -1,0 +1,21 @@
+// The body of a `while` is the whole statement body, also an arm that leaves
+// by `goto` and never returns to the head: that arm runs on the invariant's
+// permissions only, like the rest of the body.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the assignment).
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  while (c)
+    invariant true
+  {
+    if (b) {
+      x.f := 5
+      goto out
+    }
+  }
+  label out
+}

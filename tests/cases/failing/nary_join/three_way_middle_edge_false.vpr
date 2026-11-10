@@ -1,0 +1,14 @@
+// REGRESSION (soundness). As three_way_middle_edge.vpr, but the leaked `x != y`
+// refutes a feasible path: on `a && b` nothing was inhaled, so `x == y` is
+// consistent and `assert false` must fail.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool)
+{
+  if (a) { goto L }
+  if (b) { inhale acc(x.f) && acc(y.f); goto L }
+  label L
+  if (a && b) { assume x == y; assert false }
+}

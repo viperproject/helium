@@ -1,9 +1,11 @@
 //! Lower `typed::TypedPureExp<Ext>` into VMIR `PureInst` chains.
 
 use crate::dhash::HashMap;
+use std::cell::RefCell;
 
 use lasso::Spur;
 
+use crate::translate::reach::{Reach, ReachRef};
 use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
@@ -13,10 +15,52 @@ use crate::vmir::{
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
 /// body. `baseline` is the post-requires-inhale heap (target of unlabeled
-/// `old`); `labeled` maps each `label L` to the heap captured at that point.
+/// `old`); `labeled` holds the labels `old[L]` can name (`None` outside a
+/// method body).
 pub(crate) struct OldHeaps<'a> {
     pub baseline: HeapVal,
-    pub labeled: &'a HashMap<Spur, HeapVal>,
+    pub labeled: Option<&'a Labels<'a>>,
+}
+
+/// The `label`s of a method body, as read by `old[L]` in the block being
+/// lowered.
+///
+/// `old[L]` is well-defined only on an execution that passed `label L` (Viper:
+/// "Did not reach labelled state L"), so each read asserts that it did. A
+/// block's reach holds of exactly the executions that enter it (back edges cut,
+/// as for the verifier), and those enter blocks in topological order — the
+/// order blocks are lowered in. So an execution reaching this block has passed
+/// `L` iff it satisfies the reach of `L`'s block, if that block was lowered
+/// already, and never otherwise. That reach is the obligation, under the
+/// read's own path condition: a read `L` dominates needs none, and one guarded
+/// by `L`'s condition (a branch, `==>`, `? :`) is discharged by the guard.
+pub(crate) struct Labels<'a> {
+    /// Every label whose block was lowered so far (or is being lowered): the
+    /// heap captured at the block's entry and the block's reach.
+    pub passed: &'a HashMap<Spur, (HeapVal, ReachRef)>,
+    /// The reach of the block being lowered.
+    pub here: ReachRef,
+    pub reach: &'a RefCell<Reach>,
+}
+
+impl Labels<'_> {
+    /// Assert that the read has passed `label l` and return the label's heap
+    /// (`None` if no path to here passes it: the asserted `false` then rejects
+    /// the read unless it is dead).
+    fn read(&self, sink: &mut Sink, l: Spur) -> Option<HeapVal> {
+        let Some(&(heap, at)) = self.passed.get(&l) else {
+            sink.emit_assert(FALSE);
+            return None;
+        };
+        let mut reach = self.reach.borrow_mut();
+        // Nothing to check where every path here passes `l` (it dominates).
+        if reach.and(at, self.here) != self.here {
+            let g = reach.simplify(at, self.here);
+            let v = reach.val(sink, g);
+            sink.emit_assert(v);
+        }
+        Some(heap)
+    }
 }
 
 /// Heaps a pure expression reads from. `value` is used by field derefs and
@@ -946,9 +990,14 @@ impl PureExt for typed::MethodBodyExt {
                     .ok_or(TranslationError::Unsupported("`old` outside method body"))?;
                 let heap = match label {
                     None => old.baseline,
-                    Some(l) => *old.labeled.get(l).ok_or_else(|| {
-                        TranslationError::UnknownIdent(b.interner.resolve(l).to_string())
-                    })?,
+                    Some(l) => {
+                        let labels = old.labeled.ok_or_else(|| {
+                            TranslationError::UnknownIdent(b.interner.resolve(l).to_string())
+                        })?;
+                        // An unreached label's read is dead or rejected; any heap
+                        // serves to lower the rest.
+                        labels.read(sink, *l).unwrap_or(old.baseline)
+                    }
                 };
                 lower(
                     b,

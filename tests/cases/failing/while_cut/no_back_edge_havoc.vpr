@@ -1,0 +1,21 @@
+// A `while` without a back edge still havocs the invariant's footprint: after
+// the body's `goto out`, `x.f` is the head's havoc, not 3.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  x.f := 3
+  var c: Bool := true
+  while (c)
+    invariant acc(x.f)
+  {
+    goto out
+  }
+  goto end
+  label out
+  assert x.f == 3
+  label end
+}

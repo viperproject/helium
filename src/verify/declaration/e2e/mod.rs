@@ -1469,10 +1469,10 @@ method m(x: Ref)
 }
 
 #[test]
-fn old_before_its_label_is_a_translation_error() {
-    // Straight-line lowering only knows labels it has already passed. An
-    // `old[L]` used before `label L` cannot find the captured heap and is a
-    // clean translation error (not a panic).
+fn old_before_its_label_fails_verification() {
+    // No path to the read passes `label L`, so the read is not well-defined
+    // ("Did not reach labelled state L"): it lowers, and its reach obligation
+    // fails.
     let input = r#"
 field f: Int
 
@@ -1483,19 +1483,10 @@ method m(x: Ref)
     label L
 }
 "#;
-    let mut program = viper_parser::vpr_program(input).expect("parse");
-    let mut ic = IdentCollector::default();
-    program.walk_mut(&mut ic);
-    let interner = ic.finalize();
-    let mut gc = GlobalsCollector::new(&interner);
-    program.walk(&mut gc);
-    let globals = gc.finalize().expect("globals");
-    disambiguate(&mut program, &interner, &globals).expect("disambiguation");
-    inline_macros(&mut program, &interner).expect("macros");
-    let typed = typecheck_program(&mut program, interner, &globals).expect("typecheck");
+    let program = lower(input);
     assert!(
-        translate::translate(&typed).is_err(),
-        "old[L] before label L must fail translation"
+        verify_named_method(&program, "m").is_err(),
+        "old[L] before label L must be rejected"
     );
 }
 

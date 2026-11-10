@@ -1,0 +1,17 @@
+// As no_back_edge_frame_write.vpr, for a read of a location the invariant does
+// not mention.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access y.f".
+field f: Int
+
+method m(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f) && acc(y.f)
+{
+  while (c)
+    invariant acc(x.f)
+  {
+    assert y.f == y.f
+    goto out
+  }
+  label out
+}

@@ -214,14 +214,6 @@ impl<'a> VerifyContext<'a> {
         (level, self.alloc.rules().len(), self.axiom_rules.len())
     }
 
-    /// Whether the live graph is already at a full-rule-set fixpoint, i.e. whether
-    /// a `saturate()` right now would be a no-op. Callers that re-ask a question
-    /// after saturating use this to tell "the graph changed, ask again" from
-    /// "nothing moved, the answer cannot differ".
-    pub(crate) fn is_saturated(&self) -> bool {
-        self.is_clean(CleanLevel::Full)
-    }
-
     /// Whether the live graph is known saturated at `level` (or stronger) under
     /// the *current* rule sets.
     fn is_clean(&self, level: CleanLevel) -> bool {
