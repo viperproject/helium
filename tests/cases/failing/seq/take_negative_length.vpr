@@ -1,0 +1,4 @@
+// Seq: take with a negative count is empty; its length is 0, not negative.
+method take_negative_length(s: Seq[Int]) {
+  assert |s[..-1]| == -1
+}

@@ -1,0 +1,32 @@
+// Seq (verification-heavy): reverse a sequence in a loop by prepending, then
+// check that reversing twice gives back the original.
+
+method reverse(s: Seq[Int]) returns (r: Seq[Int])
+  ensures |r| == |s|
+  ensures forall i: Int :: { r[i] } 0 <= i && i < |s| ==> r[i] == s[|s| - 1 - i]
+{
+  r := Seq[Int]()
+  var i: Int := 0
+  while (i < |s|)
+    invariant 0 <= i && i <= |s|
+    invariant |r| == i
+    invariant forall j: Int :: { r[j] } 0 <= j && j < i ==> r[j] == s[i - 1 - j]
+  {
+    r := Seq(s[i]) ++ r
+    i := i + 1
+  }
+}
+
+method reverse_twice(s: Seq[Int]) {
+  var r: Seq[Int]
+  var rr: Seq[Int]
+  r := reverse(s)
+  rr := reverse(r)
+  assert rr == s
+}
+
+method reverse_literal() {
+  var r: Seq[Int]
+  r := reverse(Seq(1, 2, 3))
+  assert r == Seq(3, 2, 1)
+}

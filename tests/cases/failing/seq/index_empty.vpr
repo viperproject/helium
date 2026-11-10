@@ -1,0 +1,4 @@
+// Seq well-definedness: the empty sequence has no index 0.
+method index_empty() {
+  var x: Int := Seq[Int]()[0]
+}

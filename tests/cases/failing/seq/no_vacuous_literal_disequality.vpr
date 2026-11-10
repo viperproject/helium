@@ -1,0 +1,7 @@
+// Seq: guard against an inconsistent axiomatisation. Two equal literals built
+// in different ways (concatenation vs. a single literal) must not be provably
+// different; if they were, `false` would follow.
+method no_vacuous_literal_disequality() {
+  assert Seq(1) ++ Seq(2) == Seq(1, 2)
+  assert false
+}

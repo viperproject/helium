@@ -1,0 +1,116 @@
+// Seq: one occurrence of every sequence construct, in every position the
+// grammar allows it (field, function, predicate, domain, method signature,
+// local, contract, loop invariant, quantifier, old). The obligations are kept
+// trivial; this case exists to pin down parsing and lowering, not proving.
+
+field items: Seq[Int]
+
+domain SeqHolder {
+  function holder_of(s: Seq[Int]): SeqHolder
+  function contents(h: SeqHolder): Seq[Int]
+  axiom contents_holder { forall s: Seq[Int] :: { holder_of(s) } contents(holder_of(s)) == s }
+}
+
+function first_or_zero(s: Seq[Int]): Int
+{
+  |s| > 0 ? s[0] : 0
+}
+
+function positive(s: Seq[Int]): Bool
+{
+  forall i: Int :: { s[i] } 0 <= i && i < |s| ==> s[i] > 0
+}
+
+predicate holds_items(this: Ref) {
+  acc(this.items) && |this.items| >= 0
+}
+
+method all_operations(s: Seq[Int], n: Int) returns (r: Seq[Int])
+  requires 0 <= n && n < |s|
+  ensures |r| == |s|
+{
+  // Type annotations, including a nested and a non-Int element type.
+  var nested: Seq[Seq[Int]] := Seq(Seq(1), Seq[Int]())
+  var bools: Seq[Bool] := Seq(true, false)
+  var refs: Seq[Ref] := Seq[Ref]()
+
+  // Constructors: typed empty, untyped literal, singleton.
+  var empty: Seq[Int] := Seq[Int]()
+  var lit: Seq[Int] := Seq(1, 2, 3)
+  var one: Seq[Int] := Seq(42)
+
+  // Length and indexing.
+  var len: Int := |lit|
+  var x: Int := lit[0]
+  var y: Int := s[n]
+
+  // Update.
+  var upd: Seq[Int] := s[n := 7]
+
+  // Concatenation, including chained.
+  var cat: Seq[Int] := lit ++ one ++ empty
+
+  // Take, drop, slice.
+  var tk: Seq[Int] := s[..n]
+  var dr: Seq[Int] := s[n..]
+  var sl: Seq[Int] := s[0..n]
+
+  // Integer range.
+  var rng: Seq[Int] := [1..4)
+
+  // Membership, equality, disequality.
+  var mem: Bool := 2 in lit
+  var eq: Bool := lit == rng
+  var ne: Bool := lit != one
+
+  // Operations nested inside each other.
+  var deep: Int := |(lit ++ s[..n])[1 := 0][1..]|
+  var inner: Int := nested[0][0]
+
+  // Sequences through functions and domains.
+  var f: Int := first_or_zero(s[n..])
+  var h: Seq[Int] := contents(holder_of(lit))
+
+  assert len == 3 && x == 1 && y == s[n]
+  assert upd[n] == 7
+  assert |cat| == 4
+  assert |tk| + |dr| == |s|
+  assert |sl| == n
+  assert mem && eq && ne
+  assert inner == 1
+  assert h == lit
+  assert positive(lit)
+
+  r := s
+}
+
+method in_the_heap(this: Ref)
+  requires acc(this.items)
+  ensures acc(this.items)
+  ensures this.items == old(this.items) ++ Seq(0)
+{
+  this.items := this.items ++ Seq(0)
+}
+
+method in_a_predicate(this: Ref)
+  requires holds_items(this)
+  ensures holds_items(this)
+{
+  var len: Int := unfolding holds_items(this) in |this.items|
+  assert len >= 0
+}
+
+method in_a_loop(s: Seq[Int]) returns (copy: Seq[Int])
+  ensures copy == s
+{
+  copy := Seq[Int]()
+  var i: Int := 0
+  while (i < |s|)
+    invariant 0 <= i && i <= |s|
+    invariant copy == s[..i]
+  {
+    copy := copy ++ Seq(s[i])
+    i := i + 1
+  }
+  assert s[..|s|] == s
+}

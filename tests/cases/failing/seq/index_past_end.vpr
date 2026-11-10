@@ -1,0 +1,6 @@
+// Seq well-definedness: `s[|s|]` is one past the last element.
+method index_past_end(s: Seq[Int])
+  requires |s| == 3
+{
+  var x: Int := s[3]
+}

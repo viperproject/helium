@@ -1,0 +1,50 @@
+// Seq (verification-heavy): recursive binary search over a non-strictly sorted
+// sequence, on a half-open window [lo, hi). Sortedness is a pure function, so
+// it is unfolded at every use; the "not found" postcondition of each recursive
+// call only covers half the window, and the other half has to come from
+// sortedness instantiated at `mid`.
+
+function sorted(xs: Seq[Int]): Bool
+{
+  forall i: Int, j: Int :: { xs[i], xs[j] } 0 <= i && i < j && j < |xs| ==> xs[i] <= xs[j]
+}
+
+method bsearch(xs: Seq[Int], key: Int, lo: Int, hi: Int) returns (index: Int)
+  requires sorted(xs)
+  requires 0 <= lo && lo <= hi && hi <= |xs|
+  ensures index == -1 || (lo <= index && index < hi && xs[index] == key)
+  ensures index == -1 ==> forall i: Int :: { xs[i] } lo <= i && i < hi ==> xs[i] != key
+{
+  if (lo == hi) {
+    index := -1
+  } else {
+    var mid: Int := lo + (hi - lo) \ 2
+    if (xs[mid] == key) {
+      index := mid
+    } elseif (xs[mid] < key) {
+      index := bsearch(xs, key, mid + 1, hi)
+    } else {
+      index := bsearch(xs, key, lo, mid)
+    }
+  }
+}
+
+method search(xs: Seq[Int], key: Int) returns (index: Int)
+  requires sorted(xs)
+  ensures -1 <= index && index < |xs|
+  ensures index == -1 <==> !(key in xs)
+  ensures index != -1 ==> xs[index] == key
+{
+  index := bsearch(xs, key, 0, |xs|)
+}
+
+method client() {
+  var xs: Seq[Int] := Seq(2, 2, 4, 8, 8, 8, 16)
+  assert sorted(xs)
+  var r: Int
+  r := search(xs, 8)
+  assert xs[3] == 8
+  assert 3 <= r && r <= 5
+  r := search(xs, 5)
+  assert r == -1
+}

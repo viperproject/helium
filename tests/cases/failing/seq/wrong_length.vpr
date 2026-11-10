@@ -1,0 +1,4 @@
+// Seq: a three-element literal does not have length 2.
+method wrong_length() {
+  assert |Seq(1, 2, 3)| == 2
+}

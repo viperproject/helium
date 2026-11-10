@@ -1,0 +1,19 @@
+// Seq (verification-heavy): starting the scan at index 1 from m = s[1] never
+// looks at s[0], so the bound on `s[0]` is not established (s = [9, 1]).
+
+method max_element(s: Seq[Int]) returns (m: Int)
+  requires |s| > 1
+  ensures forall i: Int :: { s[i] } 0 <= i && i < |s| ==> s[i] <= m
+{
+  m := s[1]
+  var i: Int := 2
+  while (i < |s|)
+    invariant 2 <= i && i <= |s|
+    invariant forall j: Int :: { s[j] } 1 <= j && j < i ==> s[j] <= m
+  {
+    if (s[i] > m) {
+      m := s[i]
+    }
+    i := i + 1
+  }
+}

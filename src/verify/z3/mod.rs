@@ -258,6 +258,8 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
             } => Some(field_types(ctxt, head, variant, tys).swap_remove(field)),
             FuncKind::IsVariant { .. } => Some(Type::Bool),
         },
+        Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
+        Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
     }
 }
 
@@ -273,6 +275,12 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
         // so the node list cannot stay borrowed across the call.
         let node = ctxt.egraph.id_to_node(id).clone();
         if matches!(node, Symbolic::Forall(..)) {
+            continue;
+        }
+        if matches!(node, Symbolic::Seq(..)) {
+            continue;
+        }
+        if matches!(node, Symbolic::SeqLit(..)) {
             continue;
         }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {
@@ -383,6 +391,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
             Sort::uninterpreted(format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into())
         }
         Type::Generic(_) => unreachable!("generics are currently not supported"),
+        Type::Seq(elem_ty) => Sort::uninterpreted(format!("seq@{elem_ty}").into()),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -454,6 +463,8 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
             class.to_real().into()
         }
         Symbolic::Forall(..) => todo!("implement translation for forall nodes"),
+        Symbolic::Seq(..) => todo!("implement translation for seq nodes"),
+        Symbolic::SeqLit(_, _) => todo!("implement translation for seq_lit nodes"),
     })
 }
 

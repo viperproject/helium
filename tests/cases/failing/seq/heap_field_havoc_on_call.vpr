@@ -1,0 +1,15 @@
+// Seq in the heap: a callee holding write permission and promising nothing
+// about the value may change the stored sequence arbitrarily.
+
+field elems: Seq[Int]
+
+method touch(this: Ref)
+  requires acc(this.elems)
+  ensures acc(this.elems)
+
+method client(this: Ref)
+  requires acc(this.elems) && this.elems == Seq(1, 2)
+{
+  touch(this)
+  assert this.elems == Seq(1, 2)
+}

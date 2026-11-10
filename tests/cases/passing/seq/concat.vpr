@@ -1,0 +1,39 @@
+// Seq: concatenation `++`.
+
+method concat_length(s: Seq[Int], t: Seq[Int]) {
+  assert |s ++ t| == |s| + |t|
+}
+
+method concat_index_left(s: Seq[Int], t: Seq[Int], i: Int)
+  requires 0 <= i && i < |s|
+{
+  assert (s ++ t)[i] == s[i]
+}
+
+method concat_index_right(s: Seq[Int], t: Seq[Int], i: Int)
+  requires 0 <= i && i < |t|
+{
+  assert (s ++ t)[|s| + i] == t[i]
+}
+
+method concat_empty_is_identity(s: Seq[Int]) {
+  assert s ++ Seq[Int]() == s
+  assert Seq[Int]() ++ s == s
+}
+
+method concat_literals() {
+  assert Seq(1) ++ Seq(2, 3) == Seq(1, 2, 3)
+  assert |Seq(1, 2) ++ Seq(3, 4, 5)| == 5
+}
+
+method concat_associative(a: Seq[Int], b: Seq[Int], c: Seq[Int]) {
+  assert (a ++ b) ++ c == a ++ (b ++ c)
+}
+
+method append_one(s: Seq[Int], x: Int) returns (r: Seq[Int])
+  ensures |r| == |s| + 1
+  ensures r[|s|] == x
+  ensures forall i: Int :: { r[i] } 0 <= i && i < |s| ==> r[i] == s[i]
+{
+  r := s ++ Seq(x)
+}

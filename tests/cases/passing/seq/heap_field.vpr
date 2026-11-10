@@ -1,0 +1,72 @@
+// Seq stored in the heap: a field of sequence type, a stack built on it, and
+// a predicate whose body constrains the stored sequence.
+
+field elems: Seq[Int]
+
+method push(this: Ref, v: Int)
+  requires acc(this.elems)
+  ensures acc(this.elems)
+  ensures this.elems == old(this.elems) ++ Seq(v)
+{
+  this.elems := this.elems ++ Seq(v)
+}
+
+method pop(this: Ref) returns (v: Int)
+  requires acc(this.elems) && |this.elems| > 0
+  ensures acc(this.elems)
+  ensures this.elems == old(this.elems)[..|old(this.elems)| - 1]
+  ensures v == old(this.elems)[|old(this.elems)| - 1]
+{
+  v := this.elems[|this.elems| - 1]
+  this.elems := this.elems[..|this.elems| - 1]
+}
+
+method client(this: Ref)
+  requires acc(this.elems) && this.elems == Seq[Int]()
+  ensures acc(this.elems) && this.elems == Seq(1)
+{
+  push(this, 1)
+  push(this, 2)
+  assert |this.elems| == 2
+  var x: Int
+  x := pop(this)
+  assert x == 2
+}
+
+// Two stacks: pushing on one frames the other.
+method two_stacks(a: Ref, b: Ref)
+  requires acc(a.elems) && acc(b.elems)
+  ensures acc(a.elems) && acc(b.elems)
+  ensures b.elems == old(b.elems)
+  ensures |a.elems| == |old(a.elems)| + 1
+{
+  push(a, 7)
+}
+
+predicate nat_stack(this: Ref) {
+  acc(this.elems) && |this.elems| <= 10 &&
+  forall i: Int :: { this.elems[i] } 0 <= i && i < |this.elems| ==> this.elems[i] >= 0
+}
+
+method push_nat(this: Ref, v: Int)
+  requires nat_stack(this) && v >= 0
+  requires unfolding nat_stack(this) in |this.elems| < 10
+  ensures nat_stack(this)
+  ensures unfolding nat_stack(this) in
+    this.elems == old(unfolding nat_stack(this) in this.elems) ++ Seq(v)
+{
+  unfold nat_stack(this)
+  this.elems := this.elems ++ Seq(v)
+  fold nat_stack(this)
+}
+
+method nat_stack_top(this: Ref) returns (v: Int)
+  requires nat_stack(this)
+  requires unfolding nat_stack(this) in |this.elems| > 0
+  ensures nat_stack(this)
+  ensures v >= 0
+{
+  unfold nat_stack(this)
+  v := this.elems[|this.elems| - 1]
+  fold nat_stack(this)
+}

@@ -9,7 +9,7 @@ use egg::{EGraph, Id, SearchMatches, Searcher, Subst, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
-use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
+use crate::vmir::{BinOp, Literal, Polarity, SeqOp, Type, Val};
 
 use super::*;
 
@@ -26,6 +26,15 @@ pub(crate) enum AxiomPure {
         func: FuncId,
         type_args: Vec<Type>,
         args: Vec<Val>,
+    },
+    Seq {
+        elem_ty: Type,
+        op: SeqOp,
+        args: Vec<Val>,
+    },
+    SeqLit {
+        elem_ty: Type,
+        elem: Val,
     },
 }
 
@@ -293,6 +302,14 @@ pub(super) fn build_instance_vals_impl(
                         let tys: Box<[Type]> = type_args.iter().cloned().collect();
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
+                    }
+                    AxiomPure::Seq { elem_ty, op, args } => {
+                        let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
+                        egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args))
+                    }
+                    AxiomPure::SeqLit { elem_ty, elem } => {
+                        let elem = get(egraph, &vals, elem);
+                        egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), elem))
                     }
                 };
                 vals.push(id);

@@ -1,0 +1,4 @@
+// Seq: 4 is not an element of [1, 2, 3].
+method not_a_member() {
+  assert 4 in Seq(1, 2, 3)
+}

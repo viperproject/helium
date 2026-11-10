@@ -447,13 +447,18 @@ impl Sink {
     }
 
     /// Emit a pure instruction whose side condition (e.g. `Deref` permission,
-    /// `Div`/`Mod` divisor) must hold under the running path condition. A
-    /// `Div`/`Mod` has no embedded heap, so it snapshots the current check-in heap
-    /// (see [`Sink::heap`]); a `Deref`/`Perm` embeds its own heap, so it does not.
+    /// `Div`/`Mod` divisor, sequence index bound) must hold under the running
+    /// path condition. A `Div`/`Mod` or bound-checked `Seq` op has no embedded
+    /// heap, so it snapshots the current check-in heap (see [`Sink::heap`]); a
+    /// `Deref`/`Perm` embeds its own heap, so it does not.
     pub fn emit_pure_guarded(&mut self, ty: vmir::Type, inst: PureInst) -> Val {
         let v = self.next_val_temp();
         let pc = self.guard();
-        let heapless_obligation = matches!(inst, PureInst::Binary(op, _, _) if op.is_div_or_mod());
+        let heapless_obligation = match &inst {
+            PureInst::Binary(op, _, _) => op.is_div_or_mod(),
+            PureInst::Seq { op, .. } => op.has_bound_check(),
+            _ => false,
+        };
         let kind = InstKind::Pure(ty, inst);
         let node = if heapless_obligation {
             self.checked_inst(pc, kind)

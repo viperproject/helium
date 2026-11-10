@@ -1,0 +1,18 @@
+// Seq (verification-heavy): the loop really reverses, but the contract claims
+// the result equals the input (false for s = [1, 2]).
+
+method reverse(s: Seq[Int]) returns (r: Seq[Int])
+  ensures |r| == |s|
+  ensures r == s
+{
+  r := Seq[Int]()
+  var i: Int := 0
+  while (i < |s|)
+    invariant 0 <= i && i <= |s|
+    invariant |r| == i
+    invariant forall j: Int :: { r[j] } 0 <= j && j < i ==> r[j] == s[i - 1 - j]
+  {
+    r := Seq(s[i]) ++ r
+    i := i + 1
+  }
+}

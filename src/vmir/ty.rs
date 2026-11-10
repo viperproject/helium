@@ -41,6 +41,8 @@ pub enum Type {
     /// (e.g. `Generic(0)` is the `Some` field type of the generic `Option` ADT).
     /// Substituted by the type arguments at monomorphization.
     Generic(usize),
+
+    Seq(Box<Type>),
 }
 
 /// Permission bound of a heap location (cap on total permission per cell).
@@ -97,6 +99,7 @@ impl Type {
             Type::Option(t) => t.collect_generics(out),
             Type::Addr { value, .. } => value.collect_generics(out),
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => {}
+            Type::Seq(t) => t.collect_generics(out),
         }
     }
 
@@ -112,6 +115,7 @@ impl Type {
             Type::Domain(_, args) => args.iter().for_each(|a| a.generics_in_order(out)),
             Type::Option(t) => t.generics_in_order(out),
             Type::Addr { value, .. } => value.generics_in_order(out),
+            Type::Seq(t) => t.generics_in_order(out),
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => {}
         }
     }
@@ -134,6 +138,7 @@ impl Type {
                 bound: bound.clone(),
             },
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => self.clone(),
+            Type::Seq(t) => Type::Seq(Box::new(t.subst_generics(args))),
         }
     }
 
@@ -157,7 +162,9 @@ impl Type {
                         .zip(ys.iter())
                         .all(|(x, y)| x.match_generics(y, out))
             }
-            (Type::Option(x), Type::Option(y)) => x.match_generics(y, out),
+            (Type::Option(x), Type::Option(y)) | (Type::Seq(x), Type::Seq(y)) => {
+                x.match_generics(y, out)
+            }
             (
                 Type::Addr {
                     group: g1,
@@ -194,6 +201,7 @@ impl Display for Type {
                 bound,
             } => write!(f, "&[g{}] {value} @ {bound}", group.into_usize()),
             Type::Generic(i) => write!(f, "?{i}"),
+            Type::Seq(t) => write!(f, "Seq<{t}>"),
         }
     }
 }
@@ -227,6 +235,7 @@ impl<'a> Display for VmirDisplay<'a, &'a Type> {
                 self.groups.resolve(group),
                 self.with(value.as_ref())
             ),
+            Type::Seq(ty) => write!(f, "Seq<{}>", self.with(ty.as_ref())),
             ty => write!(f, "{ty}"),
         }
     }
