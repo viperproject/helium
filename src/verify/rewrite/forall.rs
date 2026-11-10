@@ -324,19 +324,6 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                     let mut vals = caps.clone();
                     vals.extend(sigma);
                     if self.memo.insert((*rid, vals.clone())) {
-                        let ex = egg::Extractor::new(&*egraph, egg::AstSize);
-                        let show = |ids: &[Id]| {
-                            ids.iter()
-                                .map(|&i| ex.find_best(i).1.to_string())
-                                .collect::<Vec<_>>()
-                        };
-                        let (c, s) = vals.split_at(recipe.n_caps);
-                        println!(
-                            "[forall] recipe #{} caps={:?} sigma={:?}",
-                            rid.0,
-                            show(c),
-                            show(s)
-                        );
                         instances.push((*rid, vals, generation));
                     }
                 }
