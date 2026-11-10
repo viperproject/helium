@@ -98,7 +98,7 @@ pub(crate) fn type_trigger_matches(
             continue;
         }
         order.sort_unstable_by_key(|(_, bucket)| bucket.len());
-        join(&order, &mut vec![None; ty_params], &mut out);
+        join(&order, &vec![None; ty_params], &mut out);
     }
     out.sort_unstable();
     out.dedup();
@@ -109,7 +109,7 @@ pub(crate) fn type_trigger_matches(
 /// pattern has matched. Matching writes into the assignment as it goes, so each
 /// candidate gets its own copy and a failed attempt leaks nothing. Patterns that
 /// share a parameter must agree on it (`match_generics` rejects a conflict).
-fn join(order: &[(&Type, &[&Type])], sigma: &mut Vec<Option<Type>>, out: &mut Vec<Vec<Type>>) {
+fn join(order: &[(&Type, &[&Type])], sigma: &[Option<Type>], out: &mut Vec<Vec<Type>>) {
     let Some(((pattern, bucket), rest)) = order.split_first() else {
         out.push(
             sigma
@@ -121,9 +121,9 @@ fn join(order: &[(&Type, &[&Type])], sigma: &mut Vec<Option<Type>>, out: &mut Ve
         return;
     };
     for candidate in *bucket {
-        let mut next = sigma.clone();
+        let mut next = sigma.to_vec();
         if pattern.match_generics(candidate, &mut next) {
-            join(rest, &mut next, out);
+            join(rest, &next, out);
         }
     }
 }
