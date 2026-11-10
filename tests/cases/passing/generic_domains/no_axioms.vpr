@@ -1,0 +1,9 @@
+// A generic domain with no axioms still gives each instance its own function.
+domain Pair[A, B] {
+  function pair(a: A, b: B): Pair[A, B]
+}
+
+method congruence(x: Int, y: Bool) {
+  var p: Pair[Int, Bool] := pair(x, y)
+  assert p == pair(x, y)
+}

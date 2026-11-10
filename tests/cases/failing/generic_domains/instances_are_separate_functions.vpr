@@ -1,0 +1,7 @@
+// Assuming a fact about `g` at `Int` says nothing about `g` at `Bool`.
+domain G[T] { function g(x: T): Int }
+
+method m() {
+  assume g(3) == 5
+  assert g(true) == 5
+}

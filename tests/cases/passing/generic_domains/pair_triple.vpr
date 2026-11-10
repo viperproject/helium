@@ -1,0 +1,54 @@
+// From Silver's all/domains/domains.vpr: several type parameters, and a domain whose
+// axiom mentions another generic domain. Triggers added.
+domain Pair[A, B] {
+  function Pair_pair(a: A, b: B): Pair[A, B]
+  function Pair_first(p: Pair[A, B]): A
+  function Pair_second(p: Pair[A, B]): B
+
+  axiom Pair_access_first {
+    forall a: A, b: B :: { Pair_pair(a, b) } Pair_first(Pair_pair(a, b)) == a
+  }
+  axiom Pair_access_second {
+    forall a: A, b: B :: { Pair_pair(a, b) } Pair_second(Pair_pair(a, b)) == b
+  }
+}
+
+domain Triple[A, B, C] {
+  function Triple_triple(a: A, b: B, c: C): Triple[A, B, C]
+  function Triple_first(t: Triple[A, B, C]): A
+  function Triple_second(t: Triple[A, B, C]): B
+  function Triple_third(t: Triple[A, B, C]): C
+  function Triple_isPrefix(p: Pair[A, B], t: Triple[A, B, C]): Bool
+
+  axiom Triple_access_first {
+    forall a: A, b: B, c: C :: { Triple_triple(a, b, c) } Triple_first(Triple_triple(a, b, c)) == a
+  }
+  axiom Triple_access_second {
+    forall a: A, b: B, c: C :: { Triple_triple(a, b, c) } Triple_second(Triple_triple(a, b, c)) == b
+  }
+  axiom Triple_access_third {
+    forall a: A, b: B, c: C :: { Triple_triple(a, b, c) } Triple_third(Triple_triple(a, b, c)) == c
+  }
+  axiom Triple_is_prefix {
+    forall p: Pair[A, B], t: Triple[A, B, C] :: { Triple_isPrefix(p, t) }
+      Triple_isPrefix(p, t) ==
+        ((Pair_first(p) == Triple_first(t)) && (Pair_second(p) == Triple_second(t)))
+  }
+}
+
+method pairs(a: Int, b: Bool) {
+  assert Pair_first(Pair_pair(a, b)) == a
+  assert Pair_second(Pair_pair(a, b)) == b
+}
+
+method triples(a: Int, b: Bool, c: Ref) {
+  assert Triple_first(Triple_triple(a, b, c)) == a
+  assert Triple_second(Triple_triple(a, b, c)) == b
+  assert Triple_third(Triple_triple(a, b, c)) == c
+}
+
+method prefix(a: Int, b: Bool, c: Ref) {
+  var p: Pair[Int, Bool] := Pair_pair(a, b)
+  var t: Triple[Int, Bool, Ref] := Triple_triple(a, b, c)
+  assert Triple_isPrefix(p, t)
+}

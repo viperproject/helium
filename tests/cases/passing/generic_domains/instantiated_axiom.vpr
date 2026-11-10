@@ -1,0 +1,13 @@
+// One axiom, used at several instances.
+domain Box[T] {
+  function box(x: T): Box[T]
+  function unbox(b: Box[T]): T
+
+  axiom inverse { forall x: T :: { box(x) } unbox(box(x)) == x }
+}
+
+method at_int() { assert unbox(box(3)) == 3 }
+
+method at_bool(b: Bool) { assert unbox(box(b)) == b }
+
+method at_ref(r: Ref) { assert unbox(box(r)) == r }
