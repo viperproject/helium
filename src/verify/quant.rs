@@ -110,6 +110,14 @@ impl RecipeTable {
         self.recipes.len()
     }
 
+    /// A table of the one recipe `recipe`, for applier tests.
+    #[cfg(test)]
+    pub(crate) fn of(recipe: QuantRecipe) -> (Self, RecipeId) {
+        let mut table = Self::default();
+        let id = table.recipes.push_and_get_key(recipe);
+        (table, id)
+    }
+
     /// The recipe of an already-interned `forall`, with its capture list. A miss is
     /// a bug: every read is either preceded by [`intern_forall`] on the same
     /// quantifier, or reads a nested one that its encloser's innermost-first

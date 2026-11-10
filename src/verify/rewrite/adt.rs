@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
 
-use crate::verify::analysis::{AdtData, ConstFold, Data};
+use crate::verify::analysis::{AdtData, ClassData, ConstFold, Data};
 use crate::verify::lang::{Discriminant, FuncId, Symbolic};
 use crate::vmir::{Literal, MemberId, Type};
 
@@ -164,7 +164,7 @@ impl Applier<Symbolic, ConstFold> for IsApplier {
         _: Symbol,
     ) -> Vec<Id> {
         let xc = egraph.find(subst[arg_x()]);
-        let holds = match &egraph[xc].data {
+        let holds = match &egraph[xc].data.value {
             _ if self.sole => true,
             Data::Adt(adt) if !adt.possible.contains(&self.ctor) => false,
             Data::Adt(adt) if adt.possible.len() == 1 => true,
@@ -322,7 +322,7 @@ impl VariantNarrowApplier {
     ) {
         let x = egraph.find(x);
         // What is known so far; `Unknown` means every variant is still possible.
-        let current: BTreeSet<FuncId> = match &egraph[x].data {
+        let current: BTreeSet<FuncId> = match &egraph[x].data.value {
             Data::Adt(adt) => adt.possible.clone(),
             Data::Unknown => self.ctors.iter().copied().collect(),
             // Already contradictory: nothing to narrow.
@@ -338,7 +338,7 @@ impl VariantNarrowApplier {
         };
 
         // only write when something changed
-        let was_unknown = matches!(egraph[x].data, Data::Unknown);
+        let was_unknown = matches!(egraph[x].data.value, Data::Unknown);
         if !was_unknown && narrowed.len() == current.len() {
             return;
         }
@@ -352,7 +352,15 @@ impl VariantNarrowApplier {
                 possible: narrowed,
             })
         };
-        egraph.set_analysis_data(x, data);
+        // Narrowing changes what the value may be, not how deep the class is.
+        let generation = egraph[x].data.generation;
+        egraph.set_analysis_data(
+            x,
+            ClassData {
+                value: data,
+                generation,
+            },
+        );
         changed.push(x);
     }
 }

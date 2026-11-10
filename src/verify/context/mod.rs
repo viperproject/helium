@@ -707,5 +707,15 @@ pub(super) fn run_rules_until<'r>(
         });
     }
     let runner = runner.run(rules);
+    // A bound stop is a truncation the verdict cannot see. Counted here rather
+    // than in `record_run`: egg reports the iteration limit only on the runner,
+    // never on its last `Iteration`. Hook stops (`Other`) and fixpoints
+    // (`Saturated`) are not truncations; `TimeLimit` is disabled above.
+    if matches!(
+        runner.stop_reason,
+        Some(egg::StopReason::IterationLimit(_) | egg::StopReason::NodeLimit(_))
+    ) {
+        stats::bump(|s| s.sat_bound_stops += 1);
+    }
     (runner.egraph, runner.iterations)
 }

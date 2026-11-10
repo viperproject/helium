@@ -1,0 +1,15 @@
+// A permission held under a guard that a quantifier chain 15 instances deep
+// proves: `g(0)` and `g(i) == g(i + 1)` give `g(30)`. Whether the guarded chunk
+// is held is decided inside the heap, not by a reported obligation.
+domain G {
+  function g(i: Int): Bool
+  axiom step { forall i: Int :: { g(i) } g(i) == g(i + 1) }
+}
+
+field v: Int
+
+method m(x: Ref)
+  requires g(0) && (g(15) ==> acc(x.v))
+{
+  x.v := 1
+}
