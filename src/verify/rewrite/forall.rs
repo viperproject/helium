@@ -11,6 +11,7 @@ use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Sub
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
 use crate::verify::quant::RecipeTable;
+use crate::verify::stats;
 use crate::vmir::{Literal, Type};
 
 use super::*;
@@ -46,7 +47,8 @@ impl PreparedTerm {
 /// Match `term` against e-class `class` under the forall node's capture children,
 /// extending `sigma`. Returns every consistent extension (an e-class may hold
 /// several nodes matching the pattern's head, each binding σ differently), or an
-/// empty vector when the term cannot match.
+/// empty vector when the term cannot match. Each extension is at least as deep
+/// as every class it matched (see [`Sigma::generation`]).
 pub(super) fn match_term(
     egraph: &EGraph<Symbolic, ConstFold>,
     term: &PreparedTerm,
@@ -55,20 +57,21 @@ pub(super) fn match_term(
     sigma: &Sigma,
 ) -> Vec<Sigma> {
     let class = egraph.find(class);
+    let matched = || sigma.through(egraph, class);
     match term {
-        PreparedTerm::Bound(i) => match sigma[*i] {
+        PreparedTerm::Bound(i) => match sigma.slots[*i] {
             // A repeated binder must land on the same e-class.
             Some(prev) if egraph.find(prev) != class => vec![],
-            Some(_) => vec![sigma.clone()],
+            Some(_) => vec![matched()],
             None => {
-                let mut next = sigma.clone();
-                next[*i] = Some(class);
+                let mut next = matched();
+                next.slots[*i] = Some(class);
                 vec![next]
             }
         },
         PreparedTerm::Capture(c) => {
             if egraph.find(caps[*c]) == class {
-                vec![sigma.clone()]
+                vec![matched()]
             } else {
                 vec![]
             }
@@ -79,7 +82,7 @@ pub(super) fn match_term(
                 .iter()
                 .any(|n| matches!(n, Symbolic::Lit(l) if l == lit))
             {
-                vec![sigma.clone()]
+                vec![matched()]
             } else {
                 vec![]
             }
@@ -99,7 +102,7 @@ pub(super) fn match_term(
                 }
                 // Thread σ left to right across the arguments, branching on every
                 // consistent way each of them matches.
-                let mut partials = vec![sigma.clone()];
+                let mut partials = vec![matched()];
                 for (arg, &child) in args.iter().zip(children.iter()) {
                     partials = partials
                         .iter()
@@ -130,7 +133,14 @@ pub(super) fn match_term_anywhere(
     let Some(classes) = egraph.classes_for_op(&Discriminant::FuncApp(root)) else {
         return vec![];
     };
+    // Between a union and the next rebuild the index still lists the class that
+    // was merged away, which resolves to the survivor: once the classes of many
+    // applications merge (each proven `true`), the survivor would be matched once
+    // per class it absorbed, every match walking all of their nodes.
+    let mut seen = HashSet::default();
     classes
+        .map(|class| egraph.find(class))
+        .filter(|&class| seen.insert(class))
         .flat_map(|class| match_term(egraph, term, class, caps, sigma))
         .collect()
 }
@@ -198,6 +208,11 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
 /// Memoized per `(recipe, caps ++ σ)` (canonicalized at insert) — a saturation-cost
 /// guard only, since instances are idempotent.
 ///
+/// An instance's generation is one more than the deepest class its trigger
+/// matched (captures included); one deeper than [`MAX_GENERATION`] is deferred:
+/// not built and not memoized, so it is built once a union makes a matched class
+/// shallower.
+///
 /// The table is interned into as bodies are walked, so this holds it behind the
 /// shared lock rather than a snapshot. Only reads happen here: a nested recipe is
 /// interned innermost-first with its encloser, on the eval walk, never from inside
@@ -229,15 +244,22 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
 
         let table = self.table.read().expect("recipe table lock");
         // Collect the instances first: `build_instance` needs `&mut egraph`.
-        let mut instances: Vec<(RecipeId, Vec<Id>)> = Vec::new();
+        let mut instances: Vec<(RecipeId, Vec<Id>, u32)> = Vec::new();
+        let mut deferred = 0;
         for (rid, caps) in &quants {
             let recipe = table.get(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
+            let empty = caps.iter().fold(
+                Sigma {
+                    slots: vec![None; recipe.n_bound],
+                    generation: 0,
+                },
+                |s, &c| s.through(egraph, c),
+            );
             for group in &recipe.groups {
                 let Some((anchor, rest)) = group.split_first() else {
                     continue;
                 };
-                let empty: Sigma = vec![None; recipe.n_bound];
                 let mut sigmas = match_term_anywhere(egraph, anchor, &caps, &empty);
                 for term in rest {
                     sigmas = sigmas
@@ -249,29 +271,42 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                     }
                 }
                 for sigma in sigmas {
+                    let generation = sigma.generation + 1;
                     // A group covers every binder (typecheck-enforced), so a
                     // complete match leaves no slot open.
-                    let Some(sigma): Option<Vec<Id>> = sigma.into_iter().collect() else {
+                    let Some(sigma): Option<Vec<Id>> = sigma.slots.into_iter().collect() else {
                         continue;
                     };
+                    if generation > MAX_GENERATION {
+                        deferred += 1;
+                        continue;
+                    }
                     // The seed is the body's leading temps: captures then binders.
                     let mut vals = caps.clone();
                     vals.extend(sigma);
                     if self.memo.insert((*rid, vals.clone())) {
-                        instances.push((*rid, vals));
+                        instances.push((*rid, vals, generation));
                     }
                 }
             }
         }
+        if deferred > 0 {
+            stats::bump(|s| s.inst_deferred += deferred);
+        }
+        if let Some(peak) = instances.iter().map(|i| i.2).max() {
+            stats::bump(|s| s.inst_generation_peak = s.inst_generation_peak.max(peak.into()));
+        }
 
         let mut changed = Vec::new();
-        for (rid, vals) in instances {
+        for (rid, vals, generation) in instances {
             let recipe = table.get(rid);
             debug_assert_eq!(
                 vals.len(),
                 recipe.n_caps + recipe.n_bound,
                 "instance seed is captures ++ sigma"
             );
+            // Every node the instance adds is created at its generation.
+            let outer = egraph.analysis.building.replace(generation);
             // `eclass` as the token guard: a `g%pre` token this body propagates is
             // released only under the quantifier's own truth, the same gate the
             // instance itself sits behind below. A quantifier that is merely
@@ -286,6 +321,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             let res = resolve_val(egraph, &instance_vals, &recipe.res);
             let true_ = egraph.add(Symbolic::Lit(Literal::Bool(true)));
             let guard = egraph.add(Symbolic::Ite([eclass, res, true_]));
+            egraph.analysis.building.set(outer);
             if egraph.union(guard, true_) {
                 changed.push(egraph.find(guard));
             }
@@ -311,4 +347,132 @@ pub(crate) fn forall_rule(table: Arc<RwLock<RecipeTable>>) -> Rule {
 }
 
 /// A partial bound-variable substitution, one slot per binder.
-pub(super) type Sigma = Vec<Option<Id>>;
+#[derive(Clone)]
+pub(super) struct Sigma {
+    slots: Vec<Option<Id>>,
+    /// The deepest [generation](crate::verify::analysis::ClassData::generation) of
+    /// the classes matched so far.
+    generation: u32,
+}
+
+impl Sigma {
+    /// This substitution, having also matched `class`.
+    fn through(&self, egraph: &EGraph<Symbolic, ConstFold>, class: Id) -> Sigma {
+        Sigma {
+            slots: self.slots.clone(),
+            generation: self.generation.max(egraph[class].data.generation),
+        }
+    }
+}
+
+/// The deepest instance generation built. A termination bound: a matching loop
+/// (an instance that builds a new term its own trigger matches) has no fixpoint,
+/// and there are finitely many instances of each generation, since every class
+/// of generation `g` holds a node built by an instance of generation at most `g`
+/// or by the other rules from such classes (which terminate on their own).
+///
+/// Sized above the depth proofs need: the deepest measured is 11 (a crate's
+/// type-level arithmetic; a bound of 8 loses proofs there). Z3's defaults
+/// instantiate eagerly up to cost 10 and at a final check up to 20. Below the
+/// iteration limit, so a matching loop ends its run at a fixpoint.
+pub(crate) const MAX_GENERATION: u32 = 16;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// After many applications' classes merge, and before the rebuild that
+    /// refreshes the op index, a trigger still matches each application once:
+    /// the index's merged-away entries resolve to the class already matched.
+    #[test]
+    fn a_class_merged_mid_iteration_is_matched_once() {
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let f = FuncId(0);
+        let n = 50;
+        let apps: Vec<Id> = (0..n)
+            .map(|i| {
+                let x = g.add(Symbolic::Fresh(i));
+                g.add(Symbolic::FuncApp(f, Box::new([]), Box::new([x])))
+            })
+            .collect();
+        g.rebuild();
+        for &app in &apps[1..] {
+            g.union(apps[0], app);
+        }
+        let trigger = PreparedTerm::App {
+            func: f,
+            type_args: Box::new([]),
+            args: vec![PreparedTerm::Bound(0)],
+        };
+        let empty = Sigma {
+            slots: vec![None],
+            generation: 0,
+        };
+        let sigmas = match_term_anywhere(&g, &trigger, &[], &empty);
+        assert_eq!(sigmas.len(), n as usize);
+    }
+
+    /// `forall x :: {f(x)} f(g(x))` from `f(a)`: the instance at `x = g^k(a)` has
+    /// generation `k + 1`, so the chain stops with `g^B(a)` built
+    /// (`B = MAX_GENERATION`) and its instance deferred, at a fixpoint. The
+    /// deferred instance is not remembered as done: once unions with
+    /// generation-0 terms make the match shallow, it is built.
+    #[test]
+    fn deferred_instance_is_built_once_its_binding_becomes_shallow() {
+        use crate::verify::quant::{QuantRecipe, RecipeTable};
+        use crate::vmir::Val;
+        let (f, g_) = (FuncId(0), FuncId(1));
+        let app = |func, args| {
+            AxiomInst::Val(AxiomPure::App {
+                func,
+                type_args: vec![],
+                args,
+            })
+        };
+        let (table, rid) = RecipeTable::of(QuantRecipe {
+            n_caps: 0,
+            n_bound: 1,
+            groups: vec![vec![PreparedTerm::App {
+                func: f,
+                type_args: Box::new([]),
+                args: vec![PreparedTerm::Bound(0)],
+            }]],
+            insts: vec![app(g_, vec![Val::Temp(0)]), app(f, vec![Val::Temp(1)])],
+            res: Val::Literal(Literal::Bool(true)),
+        });
+        let rules = [forall_rule(Arc::new(RwLock::new(table)))];
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let a = g.add(Symbolic::Fresh(0));
+        g.add(Symbolic::FuncApp(f, Box::new([]), Box::new([a])));
+        let q = g.add(Symbolic::Forall(rid, Box::new([])));
+        let t = g.add(Symbolic::Lit(Literal::Bool(true)));
+        g.union(q, t);
+        g.rebuild();
+        let run = |g| {
+            let r = egg::Runner::default()
+                .with_egraph(g)
+                .with_iter_limit(10 * MAX_GENERATION as usize)
+                .run(&rules);
+            assert!(matches!(r.stop_reason, Some(egg::StopReason::Saturated)));
+            r.egraph
+        };
+        let g_of = |g: &EGraph<Symbolic, ConstFold>, x| {
+            g.lookup(Symbolic::FuncApp(g_, Box::new([]), Box::new([x])))
+        };
+        let mut g = run(g);
+        let mut deep = a;
+        for _ in 0..MAX_GENERATION {
+            deep = g_of(&g, deep).expect("within the bound");
+        }
+        assert_eq!(g[deep].data.generation, MAX_GENERATION);
+        assert!(g_of(&g, deep).is_none(), "one past the bound is deferred");
+        // The program's own `f(b)`, with `b == g^B(a)`: congruence makes the
+        // whole trigger match generation 0.
+        let named = g.add(Symbolic::Fresh(1));
+        g.add(Symbolic::FuncApp(f, Box::new([]), Box::new([named])));
+        g.union(deep, named);
+        g.rebuild();
+        let g = run(g);
+        assert!(g_of(&g, deep).is_some());
+    }
+}
