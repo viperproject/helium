@@ -1,0 +1,9 @@
+// The axiom holds at this instance, and this contradicts it.
+domain Box[T] {
+  function box(x: T): Box[T]
+  function unbox(b: Box[T]): T
+
+  axiom inverse { forall x: T :: { box(x) } unbox(box(x)) == x }
+}
+
+method m() { assert unbox(box(3)) == 4 }

@@ -1,0 +1,8 @@
+// `f` does not mention `B`, so both instances of `P` share one `f[Int]`.
+domain P[A, B] {
+  function f(a: A): Int
+
+  axiom f_zero { forall a: A :: { f(a) } f(a) == 0 }
+}
+
+method m(x: P[Int, Bool], y: P[Int, Ref]) { assert f(3) == 0 }

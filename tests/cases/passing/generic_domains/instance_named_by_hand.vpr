@@ -1,0 +1,16 @@
+// known_limitations/generic_domains/reverse_lookup_runs_once.vpr with the missing
+// instance named, which makes it a seed.
+domain A[T] { function a(x: T): Int }
+
+domain B[U] { axiom ax { forall u: U :: { a(u) } a(u) == 0 } }
+
+domain E[T] {
+  function e(x: T): Int
+
+  axiom ex { forall t: T :: { e(t) } e(t) == a(t) }
+}
+
+method m() {
+  var b: B[Bool]
+  assert e(true) == 0
+}
