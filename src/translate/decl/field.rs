@@ -79,6 +79,7 @@ impl FieldTranslator<'_, Metaed> {
         definer.define_function(
             self.slot,
             vmir::Function {
+                ty_params: 0.into(),
                 name,
                 params: vec![vmir::Type::Ref].into(),
                 ret,

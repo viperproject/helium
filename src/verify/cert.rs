@@ -317,11 +317,15 @@ impl RecipeBuilder {
     pub(crate) fn emit_forall(
         &mut self,
         recipe: crate::verify::lang::RecipeId,
+        type_args: Vec<crate::vmir::Type>,
         caps: Vec<Val>,
     ) -> Val {
         let v = self.next_temp();
-        self.steps
-            .push(RecipeStep::Inst(AxiomInst::Forall { recipe, caps }));
+        self.steps.push(RecipeStep::Inst(AxiomInst::Forall {
+            recipe,
+            type_args,
+            caps,
+        }));
         v
     }
 

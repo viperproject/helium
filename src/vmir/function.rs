@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{Inst, MemberId, Type, Val};
+use crate::vmir::{Inst, MemberId, TyParams, Type, Val};
 use lasso::Spur;
 use std::fmt::{self, Display, Formatter};
 
@@ -18,6 +18,11 @@ use std::fmt::{self, Display, Formatter};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     pub name: Spur,
+    /// Generic over this many types (`Generic(0..n)` in `params` / `ret`). Only a
+    /// domain function is generic: over the domain parameters its signature
+    /// mentions, renumbered `0..n` in order of first occurrence. A call's
+    /// [`FunctionCall::type_args`] instantiates them.
+    pub ty_params: TyParams,
     pub params: Params,
     pub ret: Type,
     /// The function's definition, when it has a body. `None` ⟹ abstract /
@@ -206,7 +211,8 @@ impl<'a> Display for VmirDisplay<'a, &'a Function> {
         let ret = &self.item.ret;
         write!(
             f,
-            "function {name}{} -> {}",
+            "function {name}{}{} -> {}",
+            self.item.ty_params,
             self.with(params),
             self.with(ret)
         )?;

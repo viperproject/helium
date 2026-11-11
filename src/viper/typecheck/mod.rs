@@ -216,7 +216,9 @@ impl<'g> LocalEnv<'g> {
             }
         }
         let table = c.tc.type_check().map_err(TypeError::from)?;
-        LoweringCtx::new(self, &table).lower_pure::<typed::AxiomExt>(exp)
+        LoweringCtx::new(self, &table)
+            .with_rigid(rigid)
+            .lower_pure::<typed::AxiomExt>(exp)
     }
 
     /// Typecheck a spatial (assertion) expression and lower it to `typed`.
@@ -303,11 +305,23 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 struct LoweringCtx<'a, 'g> {
     env: &'a LocalEnv<'g>,
     table: &'a TypeTable,
+    /// Type parameters in scope as rigid types (a domain's, while lowering its
+    /// axioms): a bare binder type naming one lowers to `Generic`.
+    rigid: Vec<Spur>,
 }
 
 impl<'a, 'g> LoweringCtx<'a, 'g> {
     fn new(env: &'a LocalEnv<'g>, table: &'a TypeTable) -> Self {
-        Self { env, table }
+        Self {
+            env,
+            table,
+            rigid: Vec::new(),
+        }
+    }
+
+    fn with_rigid(mut self, rigid: &[Spur]) -> Self {
+        self.rigid = rigid.to_vec();
+        self
     }
 
     fn resolved_ty(&self, exp: &viper::Exp) -> Result<Type, TypeError> {
@@ -679,7 +693,10 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
             ExpKind::Ascribe(inner, ascribed_ty) => {
                 self.check_binder_type(ascribed_ty)?;
-                let target = Type::from(&*ascribed_ty);
+                // As for a binder: a type parameter in scope (a domain axiom's
+                // `T`) is that parameter, not a type of the same name.
+                let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+                let target = type_with_generics(ascribed_ty, &rigid);
                 let inner_key = self.constrain_pure(inner)?;
                 self.impose_type(inner_key, &target, &HashMap::default())?;
                 self.impose_type(key, &target, &HashMap::default())?;
@@ -792,9 +809,10 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                         ));
                     }
                     self.check_binder_type(&bv.ty)?;
-                    let ty = Type::from(&bv.ty);
+                    let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+                    let ty = type_with_generics(&bv.ty, &rigid);
                     let bk = self.tc.new_term_key();
-                    self.tc.impose(bk.concretizes_explicit(type_to_tc(&ty)))?;
+                    self.impose_type(bk, &ty, &HashMap::default())?;
                     let prev = self.let_bindings.insert(bv.idn.0.id(), bk);
                     prev_bindings.push((bv.idn.0.id(), prev));
                 }
@@ -1350,7 +1368,7 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     .iter()
                     .map(|bv| TypedIdent {
                         name: Ident(bv.idn.0.id()),
-                        ty: Type::from(&bv.ty),
+                        ty: type_with_generics(&bv.ty, &self.rigid),
                     })
                     .collect();
                 let lowered_triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>> = triggers

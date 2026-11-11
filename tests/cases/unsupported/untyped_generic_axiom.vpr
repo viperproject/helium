@@ -1,0 +1,15 @@
+// A generic axiom is instantiated only at the types its trigger matches fix, and
+// `none_discr` has no quantifier, hence no trigger: it is rejected as unsupported
+// (`UntypedGenericAxiom`), and `m`, which depends on it, is skipped. Supporting it
+// would need an implicit trigger on its generic applications (`nothing<T>()`).
+domain Option[T] {
+  function discr(o: Option[T]): Int
+  function nothing(): Option[T]
+
+  axiom none_discr { discr(nothing()) == 0 }
+}
+
+method m() {
+  assert discr((nothing(): Option[Bool])) == 0
+  assert discr((nothing(): Option[Ref])) == 0
+}

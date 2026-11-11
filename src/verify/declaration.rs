@@ -531,14 +531,27 @@ fn eval_pure_inst(
             let (recipe_id, free) = crate::verify::quant::intern_forall(ctx.alloc, &names, q)?;
             let free: Vec<Val> = free.iter().map(|&k| Val::Temp(k)).collect();
             let caps: Box<[egg::Id]> = free.iter().map(|v| state.get_val(ctx, v)).collect();
-            let id = ctx.add(Symbolic::Forall(recipe_id, caps));
+            // Stated directly (not inside an instantiated quantifier), so every
+            // type parameter of a generic axiom's quantifier is still open.
+            let type_args = ctx
+                .alloc
+                .quant_table()
+                .read()
+                .expect("recipe table lock")
+                .get(recipe_id)
+                .open_types();
+            let id = ctx.add(Symbolic::Forall(
+                recipe_id,
+                type_args.iter().cloned().collect(),
+                caps,
+            ));
             let recipe = if ctx.recipe.is_some() {
                 let caps: Vec<Val> = free
                     .iter()
                     .map(|v| state.require_recipe(v, OPERAND_RECIPE))
                     .collect::<Result<_, _>>()?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit_forall(recipe_id, caps))
+                Some(rb.emit_forall(recipe_id, type_args, caps))
             } else {
                 None
             };
@@ -1930,10 +1943,14 @@ fn eval_from_snap(
 
 /// Axiomatize the state: make every domain axiom's fact available to the unit
 /// about to be verified. An axiom body is evaluated into the e-graph and its
-/// boolean merged with `true` up front — domains are monomorphic, so there is no
-/// type-σ instantiation; quantification over *values* is a `forall` in the body,
-/// which becomes its own lazy-instantiation rule below. Axiom bodies are trusted
-/// — no obligations (div-by-zero, deref permission) are checked on them.
+/// boolean merged with `true` up front; quantification over *values* is a
+/// `forall` in the body, which becomes its own lazy-instantiation rule below.
+/// A **generic** axiom is evaluated the same way: outside its `forall`s it is
+/// ground (translation-enforced), and each `forall` node carries its type
+/// parameters open in its payload, fixed per instance by the trigger terms it
+/// matches (`rewrite::forall_rule`) — there is no up-front type instantiation.
+/// Axiom bodies are trusted — no obligations (div-by-zero, deref permission) are
+/// checked on them.
 ///
 /// Invariant: the eager ground-axiom evaluation below only ever sees **nullary**
 /// quantifier occurrences — axioms are closed and `let` is rejected in pure
@@ -2102,6 +2119,7 @@ pub(crate) fn prepare_body(
             let (recipe, free) = quants.entry_of(q)?;
             out.push(AxiomInst::Forall {
                 recipe: *recipe,
+                type_args: quants.get(*recipe).open_types(),
                 caps: free.iter().map(|&k| Val::Temp(k)).collect(),
             });
             continue;
@@ -2126,6 +2144,7 @@ pub(crate) fn prepare_body(
             // identity-wise, so `inst.pc`'s literals transfer directly.
             out.push(AxiomInst::Token {
                 func: alloc.fn_pre_token(fc.function, &names(fc.function)),
+                type_args: fc.type_args.clone(),
                 args,
                 guards: inst.pc.conds.clone(),
             });

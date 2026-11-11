@@ -46,7 +46,8 @@ impl PreparedTerm {
 /// Match `term` against e-class `class` under the forall node's capture children,
 /// extending `sigma`. Returns every consistent extension (an e-class may hold
 /// several nodes matching the pattern's head, each binding σ differently), or an
-/// empty vector when the term cannot match.
+/// empty vector when the term cannot match. An application also fixes the
+/// generic quantifier's open type parameters its type arguments mention.
 pub(super) fn match_term(
     egraph: &EGraph<Symbolic, ConstFold>,
     term: &PreparedTerm,
@@ -56,13 +57,13 @@ pub(super) fn match_term(
 ) -> Vec<Sigma> {
     let class = egraph.find(class);
     match term {
-        PreparedTerm::Bound(i) => match sigma[*i] {
+        PreparedTerm::Bound(i) => match sigma.vals[*i] {
             // A repeated binder must land on the same e-class.
             Some(prev) if egraph.find(prev) != class => vec![],
             Some(_) => vec![sigma.clone()],
             None => {
                 let mut next = sigma.clone();
-                next[*i] = Some(class);
+                next.vals[*i] = Some(class);
                 vec![next]
             }
         },
@@ -94,12 +95,15 @@ pub(super) fn match_term(
                 let Symbolic::FuncApp(f, tys, children) = node else {
                     continue;
                 };
-                if f != func || tys != type_args || children.len() != args.len() {
+                if f != func || children.len() != args.len() {
                     continue;
                 }
+                let Some(sigma) = match_types(type_args, tys, sigma) else {
+                    continue;
+                };
                 // Thread σ left to right across the arguments, branching on every
                 // consistent way each of them matches.
-                let mut partials = vec![sigma.clone()];
+                let mut partials = vec![sigma];
                 for (arg, &child) in args.iter().zip(children.iter()) {
                     partials = partials
                         .iter()
@@ -114,6 +118,33 @@ pub(super) fn match_term(
             out
         }
     }
+}
+
+/// `sigma` extended so that the pattern type arguments `pats` equal the ground
+/// `ground`, fixing open type parameters as needed; `None` on a mismatch. For a
+/// ground quantifier (no type payload) this is plain equality.
+fn match_types(pats: &[Type], ground: &[Type], sigma: &Sigma) -> Option<Sigma> {
+    if pats.len() != ground.len() {
+        return None;
+    }
+    if sigma.tys.is_empty() {
+        return (pats == ground).then(|| sigma.clone());
+    }
+    // Fixed parameters are substituted in; an open one stays `Generic(i)` and is
+    // bound by the match.
+    let mut bound: Vec<Option<Type>> = vec![None; sigma.tys.len()];
+    for (p, g) in pats.iter().zip(ground) {
+        if !p.subst_generics(&sigma.tys).match_generics(g, &mut bound) {
+            return None;
+        }
+    }
+    let mut next = sigma.clone();
+    for (slot, t) in next.tys.iter_mut().zip(bound) {
+        if let Some(t) = t {
+            *slot = t;
+        }
+    }
+    Some(next)
 }
 
 /// Every σ that matches `term` somewhere in the e-graph, extending `sigma`. Scans
@@ -195,8 +226,13 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
 /// once that forall e-class merges `true` (existing `ite-true` rule), so
 /// instantiating is sound regardless of the quantifier's truth.
 ///
-/// Memoized per `(recipe, caps ++ σ)` (canonicalized at insert) — a saturation-cost
-/// guard only, since instances are idempotent.
+/// A generic quantifier (non-empty type payload) is instantiated at the types
+/// its payload and the matched trigger terms fix: its body is built with them
+/// substituted in, so every node it adds is ground (or, for a nested quantifier,
+/// carries the fixed types in its own payload).
+///
+/// Memoized per `(recipe, types, caps ++ σ)` (canonicalized at insert) — a
+/// saturation-cost guard only, since instances are idempotent.
 ///
 /// The table is interned into as bodies are walked, so this holds it behind the
 /// shared lock rather than a snapshot. Only reads happen here: a nested recipe is
@@ -204,7 +240,7 @@ impl Searcher<Symbolic, ConstFold> for ForallSearcher {
 /// a rule.
 pub(super) struct ForallApplier {
     pub(super) table: Arc<RwLock<RecipeTable>>,
-    pub(super) memo: Arc<Memo<(RecipeId, Vec<Id>)>>,
+    pub(super) memo: Arc<Memo<(RecipeId, Vec<Type>, Vec<Id>)>>,
 }
 
 impl Applier<Symbolic, ConstFold> for ForallApplier {
@@ -218,26 +254,29 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
     ) -> Vec<Id> {
         // Distinct capture tuples in one e-class are distinct quantifiers (each
         // yields its own instances); the guard is this e-class either way.
-        let quants: Vec<(RecipeId, Box<[Id]>)> = egraph[eclass]
+        let quants: Vec<(RecipeId, Box<[Type]>, Box<[Id]>)> = egraph[eclass]
             .nodes
             .iter()
             .filter_map(|n| match n {
-                Symbolic::Forall(rid, caps) => Some((*rid, caps.clone())),
+                Symbolic::Forall(rid, tys, caps) => Some((*rid, tys.clone(), caps.clone())),
                 _ => None,
             })
             .collect();
 
         let table = self.table.read().expect("recipe table lock");
         // Collect the instances first: `build_instance` needs `&mut egraph`.
-        let mut instances: Vec<(RecipeId, Vec<Id>)> = Vec::new();
-        for (rid, caps) in &quants {
+        let mut instances: Vec<(RecipeId, Vec<Type>, Vec<Id>)> = Vec::new();
+        for (rid, tys, caps) in &quants {
             let recipe = table.get(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
             for group in &recipe.groups {
                 let Some((anchor, rest)) = group.split_first() else {
                     continue;
                 };
-                let empty: Sigma = vec![None; recipe.n_bound];
+                let empty = Sigma {
+                    vals: vec![None; recipe.n_bound],
+                    tys: tys.to_vec(),
+                };
                 let mut sigmas = match_term_anywhere(egraph, anchor, &caps, &empty);
                 for term in rest {
                     sigmas = sigmas
@@ -251,22 +290,34 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                 for sigma in sigmas {
                     // A group covers every binder (typecheck-enforced), so a
                     // complete match leaves no slot open.
-                    let Some(sigma): Option<Vec<Id>> = sigma.into_iter().collect() else {
+                    let Some(bound): Option<Vec<Id>> = sigma.vals.into_iter().collect() else {
                         continue;
                     };
+                    // Each group, with what the payload already fixes, binds every
+                    // type parameter this level uses (translation-enforced,
+                    // `check_typed`); one only a nested quantifier uses may stay open.
+                    assert!(
+                        recipe.own_tys.iter().all(|&i| is_ground(&sigma.tys[i])),
+                        "a trigger match of a generic quantifier must fix the types it uses"
+                    );
                     // The seed is the body's leading temps: captures then binders.
                     let mut vals = caps.clone();
-                    vals.extend(sigma);
-                    if self.memo.insert((*rid, vals.clone())) {
-                        instances.push((*rid, vals));
+                    vals.extend(bound);
+                    if self.memo.insert((*rid, sigma.tys.clone(), vals.clone())) {
+                        instances.push((*rid, sigma.tys, vals));
                     }
                 }
             }
         }
 
         let mut changed = Vec::new();
-        for (rid, vals) in instances {
+        for (rid, tys, vals) in instances {
             let recipe = table.get(rid);
+            let insts = if tys.is_empty() {
+                std::borrow::Cow::Borrowed(&recipe.insts)
+            } else {
+                std::borrow::Cow::Owned(subst_types(&recipe.insts, &tys))
+            };
             debug_assert_eq!(
                 vals.len(),
                 recipe.n_caps + recipe.n_bound,
@@ -276,13 +327,8 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             // released only under the quantifier's own truth, the same gate the
             // instance itself sits behind below. A quantifier that is merely
             // *present* materializes its body but activates no callee's axioms.
-            let instance_vals = build_instance_vals_guarded(
-                egraph,
-                &recipe.insts,
-                &vals,
-                &mut changed,
-                Some(eclass),
-            );
+            let instance_vals =
+                build_instance_vals_guarded(egraph, &insts, &vals, &mut changed, Some(eclass));
             let res = resolve_val(egraph, &instance_vals, &recipe.res);
             let true_ = egraph.add(Symbolic::Lit(Literal::Bool(true)));
             let guard = egraph.add(Symbolic::Ite([eclass, res, true_]));
@@ -310,5 +356,18 @@ pub(crate) fn forall_rule(table: Arc<RwLock<RecipeTable>>) -> Rule {
     timed(Rewrite::new("forall-instantiate", searcher, applier).expect("forall rule"))
 }
 
-/// A partial bound-variable substitution, one slot per binder.
-pub(super) type Sigma = Vec<Option<Id>>;
+/// A partial substitution: one slot per binder, and the quantifier's type
+/// payload being fixed (see [`Symbolic::Forall`]: entry `i` is open while it is
+/// `Generic(i)`; empty for a ground quantifier).
+#[derive(Clone)]
+pub(super) struct Sigma {
+    pub(super) vals: Vec<Option<Id>>,
+    pub(super) tys: Vec<Type>,
+}
+
+/// Whether `t` mentions no type parameter.
+fn is_ground(t: &Type) -> bool {
+    let mut g = crate::dhash::HashSet::default();
+    t.collect_generics(&mut g);
+    g.is_empty()
+}

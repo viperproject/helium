@@ -28,7 +28,7 @@ use crate::verify::error::VerifyError;
 use crate::verify::func_registry::FuncRegistry;
 use crate::verify::lang::RecipeId;
 use crate::verify::rewrite::{AxiomInst, PreparedTerm};
-use crate::vmir::{self, InstKind, PureInst, Val};
+use crate::vmir::{self, InstKind, PureInst, Type, Val};
 
 /// A compiled `forall` body: the pure steps, the boolean result, the binder arity,
 /// and the trigger groups (alternatives — a match of any one instantiates).
@@ -44,10 +44,29 @@ pub(crate) struct QuantRecipe {
     /// arity of every `Symbolic::Forall` node naming this recipe.
     pub(crate) n_caps: usize,
     pub(crate) n_bound: usize,
+    /// The type arity: one past the highest `Generic(i)` the quantifier (binders,
+    /// triggers, body, nested quantifiers) mentions, hence the length of every
+    /// `Symbolic::Forall` node's type payload. `0` for a ground quantifier; only a
+    /// generic axiom's quantifiers have one.
+    pub(crate) n_tys: usize,
+    /// The type parameters this quantifier's own level (binders, triggers, body
+    /// outside nested quantifiers) mentions: what an instantiation must have
+    /// fixed. A parameter only a nested quantifier mentions may stay open, for
+    /// that quantifier's own trigger to fix.
+    pub(crate) own_tys: Vec<usize>,
     /// Alternative trigger groups; each group is a conjunctive multi-pattern.
     pub(crate) groups: Vec<Vec<PreparedTerm>>,
     pub(crate) insts: Vec<AxiomInst>,
     pub(crate) res: Val,
+}
+
+impl QuantRecipe {
+    /// The type payload of a node whose type parameters are all still open:
+    /// `Generic(0..n_tys)`. How a quantifier is stated in a generic axiom; an
+    /// enclosing instantiation substitutes into it.
+    pub(crate) fn open_types(&self) -> Vec<Type> {
+        (0..self.n_tys).map(Type::Generic).collect()
+    }
 }
 
 /// The identity of a recipe: the canonicalized body **and** its triggers. Two
@@ -60,6 +79,8 @@ pub(crate) struct QuantRecipe {
 struct RecipeKey {
     n_caps: usize,
     n_bound: usize,
+    n_tys: usize,
+    own_tys: Vec<usize>,
     groups: Vec<Vec<PreparedTerm>>,
     insts: Vec<AxiomInst>,
     res: Val,
@@ -188,10 +209,19 @@ fn intern(
         })
         .collect();
     let res = rename(&q.body.res);
+    let mut generics = crate::dhash::HashSet::default();
+    forall_generics(q, true, &mut generics);
+    let n_tys = generics.iter().max().map_or(0, |m| m + 1);
+    let mut own = crate::dhash::HashSet::default();
+    forall_generics(q, false, &mut own);
+    let mut own_tys: Vec<usize> = own.into_iter().collect();
+    own_tys.sort_unstable();
 
     let key = RecipeKey {
         n_caps,
         n_bound: q.bound.len(),
+        n_tys,
+        own_tys: own_tys.clone(),
         groups: groups.clone(),
         insts: insts.clone(),
         res: res.clone(),
@@ -202,6 +232,8 @@ fn intern(
             let id = table.recipes.push_and_get_key(QuantRecipe {
                 n_caps,
                 n_bound: q.bound.len(),
+                n_tys,
+                own_tys,
                 groups,
                 insts,
                 res,
@@ -212,4 +244,40 @@ fn intern(
     };
     table.by_forall.insert(q.clone(), (id, free.into()));
     Ok(id)
+}
+
+/// Every `Generic(i)` index `q` mentions: its binder types, its triggers' type
+/// arguments, and every type of its body — nested quantifiers included when
+/// `deep`.
+fn forall_generics(q: &vmir::Forall, deep: bool, out: &mut crate::dhash::HashSet<usize>) {
+    fn trig(t: &vmir::TrigTerm, out: &mut crate::dhash::HashSet<usize>) {
+        if let vmir::TrigTerm::App {
+            type_args, args, ..
+        } = t
+        {
+            type_args.iter().for_each(|ty| ty.collect_generics(out));
+            args.iter().for_each(|a| trig(a, out));
+        }
+    }
+    q.bound.iter().for_each(|ty| ty.collect_generics(out));
+    q.triggers
+        .iter()
+        .flat_map(|g| g.terms.iter())
+        .for_each(|t| trig(t, out));
+    for inst in &q.body.insts {
+        let InstKind::Pure(ty, pi) = &inst.kind else {
+            continue;
+        };
+        ty.collect_generics(out);
+        match pi {
+            PureInst::FunctionCall(fc) => fc.type_args.iter().for_each(|t| t.collect_generics(out)),
+            PureInst::AdtCons { type_args, .. }
+            | PureInst::AdtProj { type_args, .. }
+            | PureInst::AdtIs { type_args, .. } => {
+                type_args.iter().for_each(|t| t.collect_generics(out))
+            }
+            PureInst::Forall(inner) if deep => forall_generics(inner, deep, out),
+            _ => {}
+        }
+    }
 }

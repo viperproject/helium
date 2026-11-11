@@ -491,20 +491,72 @@ function len(l: List[Int]): Int
 }
 
 #[test]
-fn generic_domain_rejected() {
-    // Generics live on ADTs. A generic domain's axioms could only be
-    // instantiated off a *type* trigger, which Silver has no syntax to write —
-    // rather than infer one, translation refuses the domain.
-    let err = run_err(
-        r#"
-domain Box[T] {
-    function wrap(x: T): T
+fn generic_domain_members() {
+    // A domain function is generic over only the domain parameters its signature
+    // mentions, renumbered from 0; an axiom keeps the domain's arity; a call
+    // carries its instantiation.
+    let p = run(r#"
+domain Two[A, B] {
+    function second(x: B): B
+    function zero(): Int
+    axiom ax { forall b: B :: { second(b) } second(b) == b }
 }
-"#,
-    );
+method m() { assert second(true) == true }
+"#);
+    let decl = |name: &str| &p.decls[p.id(name).expect(name)];
+    let vmir::Declaration::Domain(two) = decl("Two") else {
+        panic!("Two")
+    };
+    assert_eq!(two.ty_params.count(), 2);
+    let vmir::Declaration::Function(second) = decl("second") else {
+        panic!("second")
+    };
+    assert_eq!(second.ty_params.count(), 1);
+    assert_eq!(second.ret, vmir::Type::Generic(0));
+    let vmir::Declaration::Function(zero) = decl("zero") else {
+        panic!("zero")
+    };
+    assert_eq!(zero.ty_params.count(), 0);
+    let vmir::Declaration::Axiom(ax) = decl("ax") else {
+        panic!("ax")
+    };
+    assert_eq!(ax.ty_params.count(), 2);
+    // `second(b)` in the axiom is instantiated at the domain's `B`, i.e. `Generic(1)`.
+    let vmir::InstKind::Pure(_, vmir::PureInst::Forall(q)) = &ax.body.insts[0].kind else {
+        panic!("axiom body starts with its forall")
+    };
+    let vmir::TrigTerm::App { type_args, .. } = &q.triggers[0].terms[0] else {
+        panic!("trigger is an application")
+    };
+    assert_eq!(type_args, &vec![vmir::Type::Generic(1)]);
+}
+
+#[test]
+fn untyped_generic_axiom_rejected() {
+    // The verifier instantiates a generic axiom only at the types its trigger
+    // matches fix: a part that no trigger can type is refused.
+    let no_quantifier = r#"
+domain Box[T] {
+    function emp(): Box[T]
+    function full(b: Box[T]): Bool
+    axiom closed { !full(emp()) }
+}
+"#;
     assert_eq!(
-        err,
-        TranslationError::GenericDomainUnsupported("Box".to_string())
+        run_err(no_quantifier),
+        TranslationError::UntypedGenericAxiom("closed".to_string())
+    );
+    // `h(x)` carries no type arguments, so nothing fixes the `T` of `g(x)`.
+    let trigger_misses_param = r#"
+domain D[T] {
+    function g(x: Int): D[T]
+    function h(x: Int): Int
+    axiom loose { forall x: Int :: { h(x) } g(x) == g(x) }
+}
+"#;
+    assert_eq!(
+        run_err(trigger_misses_param),
+        TranslationError::UntypedGenericAxiom("loose".to_string())
     );
 }
 

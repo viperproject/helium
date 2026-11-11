@@ -51,6 +51,7 @@ impl Resource {
     /// interned group tag (`Program.groups`).
     pub fn derive_location(&self, id: MemberId, group: lasso::Spur) -> Function {
         Function {
+            ty_params: 0.into(),
             name: self.name,
             params: self.params.clone().into(),
             ret: Type::addr(group, Type::Snap(id), Bound::Unbounded),

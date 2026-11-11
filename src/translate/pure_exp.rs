@@ -243,11 +243,10 @@ pub(crate) fn lower<Ext: PureExt>(
             })?;
             Ok(sink.emit_pure(ty, PureInst::Ternary(c, t, e)))
         }
-        // A domain function call (pure, heap-free). Domains are monomorphic, so
-        // the application carries no type arguments — only ADT constructors and
-        // projections do.
+        // A domain function call (pure, heap-free). Its type arguments
+        // instantiate the domain parameters its signature mentions, recovered
+        // from the actual argument / result types.
         P::DomainFunctionCall(call) => {
-            let type_args = Vec::new();
             let mut args = Vec::with_capacity(call.args.len());
             for a in &call.args {
                 args.push(lower(b, env, sink, hctx, a)?);
@@ -255,6 +254,7 @@ pub(crate) fn lower<Ext: PureExt>(
             let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
+            let type_args = domain_call_type_args(b, function, &call.args, &ty);
             Ok(sink.emit_pure(
                 ty,
                 PureInst::FunctionCall(vmir::FunctionCall {
@@ -357,6 +357,37 @@ fn dtor_projection(
         .get(&(adt.0, field.0))
         .copied()
         .ok_or_else(|| TranslationError::UnknownIdent(b.interner.resolve(&field.0).to_string()))
+}
+
+/// The type arguments of a call to `function`: the instantiation of the generic
+/// parameters its signature mentions (`Generic(k)` ↦ `k`-th entry), found by
+/// matching the signature against the actual argument types and the result type
+/// `ret`. Empty for a callee with no recorded domain signature (a Silver
+/// function) or a ground signature.
+fn domain_call_type_args<Ext>(
+    b: &TranslationContext<'_>,
+    function: vmir::MemberId,
+    args: &[typed::TypedPureExp<Ext>],
+    ret: &vmir::Type,
+) -> Vec<vmir::Type> {
+    let Some(sig) = b.domain_fn_sigs.get(&function) else {
+        return Vec::new();
+    };
+    let mut bound: Vec<Option<vmir::Type>> = vec![None; sig.ty_params];
+    for (param, arg) in sig.params.iter().zip(args) {
+        assert!(
+            param.match_generics(&b.lower_type(&arg.ty), &mut bound),
+            "typecheck guarantees domain call arguments match the signature"
+        );
+    }
+    assert!(
+        sig.ret.match_generics(ret, &mut bound),
+        "typecheck guarantees a domain call's result matches the signature"
+    );
+    bound
+        .into_iter()
+        .map(|t| t.expect("every generic of a signature occurs in it, so a call binds it"))
+        .collect()
 }
 
 fn adt_type_args(b: &TranslationContext<'_>, ty: &typed::Type) -> Vec<vmir::Type> {
@@ -828,9 +859,11 @@ fn lower_trig_term(
             let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
+            // A Silver function has no `domain_fn_sigs` entry: no type arguments.
+            let type_args = domain_call_type_args(b, function, &call.args, &b.lower_type(&term.ty));
             Ok(vmir::TrigTerm::App {
                 head: vmir::TrigHead::Func(function),
-                type_args: Vec::new(),
+                type_args,
                 args: lower_args(&call.args)?.into(),
             })
         }

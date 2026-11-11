@@ -392,8 +392,15 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
         Type::Ref => Sort::uninterpreted("Ref".into()),
         Type::Domain(id, args) => match &decls[*id] {
             vmir::Declaration::Domain(d) => {
-                debug_assert!(args.is_empty(), "domains are monomorphic");
-                Sort::uninterpreted(format!("dom@{}", interner.resolve(&d.name)).into())
+                // A generic domain is one sort per instantiation: `Box<Int>` and
+                // `Box<Bool>` must not collapse onto a single sort.
+                let args = if args.is_empty() {
+                    String::new()
+                } else {
+                    let each: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                    format!("<{}>", each.join(", "))
+                };
+                Sort::uninterpreted(format!("dom@{}{args}", interner.resolve(&d.name)).into())
             }
             vmir::Declaration::Adt(_) => datatype(ctxt, ty).sort.clone(),
             _ => unreachable!("Type::Domain must name a domain or an ADT"),
@@ -475,7 +482,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
             let class = class_const(ctxt, *id)?.as_int().unwrap();
             class.to_real().into()
         }
-        Symbolic::Forall(_, _) => todo!("implement translation for forall nodes"),
+        Symbolic::Forall(..) => todo!("implement translation for forall nodes"),
     })
 }
 
