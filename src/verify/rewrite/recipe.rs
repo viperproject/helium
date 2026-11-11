@@ -8,7 +8,7 @@
 use egg::{EGraph, Id, SearchMatches, Searcher, Subst, Var};
 
 use crate::verify::analysis::ConstFold;
-use crate::verify::lang::{Discriminant, FuncId, RecipeId, SeqAux, Symbolic};
+use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
 use crate::vmir::{BinOp, Literal, Polarity, SeqOp, Type, Val};
 
 use super::*;
@@ -36,18 +36,6 @@ pub(crate) enum AxiomPure {
     SeqLit {
         elem_ty: Type,
         elem: Val,
-    },
-    /// A sequence equality `l == r` of the program, built together with its
-    /// [`SeqAux::Eq`] tag in the same e-class, the term the extensionality axioms
-    /// trigger on. Its value is the equality. Only a certificate walk emits it, as
-    /// the eval walk tags the equalities it evaluates
-    /// (`declaration::tag_seq_equal`); a quantifier body's equalities stay
-    /// untagged, so the sequence axioms' own conclusions never feed
-    /// extensionality.
-    SeqEq {
-        elem_ty: Type,
-        l: Val,
-        r: Val,
     },
 }
 
@@ -117,13 +105,6 @@ pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
                 AxiomInst::Val(AxiomPure::SeqLit {
                     elem_ty: elem_ty.subst_generics(tys),
                     elem: elem.clone(),
-                })
-            }
-            AxiomInst::Val(AxiomPure::SeqEq { elem_ty, l, r }) => {
-                AxiomInst::Val(AxiomPure::SeqEq {
-                    elem_ty: elem_ty.subst_generics(tys),
-                    l: l.clone(),
-                    r: r.clone(),
                 })
             }
             AxiomInst::Forall {
@@ -384,25 +365,20 @@ pub(super) fn build_instance_vals_impl(
                     }
                     AxiomPure::Seq { elem_ty, op, args } => {
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                        egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args))
+                        let id =
+                            egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args.clone()));
+                        // A sequence equality shares its class with the untyped one.
+                        if *op == SeqOp::Eq {
+                            let eq = egraph.add(Symbolic::Binary(BinOp::Eq, [args[0], args[1]]));
+                            if egraph.union(id, eq) {
+                                changed.push(egraph.find(id));
+                            }
+                        }
+                        id
                     }
                     AxiomPure::SeqLit { elem_ty, elem } => {
                         let elem = get(egraph, &vals, elem);
                         egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), elem))
-                    }
-                    AxiomPure::SeqEq { elem_ty, l, r } => {
-                        let l = get(egraph, &vals, l);
-                        let r = get(egraph, &vals, r);
-                        let tag = egraph.add(Symbolic::SeqAux(
-                            Box::new(elem_ty.clone()),
-                            SeqAux::Eq,
-                            [l, r],
-                        ));
-                        let eq = egraph.add(Symbolic::Binary(BinOp::Eq, [l, r]));
-                        if egraph.union(tag, eq) {
-                            changed.push(egraph.find(eq));
-                        }
-                        eq
                     }
                 };
                 vals.push(id);

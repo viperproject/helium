@@ -5,11 +5,12 @@
 //! Adapted from Silicon's `dafny_axioms/sequences.vpr`. As recipes, they need
 //! none of the domain's helper functions: `Seq_add`/`Seq_sub` are plain `+`/`-`
 //! (their round-trip equalities stay, see [`round_trip`]),
-//! `Seq_contains_trigger` is gone, and `Seq_equal` is the [`SeqAux::Eq`] tag in
-//! the equality's own e-class. The two skolem functions stay (see
-//! [`SeqSkolems`]), as functions the registry mints rather than domain
-//! functions: a witness is a term of the instance's binders, so building an
-//! instance again finds the same witness instead of adding another one.
+//! `Seq_contains_trigger` is gone, and `Seq_equal` is a program's typed
+//! sequence equality ([`SeqOp::Eq`], in the untyped equality's own e-class).
+//! The two skolem functions stay (see [`SeqSkolems`]), as functions the
+//! registry mints rather than domain functions: a witness is a term of the
+//! instance's binders, so building an instance again finds the same witness
+//! instead of adding another one.
 //!
 //! Each axiom reads `forall vars :: {triggers} conds ==> conclusions` and holds
 //! at every element type `E`: its recipe is generic over `E` (`Generic(0)`), so
@@ -32,7 +33,7 @@
 use std::sync::LazyLock;
 
 use crate::verify::func_registry::SkolemSig;
-use crate::verify::lang::{FuncId, SeqAux};
+use crate::verify::lang::FuncId;
 use crate::verify::quant::{Guard, QuantRecipe};
 use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 use crate::vmir::{BinOp, Literal, SeqOp, Type, Val};
@@ -62,7 +63,6 @@ pub(crate) enum STerm {
     /// A sequence operation on `Seq[E]` (a `Range` is on `Seq[Int]`), operands
     /// in `Symbolic::Seq` order. Never `Empty`, which is [`STerm::Empty`].
     Op(SeqOp, Vec<STerm>),
-    Aux(SeqAux, Box<[STerm; 2]>),
     /// A witness: a skolem function of [`SeqSkolems`] applied to its operands.
     Skolem(Witness, Box<[STerm; 2]>),
     Bin(BinOp, Box<[STerm; 2]>),
@@ -180,7 +180,6 @@ impl STerm {
             STerm::Skolem(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Unit(e) => e.mark_vars(seen),
             STerm::Op(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
-            STerm::Aux(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Bin(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Ite(args) => args.iter().for_each(|a| a.mark_vars(seen)),
         }
@@ -229,8 +228,10 @@ fn contains(s: STerm, x: STerm) -> STerm {
 fn range(lo: STerm, hi: STerm) -> STerm {
     op(SeqOp::Range, vec![lo, hi])
 }
-fn aux(a: SeqAux, l: STerm, r: STerm) -> STerm {
-    STerm::Aux(a, Box::new([l, r]))
+/// `s == t` of the program, the typed equality (not the axioms' own `==`,
+/// which is [`eq`]): only usable as a trigger.
+fn seq_eq(s: STerm, t: STerm) -> STerm {
+    op(SeqOp::Eq, vec![s, t])
 }
 fn skolem(w: Witness, l: STerm, r: STerm) -> STerm {
     STerm::Skolem(w, Box::new([l, r]))
@@ -662,12 +663,13 @@ fn build() -> Vec<SeqAxiom> {
             .then([contains(s.clone(), t.clone())])
             .done(),
         // End contains
-        // Start equals. `Seq_equal(a, b)` is the `SeqAux::Eq` tag, which shares
-        // its e-class with `a == b`, so `Seq_equal_ext` holds by construction and
-        // `Seq_equal_def` reduces to its third disjunct: unequal sequences of one
-        // length differ at the in-range index `k = Seq_skolem_diff(a, b)`.
+        // Start equals. `Seq_equal(a, b)` is the program's `SeqOp::Eq`, which
+        // shares its e-class with `a == b`, so `Seq_equal_ext` holds by
+        // construction and `Seq_equal_def` reduces to its third disjunct:
+        // unequal sequences of one length differ at the in-range index
+        // `k = Seq_skolem_diff(a, b)`.
         Ax::new("seq-equal-diff", &[Seq, Seq])
-            .trig(vec![aux(SeqAux::Eq, s.clone(), t.clone())])
+            .trig(vec![seq_eq(s.clone(), t.clone())])
             .when([ne(s.clone(), t.clone()), eq(len(s.clone()), len(t.clone()))])
             .guard_when()
             .then({
@@ -687,7 +689,7 @@ fn build() -> Vec<SeqAxiom> {
         // implication is spelled as a program's `0 <= i && i < |a| ==> a[i] ==
         // b[i]` lowers, so an instance of such a quantifier at `k` is this term.
         Ax::new("seq-equal-ext", &[Seq, Seq])
-            .trig(vec![aux(SeqAux::Eq, s.clone(), t.clone())])
+            .trig(vec![seq_eq(s.clone(), t.clone())])
             .when([eq(len(s.clone()), len(t.clone()))])
             .guard_when()
             .then({
@@ -826,6 +828,11 @@ impl Steps {
                 })
             }
             STerm::Op(op, args) => {
+                assert_ne!(
+                    *op,
+                    SeqOp::Eq,
+                    "a sequence axiom has the program's typed equality only in a trigger"
+                );
                 let args = args.iter().map(|a| self.emit(a)).collect();
                 let elem_ty = if *op == SeqOp::Range { Type::Int } else { elem };
                 self.push(AxiomPure::Seq {
@@ -833,9 +840,6 @@ impl Steps {
                     op: *op,
                     args,
                 })
-            }
-            STerm::Aux(..) => {
-                panic!("a sequence axiom has a `SeqAux` term only in a trigger, not {t:?}")
             }
             // Generic in the element type like the axiom, so an instance's
             // type substitution fixes it.
@@ -885,7 +889,6 @@ fn trigger(t: &STerm, elem: &Type) -> PreparedTerm {
         STerm::Unit(e) => app(TermHead::SeqLit(elem.clone()), std::slice::from_ref(&**e)),
         STerm::Op(SeqOp::Range, args) => app(TermHead::Seq(Type::Int, SeqOp::Range), args),
         STerm::Op(op, args) => app(TermHead::Seq(elem.clone(), *op), args),
-        STerm::Aux(aux, args) => app(TermHead::SeqAux(elem.clone(), *aux), &args[..]),
         STerm::Bin(..) | STerm::Ite(..) | STerm::Skolem(..) => {
             panic!("a sequence-axiom trigger is built from sequence terms, not {t:?}")
         }

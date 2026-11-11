@@ -290,7 +290,6 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
         },
         Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
         Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
-        Symbolic::SeqAux(_, aux, _) => Some(aux.result_type()),
     }
 }
 
@@ -311,7 +310,7 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
         if matches!(node, Symbolic::Seq(..)) {
             continue;
         }
-        if matches!(node, Symbolic::SeqLit(..) | Symbolic::SeqAux(..)) {
+        if matches!(node, Symbolic::SeqLit(..)) {
             continue;
         }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {
@@ -496,7 +495,6 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
         Symbolic::Forall(..) => todo!("implement translation for forall nodes"),
         Symbolic::Seq(..) => todo!("implement translation for seq nodes"),
         Symbolic::SeqLit(_, _) => todo!("implement translation for seq_lit nodes"),
-        Symbolic::SeqAux(..) => todo!("implement translation for seq_aux nodes"),
     })
 }
 

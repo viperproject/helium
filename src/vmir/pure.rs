@@ -137,6 +137,11 @@ pub enum SeqOp {
     Range,
     /// `Seq[T]()` : Seq<T>. Takes no operands, so `elem_ty` is all that names `T`.
     Empty,
+    /// `s == t` : Bool, a program's equality of two sequences. Typed, unlike
+    /// `BinOp::Eq`, so the extensionality axioms can trigger on it: the
+    /// verifier keeps it in one e-class with the untyped `s == t`, which every
+    /// other part of equality reasoning reads.
+    Eq,
 }
 
 impl SeqOp {
@@ -150,7 +155,8 @@ impl SeqOp {
             | SeqOp::Take
             | SeqOp::Drop
             | SeqOp::Contains
-            | SeqOp::Range => 2,
+            | SeqOp::Range
+            | SeqOp::Eq => 2,
             SeqOp::Update => 3,
         }
     }
@@ -165,7 +171,7 @@ impl SeqOp {
     pub fn result_type(self, elem_ty: &Type) -> Type {
         match self {
             SeqOp::Len => Type::Int,
-            SeqOp::Contains => Type::Bool,
+            SeqOp::Contains | SeqOp::Eq => Type::Bool,
             SeqOp::Index => elem_ty.clone(),
             SeqOp::Concat
             | SeqOp::Update
@@ -187,6 +193,7 @@ impl SeqOp {
             SeqOp::Range => "seq.range",
             SeqOp::Contains => "seq.in",
             SeqOp::Empty => "seq.empty",
+            SeqOp::Eq => "seq.eq",
         }
     }
 }
@@ -411,6 +418,7 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 (SeqOp::Drop, [s, n]) => write!(f, "{s}[{n}..]"),
                 (SeqOp::Contains, [s, x]) => write!(f, "{x} in {s}"),
                 (SeqOp::Range, [a, b]) => write!(f, "[{a}..{b})"),
+                (SeqOp::Eq, [s, t]) => write!(f, "{s} ==seq {t}"),
                 (op, args) => unreachable!(
                     "`{op:?}` with {} operands; `PureInst::seq` checks arity",
                     args.len()

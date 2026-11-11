@@ -70,36 +70,6 @@ pub enum Symbolic {
     /// The singleton sequence of one element, of this element type. A longer
     /// literal is a concatenation of these (`PureInst::SeqLit`).
     SeqLit(Box<Type>, Id),
-
-    /// A verifier-internal sequence term over two operands, of this element
-    /// type: the type-tagged equality the sequence axioms
-    /// (`verify::seq_axioms`) trigger on. No program writes one.
-    SeqAux(Box<Type>, SeqAux, [Id; 2]),
-}
-
-/// The verifier-internal sequence terms (see [`Symbolic::SeqAux`]).
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SeqAux {
-    /// `l == r` on `Seq<T>`: a type tag kept in the *same e-class* as the
-    /// `Binary(Eq, [l, r])` of a program's sequence equality, so the
-    /// extensionality axiom can find sequence equalities in a type-free graph.
-    /// Only a program's own equalities get one, so the axioms' conclusions
-    /// never feed extensionality back.
-    Eq,
-}
-
-impl SeqAux {
-    pub fn token(self) -> &'static str {
-        match self {
-            SeqAux::Eq => "seq.eq",
-        }
-    }
-
-    pub fn result_type(self) -> Type {
-        match self {
-            SeqAux::Eq => Type::Bool,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -123,7 +93,6 @@ pub enum Discriminant {
     Forall,
     Seq(SeqOp),
     SeqLit,
-    SeqAux(SeqAux),
 }
 
 impl Language for Symbolic {
@@ -142,7 +111,6 @@ impl Language for Symbolic {
             S::Forall(..) => D::Forall,
             S::Seq(_, op, _) => D::Seq(*op),
             S::SeqLit(..) => D::SeqLit,
-            S::SeqAux(_, aux, _) => D::SeqAux(*aux),
         }
     }
 
@@ -163,7 +131,6 @@ impl Language for Symbolic {
             (Forall(r1, _, caps1), Forall(r2, _, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
             (Seq(_, op1, _), Seq(_, op2, _)) => op1 == op2,
             (SeqLit(..), SeqLit(..)) => true,
-            (SeqAux(_, a1, _), SeqAux(_, a2, _)) => a1 == a2,
             _ => false,
         }
     }
@@ -181,7 +148,6 @@ impl Language for Symbolic {
             Forall(_, _, caps) => caps,
             Seq(_, _, ids) => ids,
             SeqLit(_, id) => std::slice::from_ref(id),
-            SeqAux(_, _, ids) => ids,
         }
     }
 
@@ -196,7 +162,6 @@ impl Language for Symbolic {
             Forall(_, _, caps) => caps,
             Seq(_, _, ids) => ids,
             SeqLit(_, id) => std::slice::from_mut(id),
-            SeqAux(_, _, ids) => ids,
         }
     }
 }
@@ -234,7 +199,6 @@ impl Display for Symbolic {
             }
             Symbolic::Seq(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
             Symbolic::SeqLit(ty, _) => write!(f, "Seq<{ty}>"),
-            Symbolic::SeqAux(ty, aux, _) => write!(f, "{}<{ty}>", aux.token()),
         }
     }
 }

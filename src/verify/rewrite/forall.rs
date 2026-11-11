@@ -11,7 +11,7 @@ use egg::{
 };
 
 use crate::verify::analysis::{ConstFold, Data};
-use crate::verify::lang::{Discriminant, FuncId, RecipeId, SeqAux, Symbolic};
+use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
 use crate::verify::quant::{Guard, RecipeTable};
 use crate::verify::stats;
 use crate::vmir::{BinOp, Literal, SeqOp, Type, Val};
@@ -30,8 +30,6 @@ pub(crate) enum TermHead {
     Seq(Type, SeqOp),
     /// A `Symbolic::SeqLit` of this element type.
     SeqLit(Type),
-    /// A `Symbolic::SeqAux` of this element type and kind.
-    SeqAux(Type, SeqAux),
 }
 
 impl TermHead {
@@ -41,7 +39,6 @@ impl TermHead {
             TermHead::Func { func, .. } => Discriminant::FuncApp(*func),
             TermHead::Seq(_, op) => Discriminant::Seq(*op),
             TermHead::SeqLit(_) => Discriminant::SeqLit,
-            TermHead::SeqAux(_, aux) => Discriminant::SeqAux(*aux),
         }
     }
 
@@ -68,13 +65,6 @@ impl TermHead {
                 std::slice::from_ref(&**e),
                 std::slice::from_ref(elem),
             )),
-            (TermHead::SeqAux(elem_ty, aux), Symbolic::SeqAux(e, a, children)) if a == aux => {
-                Some((
-                    std::slice::from_ref(elem_ty),
-                    std::slice::from_ref(&**e),
-                    children,
-                ))
-            }
             _ => None,
         }
     }
@@ -439,14 +429,17 @@ fn probe_shape<'a>(inst: &'a AxiomInst, tys: &[Type]) -> Option<(Symbolic, Vec<&
                 ),
                 args.iter().collect(),
             ),
+            // Its value is the untyped equality's, which the probe can fold.
+            AxiomPure::Seq {
+                op: SeqOp::Eq,
+                args,
+                ..
+            } => (Symbolic::Binary(BinOp::Eq, [i0, i1]), args.iter().collect()),
             AxiomPure::Seq { elem_ty, op, args } => (
                 Symbolic::Seq(ty(elem_ty), *op, ix(args.len())),
                 args.iter().collect(),
             ),
             AxiomPure::SeqLit { elem_ty, elem } => (Symbolic::SeqLit(ty(elem_ty), i0), vec![elem]),
-            // Its value is the equality; the tag built beside it has no bearing
-            // on that value.
-            AxiomPure::SeqEq { l, r, .. } => (Symbolic::Binary(BinOp::Eq, [i0, i1]), vec![l, r]),
         },
         AxiomInst::Forall {
             recipe,

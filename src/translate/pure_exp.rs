@@ -561,6 +561,11 @@ fn lower_binary<Ext: PureExt>(
     // either one, since the typechecker equates the two
     // (`viper::typecheck`, `Lt | Le | Gt | Ge` imposes `lk.equate_with(rk)`).
     let cmp = &lty;
+    // `l == r`: over sequences, the typed `SeqOp::Eq`.
+    let eq_of = |lv, rv| match &lty {
+        vmir::Type::Seq(elem_ty) => PureInst::seq((**elem_ty).clone(), SeqOp::Eq, vec![lv, rv]),
+        _ => PureInst::Binary(V::Eq, lv, rv),
+    };
     Ok(match op {
         B::Plus => sink.emit_pure(ty.clone(), PureInst::Binary(V::add(&ty), lv, rv)),
         B::Minus => sink.emit_pure(ty.clone(), PureInst::Binary(V::sub(&ty), lv, rv)),
@@ -575,11 +580,11 @@ fn lower_binary<Ext: PureExt>(
         B::Mod => sink.with_heap(hctx.value, |sink| {
             sink.emit_pure_guarded(ty, PureInst::Binary(V::Mod, lv, rv))
         }),
-        B::Eq => sink.emit_pure(ty, PureInst::Binary(V::Eq, lv, rv)),
+        B::Eq => sink.emit_pure(ty, eq_of(lv, rv)),
         B::Lt => sink.emit_pure(ty, PureInst::Binary(V::lt(cmp), lv, rv)),
         // Desugarings:
         B::Neq => {
-            let eq = sink.emit_pure(vmir::Type::Bool, PureInst::Binary(V::Eq, lv, rv));
+            let eq = sink.emit_pure(vmir::Type::Bool, eq_of(lv, rv));
             sink.emit_pure(ty, PureInst::Ternary(eq, FALSE, TRUE))
         }
         B::Le => {

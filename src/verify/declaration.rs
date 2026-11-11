@@ -128,14 +128,6 @@ impl EvalState {
             .collect()
     }
 
-    /// The VMIR type of a temp operand (`None` for a literal).
-    fn val_type(&self, val: &Val) -> Option<&Type> {
-        match val {
-            Val::Temp(n) => Some(&self.val_types[*n]),
-            Val::Literal(_) => None,
-        }
-    }
-
     /// The location kind of an address operand, from its tracked VMIR type. A
     /// non-`Temp` or non-`Addr`-typed operand has no kind (`None`).
     fn loc_kind(&self, val: &Val) -> Option<LocationKind> {
@@ -300,27 +292,6 @@ fn collect_pc_lits(
 /// unsupported source leaked into a function/resource body.
 const OPERAND_RECIPE: &str = "purify: operand without a recipe";
 
-/// Tag the sequence equality `eq` (`lhs == rhs`) with
-/// [`SeqAux::Eq`](crate::verify::lang::SeqAux::Eq), in `eq`'s own e-class. The
-/// extensionality axioms (`verify::seq_axioms`) trigger on the tag: the e-graph
-/// is type-free, so a bare `==` does not say it compares sequences. Only
-/// equalities of the program itself get it, as in Silicon: tagging the axioms'
-/// own conclusions would feed extensionality back its own results.
-fn tag_seq_equal(
-    ctx: &mut VerifyContext<'_>,
-    elem_ty: &Type,
-    lhs: egg::Id,
-    rhs: egg::Id,
-    eq: egg::Id,
-) {
-    let tag = ctx.add(Symbolic::SeqAux(
-        Box::new(elem_ty.clone()),
-        crate::verify::lang::SeqAux::Eq,
-        [lhs, rhs],
-    ));
-    ctx.union(tag, eq);
-}
-
 /// Evaluate a `PureInst` into its symbolic e-class id, plus — when a
 /// certificate recipe is being built (`ctx.recipe`) — the recipe-space `Val`
 /// mirroring it (the single-walk replacement of the old purify pass). `pc_lits`
@@ -353,21 +324,11 @@ fn eval_pure_inst(
             let lhs = state.get_val(ctx, l);
             let rhs = state.get_val(ctx, r);
             let id = ctx.add(Symbolic::Binary(*op, [lhs, rhs]));
-            let seq_eq = match (op, state.val_type(l)) {
-                (BinOp::Eq, Some(Type::Seq(elem_ty))) => {
-                    tag_seq_equal(ctx, elem_ty, lhs, rhs, id);
-                    Some((**elem_ty).clone())
-                }
-                _ => None,
-            };
             let recipe = if ctx.recipe.is_some() {
                 let l = state.require_recipe(l, OPERAND_RECIPE)?;
                 let r = state.require_recipe(r, OPERAND_RECIPE)?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(match seq_eq {
-                    Some(elem_ty) => AxiomPure::SeqEq { elem_ty, l, r },
-                    None => AxiomPure::Binary(*op, l, r),
-                }))
+                Some(rb.emit(AxiomPure::Binary(*op, l, r)))
             } else {
                 None
             };
@@ -740,10 +701,14 @@ fn eval_pure_inst(
             } else {
                 None
             };
-            (
-                ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids)),
-                recipe,
-            )
+            let id = ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids.clone()));
+            // A sequence equality (`SeqOp::Eq`) shares its class with the untyped
+            // `l == r`, which the rest of equality reasoning reads.
+            if *op == SeqOp::Eq {
+                let eq = ctx.add(Symbolic::Binary(BinOp::Eq, [ids[0], ids[1]]));
+                ctx.union(id, eq);
+            }
+            (id, recipe)
         }
         PureInst::SeqLit { elem_ty, elem } => {
             let id = state.get_val(ctx, elem);
