@@ -286,6 +286,7 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
                 field,
             } => Some(field_types(ctxt, head, variant, tys).swap_remove(field)),
             FuncKind::IsVariant { .. } => Some(Type::Bool),
+            FuncKind::Skolem(i) => Some(ctxt.alloc.skolem_signature(i, tys).1),
         },
         Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
         Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
@@ -656,6 +657,12 @@ fn translate_function(
         FuncKind::PreToken(func) => {
             let (params, _) = function_signature(ctxt, func, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &Type::Bool, args)
+        }
+        // A skolem function is uninterpreted: its axioms reach Z3 only as the
+        // ground facts the e-graph instantiated.
+        FuncKind::Skolem(i) => {
+            let (params, ret) = ctxt.alloc.skolem_signature(i, ty);
+            uninterpreted_app(ctxt, *f_id, ty, &params, &ret, args)
         }
     }
 }

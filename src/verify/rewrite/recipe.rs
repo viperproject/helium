@@ -37,14 +37,6 @@ pub(crate) enum AxiomPure {
         elem_ty: Type,
         elem: Val,
     },
-    /// A verifier-internal sequence term ([`Symbolic::SeqAux`]); only the
-    /// sequence axioms (`verify::seq_axioms`) build one.
-    SeqAux {
-        elem_ty: Type,
-        aux: SeqAux,
-        l: Val,
-        r: Val,
-    },
     /// A sequence equality `l == r` of the program, built together with its
     /// [`SeqAux::Eq`] tag in the same e-class, the term the extensionality axioms
     /// trigger on. Its value is the equality. Only a certificate walk emits it, as
@@ -125,14 +117,6 @@ pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
                 AxiomInst::Val(AxiomPure::SeqLit {
                     elem_ty: elem_ty.subst_generics(tys),
                     elem: elem.clone(),
-                })
-            }
-            AxiomInst::Val(AxiomPure::SeqAux { elem_ty, aux, l, r }) => {
-                AxiomInst::Val(AxiomPure::SeqAux {
-                    elem_ty: elem_ty.subst_generics(tys),
-                    aux: *aux,
-                    l: l.clone(),
-                    r: r.clone(),
                 })
             }
             AxiomInst::Val(AxiomPure::SeqEq { elem_ty, l, r }) => {
@@ -405,11 +389,6 @@ pub(super) fn build_instance_vals_impl(
                     AxiomPure::SeqLit { elem_ty, elem } => {
                         let elem = get(egraph, &vals, elem);
                         egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), elem))
-                    }
-                    AxiomPure::SeqAux { elem_ty, aux, l, r } => {
-                        let l = get(egraph, &vals, l);
-                        let r = get(egraph, &vals, r);
-                        egraph.add(Symbolic::SeqAux(Box::new(elem_ty.clone()), *aux, [l, r]))
                     }
                     AxiomPure::SeqEq { elem_ty, l, r } => {
                         let l = get(egraph, &vals, l);

@@ -444,9 +444,6 @@ fn probe_shape<'a>(inst: &'a AxiomInst, tys: &[Type]) -> Option<(Symbolic, Vec<&
                 args.iter().collect(),
             ),
             AxiomPure::SeqLit { elem_ty, elem } => (Symbolic::SeqLit(ty(elem_ty), i0), vec![elem]),
-            AxiomPure::SeqAux { elem_ty, aux, l, r } => {
-                (Symbolic::SeqAux(ty(elem_ty), *aux, [i0, i1]), vec![l, r])
-            }
             // Its value is the equality; the tag built beside it has no bearing
             // on that value.
             AxiomPure::SeqEq { l, r, .. } => (Symbolic::Binary(BinOp::Eq, [i0, i1]), vec![l, r]),

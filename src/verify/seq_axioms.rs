@@ -5,8 +5,11 @@
 //! Adapted from Silicon's `dafny_axioms/sequences.vpr`. As recipes, they need
 //! none of the domain's helper functions: `Seq_add`/`Seq_sub` are plain `+`/`-`
 //! (their round-trip equalities stay, see [`round_trip`]),
-//! `Seq_contains_trigger` is gone, `Seq_equal` is the [`SeqAux::Eq`] tag in the
-//! equality's own e-class, and the two skolems are [`SeqAux`] terms.
+//! `Seq_contains_trigger` is gone, and `Seq_equal` is the [`SeqAux::Eq`] tag in
+//! the equality's own e-class. The two skolem functions stay (see
+//! [`SeqSkolems`]), as functions the registry mints rather than domain
+//! functions: a witness is a term of the instance's binders, so building an
+//! instance again finds the same witness instead of adding another one.
 //!
 //! Each axiom reads `forall vars :: {triggers} conds ==> conclusions` and holds
 //! at every element type `E`: its recipe is generic over `E` (`Generic(0)`), so
@@ -28,7 +31,8 @@
 
 use std::sync::LazyLock;
 
-use crate::verify::lang::SeqAux;
+use crate::verify::func_registry::SkolemSig;
+use crate::verify::lang::{FuncId, SeqAux};
 use crate::verify::quant::{Guard, QuantRecipe};
 use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 use crate::vmir::{BinOp, Literal, SeqOp, Type, Val};
@@ -59,8 +63,60 @@ pub(crate) enum STerm {
     /// in `Symbolic::Seq` order. Never `Empty`, which is [`STerm::Empty`].
     Op(SeqOp, Vec<STerm>),
     Aux(SeqAux, Box<[STerm; 2]>),
+    /// A witness: a skolem function of [`SeqSkolems`] applied to its operands.
+    Skolem(Witness, Box<[STerm; 2]>),
     Bin(BinOp, Box<[STerm; 2]>),
     Ite(Box<[STerm; 3]>),
+}
+
+/// The skolem functions of the sequence axioms, each the witness of an
+/// existential in a conclusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Witness {
+    /// `Seq_skolem(s, x)`: an index of `x` in `s`, when `x in s`.
+    IndexOf,
+    /// `Seq_skolem_diff(a, b)`: an index where `a` and `b` differ, when they
+    /// have one. Both equality axioms use it, as in the domain: one function
+    /// satisfies both.
+    Diff,
+}
+
+/// The function ids of the [`Witness`]es, generic over the element type
+/// (`Generic(0)`), minted by the registry (`FuncRegistry::seq_axioms`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SeqSkolems {
+    index_of: FuncId,
+    diff: FuncId,
+}
+
+impl SeqSkolems {
+    /// Mint every witness function through `mint`, with its name and signature.
+    pub(crate) fn mint(mut mint: impl FnMut(&str, SkolemSig) -> FuncId) -> Self {
+        let seq = || Type::Seq(Box::new(Type::Generic(0)));
+        SeqSkolems {
+            index_of: mint(
+                "Seq_skolem",
+                SkolemSig {
+                    params: vec![seq(), Type::Generic(0)],
+                    ret: Type::Int,
+                },
+            ),
+            diff: mint(
+                "Seq_skolem_diff",
+                SkolemSig {
+                    params: vec![seq(), seq()],
+                    ret: Type::Int,
+                },
+            ),
+        }
+    }
+
+    fn func(&self, w: Witness) -> FuncId {
+        match w {
+            Witness::IndexOf => self.index_of,
+            Witness::Diff => self.diff,
+        }
+    }
 }
 
 /// One axiom: `forall vars :: {triggers} guards ==> concls`.
@@ -121,6 +177,7 @@ impl STerm {
         match self {
             STerm::Var(i) => seen[*i] = true,
             STerm::Int(_) | STerm::Bool(_) | STerm::Empty => {}
+            STerm::Skolem(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Unit(e) => e.mark_vars(seen),
             STerm::Op(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Aux(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
@@ -174,6 +231,9 @@ fn range(lo: STerm, hi: STerm) -> STerm {
 }
 fn aux(a: SeqAux, l: STerm, r: STerm) -> STerm {
     STerm::Aux(a, Box::new([l, r]))
+}
+fn skolem(w: Witness, l: STerm, r: STerm) -> STerm {
+    STerm::Skolem(w, Box::new([l, r]))
 }
 fn bin(o: BinOp, l: STerm, r: STerm) -> STerm {
     STerm::Bin(o, Box::new([l, r]))
@@ -586,7 +646,7 @@ fn build() -> Vec<SeqAxiom> {
             .when([contains(s.clone(), t.clone())])
             .guard_when()
             .then({
-                let k = || aux(SeqAux::IndexOf, s.clone(), t.clone());
+                let k = || skolem(Witness::IndexOf, s.clone(), t.clone());
                 let [lo, hi] = in_range(k(), len(s.clone()));
                 [lo, hi, eq(idx(s.clone(), k()), t.clone())]
             })
@@ -611,10 +671,10 @@ fn build() -> Vec<SeqAxiom> {
             .when([ne(s.clone(), t.clone()), eq(len(s.clone()), len(t.clone()))])
             .guard_when()
             .then({
-                let k = || aux(SeqAux::Diff, s.clone(), t.clone());
+                let k = || skolem(Witness::Diff, s.clone(), t.clone());
                 let [lo, hi] = in_range(k(), len(s.clone()));
                 [
-                    eq(k(), aux(SeqAux::Diff, t.clone(), s.clone())),
+                    eq(k(), skolem(Witness::Diff, t.clone(), s.clone())),
                     lo,
                     hi,
                     ne(idx(s.clone(), k()), idx(t.clone(), k())),
@@ -631,7 +691,7 @@ fn build() -> Vec<SeqAxiom> {
             .when([eq(len(s.clone()), len(t.clone()))])
             .guard_when()
             .then({
-                let k = || aux(SeqAux::Diff, s.clone(), t.clone());
+                let k = || skolem(Witness::Diff, s.clone(), t.clone());
                 let [lo, hi] = in_range(k(), len(s.clone()));
                 [eq(
                     eq(s.clone(), t.clone()),
@@ -678,13 +738,14 @@ fn build() -> Vec<SeqAxiom> {
     ]
 }
 
-/// One recipe per axiom, in [`axioms`] order. See the module docs.
-pub(crate) fn recipes() -> Vec<QuantRecipe> {
-    axioms().iter().map(SeqAxiom::recipe).collect()
+/// One recipe per axiom, in [`axioms`] order, its witnesses applications of
+/// `skolems`. See the module docs.
+pub(crate) fn recipes(skolems: &SeqSkolems) -> Vec<QuantRecipe> {
+    axioms().iter().map(|ax| ax.recipe(*skolems)).collect()
 }
 
 impl SeqAxiom {
-    fn recipe(&self) -> QuantRecipe {
+    fn recipe(&self, skolems: SeqSkolems) -> QuantRecipe {
         // A range is a `Seq[Int]` whatever `E` is, so its axioms are ground.
         let (elem, n_tys) = if self.int_only {
             (Type::Int, 0)
@@ -697,6 +758,7 @@ impl SeqAxiom {
             next: self.vars.len(),
             insts: Vec::new(),
             elem: elem.clone(),
+            skolems,
         };
         let mut guard = steps();
         let conds: Vec<Val> = self.guard.iter().map(|g| guard.emit(g)).collect();
@@ -734,6 +796,7 @@ struct Steps {
     next: usize,
     insts: Vec<AxiomInst>,
     elem: Type,
+    skolems: SeqSkolems,
 }
 
 impl Steps {
@@ -771,13 +834,17 @@ impl Steps {
                     args,
                 })
             }
-            STerm::Aux(aux, args) => {
-                let (l, r) = (self.emit(&args[0]), self.emit(&args[1]));
-                self.push(AxiomPure::SeqAux {
-                    elem_ty: elem,
-                    aux: *aux,
-                    l,
-                    r,
+            STerm::Aux(..) => {
+                panic!("a sequence axiom has a `SeqAux` term only in a trigger, not {t:?}")
+            }
+            // Generic in the element type like the axiom, so an instance's
+            // type substitution fixes it.
+            STerm::Skolem(w, args) => {
+                let args = args.iter().map(|a| self.emit(a)).collect();
+                self.push(AxiomPure::App {
+                    func: self.skolems.func(*w),
+                    type_args: vec![elem],
+                    args,
                 })
             }
             STerm::Bin(op, args) => {
@@ -819,7 +886,7 @@ fn trigger(t: &STerm, elem: &Type) -> PreparedTerm {
         STerm::Op(SeqOp::Range, args) => app(TermHead::Seq(Type::Int, SeqOp::Range), args),
         STerm::Op(op, args) => app(TermHead::Seq(elem.clone(), *op), args),
         STerm::Aux(aux, args) => app(TermHead::SeqAux(elem.clone(), *aux), &args[..]),
-        STerm::Bin(..) | STerm::Ite(..) => {
+        STerm::Bin(..) | STerm::Ite(..) | STerm::Skolem(..) => {
             panic!("a sequence-axiom trigger is built from sequence terms, not {t:?}")
         }
     }

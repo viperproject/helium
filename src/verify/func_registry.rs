@@ -46,6 +46,19 @@ pub enum FuncKind {
     },
     Limited(MemberId),
     PreToken(MemberId),
+    /// A skolem function: the witness of an existential in a built-in axiom's
+    /// conclusion, applied to the instance's binders, so every instance at one
+    /// σ has the same witness. Indexes the registry's skolem signatures (see
+    /// [`FuncRegistry::skolem_signature`]).
+    Skolem(usize),
+}
+
+/// A skolem function's signature, generic over its axiom's type parameters
+/// (`Generic(i)`), substituted by an application's type arguments.
+#[derive(Debug, Clone)]
+pub struct SkolemSig {
+    pub params: Vec<Type>,
+    pub ret: Type,
 }
 
 /// Allocates and names the verifier ids for polymorphic ADT constructors /
@@ -106,6 +119,10 @@ pub struct FuncRegistry {
     /// never from inside a rule, and egg sees the resulting e-node on the next
     /// iteration either way.
     quant_table: std::sync::Arc<std::sync::RwLock<crate::verify::quant::RecipeTable>>,
+    /// The signature of each skolem function, by its [`FuncKind::Skolem`] index.
+    skolems: Vec<SkolemSig>,
+    /// The sequence axioms' skolem functions, minted with their recipes.
+    seq_skolems: Option<crate::verify::seq_axioms::SeqSkolems>,
 }
 
 // Builtin reserved operator ids (starting from the top of the usize space).
@@ -275,6 +292,8 @@ impl FuncRegistry {
             variant_names: HashMap::default(),
             ctor_head,
             quant_table: Default::default(),
+            skolems: Vec::new(),
+            seq_skolems: None,
         }
     }
 
@@ -328,6 +347,59 @@ impl FuncRegistry {
         let id = self.mint(format!("{name}%pre"), FuncKind::PreToken(func));
         self.fn_pre_token.insert(func, id);
         id
+    }
+
+    /// Mint a skolem function `name` of signature `sig` (see [`FuncKind::Skolem`]).
+    fn skolem(&mut self, name: &str, sig: SkolemSig) -> FuncId {
+        let id = self.mint(name.to_string(), FuncKind::Skolem(self.skolems.len()));
+        self.skolems.push(sig);
+        id
+    }
+
+    /// The parameter and return types of the skolem function of kind
+    /// `Skolem(index)`, applied at the type arguments `tys`.
+    pub fn skolem_signature(&self, index: usize, tys: &[Type]) -> (Vec<Type>, Type) {
+        let sig = &self.skolems[index];
+        let params = sig.params.iter().map(|t| t.subst_generics(tys)).collect();
+        (params, sig.ret.subst_generics(tys))
+    }
+
+    /// Every skolem function with its return type, when that is ground.
+    pub(crate) fn skolem_ret_types(&self) -> Vec<(FuncId, Type)> {
+        self.kind
+            .iter()
+            .filter_map(|(id, k)| match k {
+                FuncKind::Skolem(i)
+                    if {
+                        let mut g = crate::dhash::HashSet::default();
+                        self.skolems[*i].ret.collect_generics(&mut g);
+                        g.is_empty()
+                    } =>
+                {
+                    Some((*id, self.skolems[*i].ret.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The recipes of the built-in sequence axioms (`verify::seq_axioms`),
+    /// compiled into the recipe table on the first call, with the skolem
+    /// functions their witnesses are terms of.
+    pub(crate) fn seq_axioms(&mut self) -> Vec<crate::verify::lang::RecipeId> {
+        let skolems = match self.seq_skolems {
+            Some(s) => s,
+            None => {
+                let s =
+                    crate::verify::seq_axioms::SeqSkolems::mint(|name, sig| self.skolem(name, sig));
+                self.seq_skolems = Some(s);
+                s
+            }
+        };
+        self.quant_table
+            .write()
+            .expect("recipe table lock")
+            .seq_axioms(&skolems)
     }
 
     // ---- Builtin `Option` resolution -------------------------------------

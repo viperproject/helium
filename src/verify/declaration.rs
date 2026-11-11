@@ -2121,12 +2121,11 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
     // node, true, whose element type stays open for its trigger matches to fix.
     // Only a program that has sequences gets them, so others pay nothing.
     if decls_use_seq(&program.decls) {
-        let ids = ctx
-            .alloc
-            .quant_table()
-            .write()
-            .expect("recipe table lock")
-            .seq_axioms();
+        let ids = ctx.alloc.seq_axioms();
+        // The witnesses' type, for type inference (`types::infer_type`).
+        for (f, ret) in ctx.alloc.skolem_ret_types() {
+            ctx.func_ret_types.entry(f).or_insert(ret);
+        }
         for rid in ids {
             let tys: Box<[Type]> = ctx
                 .alloc

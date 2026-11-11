@@ -72,8 +72,8 @@ pub enum Symbolic {
     SeqLit(Box<Type>, Id),
 
     /// A verifier-internal sequence term over two operands, of this element
-    /// type: the type-tagged equality and the skolem witnesses the sequence
-    /// axioms (`verify::seq_axioms`) need. No program writes one.
+    /// type: the type-tagged equality the sequence axioms
+    /// (`verify::seq_axioms`) trigger on. No program writes one.
     SeqAux(Box<Type>, SeqAux, [Id; 2]),
 }
 
@@ -86,26 +86,18 @@ pub enum SeqAux {
     /// Only a program's own equalities get one, so the axioms' conclusions
     /// never feed extensionality back.
     Eq,
-    /// `Seq_skolem(s, x)`: an index of `x` in `s`, the witness of `x in s`.
-    IndexOf,
-    /// `Seq_skolem_diff(a, b)`: an index where `a` and `b` differ, when they
-    /// have one.
-    Diff,
 }
 
 impl SeqAux {
     pub fn token(self) -> &'static str {
         match self {
             SeqAux::Eq => "seq.eq",
-            SeqAux::IndexOf => "seq.index_of",
-            SeqAux::Diff => "seq.diff",
         }
     }
 
     pub fn result_type(self) -> Type {
         match self {
             SeqAux::Eq => Type::Bool,
-            SeqAux::IndexOf | SeqAux::Diff => Type::Int,
         }
     }
 }

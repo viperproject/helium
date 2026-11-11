@@ -127,11 +127,15 @@ impl RecipeTable {
     }
 
     /// The recipes of the built-in sequence axioms, compiled into the table on
-    /// the first call. Each is a closed quantifier (no captures) whose element
-    /// type is open (`Generic(0)`), or `Int` for an axiom only about ranges.
-    pub(crate) fn seq_axioms(&mut self) -> Vec<RecipeId> {
+    /// the first call, their witnesses applications of `skolems`. Each is a
+    /// closed quantifier (no captures) whose element type is open
+    /// (`Generic(0)`), or `Int` for an axiom only about ranges.
+    pub(crate) fn seq_axioms(
+        &mut self,
+        skolems: &crate::verify::seq_axioms::SeqSkolems,
+    ) -> Vec<RecipeId> {
         if self.seq_axioms.is_none() {
-            let ids = crate::verify::seq_axioms::recipes()
+            let ids = crate::verify::seq_axioms::recipes(skolems)
                 .into_iter()
                 .map(|r| self.recipes.push_and_get_key(r))
                 .collect();
