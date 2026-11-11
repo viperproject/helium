@@ -35,7 +35,7 @@ use crate::vmir::{self, InstKind, PureInst, Type, Val};
 ///
 /// A recipe lives in a **canonical** temp space, independent of the program point
 /// the quantifier was stated at: the captures first (they are the node's children,
-/// so `n_caps` is the node's arity), then the `n_bound` binders (σ), then one per
+/// so `n_caps` is the node's arity), then the binders (σ, see `bound`), then one per
 /// step. [`intern`] renames the VMIR body — which shares its *enclosing* space, see
 /// [`vmir::Forall`] — into it, which is what makes two structurally identical
 /// quantifiers at different program points share one entry.
@@ -43,7 +43,9 @@ pub(crate) struct QuantRecipe {
     /// The capture arity: the number of enclosing values the body reads, hence the
     /// arity of every `Symbolic::Forall` node naming this recipe.
     pub(crate) n_caps: usize,
-    pub(crate) n_bound: usize,
+    /// The binder types, in binder order. Z3 reads them to declare its bound
+    /// variables (`verify::z3`); a generic quantifier's mention its `Generic(i)`.
+    pub(crate) bound: Box<[Type]>,
     /// The type arity: one past the highest `Generic(i)` the quantifier (binders,
     /// triggers, body, nested quantifiers) mentions, hence the length of every
     /// `Symbolic::Forall` node's type payload. `0` for a ground quantifier; only a
@@ -98,7 +100,7 @@ impl QuantRecipe {
 #[derive(PartialEq, Eq, Hash)]
 struct RecipeKey {
     n_caps: usize,
-    n_bound: usize,
+    bound: Box<[Type]>,
     n_tys: usize,
     own_tys: Vec<usize>,
     groups: Vec<Vec<PreparedTerm>>,
@@ -268,7 +270,7 @@ fn intern(
 
     let key = RecipeKey {
         n_caps,
-        n_bound: q.bound.len(),
+        bound: q.bound.clone(),
         n_tys,
         own_tys: own_tys.clone(),
         groups: groups.clone(),
@@ -280,7 +282,7 @@ fn intern(
         None => {
             let id = table.recipes.push_and_get_key(QuantRecipe {
                 n_caps,
-                n_bound: q.bound.len(),
+                bound: q.bound.clone(),
                 n_tys,
                 own_tys,
                 groups,

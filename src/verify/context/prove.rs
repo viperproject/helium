@@ -842,6 +842,11 @@ impl<'a> VerifyContext<'a> {
         }
         let t_build = std::time::Instant::now();
 
+        // Quantifiers are left out until a goal the e-graph could not prove
+        // reaches one; from then on they all go to Z3. One analysis read.
+        if self.egraph[goal].data.reaches_forall() {
+            crate::verify::z3::include_foralls(self);
+        }
         crate::verify::z3::sync_facts(self);
 
         let goal_z3 = crate::verify::z3::build_goal(self, goal);

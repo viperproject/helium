@@ -487,7 +487,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
             let empty = caps.iter().fold(
                 Sigma {
-                    vals: vec![None; recipe.n_bound],
+                    vals: vec![None; recipe.bound.len()],
                     tys: tys.to_vec(),
                     generation: 0,
                 },
@@ -562,7 +562,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
             };
             debug_assert_eq!(
                 vals.len(),
-                recipe.n_caps + recipe.n_bound,
+                recipe.n_caps + recipe.bound.len(),
                 "instance seed is captures ++ sigma"
             );
             // Every node the instance adds is created at its generation.
@@ -700,7 +700,7 @@ mod tests {
         };
         let (table, rid) = RecipeTable::of(QuantRecipe {
             n_caps: 0,
-            n_bound: 1,
+            bound: Box::new([Type::Int]),
             n_tys: 0,
             own_tys: vec![],
             groups: vec![vec![PreparedTerm::App {

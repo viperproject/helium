@@ -20,8 +20,8 @@ pub struct AdtData {
     pub possible: BTreeSet<FuncId>,
 }
 
-/// An e-class's analysis data: its folded value and its instantiation
-/// [`generation`](ClassData::generation).
+/// An e-class's analysis data: its folded value, its instantiation
+/// [`generation`](ClassData::generation), and whether it reaches a quantifier.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassData {
     pub value: Data,
@@ -32,6 +32,12 @@ pub struct ClassData {
     /// ([`ConstFold::building`]), and keeps it. A class holds the least of its
     /// nodes', so only a union changes it, and only downwards.
     pub generation: u32,
+    /// The class holds a [`Symbolic::Forall`] node, or a node with a child
+    /// class that [reaches](ClassData::reaches_forall) one. An
+    /// over-approximation: it is OR-ed on merge and never cleared, so a parent
+    /// keeps it after the child folds to a literal. Read by the Z3 rung to decide
+    /// whether a goal needs the quantifiers it otherwise leaves out.
+    pub has_forall: bool,
 }
 
 /// Const-fold analysis data: a lattice over what is known about an e-class's
@@ -171,6 +177,14 @@ impl ClassData {
     pub fn is_inconsistent(&self) -> bool {
         self.value.is_inconsistent()
     }
+
+    /// Whether a quantifier may still decide this class's value. A class that
+    /// folded to a literal does not count: its value is a fact of its own. That
+    /// also keeps the bit from spreading through `true`, which every assumed
+    /// quantifier and every proven goal merges with.
+    pub fn reaches_forall(&self) -> bool {
+        self.has_forall && self.known().is_none()
+    }
 }
 
 /// Whether two literals are of the same VMIR type (so a value conflict is an
@@ -215,6 +229,16 @@ impl ConstFold {
 }
 
 impl ConstFold {
+    /// Whether `enode` is a quantifier or has a child class that
+    /// [reaches](ClassData::reaches_forall) one.
+    fn reaches_forall(egraph: &EGraph<Symbolic, Self>, enode: &Symbolic) -> bool {
+        matches!(enode, Symbolic::Forall(..))
+            || enode
+                .children()
+                .iter()
+                .any(|&c| egraph[c].data.reaches_forall())
+    }
+
     fn make_value(egraph: &EGraph<Symbolic, Self>, enode: &Symbolic) -> Data {
         egraph
             .analysis
@@ -382,6 +406,7 @@ impl Analysis<Symbolic> for ConstFold {
         ClassData {
             value: Self::make_value(egraph, enode),
             generation,
+            has_forall: Self::reaches_forall(egraph, enode),
         }
     }
 
@@ -392,15 +417,20 @@ impl Analysis<Symbolic> for ConstFold {
         ClassData {
             value: Self::make_value(egraph, enode),
             generation: egraph[id].data.generation,
+            has_forall: Self::reaches_forall(egraph, enode),
         }
     }
 
-    /// The value merges as a lattice; the generation is the least of the two.
-    /// Only a value change is reported: a parent was created at its own
-    /// generation and does not depend on its children's later ones.
+    /// The value merges as a lattice; the generation is the least of the two;
+    /// `has_forall` is OR-ed. A value or `has_forall` change is reported, as a
+    /// parent reads both; a generation change is not: a parent was created at
+    /// its own generation and does not depend on its children's later ones.
     fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
         a.generation = a.generation.min(b.generation);
-        self.merge_value(&mut a.value, b.value)
+        // Reported, so the bit reaches the parents.
+        let forall = DidMerge(!a.has_forall && b.has_forall, a.has_forall && !b.has_forall);
+        a.has_forall |= b.has_forall;
+        self.merge_value(&mut a.value, b.value) | forall
     }
 
     /// When `union_log` is on, record the classes whose nodes will read

@@ -46,6 +46,17 @@ pub(crate) enum VarSort {
     Int,
 }
 
+impl VarSort {
+    /// The binder type, at element type `elem`.
+    fn ty(self, elem: &Type) -> Type {
+        match self {
+            VarSort::Seq => Type::Seq(Box::new(elem.clone())),
+            VarSort::Elem => elem.clone(),
+            VarSort::Int => Type::Int,
+        }
+    }
+}
+
 /// A term of an axiom, over its bound variables and the element type `E`.
 /// Boolean connectives use the shapes the program's own lowering builds
 /// (`translate::pure_exp`), so a guard finds the program's terms by lookup:
@@ -778,7 +789,7 @@ impl SeqAxiom {
             .collect();
         QuantRecipe {
             n_caps: 0,
-            n_bound: self.vars.len(),
+            bound: self.vars.iter().map(|v| v.ty(&elem)).collect(),
             n_tys,
             own_tys: (0..n_tys).collect(),
             groups,

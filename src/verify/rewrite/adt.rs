@@ -352,13 +352,19 @@ impl VariantNarrowApplier {
                 possible: narrowed,
             })
         };
-        // Narrowing changes what the value may be, not how deep the class is.
-        let generation = egraph[x].data.generation;
+        // Narrowing changes what the value may be, not how deep the class is
+        // or whether it reaches a quantifier.
+        let ClassData {
+            generation,
+            has_forall,
+            ..
+        } = egraph[x].data;
         egraph.set_analysis_data(
             x,
             ClassData {
                 value: data,
                 generation,
+                has_forall,
             },
         );
         changed.push(x);
