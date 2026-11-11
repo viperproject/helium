@@ -327,7 +327,6 @@ method m(s: Seq[Int], t: Seq[Int])
 }
 
 #[test]
-#[ignore = "needs the sequence axioms in Z3, which are not ported (e-graph only)"]
 fn sequences_of_different_lengths_are_unequal() {
     // Needs the lengths, which the program never writes: only the Z3 axioms
     // build them. They used to reach Z3 only on a *second* sync, after the
@@ -342,7 +341,6 @@ method m() {
 }
 
 #[test]
-#[ignore = "needs the sequence axioms in Z3, which are not ported (e-graph only)"]
 fn a_call_result_has_the_callee_result_type() {
     // `r := m(..)` used to havoc `r` as an `Int`, so Z3 declared it at the
     // wrong sort and dropped every quantifier mentioning it, `m`'s

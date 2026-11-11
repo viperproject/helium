@@ -4,7 +4,7 @@ use itertools::Itertools;
 use crate::verify::context::VerifyContext;
 use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
 use crate::verify::stats;
-use crate::vmir::{BinOp, Literal, MemberId, Polarity, Type};
+use crate::vmir::{BinOp, Literal, MemberId, Polarity, SeqOp, Type};
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
@@ -20,6 +20,8 @@ pub(crate) struct Z3Translation {
     adts: HashMap<Type, DatatypeSort>,
     class_types: HashMap<Id, Type>,
     func_cache: HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
+    /// The sequence functions declared so far, by element type (see `seq_apply`).
+    seq_funcs: HashMap<(SeqFn, Type), FuncDecl>,
     max_node_id: usize,
     max_merges_is: usize,
     pub(crate) solver: Solver,
@@ -32,6 +34,7 @@ impl Default for Z3Translation {
             adts: HashMap::default(),
             class_types: HashMap::default(),
             func_cache: HashMap::default(),
+            seq_funcs: HashMap::default(),
             max_node_id: 0,
             max_merges_is: 0,
             solver: new_solver(),
@@ -307,12 +310,6 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
         if matches!(node, Symbolic::Forall(..)) {
             continue;
         }
-        if matches!(node, Symbolic::Seq(..)) {
-            continue;
-        }
-        if matches!(node, Symbolic::SeqLit(..)) {
-            continue;
-        }
         let Some(expr) = symbol_to_z3(ctxt, &node) else {
             eprintln!(
                 "[z3] warning: an operand of `{node}` has no certain type; dropping its fact"
@@ -421,7 +418,8 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
             Sort::uninterpreted(format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into())
         }
         Type::Generic(_) => unreachable!("generics are currently not supported"),
-        Type::Seq(elem_ty) => Sort::uninterpreted(format!("seq@{elem_ty}").into()),
+        // Uninterpreted, as are its operations (see `seq_apply`).
+        Type::Seq(elem_ty) => Sort::uninterpreted(format!("Seq<{elem_ty}>").into()),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -493,9 +491,76 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
             class.to_real().into()
         }
         Symbolic::Forall(..) => todo!("implement translation for forall nodes"),
-        Symbolic::Seq(..) => todo!("implement translation for seq nodes"),
-        Symbolic::SeqLit(_, _) => todo!("implement translation for seq_lit nodes"),
+        Symbolic::Seq(elem_ty, op, args) => {
+            // Each operand read at the sort the operation takes it at.
+            let params = op.operand_types(elem_ty);
+            let args: Vec<Dynamic> = args
+                .iter()
+                .zip(&params)
+                .map(|(arg, ty)| {
+                    let s = sort(ctxt, ty);
+                    class_const_given_sort(ctxt, *arg, &s)
+                })
+                .collect();
+            seq_to_z3(ctxt, elem_ty, *op, &args)
+        }
+        Symbolic::SeqLit(elem_ty, elem) => {
+            let s = sort(ctxt, elem_ty);
+            let elem = class_const_given_sort(ctxt, *elem, &s);
+            seq_apply(ctxt, SeqFn::Unit, elem_ty, &[&elem])
+        }
     })
+}
+
+/// A sequence function of the Z3 encoding (see [`seq_apply`]): an operation, or
+/// the singleton constructor of a literal.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SeqFn {
+    Op(SeqOp),
+    Unit,
+}
+
+/// `f(args)` at element type `elem_ty`, its operands already at `f`'s parameter
+/// sorts. Like Silicon, Helium does not hand sequences to Z3's sequence theory:
+/// Z3 rewrites its `seq.nth`, so a trigger on an index would never match. A
+/// sequence is a value of an uninterpreted sort, each operation an
+/// uninterpreted function per element type, declared on first use, and what Z3
+/// knows about them is what the sequence axioms (`verify::seq_axioms`) say.
+fn seq_apply(ctxt: &mut VerifyContext, f: SeqFn, elem_ty: &Type, args: &[&dyn Ast]) -> Dynamic {
+    let key = (f, elem_ty.clone());
+    if !ctxt.z3translator.seq_funcs.contains_key(&key) {
+        let (token, params, ret) = match f {
+            SeqFn::Op(op) => (
+                op.token(),
+                op.operand_types(elem_ty),
+                op.result_type(elem_ty),
+            ),
+            SeqFn::Unit => (
+                "seq.unit",
+                vec![elem_ty.clone()],
+                Type::Seq(Box::new(elem_ty.clone())),
+            ),
+        };
+        let domain: Vec<Sort> = params.iter().map(|t| sort(ctxt, t)).collect();
+        let domain_refs: Vec<&Sort> = domain.iter().collect();
+        let range = sort(ctxt, &ret);
+        let decl = FuncDecl::new(format!("{token}<{elem_ty}>"), &domain_refs, &range);
+        ctxt.z3translator.seq_funcs.insert(key.clone(), decl);
+    }
+    ctxt.z3translator.seq_funcs[&key].apply(args)
+}
+
+/// `⟦op(args)⟧`, its operands already at the sorts [`SeqOp::operand_types`]
+/// gives: an application of `op`'s function (see [`seq_apply`]), except that
+/// equality is Z3's own.
+fn seq_to_z3(ctxt: &mut VerifyContext, elem_ty: &Type, op: SeqOp, args: &[Dynamic]) -> Dynamic {
+    match op {
+        SeqOp::Eq => args[0].eq(&args[1]).into(),
+        _ => {
+            let refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
+            seq_apply(ctxt, SeqFn::Op(op), elem_ty, &refs)
+        }
+    }
 }
 
 // the type build by heads constructor at instantiation typs

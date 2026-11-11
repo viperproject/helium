@@ -167,6 +167,21 @@ impl SeqOp {
         matches!(self, SeqOp::Index | SeqOp::Update)
     }
 
+    /// The operand types, in operand order, for a sequence of element type
+    /// `elem_ty` (for a `Range`, `Int`).
+    pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
+        let seq = || Type::Seq(Box::new(elem_ty.clone()));
+        match self {
+            SeqOp::Empty => vec![],
+            SeqOp::Len => vec![seq()],
+            SeqOp::Concat | SeqOp::Eq => vec![seq(), seq()],
+            SeqOp::Index | SeqOp::Take | SeqOp::Drop => vec![seq(), Type::Int],
+            SeqOp::Update => vec![seq(), Type::Int, elem_ty.clone()],
+            SeqOp::Contains => vec![seq(), elem_ty.clone()],
+            SeqOp::Range => vec![Type::Int, Type::Int],
+        }
+    }
+
     /// The result type, for a sequence of element type `elem_ty`.
     pub fn result_type(self, elem_ty: &Type) -> Type {
         match self {
