@@ -128,6 +128,14 @@ impl EvalState {
             .collect()
     }
 
+    /// The VMIR type of a temp operand (`None` for a literal).
+    fn val_type(&self, val: &Val) -> Option<&Type> {
+        match val {
+            Val::Temp(n) => Some(&self.val_types[*n]),
+            Val::Literal(_) => None,
+        }
+    }
+
     /// The location kind of an address operand, from its tracked VMIR type. A
     /// non-`Temp` or non-`Addr`-typed operand has no kind (`None`).
     fn loc_kind(&self, val: &Val) -> Option<LocationKind> {
@@ -292,6 +300,27 @@ fn collect_pc_lits(
 /// unsupported source leaked into a function/resource body.
 const OPERAND_RECIPE: &str = "purify: operand without a recipe";
 
+/// Tag the sequence equality `eq` (`lhs == rhs`) with
+/// [`SeqAux::Eq`](crate::verify::lang::SeqAux::Eq), in `eq`'s own e-class. The
+/// extensionality axioms (`verify::seq_axioms`) trigger on the tag: the e-graph
+/// is type-free, so a bare `==` does not say it compares sequences. Only
+/// equalities of the program itself get it, as in Silicon: tagging the axioms'
+/// own conclusions would feed extensionality back its own results.
+fn tag_seq_equal(
+    ctx: &mut VerifyContext<'_>,
+    elem_ty: &Type,
+    lhs: egg::Id,
+    rhs: egg::Id,
+    eq: egg::Id,
+) {
+    let tag = ctx.add(Symbolic::SeqAux(
+        Box::new(elem_ty.clone()),
+        crate::verify::lang::SeqAux::Eq,
+        [lhs, rhs],
+    ));
+    ctx.union(tag, eq);
+}
+
 /// Evaluate a `PureInst` into its symbolic e-class id, plus — when a
 /// certificate recipe is being built (`ctx.recipe`) — the recipe-space `Val`
 /// mirroring it (the single-walk replacement of the old purify pass). `pc_lits`
@@ -324,11 +353,21 @@ fn eval_pure_inst(
             let lhs = state.get_val(ctx, l);
             let rhs = state.get_val(ctx, r);
             let id = ctx.add(Symbolic::Binary(*op, [lhs, rhs]));
+            let seq_eq = match (op, state.val_type(l)) {
+                (BinOp::Eq, Some(Type::Seq(elem_ty))) => {
+                    tag_seq_equal(ctx, elem_ty, lhs, rhs, id);
+                    Some((**elem_ty).clone())
+                }
+                _ => None,
+            };
             let recipe = if ctx.recipe.is_some() {
                 let l = state.require_recipe(l, OPERAND_RECIPE)?;
                 let r = state.require_recipe(r, OPERAND_RECIPE)?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Binary(*op, l, r)))
+                Some(rb.emit(match seq_eq {
+                    Some(elem_ty) => AxiomPure::SeqEq { elem_ty, l, r },
+                    None => AxiomPure::Binary(*op, l, r),
+                }))
             } else {
                 None
             };
@@ -1980,6 +2019,43 @@ fn eval_from_snap(
     Ok(out)
 }
 
+/// Whether the program has a sequence anywhere: a value of a type that mentions
+/// `Seq` (a parameter, a local, a field read, an operation's result) or a
+/// sequence operation (`|s|` is an `Int` over one). Every sequence the program
+/// can build or compare is one of these.
+fn decls_use_seq(decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>) -> bool {
+    fn mentions_seq(ty: &Type) -> bool {
+        match ty {
+            Type::Seq(_) => true,
+            Type::Domain(_, args) => args.iter().any(mentions_seq),
+            Type::Option(t) => mentions_seq(t),
+            Type::Addr { value, .. } => mentions_seq(value),
+            _ => false,
+        }
+    }
+    fn insts_use_seq(insts: &[vmir::Inst]) -> bool {
+        insts.iter().any(|i| match &i.kind {
+            InstKind::Pure(ty, pi) => {
+                mentions_seq(ty) || matches!(pi, PureInst::Seq { .. } | PureInst::SeqLit { .. })
+            }
+            _ => false,
+        })
+    }
+    decls.iter().any(|d| match d {
+        vmir::Declaration::Method(m) => insts_use_seq(&m.flatten()),
+        vmir::Declaration::Function(f) => {
+            f.params.iter().any(mentions_seq)
+                || mentions_seq(&f.ret)
+                || f.body.as_ref().is_some_and(|b| insts_use_seq(&b.insts))
+        }
+        vmir::Declaration::Resource(r) => {
+            r.params.iter().any(mentions_seq) || insts_use_seq(&r.body.insts)
+        }
+        vmir::Declaration::Axiom(a) => insts_use_seq(&a.body.insts),
+        _ => false,
+    })
+}
+
 /// Axiomatize the state: make every domain axiom's fact available to the unit
 /// about to be verified. An axiom body is evaluated into the e-graph and its
 /// boolean merged with `true` up front; quantification over *values* is a
@@ -2039,6 +2115,31 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         let res = state.get_val(ctx, &ax.body.res);
         let true_ = expr!(ctx, true);
         ctx.union(res, true_);
+        ctx.egraph.rebuild();
+    }
+    // The built-in sequence axioms (`verify::seq_axioms`): each a closed `forall`
+    // node, true, whose element type stays open for its trigger matches to fix.
+    // Only a program that has sequences gets them, so others pay nothing.
+    if decls_use_seq(&program.decls) {
+        let ids = ctx
+            .alloc
+            .quant_table()
+            .write()
+            .expect("recipe table lock")
+            .seq_axioms();
+        for rid in ids {
+            let tys: Box<[Type]> = ctx
+                .alloc
+                .quant_table()
+                .read()
+                .expect("recipe table lock")
+                .get(rid)
+                .open_types()
+                .into();
+            let q = ctx.add(Symbolic::Forall(rid, tys, Box::new([])));
+            let true_ = expr!(ctx, true);
+            ctx.union(q, true_);
+        }
         ctx.egraph.rebuild();
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`

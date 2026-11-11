@@ -528,6 +528,10 @@ fn for_each_operand_mut(inst: &mut AxiomInst, mut f: impl FnMut(&mut Val)) {
             AxiomPure::App { args, .. } => args.iter_mut().for_each(f),
             AxiomPure::Seq { args, .. } => args.iter_mut().for_each(f),
             AxiomPure::SeqLit { elem, .. } => f(elem),
+            AxiomPure::SeqAux { l, r, .. } | AxiomPure::SeqEq { l, r, .. } => {
+                f(l);
+                f(r);
+            }
         },
         AxiomInst::Forall { caps, .. } => caps.iter_mut().for_each(f),
         AxiomInst::Assume(v) => f(v),
@@ -561,6 +565,10 @@ fn for_each_operand(inst: &AxiomInst, mut f: impl FnMut(&Val)) {
             AxiomPure::App { args, .. } => args.iter().for_each(f),
             AxiomPure::Seq { args, .. } => args.iter().for_each(f),
             AxiomPure::SeqLit { elem, .. } => f(elem),
+            AxiomPure::SeqAux { l, r, .. } | AxiomPure::SeqEq { l, r, .. } => {
+                f(l);
+                f(r);
+            }
         },
         AxiomInst::Forall { caps, .. } => caps.iter().for_each(f),
         AxiomInst::Assume(v) => f(v),

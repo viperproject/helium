@@ -58,6 +58,26 @@ pub(crate) struct QuantRecipe {
     pub(crate) groups: Vec<Vec<PreparedTerm>>,
     pub(crate) insts: Vec<AxiomInst>,
     pub(crate) res: Val,
+    /// The condition an instance waits for (see [`Guard`]). Only the built-in
+    /// sequence axioms (`verify::seq_axioms`) have one today; a program's
+    /// quantifier is instantiated at every match.
+    pub(crate) guard: Option<Guard>,
+}
+
+/// When a recipe's instances are worth building, independent of its body and
+/// not part of what the quantifier says: the applier builds the instance at a
+/// σ only once every conjunct is already known `true` in the e-graph, and until
+/// then skips it without memoizing it, so a later iteration builds it. For a
+/// body `a ==> b`, a guard `a` skips the instances that would say nothing yet
+/// but add terms the next round matches triggers against. The guard is
+/// evaluated by lookup only and never added to the graph.
+pub(crate) struct Guard {
+    /// The steps that compute the conjuncts, in their own temp space: the seed
+    /// (captures ++ binders, as for the body), then one temp per value-producing
+    /// step. Shares no steps with the body.
+    pub(crate) insts: Vec<AxiomInst>,
+    /// The conjuncts, in that temp space.
+    pub(crate) conds: Vec<Val>,
 }
 
 impl QuantRecipe {
@@ -96,11 +116,28 @@ pub(crate) struct RecipeTable {
     /// space). A `vmir::Forall` is `Hash + Eq`, so no id bookkeeping is needed on
     /// the IR, and caching the free list keeps a re-walked body from rescanning.
     by_forall: HashMap<vmir::Forall, (RecipeId, Arc<[usize]>)>,
+    /// The built-in sequence axioms' recipes (`verify::seq_axioms`), compiled
+    /// on first use.
+    seq_axioms: Option<Vec<RecipeId>>,
 }
 
 impl RecipeTable {
     pub(crate) fn get(&self, id: RecipeId) -> &QuantRecipe {
         &self.recipes[id]
+    }
+
+    /// The recipes of the built-in sequence axioms, compiled into the table on
+    /// the first call. Each is a closed quantifier (no captures) whose element
+    /// type is open (`Generic(0)`), or `Int` for an axiom only about ranges.
+    pub(crate) fn seq_axioms(&mut self) -> Vec<RecipeId> {
+        if self.seq_axioms.is_none() {
+            let ids = crate::verify::seq_axioms::recipes()
+                .into_iter()
+                .map(|r| self.recipes.push_and_get_key(r))
+                .collect();
+            self.seq_axioms = Some(ids);
+        }
+        self.seq_axioms.clone().expect("just compiled")
     }
 
     /// How many recipes have been compiled so far — i.e. how many distinct
@@ -245,6 +282,7 @@ fn intern(
                 groups,
                 insts,
                 res,
+                guard: None,
             });
             table.by_key.insert(key, id);
             id

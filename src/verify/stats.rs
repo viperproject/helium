@@ -101,6 +101,9 @@ pub struct VerifyStats {
     /// Quantifier instances found beyond the generation bound and deferred
     /// (counted each time a match finds one).
     pub inst_deferred: u64,
+    /// Quantifier instances skipped because the recipe's guard (a sequence
+    /// axiom's) was not yet true (counted each time a match finds one).
+    pub inst_guard_skips: u64,
     /// The deepest generation of a quantifier instance built.
     pub inst_generation_peak: u64,
     /// peak e-graph size observed in any iteration.
@@ -306,6 +309,7 @@ impl VerifyStats {
             sat_iterations,
             sat_bound_stops,
             inst_deferred,
+            inst_guard_skips,
             inst_generation_peak,
             egraph_nodes_peak,
             egraph_classes_peak,
@@ -340,6 +344,7 @@ impl VerifyStats {
             ("sat_iterations", n(sat_iterations)),
             ("sat_bound_stops", n(sat_bound_stops)),
             ("inst_deferred", n(inst_deferred)),
+            ("inst_guard_skips", n(inst_guard_skips)),
             ("inst_generation_peak", n(inst_generation_peak)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),

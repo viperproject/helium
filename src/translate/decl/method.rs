@@ -68,12 +68,14 @@ impl<'a> MethodTranslator<'a, Declared> {
         } else {
             None
         };
+        let rets = m.rets.iter().map(|r| ctx.lower_type(&r.ty)).collect();
         ctx.contracts.insert(
             m.name.0,
             MethodContracts {
                 requires,
                 ensures,
                 heap_dep: false,
+                rets,
             },
         );
         MethodTranslator {
@@ -912,23 +914,31 @@ fn lower_stmt(
                     }
                 }
             }
-            let ret_types: Vec<vmir::Type> = ret_names
-                .iter()
-                .map(|spur| {
-                    env.get(spur)
-                        .map(|_| ())
-                        .ok_or_else(|| {
-                            TranslationError::UnknownIdent(b.interner.resolve(spur).to_string())
-                        })
-                        // type is recovered from env via name lookup, but env stores Val.
-                        // For Phase 2 minimal scope, accept that the LHS variables have been
-                        // declared earlier with `var` and assume their types match the
-                        // callee's return signature. We use Fresh-typed Int as a placeholder
-                        // only when we cannot resolve — better solution lands with proper type
-                        // tracking in the env.
-                        .map(|_| vmir::Type::Int)
+            for spur in &ret_names {
+                if !env.contains_key(spur) {
+                    return Err(TranslationError::UnknownIdent(
+                        b.interner.resolve(spur).to_string(),
+                    ));
+                }
+            }
+            // The targets are havocked at the callee's declared result types
+            // (typecheck has matched them to the targets').
+            let ret_types: Vec<vmir::Type> = b
+                .contracts
+                .get(&call.name.0)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "called method `{}` was never registered",
+                        b.interner.resolve(&call.name.0)
+                    )
                 })
-                .collect::<Result<_, _>>()?;
+                .rets
+                .clone();
+            assert_eq!(
+                ret_types.len(),
+                ret_names.len(),
+                "typecheck matches a call's targets to the callee's results"
+            );
             lower_method_call(
                 b,
                 env,

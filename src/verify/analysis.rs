@@ -216,19 +216,26 @@ impl ConstFold {
 
 impl ConstFold {
     fn make_value(egraph: &EGraph<Symbolic, Self>, enode: &Symbolic) -> Data {
+        egraph
+            .analysis
+            .fold_value(enode, |c: &Id| &egraph[*c].data.value)
+    }
+
+    /// The value `enode` folds to, reading each child's value through `value`.
+    /// [`Self::make_value`] reads the children's e-classes; a caller probing a
+    /// node that is *not* in the e-graph (the quantifier guard check) passes
+    /// its own child values instead, under whatever ids it numbered them by.
+    pub(crate) fn fold_value<'a>(&self, enode: &Symbolic, value: impl Fn(&Id) -> &'a Data) -> Data {
         use Data::{Adt, Inconsistent, Known, Unknown};
-        let value = |c: &Id| &egraph[*c].data.value;
         match enode {
             Symbolic::Lit(lit) => Known(lit.clone()),
 
             // A constructor application is exactly its own variant.
-            Symbolic::FuncApp(f, tys, _) if let Some(head) = egraph.analysis.head_of(*f) => {
-                Adt(AdtData {
-                    head,
-                    tys: tys.clone(),
-                    possible: BTreeSet::from([*f]),
-                })
-            }
+            Symbolic::FuncApp(f, tys, _) if let Some(head) = self.head_of(*f) => Adt(AdtData {
+                head,
+                tys: tys.clone(),
+                possible: BTreeSet::from([*f]),
+            }),
 
             // A quantifier is opaque to constant folding: its truth is decided by
             // the instantiation rule (guarded merges with `true`), never by its
@@ -290,6 +297,7 @@ impl ConstFold {
             },
             Symbolic::Seq(..) => Unknown,
             Symbolic::SeqLit(_, _) => Unknown,
+            Symbolic::SeqAux(..) => Unknown,
         }
     }
 

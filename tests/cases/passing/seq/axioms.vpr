@@ -1,0 +1,29 @@
+// The sequence axioms, at more than one element type: one generic recipe per
+// axiom serves every `Seq[T]`.
+method literal_length() { assert |Seq(1, 2) ++ Seq(3)| == 3 }
+method empty_length() { assert |Seq[Int]() | == 0 }
+method literal_index(x: Int, y: Int) { assert Seq(x, y)[1] == y }
+method length_nonneg(s: Seq[Int]) { assert |s| >= 0 }
+method concat_length(s: Seq[Int], t: Seq[Int]) { assert |s ++ t| == |s| + |t| }
+method range_facts() {
+  assert |[2..5)| == 3
+  assert [2..5)[1] == 3
+  assert 3 in [2..5)
+}
+method bool_elements(b: Bool) {
+  assert |Seq(b, !b)| == 2
+  assert Seq(b, !b)[0] == b
+}
+method nested_elements(s: Seq[Int]) { assert |Seq(s, s)| == 2 }
+method update(s: Seq[Int], i: Int, v: Int)
+  requires 0 <= i && i < |s|
+{
+  assert s[i := v][i] == v
+  assert |s[i := v]| == |s|
+}
+method extensional(s: Seq[Int], t: Seq[Int])
+  requires |s| == |t|
+  requires forall i: Int :: { s[i] } { t[i] } 0 <= i && i < |s| ==> s[i] == t[i]
+{
+  assert s == t
+}

@@ -48,6 +48,9 @@ pub(crate) struct MethodContracts {
     /// Set only for functions whose `requires` grants permission (`acc`):
     /// call sites pass a `Snap` of the `requires` resource as an extra argument.
     pub heap_dep: bool,
+    /// A method's result types, in declaration order: a call `x := m(..)`
+    /// havocs its targets at these types. Empty for a function.
+    pub rets: Vec<vmir::Type>,
 }
 
 /// Read-only mid-translation state, owned and progressively folded by the

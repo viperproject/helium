@@ -194,12 +194,16 @@ method m(t: Seq[Int], k: Int)
 
 #[test]
 fn binder_under_a_sequence_head_ignores_other_element_types() {
-    // Not vacuous: firing at `t` would prove the assertion.
+    // Not vacuous: firing at `t` would prove the assertion. The hypothesis must
+    // hold of every `Seq[Bool]` (`|s| == 3` would contradict the sequence axioms'
+    // `|Seq[Bool]()| == 0` and prove anything).
     let input = r#"
+domain Fns { function p(n: Int): Bool }
+
 method m(t: Seq[Int])
-    requires forall s: Seq[Bool] :: { |s| } |s| == 3
+    requires forall s: Seq[Bool] :: { |s| } p(|s|)
 {
-    assert |t| == 3
+    assert p(|t|)
 }
 "#;
     let result = verify_named_method(&lower(input), "m");
@@ -241,5 +245,155 @@ method m(a: Seq[Int], b: Seq[Int], y: Int)
 }
 "#;
     let result = verify_named_method(&lower(input), "m");
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+// The sequence axioms (`verify::seq_axioms`), through the whole pipeline.
+
+#[test]
+fn axioms_give_lengths_indices_and_slices() {
+    let input = r#"
+method lengths(s: Seq[Int], t: Seq[Int]) {
+    assert |Seq(1, 2) ++ Seq(3)| == 3
+    assert |s ++ t| == |s| + |t|
+    assert 0 <= |s|
+    assert |Seq[Int]()| == 0
+}
+
+method indices(x: Int, y: Int) {
+    assert Seq(x, y)[1] == y
+    assert [2..5)[1] == 3
+    assert |[2..5)| == 3
+    assert 3 in [2..5)
+}
+
+method slices(s: Seq[Int]) {
+    assert s[..0] == Seq[Int]()
+    assert s[0..] == s
+    assert s[..|s|] == s
+}
+"#;
+    let program = lower(input);
+    for method in ["lengths", "indices", "slices"] {
+        let result = verify_named_method(&program, method);
+        assert!(result.is_ok(), "{method}: expected Ok, got {result:?}");
+    }
+}
+
+#[test]
+fn axioms_give_containment_and_extensionality() {
+    let input = r#"
+method contains(s: Seq[Int], k: Int)
+    requires 0 <= k && k < |s|
+{
+    assert s[k] in s
+}
+
+method update(s: Seq[Int], i: Int, v: Int)
+    requires 0 <= i && i < |s|
+{
+    assert s[i := v][i] == v
+    assert |s[i := v]| == |s|
+}
+
+method extensional(s: Seq[Int], t: Seq[Int])
+    requires |s| == |t|
+    requires forall i: Int :: { s[i] } { t[i] } 0 <= i && i < |s| ==> s[i] == t[i]
+{
+    assert s == t
+}
+"#;
+    let program = lower(input);
+    for method in ["contains", "update", "extensional"] {
+        let result = verify_named_method(&program, method);
+        assert!(result.is_ok(), "{method}: expected Ok, got {result:?}");
+    }
+}
+
+#[test]
+fn axioms_do_not_prove_what_does_not_hold() {
+    let input = r#"
+method m(s: Seq[Int], t: Seq[Int])
+    requires |s| == |t|
+{
+    assert s == t
+}
+"#;
+    let result = verify_named_method(&lower(input), "m");
+    assert!(
+        matches!(result, Err(ref err) if matches!(err.root_cause(), VerifyError::AssertionFailed)),
+        "expected AssertionFailed, got {result:?}"
+    );
+}
+
+#[test]
+#[ignore = "needs the sequence axioms in Z3, which are not ported (e-graph only)"]
+fn sequences_of_different_lengths_are_unequal() {
+    // Needs the lengths, which the program never writes: only the Z3 axioms
+    // build them. They used to reach Z3 only on a *second* sync, after the
+    // first had made the `Seq` sorts, so a goal decided by one call missed them.
+    let input = r#"
+method m() {
+    assert Seq(1, 2) != Seq(1, 2, 3)
+}
+"#;
+    let result = verify_named_method(&lower(input), "m");
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+#[test]
+#[ignore = "needs the sequence axioms in Z3, which are not ported (e-graph only)"]
+fn a_call_result_has_the_callee_result_type() {
+    // `r := m(..)` used to havoc `r` as an `Int`, so Z3 declared it at the
+    // wrong sort and dropped every quantifier mentioning it, `m`'s
+    // postconditions among them.
+    let input = r#"
+method reverse(s: Seq[Int]) returns (r: Seq[Int])
+  ensures |r| == |s|
+  ensures forall i: Int :: { r[i] } 0 <= i && i < |s| ==> r[i] == s[|s| - 1 - i]
+
+method twice(s: Seq[Int]) {
+  var r: Seq[Int]
+  var rr: Seq[Int]
+  r := reverse(s)
+  rr := reverse(r)
+  assert rr == s
+}
+"#;
+    let result = verify_named_method(&lower(input), "twice");
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+#[test]
+#[ignore = "needs the sequence axioms in Z3, which are not ported (e-graph only)"]
+fn shifted_indices_do_not_loop_through_drop() {
+    // `drop-index2` reads `s[i]` as `s[n..][i - n]`, and `drop-index1` reads
+    // that back as `s[(i - n) + n]`. Without the round-trip equality the
+    // second is a new index term, and `sorted(s)` (triggered on pairs of
+    // them) instantiates without end. (`tests/cases/passing/seq/insert_sorted.vpr`.)
+    let input = r#"
+function sorted(s: Seq[Int]): Bool
+{
+  forall i: Int, j: Int :: { s[i], s[j] } 0 <= i && i < j && j < |s| ==> s[i] <= s[j]
+}
+
+method insert_sorted(s: Seq[Int], x: Int) returns (r: Seq[Int])
+  requires sorted(s)
+  ensures sorted(r)
+{
+  var i: Int := 0
+  while (i < |s| && s[i] < x)
+    invariant 0 <= i && i <= |s|
+    invariant forall j: Int :: { s[j] } 0 <= j && j < i ==> s[j] < x
+  {
+    i := i + 1
+  }
+  r := s[..i] ++ Seq(x) ++ s[i..]
+  assert r[i] == x
+  assert forall k: Int :: { s[k] } 0 <= k && k < i ==> r[k] == s[k]
+  assert forall k: Int :: { s[k] } i <= k && k < |s| ==> r[k + 1] == s[k]
+}
+"#;
+    let result = verify_named_method(&lower(input), "insert_sorted");
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }

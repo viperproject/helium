@@ -1,6 +1,7 @@
-// KNOWN LIMITATION: needs the sequence axioms (length, indexing, concatenation,
-// take/drop, membership). They are not loaded, so sequences only get basic
-// equality reasoning. Promote back to passing/seq once the axioms are in.
+// KNOWN LIMITATION: the sequence axioms are in the e-graph, but some method here
+// needs an axiom whose guard takes arithmetic the e-graph cannot derive (e.g.
+// `a < b` from `0 <= i < b - a`). It verifies once Z3 also gets the axioms as
+// quantifiers (feature/experimental c256c34, not ported). Promote to passing/seq then.
 // Seq[Ref]: permissions to fields of sequence elements, held element by
 // element (no quantified permissions). Holding full permission to two
 // elements' fields forces those elements to be distinct.

@@ -6,13 +6,15 @@
 
 use std::sync::{Arc, RwLock};
 
-use egg::{Applier, EGraph, Id, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var};
+use egg::{
+    Applier, EGraph, Id, Language, PatternAst, Rewrite, SearchMatches, Searcher, Subst, Symbol, Var,
+};
 
-use crate::verify::analysis::ConstFold;
-use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
-use crate::verify::quant::RecipeTable;
+use crate::verify::analysis::{ConstFold, Data};
+use crate::verify::lang::{Discriminant, FuncId, RecipeId, SeqAux, Symbolic};
+use crate::verify::quant::{Guard, RecipeTable};
 use crate::verify::stats;
-use crate::vmir::{Literal, SeqOp, Type};
+use crate::vmir::{BinOp, Literal, SeqOp, Type, Val};
 
 use super::*;
 
@@ -28,6 +30,8 @@ pub(crate) enum TermHead {
     Seq(Type, SeqOp),
     /// A `Symbolic::SeqLit` of this element type.
     SeqLit(Type),
+    /// A `Symbolic::SeqAux` of this element type and kind.
+    SeqAux(Type, SeqAux),
 }
 
 impl TermHead {
@@ -37,6 +41,7 @@ impl TermHead {
             TermHead::Func { func, .. } => Discriminant::FuncApp(*func),
             TermHead::Seq(_, op) => Discriminant::Seq(*op),
             TermHead::SeqLit(_) => Discriminant::SeqLit,
+            TermHead::SeqAux(_, aux) => Discriminant::SeqAux(*aux),
         }
     }
 
@@ -63,6 +68,13 @@ impl TermHead {
                 std::slice::from_ref(&**e),
                 std::slice::from_ref(elem),
             )),
+            (TermHead::SeqAux(elem_ty, aux), Symbolic::SeqAux(e, a, children)) if a == aux => {
+                Some((
+                    std::slice::from_ref(elem_ty),
+                    std::slice::from_ref(&**e),
+                    children,
+                ))
+            }
             _ => None,
         }
     }
@@ -305,6 +317,156 @@ pub(super) struct ForallApplier {
     pub(super) memo: Arc<Memo<(RecipeId, Vec<Type>, Vec<Id>)>>,
 }
 
+/// One body step evaluated against the e-graph **without adding to it**: the
+/// e-class that already holds it, if any, and the value it folds to.
+struct Probe {
+    class: Option<Id>,
+    value: Data,
+}
+
+impl Probe {
+    fn of_class(egraph: &EGraph<Symbolic, ConstFold>, class: Id) -> Self {
+        Probe {
+            class: Some(egraph.find(class)),
+            value: egraph[class].data.value.clone(),
+        }
+    }
+
+    fn of_lit(egraph: &EGraph<Symbolic, ConstFold>, lit: &Literal) -> Self {
+        Probe {
+            class: egraph.lookup(Symbolic::Lit(lit.clone())),
+            value: Data::Known(lit.clone()),
+        }
+    }
+
+    /// The probe of `node`, whose child `i` is `ops[i]`: the existing class when
+    /// every child has one and the graph already holds the node, else just the
+    /// folded value (so `5 > 0` is true at σ = 5 even though the comparison
+    /// has never been built).
+    fn of_node(egraph: &EGraph<Symbolic, ConstFold>, node: Symbolic, ops: &[&Probe]) -> Self {
+        // `x == x` holds and `x < x` fails whether or not the comparison was
+        // ever built.
+        if let Symbolic::Binary(op @ (BinOp::Eq | BinOp::LtI | BinOp::LtR), _) = node
+            && let [Probe { class: Some(l), .. }, Probe { class: Some(r), .. }] = ops
+            && l == r
+        {
+            return Probe::of_lit(egraph, &Literal::Bool(op == BinOp::Eq));
+        }
+        let real: Option<Vec<Id>> = ops.iter().map(|p| p.class).collect();
+        let class = real
+            .and_then(|real| egraph.lookup(node.clone().map_children(|i| real[usize::from(i)])));
+        match class {
+            // The class's own value also reflects the unions it took part in
+            // (a guard assumed elsewhere is merged with `true`).
+            Some(class) if !matches!(egraph[class].data.value, Data::Unknown) => {
+                Probe::of_class(egraph, class)
+            }
+            class => Probe {
+                class: class.map(|c| egraph.find(c)),
+                value: egraph
+                    .analysis
+                    .fold_value(&node, |i: &Id| &ops[usize::from(*i)].value),
+            },
+        }
+    }
+}
+
+/// Whether every conjunct of `guard` is already `true` at the seed `vals`
+/// (captures ++ σ) and the types `tys` the match fixed. Evaluates the guard's
+/// steps with lookups only: a step is known when the graph already holds it or
+/// when it constant-folds from known operands, and a conjunct holds when it is
+/// known to be `true`.
+fn guard_holds(
+    egraph: &EGraph<Symbolic, ConstFold>,
+    guard: &Guard,
+    vals: &[Id],
+    tys: &[Type],
+) -> bool {
+    let mut probes: Vec<Probe> = vals.iter().map(|&c| Probe::of_class(egraph, c)).collect();
+    for inst in &guard.insts {
+        let Some((node, args)) = probe_shape(inst, tys) else {
+            continue;
+        };
+        // A literal operand gets a probe of its own; a temp reads its slot.
+        let lits: Vec<Probe> = args
+            .iter()
+            .filter_map(|v| match v {
+                Val::Literal(l) => Some(Probe::of_lit(egraph, l)),
+                Val::Temp(_) => None,
+            })
+            .collect();
+        let mut lits = lits.iter();
+        let ops: Vec<&Probe> = args
+            .iter()
+            .map(|v| match v {
+                Val::Temp(n) => &probes[*n],
+                Val::Literal(_) => lits.next().expect("one probe per literal operand"),
+            })
+            .collect();
+        let probe = Probe::of_node(egraph, node, &ops);
+        probes.push(probe);
+    }
+    guard.conds.iter().all(|c| {
+        let value = match c {
+            Val::Temp(n) => probes[*n].value.clone(),
+            Val::Literal(l) => Data::Known(l.clone()),
+        };
+        matches!(value, Data::Known(Literal::Bool(true)))
+    })
+}
+
+/// The e-node a value-producing step adds, at the types `tys`, with its
+/// children numbered `0..n` as indices into the returned operands; `None` for a
+/// step that occupies no temp. Mirrors `build_instance_vals_impl`.
+fn probe_shape<'a>(inst: &'a AxiomInst, tys: &[Type]) -> Option<(Symbolic, Vec<&'a Val>)> {
+    let ix = |n: usize| -> Box<[Id]> { (0..n).map(Id::from).collect() };
+    let ty = |t: &Type| Box::new(t.subst_generics(tys));
+    let [i0, i1, i2] = [0, 1, 2].map(Id::from);
+    Some(match inst {
+        AxiomInst::Val(p) => match p {
+            AxiomPure::Binary(op, l, r) => (Symbolic::Binary(*op, [i0, i1]), vec![l, r]),
+            AxiomPure::Ternary(c, t, e) => (Symbolic::Ite([i0, i1, i2]), vec![c, t, e]),
+            AxiomPure::RealCast(v) => (Symbolic::RealCast(i0), vec![v]),
+            AxiomPure::App {
+                func,
+                type_args,
+                args,
+            } => (
+                Symbolic::FuncApp(
+                    *func,
+                    type_args.iter().map(|t| t.subst_generics(tys)).collect(),
+                    ix(args.len()),
+                ),
+                args.iter().collect(),
+            ),
+            AxiomPure::Seq { elem_ty, op, args } => (
+                Symbolic::Seq(ty(elem_ty), *op, ix(args.len())),
+                args.iter().collect(),
+            ),
+            AxiomPure::SeqLit { elem_ty, elem } => (Symbolic::SeqLit(ty(elem_ty), i0), vec![elem]),
+            AxiomPure::SeqAux { elem_ty, aux, l, r } => {
+                (Symbolic::SeqAux(ty(elem_ty), *aux, [i0, i1]), vec![l, r])
+            }
+            // Its value is the equality; the tag built beside it has no bearing
+            // on that value.
+            AxiomPure::SeqEq { l, r, .. } => (Symbolic::Binary(BinOp::Eq, [i0, i1]), vec![l, r]),
+        },
+        AxiomInst::Forall {
+            recipe,
+            type_args,
+            caps,
+        } => (
+            Symbolic::Forall(
+                *recipe,
+                type_args.iter().map(|t| t.subst_generics(tys)).collect(),
+                ix(caps.len()),
+            ),
+            caps.iter().collect(),
+        ),
+        AxiomInst::Assume(_) | AxiomInst::Token { .. } => return None,
+    })
+}
+
 impl Applier<Symbolic, ConstFold> for ForallApplier {
     fn apply_one(
         &self,
@@ -329,6 +491,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         // Collect the instances first: `build_instance` needs `&mut egraph`.
         let mut instances: Vec<(RecipeId, Vec<Type>, Vec<Id>, u32)> = Vec::new();
         let mut deferred = 0;
+        let mut skipped = 0;
         for (rid, tys, caps) in &quants {
             let recipe = table.get(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
@@ -375,6 +538,14 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                     // The seed is the body's leading temps: captures then binders.
                     let mut vals = caps.clone();
                     vals.extend(bound);
+                    // Like a deferred instance, a skipped one is not memoized:
+                    // it is built once its guard becomes true.
+                    if let Some(guard) = &recipe.guard
+                        && !guard_holds(egraph, guard, &vals, &sigma.tys)
+                    {
+                        skipped += 1;
+                        continue;
+                    }
                     if self.memo.insert((*rid, sigma.tys.clone(), vals.clone())) {
                         instances.push((*rid, sigma.tys, vals, generation));
                     }
@@ -383,6 +554,9 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         }
         if deferred > 0 {
             stats::bump(|s| s.inst_deferred += deferred);
+        }
+        if skipped > 0 {
+            stats::bump(|s| s.inst_guard_skips += skipped);
         }
         if let Some(peak) = instances.iter().map(|i| i.3).max() {
             stats::bump(|s| s.inst_generation_peak = s.inst_generation_peak.max(peak.into()));
@@ -548,6 +722,7 @@ mod tests {
             }]],
             insts: vec![app(g_, vec![Val::Temp(0)]), app(f, vec![Val::Temp(1)])],
             res: Val::Literal(Literal::Bool(true)),
+            guard: None,
         });
         let rules = [forall_rule(Arc::new(RwLock::new(table)))];
         let mut g = EGraph::<Symbolic, ConstFold>::default();

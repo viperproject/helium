@@ -78,6 +78,7 @@ impl<'a> FunctionTranslator<'a, Declared> {
                 requires,
                 ensures,
                 heap_dep,
+                rets: Vec::new(),
             },
         );
 
