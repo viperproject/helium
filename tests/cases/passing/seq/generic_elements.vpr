@@ -1,6 +1,3 @@
-// KNOWN LIMITATION: Z3 gets the generic sequence axioms only at `Int`, so a
-// `Seq[Bool]` equality (`seq_of_bool`) has none to go by. Promote to passing/seq
-// once Z3 gets them at every element type the program uses.
 // Seq: element types other than Int — Bool, Ref, nested Seq, and a domain type.
 
 domain Color {

@@ -1,5 +1,3 @@
-// KNOWN LIMITATION: Z3 gets the sequence axioms (at `Int`) but answers
-// "incomplete quantifiers" on `reverse`; not yet diagnosed.
 // Seq (verification-heavy): reverse a sequence in a loop by prepending, then
 // check that reversing twice gives back the original.
 

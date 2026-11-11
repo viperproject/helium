@@ -1,5 +1,3 @@
-// KNOWN LIMITATION: Z3 gets the sequence axioms (at `Int`) but answers
-// "incomplete quantifiers" on `search` and `bsearch`; not yet diagnosed.
 // Seq (verification-heavy): recursive binary search over a non-strictly sorted
 // sequence, on a half-open window [lo, hi). Sortedness is a pure function, so
 // it is unfolded at every use; the "not found" postcondition of each recursive

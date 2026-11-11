@@ -842,11 +842,9 @@ impl<'a> VerifyContext<'a> {
         }
         let t_build = std::time::Instant::now();
 
-        // Quantifiers are left out until a goal the e-graph could not prove
-        // reaches one; from then on they all go to Z3. One analysis read.
-        if self.egraph[goal].data.reaches_forall() {
-            crate::verify::z3::include_foralls(self);
-        }
+        // A goal that reaches a quantifier needs the program's quantifiers, so
+        // it skips the try without them. One analysis read.
+        let needs_foralls = self.egraph[goal].data.reaches_forall();
         crate::verify::z3::sync_facts(self);
 
         let goal_z3 = crate::verify::z3::build_goal(self, goal);
@@ -860,8 +858,42 @@ impl<'a> VerifyContext<'a> {
 
         stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
 
+        // First without the program's quantifiers, then, if that fails, once
+        // more with them in a solver scope of their own: without them a model
+        // is no counterexample, and a quantifier that loops costs only this
+        // query.
+        let first = (!needs_foralls).then(|| self.check_z3(&query));
+        let res = match first {
+            Some(SatResult::Unsat) => SatResult::Unsat,
+            _ if crate::verify::z3::has_program_foralls(self) => {
+                stats::bump(|s| s.z3_timing.0.retries += u64::from(first.is_some()));
+                let t_build = std::time::Instant::now();
+                self.z3translator.solver.push();
+                crate::verify::z3::assert_program_foralls(self);
+                // The scope is this query's alone, so the path condition and the
+                // negated goal are asserted rather than assumed: Z3 simplifies
+                // with an assertion before it instantiates, where an assumption
+                // leaves it instantiating a multi-pattern over every pair of
+                // terms (`insert_sorted`'s sortedness: 30k instances).
+                for fact in &query {
+                    crate::verify::z3::assert_fact(&self.z3translator.solver, fact);
+                }
+                stats::bump(|s| s.z3_timing.0.build += t_build.elapsed().as_secs_f64());
+                let res = self.check_z3(&[]);
+                self.z3translator.solver.pop(1);
+                res
+            }
+            Some(res) => res,
+            None => self.check_z3(&query),
+        };
+        res == SatResult::Unsat
+    }
+
+    /// One `check_assumptions` of `query` on the context's solver, counted in
+    /// `z3_timing`.
+    fn check_z3(&mut self, query: &[z3::ast::Bool]) -> SatResult {
         let t_solve = std::time::Instant::now();
-        let res = self.z3translator.solver.check_assumptions(&query);
+        let res = self.z3translator.solver.check_assumptions(query);
         stats::bump(|s| {
             s.z3_timing.0.solve += t_solve.elapsed().as_secs_f64();
             s.z3_timing.0.calls += 1;
@@ -872,12 +904,7 @@ impl<'a> VerifyContext<'a> {
                 SatResult::Unknown => s.z3_timing.0.unknown += 1,
             }
         });
-
-        match res {
-            SatResult::Unsat => true,
-            SatResult::Unknown => false,
-            SatResult::Sat => false,
-        }
+        res
     }
 
     /// Whether e-class `id` folds to the boolean literal `b` in `probe`.

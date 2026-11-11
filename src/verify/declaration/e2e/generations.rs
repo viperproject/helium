@@ -46,25 +46,32 @@ method near(a: Int) {
 
 /// `f(i) == f(i + 1)` from `f(0)`: reaching `f(d)` takes the instance at
 /// `i = d - 1`, whose binding is the literal a generation-`(d - 1)` instance
-/// folded. Depth `MAX_GENERATION` is derived, one more is not.
+/// folded. Depth `MAX_GENERATION` is derived, one more is not: the e-graph
+/// leaves that one to Z3, which proves it only when retried with the axiom.
 #[test]
 fn derivations_reach_exactly_the_generation_bound() {
-    let method = |name: &str, d: u32| {
-        format!("method {name}()\n    requires f(0)\n{{\n    assert f({d})\n}}\n")
-    };
-    let input = format!(
-        r#"
+    let program = |d: u32| {
+        format!(
+            r#"
 domain Succ {{
     function f(i: Int): Bool
     axiom step {{ forall i: Int :: {{ f(i) }} f(i) == f(i + 1) }}
 }}
-{}{}"#,
-        method("within", MAX_GENERATION),
-        method("beyond", MAX_GENERATION + 1)
-    );
-    let (results, stats) = verify_all(&input);
-    assert!(outcome(&results, "within").is_ok());
-    assert!(outcome(&results, "beyond").is_err());
+method m()
+    requires f(0)
+{{
+    assert f({d})
+}}
+"#
+        )
+    };
+    let (results, stats) = verify_all(&program(MAX_GENERATION));
+    assert!(outcome(&results, "m").is_ok());
+    assert_eq!(stats.z3_timing.0.retries, 0, "the e-graph derives it");
+    assert_eq!(stats.sat_bound_stops, 0);
+    let (results, stats) = verify_all(&program(MAX_GENERATION + 1));
+    assert!(outcome(&results, "m").is_ok());
+    assert_eq!(stats.z3_timing.0.retries, 1, "only Z3, with the axiom");
     assert_eq!(stats.sat_bound_stops, 0);
 }
 
@@ -95,14 +102,15 @@ method m(a: Ref, b: Ref)
         )
     };
     let frontier = nx(MAX_GENERATION + 1);
+    // One step past the bound the instance is deferred, and only Z3, retried
+    // with the axiom, proves the goal.
     let (results, stats) = verify_all(&program(&format!("assert P(nx({frontier}))")));
-    assert!(
-        outcome(&results, "m").is_err(),
-        "one step past the bound is deferred"
-    );
+    assert!(outcome(&results, "m").is_ok());
     assert!(stats.inst_deferred > 0);
+    assert_eq!(stats.z3_timing.0.retries, 1, "the e-graph alone stops");
     let named = format!("assume b == {frontier}\n    assert P(nx(b))");
-    let (results, _) = verify_all(&program(&named));
+    let (results, stats) = verify_all(&program(&named));
+    assert_eq!(stats.z3_timing.0.retries, 0, "the e-graph builds it");
     assert!(
         outcome(&results, "m").is_ok(),
         "{:?}",

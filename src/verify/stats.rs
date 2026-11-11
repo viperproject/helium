@@ -208,6 +208,9 @@ pub struct Z3Timing {
     /// Throwaway-graph scopes (`with_scratch_graph`) in which Z3 learned
     /// something that had to be discarded afterwards.
     pub scratch_scopes: u64,
+    /// Queries Z3 failed without the program's quantifiers and was asked
+    /// again with them (`prove_by_z3`).
+    pub retries: u64,
 }
 
 /// [`Z3Timing`] wrapper, `Eq`-transparent like [`TimingTrend`].
@@ -392,6 +395,7 @@ impl VerifyStats {
                     ("unknown", n(&z3_timing.0.unknown)),
                     ("facts", n(&z3_timing.0.facts)),
                     ("scratch_scopes", n(&z3_timing.0.scratch_scopes)),
+                    ("retries", n(&z3_timing.0.retries)),
                 ]),
             ),
             (

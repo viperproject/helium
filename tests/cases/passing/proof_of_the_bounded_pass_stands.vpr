@@ -1,4 +1,3 @@
-// Current: Rejected, should be: accepted
 // A proof the generation-bounded first pass finds stands in the unbounded
 // second one. `grow` is a cubic matching loop: bounded, it ends at a fixpoint
 // and the 90-deep unfolding of `c90` proves the first assert; unbounded, it
