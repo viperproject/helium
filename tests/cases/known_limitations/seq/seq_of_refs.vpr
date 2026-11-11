@@ -1,7 +1,6 @@
-// KNOWN LIMITATION: the sequence axioms are in the e-graph, but some method here
-// needs an axiom whose guard takes arithmetic the e-graph cannot derive (e.g.
-// `a < b` from `0 <= i < b - a`). It verifies once Z3 also gets the axioms as
-// quantifiers (feature/experimental c256c34, not ported). Promote to passing/seq then.
+// KNOWN LIMITATION: `ys[0].val := 1` with `ys = xs[0 := y]` looks the address
+// up before the update axiom has made `ys[0] == y` (an `assert ys[0] == y`
+// first makes it verify).
 // Seq[Ref]: permissions to fields of sequence elements, held element by
 // element (no quantified permissions). Holding full permission to two
 // elements' fields forces those elements to be distinct.

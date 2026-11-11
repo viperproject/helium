@@ -1,7 +1,5 @@
-// KNOWN LIMITATION: the sequence axioms are in the e-graph, but some method here
-// needs an axiom whose guard takes arithmetic the e-graph cannot derive (e.g.
-// `a < b` from `0 <= i < b - a`). It verifies once Z3 also gets the axioms as
-// quantifiers (feature/experimental c256c34, not ported). Promote to passing/seq then.
+// KNOWN LIMITATION: Z3 gets the sequence axioms (at `Int`) but answers
+// "incomplete quantifiers" on `reverse`; not yet diagnosed.
 // Seq (verification-heavy): reverse a sequence in a loop by prepending, then
 // check that reversing twice gives back the original.
 

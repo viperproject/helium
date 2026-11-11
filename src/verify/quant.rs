@@ -146,6 +146,13 @@ impl RecipeTable {
         self.seq_axioms.clone().expect("just compiled")
     }
 
+    /// Whether `id` is one of the built-in sequence axioms' recipes.
+    pub(crate) fn is_seq_axiom(&self, id: RecipeId) -> bool {
+        self.seq_axioms
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&id))
+    }
+
     /// How many recipes have been compiled so far — i.e. how many distinct
     /// quantifiers the run has actually reached. Observes laziness; tests only.
     #[cfg(test)]

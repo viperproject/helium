@@ -1,7 +1,3 @@
-// KNOWN LIMITATION: the sequence axioms are in the e-graph, but some method here
-// needs an axiom whose guard takes arithmetic the e-graph cannot derive (e.g.
-// `a < b` from `0 <= i < b - a`). It verifies once Z3 also gets the axioms as
-// quantifiers (feature/experimental c256c34, not ported). Promote to passing/seq then.
 // Seq: one occurrence of every sequence construct, in every position the
 // grammar allows it (field, function, predicate, domain, method signature,
 // local, contract, loop invariant, quantifier, old). The obligations are kept

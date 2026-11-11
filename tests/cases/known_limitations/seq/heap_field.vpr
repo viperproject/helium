@@ -1,6 +1,5 @@
 // KNOWN LIMITATION: the `forall` in `nat_stack` reads the heap (`this.elems[i]`),
-// which a quantifier body may not do yet (FieldAccessInAxiom). The file also
-// needs the sequence axioms in Z3 (feature/experimental c256c34, not ported).
+// which a quantifier body may not do yet (FieldAccessInAxiom).
 // Seq stored in the heap: a field of sequence type, a stack built on it, and
 // a predicate whose body constrains the stored sequence.
 

@@ -1,7 +1,3 @@
-// KNOWN LIMITATION: the sequence axioms are in the e-graph, but some method here
-// needs an axiom whose guard takes arithmetic the e-graph cannot derive (e.g.
-// `a < b` from `0 <= i < b - a`). It verifies once Z3 also gets the axioms as
-// quantifiers (feature/experimental c256c34, not ported). Promote to passing/seq then.
 // Seq (verification-heavy): insert into a sorted sequence at the position a
 // loop finds, then show the result is sorted, one longer, and keeps every
 // element. Proving `sorted(r)` needs a case split over which of the three
