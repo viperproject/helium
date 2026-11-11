@@ -1,3 +1,6 @@
+// KNOWN LIMITATION: needs the sequence axioms (length, indexing, concatenation,
+// take/drop, membership). They are not loaded, so sequences only get basic
+// equality reasoning. Promote back to passing/seq once the axioms are in.
 // Seq (verification-heavy): reverse a sequence in a loop by prepending, then
 // check that reversing twice gives back the original.
 

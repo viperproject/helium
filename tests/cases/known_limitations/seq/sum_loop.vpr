@@ -1,3 +1,6 @@
+// KNOWN LIMITATION: needs the sequence axioms (length, indexing, concatenation,
+// take/drop, membership). They are not loaded, so sequences only get basic
+// equality reasoning. Promote back to passing/seq once the axioms are in.
 // Seq (verification-heavy): a recursive pure function over sequences, and
 // loops proven against it. Each iteration needs `xs[..i+1][..i] == xs[..i]`,
 // which only extensionality gives, so it is asserted as a hint (Silicon needs

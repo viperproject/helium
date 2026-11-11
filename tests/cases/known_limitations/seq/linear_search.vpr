@@ -1,3 +1,6 @@
+// KNOWN LIMITATION: needs the sequence axioms (length, indexing, concatenation,
+// take/drop, membership). They are not loaded, so sequences only get basic
+// equality reasoning. Promote back to passing/seq once the axioms are in.
 // Seq (verification-heavy): a loop finding the FIRST occurrence of a key.
 
 method first_index_of(xs: Seq[Int], key: Int) returns (index: Int)

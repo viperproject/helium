@@ -1,3 +1,6 @@
+// KNOWN LIMITATION: needs the sequence axioms (length, indexing, concatenation,
+// take/drop, membership). They are not loaded, so sequences only get basic
+// equality reasoning. Promote back to passing/seq once the axioms are in.
 // Seq: literals, the empty sequence, length and indexing.
 
 method empty_has_length_zero() {
