@@ -215,7 +215,10 @@ impl std::fmt::Display for TypeError {
                 write!(f, "name `{name}` already declared in this scope")
             }
             TypeError::UniqueFunctionWithParams(name) => {
-                write!(f, "unique domain function `{name}` must not have parameters")
+                write!(
+                    f,
+                    "unique domain function `{name}` must not have parameters"
+                )
             }
             TypeError::WrongReturnCount { expected, found } => {
                 write!(

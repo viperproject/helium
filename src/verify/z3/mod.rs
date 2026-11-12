@@ -429,7 +429,11 @@ fn unique_ret_type(ctxt: &VerifyContext, f: FuncId, tys: &[Type]) -> Type {
         panic!("unique function fn{} is not a declared function", f.0);
     };
     let (params, ret) = function_signature(ctxt, member, tys);
-    assert!(params.is_empty(), "unique function fn{} must be nullary", f.0);
+    assert!(
+        params.is_empty(),
+        "unique function fn{} must be nullary",
+        f.0
+    );
     ret
 }
 
@@ -499,7 +503,10 @@ fn assert_unique_sort(ctxt: &mut VerifyContext, ty: &Type) {
             let FuncKind::Decl(member) = ctxt.alloc.kind(f) else {
                 unreachable!("checked by `unique_members`")
             };
-            let name = ctxt.interner.resolve(&ctxt.decls[member].name()).to_string();
+            let name = ctxt
+                .interner
+                .resolve(&ctxt.decls[member].name())
+                .to_string();
             builder = builder.variant(&format!("Unique@{ty}::{name}#{}", f.0), vec![]);
         }
         let enumeration = create_datatypes(vec![builder])
