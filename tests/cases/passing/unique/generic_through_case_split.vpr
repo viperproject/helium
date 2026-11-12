@@ -1,0 +1,21 @@
+// Generic unique constants reach Z3 per instantiation: each method needs a
+// case split the e-graph leaves to Z3, and in every case Z3 must know
+// `empty() != absent()` at that instantiation.
+domain Opt[T] {
+  unique function empty(): Opt[T]
+  unique function absent(): Opt[T]
+}
+
+method m(x: Opt[Int], y: Opt[Int])
+  requires (x == (empty(): Opt[Int]) && y == (absent(): Opt[Int]))
+        || (x == (absent(): Opt[Int]) && y == (empty(): Opt[Int]))
+{
+  assert x != y
+}
+
+method n(x: Opt[Ref], y: Opt[Ref])
+  requires (x == (empty(): Opt[Ref]) && y == (absent(): Opt[Ref]))
+        || (x == (absent(): Opt[Ref]) && y == (empty(): Opt[Ref]))
+{
+  assert x != y
+}

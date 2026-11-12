@@ -459,6 +459,19 @@ impl FuncRegistry {
         std::sync::Arc::new(self.unique_fns.clone())
     }
 
+    /// Whether `f` is a `unique` domain function.
+    pub fn is_unique(&self, f: FuncId) -> bool {
+        self.unique_fns.contains(&f)
+    }
+
+    /// Every `unique` domain function, in id order (so anything built from
+    /// them, like a Z3 enumeration's constructors, comes out the same each run).
+    pub fn unique_fns(&self) -> Vec<FuncId> {
+        let mut fns: Vec<FuncId> = self.unique_fns.iter().copied().collect();
+        fns.sort();
+        fns
+    }
+
     pub fn rules(&self) -> &[Rule] {
         &self.rules
     }

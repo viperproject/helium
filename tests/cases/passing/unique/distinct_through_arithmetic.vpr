@@ -1,0 +1,16 @@
+// Distinctness combined with arithmetic: the e-graph folds no `==` here, so
+// this needs Z3 to know the two constants differ.
+domain K {
+  unique function k1(): Int
+  unique function k2(): Int
+}
+
+method m() {
+  assert k1() - k2() != 0
+}
+
+method n(x: Int)
+  requires x + k1() == k2()
+{
+  assert x != 0
+}
