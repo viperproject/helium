@@ -49,7 +49,10 @@ pub(crate) fn lower_type(
         typed::Type::Collection(BuiltinCollection::Seq(ty)) => {
             vmir::Type::seq(lower_type(names, generics, ty))
         }
-        // TODO: Set — modeled as builtin parametric types like Option.
+        typed::Type::Collection(BuiltinCollection::Set(ty)) => {
+            vmir::Type::set(lower_type(names, generics, ty))
+        }
+        // Multiset and Map are rejected by `scan_unsupported` before lowering.
         typed::Type::Collection(_) => vmir::Type::Ref,
     }
 }

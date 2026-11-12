@@ -1707,3 +1707,162 @@ fn seq_literal_lowers_to_concatenated_singletons() {
     };
     assert!(args.is_empty());
 }
+
+/// The collection steps of method `m`, in order.
+fn coll_steps(input: &str) -> Vec<vmir::PureInst> {
+    use vmir::{InstKind, PureInst};
+    let p = run(input);
+    let vmir::Declaration::Method(method) = &p.decls[p.id("m").expect("missing m")] else {
+        panic!("m must be a Method");
+    };
+    method
+        .iter_insts()
+        .filter_map(|inst| match &inst.kind {
+            InstKind::Pure(_, pi @ (PureInst::CollLit { .. } | PureInst::Coll { .. })) => {
+                Some(pi.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn set_literal_lowers_to_a_singleton_with_elements_added() {
+    use vmir::{CollKind, CollOp, PureInst, SetOp, Val};
+    let steps = coll_steps("method m(a: Int, b: Int, c: Int) { var s: Set[Int] := Set(a, b, c) }");
+    let [
+        PureInst::CollLit {
+            kind: CollKind::Set,
+            elem: a,
+            ..
+        },
+        PureInst::Coll {
+            op: CollOp::Set(SetOp::Add),
+            args: inner,
+            ..
+        },
+        PureInst::Coll {
+            op: CollOp::Set(SetOp::Add),
+            args: outer,
+            ..
+        },
+    ] = &steps[..]
+    else {
+        panic!("expected a singleton and two additions, got {steps:?}");
+    };
+    // `Set(a)`, then `b` added, then `c` added: left-nested, in source order.
+    let (Val::Temp(a), [Val::Temp(unit), Val::Temp(b)], [Val::Temp(once), Val::Temp(c)]) =
+        (a, &inner[..], &outer[..])
+    else {
+        panic!("expected temp operands, got {inner:?} and {outer:?}");
+    };
+    assert_eq!((*b, *c), (*a + 1, *a + 2), "elements in source order");
+    assert_eq!(*once, *unit + 1, "the second addition extends the first");
+
+    let steps = coll_steps("method m() { var s: Set[Bool] := Set[Bool]() }");
+    let [
+        PureInst::Coll {
+            elem_ty: vmir::Type::Bool,
+            op: CollOp::Set(SetOp::Empty),
+            args,
+        },
+    ] = &steps[..]
+    else {
+        panic!("expected one empty set, got {steps:?}");
+    };
+    assert!(args.is_empty());
+}
+
+#[test]
+fn set_operators_lower_to_set_ops() {
+    use vmir::{CollOp, PureInst, SeqOp, SetOp, Val};
+    let ops = |input: &str| -> Vec<(CollOp, Vec<Val>)> {
+        coll_steps(input)
+            .into_iter()
+            .filter_map(|pi| match pi {
+                PureInst::Coll { op, args, .. } => Some((op, args)),
+                _ => None,
+            })
+            .collect()
+    };
+    let src = |exp: &str| {
+        format!(
+            "method m(a: Set[Int], b: Set[Int], q: Seq[Int], x: Int) {{ var r: Bool := {exp} }}"
+        )
+    };
+    for (exp, want) in [
+        (
+            "|a union b| == 0",
+            vec![SetOp::Union.into(), SetOp::Card.into()],
+        ),
+        (
+            "|a intersection b| == 0",
+            vec![SetOp::Intersection.into(), SetOp::Card.into()],
+        ),
+        (
+            "|a setminus b| == 0",
+            vec![SetOp::Difference.into(), SetOp::Card.into()],
+        ),
+        ("a subset b", vec![SetOp::Subset.into()]),
+        ("a == b", vec![SetOp::Eq.into()]),
+        ("x in a", vec![SetOp::Contains.into()]),
+        // The overloaded operators follow their operand's kind.
+        ("x in q", vec![CollOp::Seq(SeqOp::Contains)]),
+        ("|q| == 0", vec![CollOp::Seq(SeqOp::Len)]),
+    ] {
+        let got: Vec<CollOp> = ops(&src(exp)).into_iter().map(|(op, _)| op).collect();
+        assert_eq!(got, want, "`{exp}`");
+    }
+    // Operands keep source order, except that `x in a` puts the set first,
+    // like `x in s` for a sequence: its first operand is `a subset b`'s first.
+    let only = |exp: &str| -> Vec<Val> {
+        let [(_, args)] = &ops(&src(exp))[..] else {
+            panic!("expected one operation for `{exp}`");
+        };
+        args.clone()
+    };
+    let (sub, sub_flipped, mem) = (only("a subset b"), only("b subset a"), only("x in a"));
+    assert_eq!(sub_flipped, [sub[1].clone(), sub[0].clone()]);
+    assert_eq!(mem[0], sub[0], "the set comes first");
+    assert_ne!(mem[1], sub[0]);
+}
+
+#[test]
+fn set_trigger_lowers_to_set_heads() {
+    let input = r#"
+domain D {
+    function f(s: Set[Int]): Bool
+    axiom card { forall s: Set[Int] :: {|s|} f(s) }
+    axiom mem { forall s: Set[Int], x: Int :: {x in s} f(s) }
+    axiom uni { forall s: Set[Int], t: Set[Int] :: {s union t} f(s) }
+    axiom sub { forall s: Set[Int], t: Set[Int] :: {s subset t} f(s) }
+    axiom lit { forall x: Int, y: Int :: {Set(x, y)} f(Set(x, y)) }
+}
+"#;
+    let p = run(input);
+    use vmir::{CollKind, CollOp, SetOp, TrigHead, TrigTerm};
+    let set = |op: SetOp| TrigHead::Coll(CollOp::Set(op));
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "card")));
+    assert_eq!(*head, set(SetOp::Card));
+    assert_eq!(args, &[TrigTerm::Var(0)]);
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
+    assert_eq!(*head, set(SetOp::Contains));
+    assert_eq!(args, &[TrigTerm::Var(0), TrigTerm::Var(1)], "set first");
+
+    let (head, _) = only_app(only_group(axiom_forall(&p, "uni")));
+    assert_eq!(*head, set(SetOp::Union));
+    let (head, _) = only_app(only_group(axiom_forall(&p, "sub")));
+    assert_eq!(*head, set(SetOp::Subset));
+
+    // `Set(x, y)` is `Set(x)` with `y` added, as in a body.
+    let (head, args) = only_app(only_group(axiom_forall(&p, "lit")));
+    assert_eq!(*head, set(SetOp::Add));
+    let unit = TrigTerm::App {
+        head: TrigHead::CollLit(CollKind::Set),
+        type_args: vec![vmir::Type::Int],
+        args: Box::new([TrigTerm::Var(0)]),
+    };
+    assert_eq!(args, &[unit, TrigTerm::Var(1)]);
+}

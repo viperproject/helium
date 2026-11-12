@@ -150,6 +150,7 @@ pub enum Type {
     Generic(Ident),
     Domain(Ident, Vec<Type>),
     Seq(Box<Type>),
+    Set(Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

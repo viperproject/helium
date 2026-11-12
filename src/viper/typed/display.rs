@@ -222,6 +222,7 @@ impl<'a> Display for Show<'a, &'a Type> {
             Type::Ref => write!(f, "Ref"),
             Type::Generic(id) => write!(f, "{}", self.name(*id)),
             Type::Collection(BuiltinCollection::Seq(t)) => write!(f, "Seq[{}]", self.with(&**t)),
+            Type::Collection(BuiltinCollection::Set(t)) => write!(f, "Set[{}]", self.with(&**t)),
             Type::Collection(_) => write!(f, "<collection>"),
             Type::Domain(id, args) => {
                 write!(f, "{}", self.name(*id))?;
@@ -586,8 +587,13 @@ fn fmt_pure_kind<'a, Ext: ShowExt>(
         PureExpKind::AdtDiscriminator(e, variant) => {
             write!(f, "{}.is{}", show.with(e), show.name(*variant))
         }
-        PureExpKind::SeqLit(elems) => {
-            write!(f, "Seq(")?;
+        PureExpKind::SeqLit(elems) | PureExpKind::SetLit(elems) => {
+            let name = if matches!(kind, PureExpKind::SeqLit(_)) {
+                "Seq"
+            } else {
+                "Set"
+            };
+            write!(f, "{name}(")?;
             for (i, e) in elems.iter().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;

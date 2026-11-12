@@ -60,13 +60,13 @@ peg::parser! {
             / "Perm" { Type::Real }
             / "Ref" { Type::Ref }
             / "Rational"   { Type::Real }
-            // The collection types are parsed but not implemented (expect Seq): they are kept
+            // The collection types are parsed but not implemented (expect Seq and Set): they are kept
             // as ordinary domain types under their own name so that
             // `scan_unsupported` can name the construct and reject only the
             // declaration that mentions one, instead of failing the whole file
             // with a parse error.
             / "Seq" _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
-            / "Set" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Set".to_string()), vec![ty]) }
+            / "Set" _ "[" _ ty:type_() _ "]" { Type::Set(Box::new(ty)) }
             / "Multiset" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Multiset".to_string()), vec![ty]) }
             / "Map" _ "[" _ a:type_() _ "," _ b:type_() _ "]" { Type::Domain(Ident::Raw("Map".to_string()), vec![a, b]) }
             / type_constr()
@@ -108,16 +108,22 @@ peg::parser! {
             = kw(<"Seq">) _ ty:("[" _ ty:type_() _ "]" { ty })? _ "(" _ es:(exp() ** comma()) _ ")"
                 { ExpKind::SeqLit(ty, es) }
 
+        /// A set literal, written like a sequence literal. `kw` keeps
+        /// `Settings(..)` a function call.
+        rule set_exp() -> ExpKind
+            = kw(<"Set">) _ ty:("[" _ ty:type_() _ "]" { ty })? _ "(" _ es:(exp() ** comma()) _ ")"
+                { ExpKind::SetLit(ty, es) }
+
         /// The other collection literals. Parsed into an `Unsupported` marker
         /// rather than a real expression: the construct is named, the
         /// declaration around it is rejected, and the rest of the file still runs.
         rule collection_exp() -> ExpKind
-            = n:$("Set" / "Multiset" / "Map") _ ("[" _ type_() ** comma() _ "]")? _ "(" _ collection_elems() _ ")"
+            = n:$("Multiset" / "Map") _ ("[" _ type_() ** comma() _ "]")? _ "(" _ collection_elems() _ ")"
                 { ExpKind::Unsupported(collection_name(n)) }
 
         rule collection_elems() = (e:exp() _ (":=" _ exp())? {}) ** comma()
 
-        /// `|s|` — the length of a sequence.
+        /// `|s|` — the length of a sequence, the cardinality of a set.
         rule cardinality_exp() -> ExpKind = "|" _ e:exp() _ "|" { ExpKind::UnOp(UnOp::Cardinality, e) }
 
         /// `[a..b)` — the sequence of the integers from `a` (inclusive) to `b`
@@ -175,6 +181,7 @@ peg::parser! {
             / kw(<"exists">) _ args:(formal_arg() ++ comma()) _ "::" _ triggers:(trigger()**_) _ e:exp() { ExpKind::Quantifier(QuantifierKind::Exists, args, triggers, e) }
 
             / seq_exp()
+            / set_exp()
             / collection_exp()
             / cardinality_exp()
             / range_exp()
@@ -480,7 +487,6 @@ peg::parser! {
 /// (the grammar action only has a borrowed slice of the input).
 fn collection_name(n: &str) -> &'static str {
     match n {
-        "Set" => "Set",
         "Multiset" => "Multiset",
         _ => "Map",
     }
@@ -549,4 +555,51 @@ fn seq_length_and_range() {
     assert!(matches!(&*lhs.kind, ExpKind::UnOp(UnOp::Cardinality, inner)
         if matches!(&*inner.kind, ExpKind::BinOp(BinOp::Concat, ..))));
     assert!(matches!(&*rhs.kind, ExpKind::BinOp(BinOp::Plus, ..)));
+}
+
+#[test]
+fn set_literals_and_types() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    assert_eq!(
+        parse("Set[Int]()"),
+        ExpKind::SetLit(Some(Type::Int), vec![])
+    );
+    assert_eq!(parse("Set()"), ExpKind::SetLit(None, vec![]));
+    assert_eq!(
+        parse("Set(1, x)"),
+        ExpKind::SetLit(None, vec![int_lit(1), raw_ident("x")])
+    );
+    assert_eq!(
+        parse("Set[Seq[Bool]](s)"),
+        ExpKind::SetLit(Some(Type::Seq(Box::new(Type::Bool))), vec![raw_ident("s")])
+    );
+    assert!(matches!(parse("Settings(1)"), ExpKind::Call(_)));
+    assert_eq!(
+        parse("Set[Set[Int]]()"),
+        ExpKind::SetLit(Some(Type::Set(Box::new(Type::Int))), vec![])
+    );
+    // Multiset stays an unsupported construct.
+    assert_eq!(parse("Multiset(1)"), ExpKind::Unsupported("Multiset"));
+}
+
+#[test]
+fn set_operators() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    for (src, op) in [
+        ("a union b", BinOp::Union),
+        ("a intersection b", BinOp::Intersection),
+        ("a setminus b", BinOp::SetMinus),
+        ("a subset b", BinOp::Subset),
+        ("x in a", BinOp::In),
+    ] {
+        let ExpKind::BinOp(got, ..) = parse(src) else {
+            panic!("`{src}` is not a binary operation");
+        };
+        assert_eq!(got, op, "{src}");
+    }
+    // As in Silver, the set operators bind like `+`: tighter than `in` and `==`.
+    let ExpKind::BinOp(BinOp::In, _, rhs) = parse("x in a union b") else {
+        panic!("expected `in` at the root");
+    };
+    assert!(matches!(&*rhs.kind, ExpKind::BinOp(BinOp::Union, ..)));
 }

@@ -21,6 +21,11 @@ pub enum ViperTcType {
     /// concrete type may still pin.
     Generic(Ident),
     Seq,
+    Set,
+    /// A `Seq` or a `Set`, not yet known which: what `|c|` and `x in c` ask
+    /// of `c`. Abstract, like `Numeric`, but never defaulted: a key left at
+    /// `Collection` cannot be built.
+    Collection,
     Top,
 }
 
@@ -52,7 +57,7 @@ impl Variant for ViperTcType {
     fn arity(&self) -> Arity {
         match self {
             ViperTcType::Domain(_, n) => Arity::Fixed(*n),
-            ViperTcType::Seq => Arity::Fixed(1),
+            ViperTcType::Seq | ViperTcType::Set | ViperTcType::Collection => Arity::Fixed(1),
             ViperTcType::Bool
             | ViperTcType::Int
             | ViperTcType::Real
@@ -80,6 +85,9 @@ impl Variant for ViperTcType {
             (Domain(a, n), Domain(b, m)) if a == b && n == m => Domain(a, n),
             (Generic(a), Generic(b)) if a == b => Generic(a),
             (Seq, Seq) => Seq,
+            (Set, Set) => Set,
+            (Collection, Collection) => Collection,
+            (Collection, x @ (Seq | Set)) | (x @ (Seq | Set), Collection) => x,
             (t1, t2) => {
                 return Err(TcTypeErr::Mismatch(t1, t2));
             }
@@ -88,7 +96,7 @@ impl Variant for ViperTcType {
         // every other variant is 0-ary.
         let least_arity = match &variant {
             Domain(_, n) => *n,
-            Seq => 1,
+            Seq | Set | Collection => 1,
             _ => 0,
         };
         Ok(Partial {
@@ -112,13 +120,19 @@ impl Constructable for ViperTcType {
             ViperTcType::Ref => Type::Ref,
             ViperTcType::Domain(id, _) => Type::Domain(*id, children.to_vec()),
             ViperTcType::Generic(id) => Type::Generic(*id),
-            ViperTcType::Top => {
+            ViperTcType::Top | ViperTcType::Collection => {
                 return Err(TcTypeErr::Abstract);
             }
             ViperTcType::Seq => Type::Collection(BuiltinCollection::Seq(Box::new(
                 children
                     .first()
                     .expect("sequence must have a child type")
+                    .clone(),
+            ))),
+            ViperTcType::Set => Type::Collection(BuiltinCollection::Set(Box::new(
+                children
+                    .first()
+                    .expect("set must have a child type")
                     .clone(),
             ))),
         })
@@ -137,6 +151,7 @@ pub fn type_to_tc(ty: &Type) -> ViperTcType {
         Type::Ref => ViperTcType::Ref,
         Type::Domain(id, args) => ViperTcType::Domain(*id, args.len()),
         Type::Collection(BuiltinCollection::Seq(_)) => ViperTcType::Seq,
+        Type::Collection(BuiltinCollection::Set(_)) => ViperTcType::Set,
         Type::Generic(_) | Type::Collection(_) => ViperTcType::Top,
     }
 }

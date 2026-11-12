@@ -160,6 +160,8 @@ fn viper_name(ty: &ViperTcType, interner: &Interner) -> String {
         ViperTcType::Generic(id) => format!("`{}`", interner.resolve(&id.0)),
         ViperTcType::Top => "`_`".to_string(),
         ViperTcType::Seq => "`Seq[_]`".to_string(),
+        ViperTcType::Set => "`Set[_]`".to_string(),
+        ViperTcType::Collection => "a collection (`Seq[_]` or `Set[_]`)".to_string(),
     }
 }
 

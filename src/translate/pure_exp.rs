@@ -8,8 +8,8 @@ use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
 use crate::vmir::{
-    self, CollKind, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp,
-    TRUE, Type, Val,
+    self, CollKind, CollOp, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall,
+    SeqOp, SetOp, TRUE, Type, Val,
 };
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
@@ -230,9 +230,10 @@ pub(crate) fn lower<Ext: PureExt>(
                     ty.clone(),
                     PureInst::Binary(vmir::BinOp::sub(&ty), zero_literal(&ty), v),
                 )),
+                // A sequence's length or a set's cardinality.
                 typed::UnOp::Cardinality => {
-                    let elem_ty = seq_elem(b, &x.ty);
-                    Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Len, vec![v])))
+                    let (kind, elem_ty) = coll_elem(b, &x.ty);
+                    Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, CollOp::size(kind), vec![v])))
                 }
             }
         }
@@ -349,6 +350,36 @@ pub(crate) fn lower<Ext: PureExt>(
             });
             Ok(concat.unwrap_or_else(|| {
                 sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Empty, vec![]))
+            }))
+        }
+        P::SetLit(value) => {
+            let Type::Coll(CollKind::Set, elem_ty) = &ty else {
+                panic!("set literal of type {ty}");
+            };
+            let elem_ty = (**elem_ty).clone();
+            let elems = value
+                .iter()
+                .map(|v| lower(b, env, sink, hctx, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            // As Silicon does: `Set(a, b, c)` is `Set(a)` with `b`, then `c`,
+            // added (`Set_unionone`).
+            let mut elems = elems.into_iter();
+            let Some(first) = elems.next() else {
+                return Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, SetOp::Empty, vec![])));
+            };
+            let unit = sink.emit_pure(
+                ty.clone(),
+                PureInst::CollLit {
+                    kind: CollKind::Set,
+                    elem_ty: elem_ty.clone(),
+                    elem: first,
+                },
+            );
+            Ok(elems.fold(unit, |set, elem| {
+                sink.emit_pure(
+                    ty.clone(),
+                    PureInst::coll(elem_ty.clone(), SetOp::Add, vec![set, elem]),
+                )
             }))
         }
         P::SeqIndex(seq, op) => {
@@ -623,13 +654,17 @@ fn lower_binary<Ext: PureExt>(
             ty,
             PureInst::coll(vmir::Type::Int, SeqOp::Range, vec![lv, rv]),
         ),
-        // `x in s` is `Contains(s, x)`: the sequence comes first.
-        B::In => sink.emit_pure(
-            ty,
-            PureInst::coll(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv]),
-        ),
+        // `x in c` is `Contains(c, x)`: the collection comes first.
+        B::In => {
+            let (kind, elem_ty) = coll_elem(b, &r.ty);
+            sink.emit_pure(
+                ty,
+                PureInst::coll(elem_ty, CollOp::contains(kind), vec![rv, lv]),
+            )
+        }
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
-            return Err(TranslationError::Unsupported("collection operator"));
+            let (_, elem_ty) = coll_elem(b, &l.ty);
+            sink.emit_pure(ty, PureInst::coll(elem_ty, set_op(op), vec![lv, rv]))
         }
     })
 }
@@ -1034,6 +1069,23 @@ fn lower_trig_term(
                 .reduce(|tail, head| seq_trig(&elem_ty, vmir::SeqOp::Concat, [head, tail]))
                 .unwrap_or_else(|| seq_trig(&elem_ty, vmir::SeqOp::Empty, [])))
         }
+        // A set literal, in the body's shape: a singleton with each further
+        // element added, or `SetOp::Empty`.
+        P::SetLit(elems) => {
+            let (_, elem_ty) = coll_elem(b, &term.ty);
+            let mut elems = lower_args(elems)?.into_iter();
+            let Some(first) = elems.next() else {
+                return Ok(coll_trig(&elem_ty, SetOp::Empty, []));
+            };
+            let unit = vmir::TrigTerm::App {
+                head: vmir::TrigHead::CollLit(CollKind::Set),
+                type_args: vec![elem_ty.clone()],
+                args: Box::new([first]),
+            };
+            Ok(elems.fold(unit, |set, elem| {
+                coll_trig(&elem_ty, SetOp::Add, [set, elem])
+            }))
+        }
         P::SeqIndex(base, op) => {
             use typed::SeqIndexOp as I;
             let elem_ty = seq_elem(b, &base.ty);
@@ -1051,20 +1103,37 @@ fn lower_trig_term(
                 }
             })
         }
-        P::Unary(typed::UnOp::Cardinality, s) => Ok(seq_trig(
-            &seq_elem(b, &s.ty),
-            vmir::SeqOp::Len,
-            [lower_trig_term(b, s, env)?],
-        )),
-        P::Binary(op @ (typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range), l, r) => {
+        P::Unary(typed::UnOp::Cardinality, s) => {
+            let (kind, elem_ty) = coll_elem(b, &s.ty);
+            Ok(coll_trig(
+                &elem_ty,
+                CollOp::size(kind),
+                [lower_trig_term(b, s, env)?],
+            ))
+        }
+        P::Binary(
+            op @ (typed::BinOp::Concat
+            | typed::BinOp::In
+            | typed::BinOp::Range
+            | typed::BinOp::Union
+            | typed::BinOp::Intersection
+            | typed::BinOp::SetMinus
+            | typed::BinOp::Subset),
+            l,
+            r,
+        ) => {
             let (l_ty, r_ty) = (&l.ty, &r.ty);
             let l = lower_trig_term(b, l, env)?;
             let r = lower_trig_term(b, r, env)?;
             Ok(match op {
                 typed::BinOp::Concat => seq_trig(&seq_elem(b, l_ty), vmir::SeqOp::Concat, [l, r]),
                 typed::BinOp::Range => seq_trig(&vmir::Type::Int, vmir::SeqOp::Range, [l, r]),
-                // `x in s` is `Contains(s, x)`: the sequence comes first.
-                _ => seq_trig(&seq_elem(b, r_ty), vmir::SeqOp::Contains, [r, l]),
+                // `x in c` is `Contains(c, x)`: the collection comes first.
+                typed::BinOp::In => {
+                    let (kind, elem_ty) = coll_elem(b, r_ty);
+                    coll_trig(&elem_ty, CollOp::contains(kind), [r, l])
+                }
+                set => coll_trig(&coll_elem(b, l_ty).1, set_op(set), [l, r]),
             })
         }
         P::Unary(..)
@@ -1084,11 +1153,47 @@ fn seq_trig<const N: usize>(
     op: vmir::SeqOp,
     args: [vmir::TrigTerm; N],
 ) -> vmir::TrigTerm {
+    coll_trig(elem_ty, op, args)
+}
+
+/// A trigger application of the collection operation `op`, checking its
+/// arity as `PureInst::coll` does.
+fn coll_trig<const N: usize>(
+    elem_ty: &vmir::Type,
+    op: impl Into<CollOp>,
+    args: [vmir::TrigTerm; N],
+) -> vmir::TrigTerm {
+    let op = op.into();
     assert_eq!(N, op.arity(), "`{op:?}` takes {} operands", op.arity());
     vmir::TrigTerm::App {
-        head: vmir::TrigHead::Coll(op.into()),
+        head: vmir::TrigHead::Coll(op),
         type_args: vec![elem_ty.clone()],
         args: Box::new(args),
+    }
+}
+
+/// The set operation of a typed set operator.
+fn set_op(op: &typed::BinOp) -> SetOp {
+    match op {
+        typed::BinOp::Union => SetOp::Union,
+        typed::BinOp::Intersection => SetOp::Intersection,
+        typed::BinOp::SetMinus => SetOp::Difference,
+        typed::BinOp::Subset => SetOp::Subset,
+        other => panic!("`{other:?}` is not a set operator"),
+    }
+}
+
+/// The kind and element type of an expression that typecheck has given a
+/// sequence or set type.
+fn coll_elem(b: &TranslationContext<'_>, ty: &typed::Type) -> (CollKind, vmir::Type) {
+    match ty {
+        typed::Type::Collection(typed::BuiltinCollection::Seq(t)) => {
+            (CollKind::Seq, b.lower_type(t))
+        }
+        typed::Type::Collection(typed::BuiltinCollection::Set(t)) => {
+            (CollKind::Set, b.lower_type(t))
+        }
+        other => panic!("a collection operation on a value of type {other:?}"),
     }
 }
 

@@ -56,10 +56,10 @@ fn mentions_acc(exp: &Exp) -> bool {
     find.0
 }
 
-/// The collection types other than `Seq`, which are parsed as plain named types
-/// so that a declaration mentioning one can be reported rather than failing the
-/// parse. (`Seq` has its own `Type::Seq`.)
-const COLLECTION_TYPES: [&str; 3] = ["Set", "Multiset", "Map"];
+/// The collection types other than `Seq` and `Set`, which are parsed as plain
+/// named types so that a declaration mentioning one can be reported rather than
+/// failing the parse. (`Seq` and `Set` have their own `Type::Seq`/`Type::Set`.)
+const COLLECTION_TYPES: [&str; 2] = ["Multiset", "Map"];
 
 impl<'a> AstWalker<'a> for Scan {
     fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
@@ -114,15 +114,10 @@ impl<'a> AstWalker<'a> for Scan {
     }
 
     fn walk_bin_op(&mut self, op: &'a BinOp) {
-        match op {
-            // `[A, B]`: the body is given `A` and the caller is charged `B`.
-            // Nothing here can hold the two apart.
-            BinOp::InhaleExhale => self.hit("inhale-exhale expression `[A, B]`"),
-            BinOp::Union => self.hit("union"),
-            BinOp::SetMinus => self.hit("setminus"),
-            BinOp::Intersection => self.hit("intersection"),
-            BinOp::Subset => self.hit("subset"),
-            _ => {}
+        // `[A, B]`: the body is given `A` and the caller is charged `B`.
+        // Nothing here can hold the two apart.
+        if matches!(op, BinOp::InhaleExhale) {
+            self.hit("inhale-exhale expression `[A, B]`");
         }
         op.walk_children(self);
     }
