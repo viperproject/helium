@@ -418,6 +418,9 @@ pub struct Field(pub TypedIdent);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DomainFunction {
+    /// Declared `unique`: a nullary constant distinct from every other unique
+    /// constant of the same type, program-wide.
+    pub unique: bool,
     pub name: Ident,
     pub params: Vec<TypedIdent>,
     pub ret: Type,

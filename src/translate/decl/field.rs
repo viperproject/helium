@@ -86,6 +86,7 @@ impl FieldTranslator<'_, Metaed> {
                 body: None,
                 requires: None,
                 ensures: None,
+                unique: false,
             },
         );
         Ok(())

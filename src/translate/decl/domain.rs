@@ -139,6 +139,14 @@ impl DomainTranslator<'_, Metaed> {
         );
         for (df, fslot) in self.src.functions.iter().zip(self.fn_slots) {
             let sig = ctx.domain_fn_sigs[&ctx.name_map[&df.name.0]].clone();
+            // Silver only admits nullary `unique` functions (enforced by the
+            // typechecker); a unique function with parameters would have no
+            // single value to keep distinct.
+            assert!(
+                !df.unique || sig.params.is_empty(),
+                "unique domain function `{}` has parameters; the typechecker must reject it",
+                ctx.interner.resolve(&df.name.0)
+            );
             let fn_name = definer.intern_name(ctx.interner.resolve(&df.name.0));
             definer.define_function(
                 fslot,
@@ -150,6 +158,7 @@ impl DomainTranslator<'_, Metaed> {
                     body: None,
                     requires: None,
                     ensures: None,
+                    unique: df.unique,
                 },
             );
         }

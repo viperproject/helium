@@ -2207,6 +2207,7 @@ fn domain_function_to_typed(
         })
         .collect();
     typed::DomainFunction {
+        unique: df.unique,
         name: Ident(df.signature.name.0.id()),
         params,
         ret: type_with_generics(df.signature.ret[0].ty(), type_params),

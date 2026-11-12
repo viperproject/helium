@@ -41,6 +41,13 @@ pub struct Function {
     /// heap-dependent). `Result` is only expressible here — a precondition
     /// cannot mention the result.
     pub ensures: Option<ContractCall<ContractArg>>,
+    /// A Silver `unique` domain function: a **nullary**, abstract constant
+    /// (no params, no body, no contracts) whose value differs from that of every
+    /// other unique function **of the same return type**, program-wide (across
+    /// domains). A generic one is distinct at each instantiation of its type
+    /// arguments. Nothing beyond that: it may equal a literal or any non-unique
+    /// term. Only the domain translator sets this.
+    pub unique: bool,
 }
 
 /// A function's precondition link. The two variants are the two function
@@ -209,6 +216,9 @@ impl<'a> Display for VmirDisplay<'a, &'a Function> {
         let name = self.interner.resolve(&self.item.name);
         let params = &self.item.params;
         let ret = &self.item.ret;
+        if self.item.unique {
+            write!(f, "unique ")?;
+        }
         write!(
             f,
             "function {name}{}{} -> {}",

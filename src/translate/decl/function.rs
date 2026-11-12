@@ -205,6 +205,7 @@ impl FunctionTranslator<'_, Metaed> {
                             body: Some(body),
                             requires: None,
                             ensures: None,
+                            unique: false,
                         },
                     );
                 }
@@ -296,6 +297,7 @@ impl FunctionTranslator<'_, Metaed> {
                     body: Some(body),
                     requires: requires_link(ens_snap),
                     ensures: None,
+                    unique: false,
                 },
             );
         }
@@ -371,6 +373,7 @@ impl FunctionTranslator<'_, Metaed> {
                 body,
                 requires: requires_link(contract_snap),
                 ensures: ensures_link,
+                unique: false,
             },
         );
         Ok(())
