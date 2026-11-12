@@ -1,0 +1,9 @@
+// Silver admits only nullary `unique` functions; one with parameters is a
+// type error, never a silently accepted (or silently ignored) `unique`.
+domain D {
+  unique function u(x: Int): Int
+}
+
+method m() {
+  assert true
+}

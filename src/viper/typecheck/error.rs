@@ -27,6 +27,9 @@ pub enum TypeError {
     IllegalResultUsage,
     UndefinedLabel(String),
     ShadowedName(String),
+    /// A `unique` domain function with parameters. Silver admits only nullary
+    /// unique functions: distinctness is stated between constants.
+    UniqueFunctionWithParams(String),
     WrongReturnCount {
         expected: usize,
         found: usize,
@@ -210,6 +213,9 @@ impl std::fmt::Display for TypeError {
             }
             TypeError::ShadowedName(name) => {
                 write!(f, "name `{name}` already declared in this scope")
+            }
+            TypeError::UniqueFunctionWithParams(name) => {
+                write!(f, "unique domain function `{name}` must not have parameters")
             }
             TypeError::WrongReturnCount { expected, found } => {
                 write!(

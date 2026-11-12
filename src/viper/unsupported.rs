@@ -132,15 +132,6 @@ impl<'a> AstWalker<'a> for Scan {
         ty.walk_children(self);
     }
 
-    fn walk_domain_function(&mut self, df: &'a DomainFunction) {
-        if df.unique {
-            // Parsed and never read: the injectivity `unique` promises would
-            // silently not hold.
-            self.hit("unique domain function");
-        }
-        df.walk_children(self);
-    }
-
     fn walk_import(&mut self, import: &'a Import) {
         // The path is never read, so every name the imported file would have
         // provided is simply missing.
