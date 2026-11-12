@@ -1,13 +1,3 @@
-// KNOWN LIMITATION — should verify, currently rejected.
-//
-// Eta (`x.isC ==> x == C(x.f1, .., x.fn)`) is not an e-graph rule; only the Z3
-// rung proves it (without Z3 nothing does, see `eta.vpr`). With the variant and
-// payload facts given by `assume`, Z3 does (`eta_by_assume` below). When the same
-// facts come from a callee's postcondition about a fresh result variable, Z3
-// returns `sat` and the goal is rejected. `use_prepend` and `use_grow` hold, since the
-// postconditions fix both the variant and every payload component.
-//
-// The state is consistent, so the rejection is not a vacuous discharge.
 adt Lst {
     Nil()
     Cons(head: Int, tail: Lst)
