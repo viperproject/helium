@@ -1,0 +1,14 @@
+// Set: a callee holding the field may change the set.
+field elems: Set[Int]
+
+method callee(o: Ref)
+  requires acc(o.elems)
+  ensures acc(o.elems)
+
+method heap_set_havoc_on_call(o: Ref)
+  requires acc(o.elems) && 1 in o.elems
+  ensures acc(o.elems)
+{
+  callee(o)
+  assert 1 in o.elems
+}

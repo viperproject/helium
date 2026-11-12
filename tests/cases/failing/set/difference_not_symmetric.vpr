@@ -1,0 +1,4 @@
+// Set: a = {1}, b = {}.
+method difference_not_symmetric(a: Set[Int], b: Set[Int]) {
+  assert a setminus b == b setminus a
+}

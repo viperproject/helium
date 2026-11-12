@@ -1,0 +1,6 @@
+// Set: inserting does not shrink the set to the new element.
+method insert(s: Set[Int], x: Int) returns (r: Set[Int])
+  ensures r == Set(x)
+{
+  r := s union Set(x)
+}

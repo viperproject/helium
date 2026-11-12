@@ -1,0 +1,15 @@
+// Set: the loop collects every element, but the last one is claimed missing.
+method collect(xs: Seq[Int]) returns (r: Set[Int])
+  requires |xs| > 0
+  ensures !(xs[|xs| - 1] in r)
+{
+  r := Set[Int]()
+  var k: Int := 0
+  while (k < |xs|)
+    invariant 0 <= k && k <= |xs|
+    invariant forall i: Int :: { xs[i] } 0 <= i && i < k ==> xs[i] in r
+  {
+    r := r union Set(xs[k])
+    k := k + 1
+  }
+}

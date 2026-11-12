@@ -1,0 +1,4 @@
+// Set: x and y may be equal, so the literal may have one element.
+method card_distinctness_unknown(x: Int, y: Int) {
+  assert |Set(x, y)| == 2
+}

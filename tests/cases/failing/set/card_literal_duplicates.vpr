@@ -1,0 +1,4 @@
+// Set: a literal with a repeated element has fewer elements.
+method card_literal_duplicates() {
+  assert |Set(1, 1)| == 2
+}

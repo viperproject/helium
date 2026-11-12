@@ -1,0 +1,40 @@
+// Set: element types other than Int — Bool, Ref, nested Set, Seq, and a domain type.
+
+domain Color {
+  function red(): Color
+  function green(): Color
+  axiom red_ne_green { red() != green() }
+}
+
+method set_of_bool(s: Set[Bool])
+  requires true in s && false in s
+{
+  assert |s| >= 1
+  assert Set(true, false) subset s
+}
+
+method set_of_ref(xs: Set[Ref], y: Ref)
+  requires y in xs
+{
+  assert Set(y) subset xs
+  assert |xs| > 0
+}
+
+method nested_set() {
+  var m: Set[Set[Int]] := Set(Set(1, 2), Set[Int]())
+  assert Set(1, 2) in m
+  assert Set[Int]() in m
+  assert !(Set(3) in m)
+}
+
+method set_of_seq(s: Seq[Int]) {
+  var m: Set[Seq[Int]] := Set(s, s ++ Seq[Int]())
+  assert |m| == 1
+  assert s in m
+}
+
+method set_of_domain() {
+  var cs: Set[Color] := Set(red(), green())
+  assert |cs| == 2
+  assert !(green() in Set(red()))
+}

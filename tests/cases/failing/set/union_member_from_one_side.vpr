@@ -1,0 +1,6 @@
+// Set: x in a union b does not say which side.
+method union_member_from_one_side(a: Set[Int], b: Set[Int], x: Int)
+  requires x in a union b
+{
+  assert x in a
+}

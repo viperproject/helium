@@ -1,0 +1,37 @@
+// Set: literals `Set(..)` and `Set[T]()`. Order and duplicates do not matter.
+
+method literal_membership() {
+  assert 1 in Set(1, 2, 3)
+  assert 3 in Set(1, 2, 3)
+  assert !(4 in Set(1, 2, 3))
+}
+
+method literal_cardinality() {
+  assert |Set(1)| == 1
+  assert |Set(1, 2)| == 2
+  assert |Set(1, 2, 3)| == 3
+}
+
+method duplicates_collapse(x: Int) {
+  assert |Set(x, x)| == 1
+  assert Set(x, x) == Set(x)
+  assert Set(1, 2, 1) == Set(1, 2)
+}
+
+method order_is_irrelevant(x: Int, y: Int) {
+  assert Set(1, 2) == Set(2, 1)
+  assert Set(x, y) == Set(y, x)
+}
+
+method distinct_elements_count(x: Int, y: Int)
+  requires x != y
+{
+  assert |Set(x, y)| == 2
+}
+
+method empty_literal() {
+  var s: Set[Int] := Set[Int]()
+  assert |s| == 0
+  assert s == Set[Int]()
+  assert s subset Set(1)
+}

@@ -1,0 +1,6 @@
+// Set: Set(1, x) == Set(x, 1) holds; it must not make the axioms contradictory.
+method no_vacuous_literal_equality(x: Int)
+  requires Set(1, x) == Set(x, 1)
+{
+  assert false
+}

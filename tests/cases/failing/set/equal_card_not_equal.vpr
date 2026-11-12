@@ -1,0 +1,6 @@
+// Set: a = {1}, b = {2}.
+method equal_card_not_equal(a: Set[Int], b: Set[Int])
+  requires |a| == |b|
+{
+  assert a == b
+}

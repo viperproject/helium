@@ -1,0 +1,6 @@
+// Set: reading a set-valued field needs permission.
+field elems: Set[Int]
+
+method heap_set_no_permission(o: Ref) {
+  assert |o.elems| >= 0
+}

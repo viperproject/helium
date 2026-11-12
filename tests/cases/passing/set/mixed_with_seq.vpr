@@ -1,0 +1,25 @@
+// Sets and sequences in one program: both axiom families at once.
+
+method seq_elements_in_set(s: Seq[Int], t: Set[Int])
+  requires forall i: Int :: { s[i] } 0 <= i && i < |s| ==> s[i] in t
+  requires |s| > 2
+{
+  assert s[0] in t
+  assert s[2] in t
+}
+
+method seq_member_to_set(s: Seq[Int], x: Int)
+  requires x in s
+{
+  var t: Set[Int] := Set(x)
+  assert x in t
+  assert |t| == 1
+}
+
+method lengths_and_cards(s: Seq[Int], t: Set[Int])
+  requires |s| == |t|
+  requires |s| > 0
+{
+  assert |t| > 0
+  assert t != Set[Int]()
+}

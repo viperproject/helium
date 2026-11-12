@@ -1,0 +1,4 @@
+// Set: a = b = {1}: the union has one element.
+method card_union_not_sum(a: Set[Int], b: Set[Int]) {
+  assert |a union b| == |a| + |b|
+}

@@ -1,0 +1,4 @@
+// Set: an arbitrary set need not be empty.
+method empty_has_no_member(s: Set[Int], x: Int) {
+  assert !(x in s)
+}
