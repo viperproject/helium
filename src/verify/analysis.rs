@@ -162,6 +162,9 @@ pub struct ConstFold {
     /// While a bucket rule is applied (`rewrite::PerClass`), the classes whose
     /// nodes read differently after each union; see [`Analysis::pre_union`].
     pub(crate) union_log: std::cell::RefCell<Option<Vec<Id>>>,
+    /// While a block scratch is live, every union ground makes, as the pair of
+    /// ids it was asked for, for the scratch to replay (`VerifyContext::sync_scratch`).
+    pub(crate) pair_log: std::cell::RefCell<Option<Vec<(Id, Id)>>>,
 }
 
 impl ConstFold {
@@ -169,6 +172,7 @@ impl ConstFold {
         Self {
             ctors,
             union_log: Default::default(),
+            pair_log: Default::default(),
         }
     }
 
@@ -322,6 +326,8 @@ impl Analysis<Symbolic> for ConstFold {
         }
     }
 
+    /// When `pair_log` is on, record the union itself.
+    ///
     /// When `union_log` is on, record the classes whose nodes will read
     /// differently after this union: the root that survives (it gains nodes),
     /// the parents of the class absorbed (a child's identity changes), and the
@@ -329,6 +335,11 @@ impl Analysis<Symbolic> for ConstFold {
     /// parents as the root, the first on a tie; were that to change, only which
     /// classes get walked again would, never what a walk may derive.
     fn pre_union(egraph: &EGraph<Symbolic, Self>, id1: Id, id2: Id, _: &Option<Justification>) {
+        if let Some(pairs) = egraph.analysis.pair_log.borrow_mut().as_mut() {
+            if egraph.find(id1) != egraph.find(id2) {
+                pairs.push((id1, id2));
+            }
+        }
         let mut log = egraph.analysis.union_log.borrow_mut();
         let Some(log) = log.as_mut() else {
             return;

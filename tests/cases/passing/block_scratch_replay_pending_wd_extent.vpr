@@ -1,0 +1,22 @@
+// The block scratch keeps ground's unions that are still pending when a
+// forall's well-definedness check runs in a throwaway graph
+// (`with_scratch_graph`): the call's `r == g(x)` unfolds in ground, and the
+// replay after the check still delivers it. Fails on main.
+// Canary: `failing/block_scratch_replay_pending_wd_extent.vpr`.
+
+function t(i: Int): Int
+function g(x: Int): Int { x + 1 }
+
+method callee(x: Int) returns (r: Int)
+  ensures r == g(x)
+
+method s_pending_pass(b: Bool, x: Int)
+{
+  if (b) {
+    assert b
+    var r: Int
+    r := callee(x)
+    inhale forall i: Int :: { t(i) } t(i) > 0 ==> 1 / t(i) >= 0
+    assert r == x + 1
+  }
+}

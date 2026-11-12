@@ -1,0 +1,21 @@
+// Soundness canary for the block-scratch union replay: a log entry still
+// pending when the forall's well-definedness check runs in its throwaway
+// graph (`with_scratch_graph`) replays only ground facts afterwards. The
+// throwaway's assumptions are discarded with it.
+
+function t(i: Int): Int
+function g(x: Int): Int { x + 1 }
+
+method callee(x: Int) returns (r: Int)
+  ensures r == g(x)
+
+method s_pending_fail(b: Bool, x: Int)
+{
+  if (b) {
+    assert b
+    var r: Int
+    r := callee(x)
+    inhale forall i: Int :: { t(i) } t(i) > 0 ==> 1 / t(i) >= 0
+    assert r == x + 2
+  }
+}

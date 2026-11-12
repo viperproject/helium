@@ -1,0 +1,18 @@
+// Soundness canary for the block-scratch union replay: a fact assumed under a
+// guard finer than the block cube (`c ==> ...`) reaches the scratch as the
+// guarded implication, never as the bare fact.
+
+function g(x: Int): Int { x + 1 }
+
+method callee(x: Int) returns (r: Int)
+  ensures r == g(x)
+
+method f_guard_impl(b: Bool, c: Bool, x: Int)
+{
+  var r: Int
+  if (b) {
+    assert b
+    assume c ==> r == g(x)
+    assert r == x + 1
+  }
+}

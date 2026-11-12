@@ -231,21 +231,12 @@ impl<'a> VerifyContext<'a> {
 
     /// Union two e-classes in the live graph — the sanctioned mutation path
     /// (invalidates the fixpoint cache). Callers still `rebuild()` after a
-    /// batch of unions.
+    /// batch of unions. The block scratch learns it on its next use, with
+    /// every other ground union (see [`Self::sync_scratch`]).
     pub(crate) fn union(&mut self, a: egg::Id, b: egg::Id) -> bool {
         let merged = self.egraph.union(a, b);
         if merged {
             self.clean = None;
-        }
-        if self.scratch.is_some() {
-            // Mirror into the block scratch. A same-typed conflict there (the
-            // cube made this union contradictory) folds to `Inconsistent`, not a
-            // panic — that just makes the block's goals vacuously provable.
-            let (ta, tb) = (self.tr(a), self.tr(b));
-            let sc = self.scratch.as_mut().unwrap();
-            sc.egraph.union(ta, tb);
-            sc.dirty = true;
-            sc.dirty_reduce = true;
         }
         merged
     }
@@ -566,8 +557,8 @@ impl<'a> VerifyContext<'a> {
     /// make the callee's facts available on sibling intra-block paths there —
     /// precisely the leak this gating closes.
     ///
-    /// Nothing is lost by skipping it: [`Self::union`] already mirrors the guarded
-    /// implication into the scratch, so the cube prefix of the guard chain
+    /// Nothing is lost by skipping it: the guarded implication's ground union is
+    /// replayed into the scratch ([`Self::sync_scratch`]), so the cube prefix of the guard chain
     /// collapses there via `ite-reduce` (cube literals *are* unguarded in the
     /// scratch), and any residual intra-block guard collapses in the probe clone,
     /// which assumes the obligation's extra pc literals (see
