@@ -1,0 +1,35 @@
+// REGRESSION (soundness). A summarized consume must not equate the value of a
+// member that holds no permission on this path.
+//
+// Inside the branch `y` aliases `x` only under the path condition, so `set5(y)`
+// consumes `acc(y.f)` off `x`'s chunk through the pc-alias path. That debit is
+// gated by the path condition, so the chunk is not dropped: it stays in the heap
+// with permission `1 - (b ? 1 : 0)` (zero here) and its old value 4. The
+// postcondition inhales a new chunk at `y` with value 5. `consume(x)` matches the
+// stale chunk on ground, finds it insufficient, and falls back to the summarized
+// consume over {stale x chunk, y chunk}. Assuming value agreement for every
+// member derived 4 == 5 and made the branch inconsistent.
+//
+// Viper semantics: under `b`, x.f == 5 with full permission, so `consume(x)`
+// succeeds and `assert false` must fail.
+//
+// Must FAIL.
+field f: Int
+
+method set5(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && r.f == 5
+
+method consume(r: Ref)
+  requires acc(r.f)
+
+method zero_residue_call_consume(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    consume(x)
+    assert false
+  }
+}

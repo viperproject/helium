@@ -183,6 +183,83 @@ fn known_limitations_still_fail() {
     );
 }
 
+/// Known-unsoundness canaries: programs that *must be rejected* but currently
+/// verify, because of a soundness bug that is not fixed yet.
+///
+/// Every case lives in a subdirectory named after its bug class (one root cause,
+/// see that directory's `README.md`); loose files at the top level are an error.
+/// This test asserts the CURRENT (wrong) verdict. A structural fix of a class
+/// makes all of its cases rejected at once; the whole subdirectory is then moved
+/// to `failing/<class>/`. A class that is only partly rejected is reported as
+/// such: it usually means a point fix, not a fix of the root cause.
+#[test]
+fn known_unsoundness_still_verifies() {
+    let dir = cases_dir().join("known_unsoundness");
+    if !dir.exists() {
+        return;
+    }
+
+    let mut loose: Vec<String> = Vec::new();
+    let mut classes: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("cannot read known_unsoundness/") {
+        let path = entry.expect("cannot read known_unsoundness/ entry").path();
+        if path.is_dir() {
+            classes.push(path);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("vpr") {
+            loose.push(file_name(&path).to_string());
+        }
+    }
+    classes.sort();
+    assert!(
+        loose.is_empty(),
+        "known_unsoundness/ cases must sit in a bug-class subdirectory:\n{}",
+        loose.join("\n")
+    );
+
+    let mut problems: Vec<String> = Vec::new();
+    for class_dir in &classes {
+        let class = file_name(class_dir);
+        let files = vpr_files(class_dir);
+        if files.is_empty() {
+            problems.push(format!("  {class}/: empty, remove the directory"));
+            continue;
+        }
+        let mut now_rejected: Vec<&str> = Vec::new();
+        for path in &files {
+            let name = file_name(path);
+            let still_verifies = match pipeline::run_file(path) {
+                Err(_) => false,
+                Ok(results) => !results.is_empty() && results.iter().all(|(_, r)| r.is_ok()),
+            };
+            if still_verifies {
+                println!("  [STILL-UNSOUND] {class}/{name}");
+            } else {
+                now_rejected.push(name);
+            }
+        }
+        if now_rejected.len() == files.len() {
+            problems.push(format!(
+                "  {class}/: every case is now rejected, move the whole directory to \
+                 tests/cases/failing/{class}/"
+            ));
+        } else if !now_rejected.is_empty() {
+            problems.push(format!(
+                "  {class}/: only {} of {} cases are rejected ({}); a fix of the class's \
+                 root cause rejects all of them",
+                now_rejected.len(),
+                files.len(),
+                now_rejected.join(", ")
+            ));
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "known-unsoundness verdicts changed:\n{}",
+        problems.join("\n")
+    );
+}
+
 /// Unsupported-construct cases: each file uses at least one construct this
 /// verifier does not implement. The pipeline must survive it — the file still
 /// parses and lowers, and its other members are still verified — and the

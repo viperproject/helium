@@ -1,0 +1,21 @@
+// REGRESSION (soundness). The heap merge at the inner join (after `if (c) {}`)
+// states the location axioms of the merged heap: `a.f` holds 1/1 and `b.f` 1/2,
+// so `a != b`. A join is walked with the block cube cleared, so the axiom was
+// assumed with no guard at all, although that heap only exists under `d`. On the
+// else arm `a == b` is consistent (1/2 + 1/2), and the leaked `a != b` made it
+// infeasible.
+//
+// Must FAIL.
+field f: Int
+
+method m(a: Ref, b: Ref, c: Bool, d: Bool)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+{
+  if (d) {
+    inhale acc(a.f, 1/2)
+    if (c) {}
+  } else {
+    assume a == b
+    assert false
+  }
+}
