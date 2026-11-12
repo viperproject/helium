@@ -1,0 +1,77 @@
+// Wands move through method contracts, `inhale`/`exhale`, calls, joins and
+// loop invariants like any other resource. Every method here verifies in
+// Silicon too.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+function snap(x: Ref): Ref
+  requires P(x)
+
+method get(x: Ref) returns (y: Ref)
+  requires P(x)
+  ensures P(y) && (P(y) --* P(x))
+
+// A wand returned by a callee, applied by the caller.
+method stub_wand(x: Ref)
+  requires P(x)
+  ensures P(x)
+{
+  var y: Ref
+  y := get(x)
+  apply P(y) --* P(x)
+}
+
+// Prusti's shape: a `let`-bound hole in the contract, a labelled `old` at the
+// apply.
+method get2(x: Ref) returns (y: Ref)
+  requires P(x)
+  ensures P(y) && (let r == (snap(y)) in (Q(r) --* P(x)))
+
+method let_bound_hole(x: Ref)
+  requires P(x)
+  ensures P(x)
+{
+  var y: Ref
+  y := get2(x)
+  label l
+  inhale Q(old[l](snap(y)))
+  apply Q(old[l](snap(y))) --* P(x)
+}
+
+method exhale_inhale(x: Ref)
+  requires P(x) --* Q(x)
+  ensures P(x) --* Q(x)
+{
+  exhale P(x) --* Q(x)
+  inhale P(x) --* Q(x)
+}
+
+// A call that does not mention the wand frames it.
+method noop(x: Ref)
+method framed(x: Ref)
+  requires P(x) && (P(x) --* Q(x))
+  ensures Q(x)
+{
+  noop(x)
+  apply P(x) --* Q(x)
+}
+
+// A join of two instances of one wand still holds the wand.
+method join_keeps_wand(x: Ref, b: Bool)
+  requires P(x) && (P(x) --* Q(x))
+  ensures Q(x)
+{
+  if (b) { exhale P(x) --* Q(x); inhale P(x) --* Q(x) }
+  apply P(x) --* Q(x)
+}
+
+// A loop invariant keeps the wand.
+method loop_keeps_wand(x: Ref, n: Int)
+  requires P(x) && (P(x) --* Q(x))
+  ensures Q(x)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant P(x) && (P(x) --* Q(x))
+  { i := i + 1 }
+  apply P(x) --* Q(x)
+}

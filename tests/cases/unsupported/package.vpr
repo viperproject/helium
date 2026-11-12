@@ -1,0 +1,8 @@
+// `package` needs the wand's footprint, which is not computed: the method is
+// reported unsupported.
+predicate P(x: Ref)
+
+method packages(x: Ref)
+  requires P(x)
+  ensures P(x) --* P(x)
+{ package P(x) --* P(x) }

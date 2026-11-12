@@ -270,11 +270,11 @@ peg::parser! {
             / kw(<"var">) _ args:(formal_arg() ** comma()) _ e:(":=" _ e:assign_rhs() {e})? { Statement::Var(args, e)}
             / while_statement()
             / if_statement()
+            / kw(<"package">) _ e:exp() _ b:block()? { Statement::Package(e, b) }
+            / kw(<"apply">) _ e:exp() { Statement::Apply(e) }
             // Statements we do not implement. Each is parsed into an
             // `Unsupported` marker so the declaration containing it is reported
             // by name and the rest of the file still verifies.
-            / kw(<"package">) _ exp() _ block()? { Statement::Unsupported("package") }
-            / kw(<"apply">) _ exp() { Statement::Unsupported("apply") }
             / kw(<"quasihavocall">) _ (formal_arg() ++ comma()) _ "::" _ exp() { Statement::Unsupported("quasihavocall") }
             / kw(<"quasihavoc">) _ exp() { Statement::Unsupported("quasihavoc") }
             / kw(<"fresh">) _ (ident() ++ comma()) { Statement::Unsupported("fresh") }

@@ -1,0 +1,15 @@
+// Ill-formed: Silver rejects a wand anywhere in a function precondition
+// ("magic wands are not supported in function preconditions or predicates"),
+// so the function is a type error and the method using it is skipped.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+function fw(x: Ref, b: Bool): Int
+  requires b ==> (P(x) --* Q(x))
+
+method two_copies(x: Ref)
+  requires (P(x) --* Q(x)) && fw(x, true) == 1 && (P(x) --* Q(x))
+{
+  exhale P(x) --* Q(x)
+  assert fw(x, true) == 1
+}

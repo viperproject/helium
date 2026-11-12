@@ -1,0 +1,14 @@
+// SOUNDNESS. The heap-dependent part of a wand is read where it is applied:
+// after `x.f := 2` the apply needs `R(2)` (Silicon: insufficient permission
+// to access R(x.f)).
+field f: Int
+predicate P(x: Ref)
+predicate Q(x: Ref)
+predicate R(i: Int)
+
+method heap_part_read_at_apply(x: Ref)
+  requires acc(x.f) && x.f == 1 && R(1) && (R(x.f) --* Q(x))
+{
+  x.f := 2
+  apply R(x.f) --* Q(x)
+}

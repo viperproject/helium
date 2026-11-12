@@ -14,12 +14,14 @@ pub enum Statement {
     Var(Vec<IdnDeclTyped>, Option<AssignRhs>),
     While(Exp, Vec<Invariant>, Vec<Decreases>, StmtBlock),
     If(Exp, StmtBlock, Option<StmtBlock>),
-    // Package(AccExp, Option<StmtBlock>),
-    // Apply(AccExp),
+    /// `package A --* B { proof script }`
+    Package(Exp, Option<StmtBlock>),
+    /// `apply A --* B`
+    Apply(Exp),
     Assign(Vec<AssignLhs>, AssignRhs),
     Block(StmtBlock),
-    /// A statement the verifier does not implement (`package`, `apply`,
-    /// `quasihavoc`, ...), parsed only so the enclosing declaration can be
+    /// A statement the verifier does not implement (`quasihavoc`, `fresh`,
+    /// ...), parsed only so the enclosing declaration can be
     /// reported as unsupported. See [`ExpKind::Unsupported`].
     Unsupported(&'static str),
 }

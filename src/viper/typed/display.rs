@@ -395,6 +395,9 @@ impl<'a> Display for Show<'a, &'a Statement> {
             Statement::Block(b) => write!(f, "{}", self.with(b)),
             Statement::Fold(p) => write!(f, "fold {}", self.with(p)),
             Statement::Unfold(p) => write!(f, "unfold {}", self.with(p)),
+            Statement::Apply { lhs, rhs, .. } => {
+                write!(f, "apply {} --* {}", self.with(lhs), self.with(rhs))
+            }
             Statement::Label(l, invs) => {
                 write!(f, "label {}", self.interner.resolve(l))?;
                 for inv in invs {
@@ -475,6 +478,17 @@ macro_rules! impl_spatial_display {
                     SpatialExpKind::Acc(res, perm) => {
                         write!(f, "acc({}, {})", self.with(res), self.with(perm))
                     }
+                    SpatialExpKind::Let {
+                        binder,
+                        value,
+                        body,
+                    } => write!(
+                        f,
+                        "(let {} == ({}) in {})",
+                        self.name(*binder),
+                        self.with(value),
+                        self.with(body)
+                    ),
                     SpatialExpKind::Pure(e) => write!(f, "{}", self.with(e)),
                 }
             }
@@ -501,6 +515,16 @@ where
                 write!(f, "{}.{}", self.with(base), self.name(*field))
             }
             ResourceExpKind::PredicateCall(call) => write!(f, "{}", self.with(call)),
+            ResourceExpKind::Wand(id, holes) => {
+                write!(f, "wand#{}(", id.0)?;
+                for (i, h) in holes.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", self.with(h))?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }

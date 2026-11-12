@@ -806,12 +806,25 @@ fn lower_invariant(
     else {
         return Ok(heap);
     };
+    lower_transfer(b, env, sink, heap, &conj, exhale, old)
+}
+
+/// Inhale or exhale `exp` against `heap`, assuming or asserting its boolean.
+fn lower_transfer(
+    b: &TranslationContext<'_>,
+    env: &HashMap<Spur, Val>,
+    sink: &mut Sink,
+    heap: HeapVal,
+    exp: &typed::SpatialMethodExp,
+    exhale: bool,
+    old: &pure_exp::OldHeaps<'_>,
+) -> Result<HeapVal, TranslationError> {
     let mode = if exhale {
         SpatialMode::Exhale { value_heap: heap }
     } else {
         SpatialMode::Inhale
     };
-    let (h_out, bv) = spatial::lower_spatial(b, env, sink, heap, mode, Some(old), &conj)?;
+    let (h_out, bv) = spatial::lower_spatial(b, env, sink, heap, mode, Some(old), exp)?;
     if let Some(v) = bv {
         if exhale {
             sink.with_heap(heap, |sink| sink.emit_assert(v));
@@ -1009,6 +1022,19 @@ fn lower_stmt(
         S::Fold(pwp) => lower_fold_unfold(b, env, sink, current_heap, baseline, labeled, pwp, true),
         S::Unfold(pwp) => {
             lower_fold_unfold(b, env, sink, current_heap, baseline, labeled, pwp, false)
+        }
+        // `apply A --* B`: give up the wand, then `A` (each exhale reading the
+        // state it starts in), then get `B`. `B`'s chunks get fresh values: a
+        // wand's value says nothing about them (weaker than Silicon's snapshot
+        // function for a wand packaged in the same method, never stronger).
+        S::Apply { wand, lhs, rhs } => {
+            let old = pure_exp::OldHeaps {
+                baseline,
+                labeled: &*labeled,
+            };
+            let heap = lower_transfer(b, env, sink, current_heap, wand, true, &old)?;
+            let heap = lower_transfer(b, env, sink, heap, lhs, true, &old)?;
+            lower_transfer(b, env, sink, heap, rhs, false, &old)
         }
         // Source-level assert/assume are non-destructive: the assertion is
         // reduced to a boolean over the current heap (each `acc(loc, p)` becomes

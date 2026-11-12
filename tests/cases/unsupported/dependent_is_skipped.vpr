@@ -3,7 +3,7 @@
 field f: Int
 
 predicate p(x: Ref) {
-  acc(x.f) --* acc(x.f)
+  forall y: Ref :: y == x ==> acc(y.f)
 }
 
 method use_p(x: Ref)

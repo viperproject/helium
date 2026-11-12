@@ -1,0 +1,11 @@
+// SOUNDNESS. After a join, a wand applied on one branch is gone (Silicon:
+// magic wand instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method join_keeps_one_branch(x: Ref, y: Ref, b: Bool)
+  requires P(x) && P(y) && (P(x) --* Q(x)) && (P(y) --* Q(y))
+{
+  if (b) { apply P(x) --* Q(x) } else { apply P(y) --* Q(y) }
+  apply P(x) --* Q(x)
+}

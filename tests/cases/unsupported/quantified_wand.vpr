@@ -1,0 +1,7 @@
+// A wand under a quantifier is a quantified resource.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method quantified_wand(xs: Ref)
+  requires forall y: Ref :: y != null ==> (P(y) --* Q(y))
+{}

@@ -1,0 +1,9 @@
+// A wand is an assertion, not a boolean: it cannot be assigned.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method wand_in_pure_position(x: Ref)
+{
+  var b: Bool
+  b := (P(x) --* Q(x))
+}

@@ -1,0 +1,9 @@
+// SOUNDNESS. Holding a wand does not give its right-hand side (Silicon:
+// insufficient permission to access Q(x)).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method wand_is_not_its_rhs(x: Ref)
+  requires P(x) --* Q(x)
+  ensures Q(x)
+{}

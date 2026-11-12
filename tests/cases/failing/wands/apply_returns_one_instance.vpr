@@ -1,0 +1,17 @@
+// SOUNDNESS. Applying a callee's wand returns one instance of its right-hand
+// side (Silicon: insufficient permission to access P(x)).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method get(x: Ref) returns (y: Ref)
+  requires P(x)
+  ensures P(y) && (P(y) --* P(x))
+
+method apply_returns_one_instance(x: Ref)
+  requires P(x)
+  ensures P(x) && P(x)
+{
+  var y: Ref
+  y := get(x)
+  apply P(y) --* P(x)
+}

@@ -93,6 +93,7 @@ pub(crate) fn spatial_contains_acc<Ext>(exp: &typed::SpatialExp<Ext>) -> bool {
     match &*exp.0 {
         S::Acc(..) => true,
         S::Pure(_) => false,
+        S::Let { body, .. } => spatial_contains_acc(body),
         S::Conj(l, r) => spatial_contains_acc(l) || spatial_contains_acc(r),
         S::Implies(_, r) => spatial_contains_acc(r),
         S::Ternary { then, else_, .. } => spatial_contains_acc(then) || spatial_contains_acc(else_),
@@ -291,6 +292,16 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
             };
             Ok((h_out, bv))
         }
+        S::Let {
+            binder,
+            value,
+            body,
+        } => {
+            let v = pure_exp::lower(b, env, sink, hctx, value)?;
+            let mut inner_env = env.clone();
+            inner_env.insert(binder.0, v);
+            lower_spatial(b, &inner_env, sink, acc_heap, mode, old, body)
+        }
         S::Pure(p) => {
             let v = pure_exp::lower(b, env, sink, hctx, p)?;
             Ok((acc_heap, Some(v)))
@@ -399,6 +410,16 @@ pub(crate) fn lower_assertion_bool<Ext: PureExt>(
                     Some(sink.emit_pure(Type::Bool, PureInst::Ternary(c, vt, ve)))
                 }
             })
+        }
+        S::Let {
+            binder,
+            value,
+            body,
+        } => {
+            let v = pure_exp::lower(b, env, sink, hctx, value)?;
+            let mut inner_env = env.clone();
+            inner_env.insert(binder.0, v);
+            lower_assertion_bool(b, &inner_env, sink, heap, old, body)
         }
         S::Pure(p) => Ok(Some(pure_exp::lower(b, env, sink, hctx, p)?)),
     }

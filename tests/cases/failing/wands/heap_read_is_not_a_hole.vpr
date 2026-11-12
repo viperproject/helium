@@ -1,0 +1,11 @@
+// SOUNDNESS. A heap read is evaluated where the wand is used, not a hole: the
+// wand held is `R(1) --* Q(x)`, `R(x.f) --* Q(x)` is another structure
+// (Silicon: magic wand instance not found).
+field f: Int
+predicate P(x: Ref)
+predicate Q(x: Ref)
+predicate R(i: Int)
+
+method heap_read_is_not_a_hole(x: Ref)
+  requires acc(x.f) && x.f == 1 && R(1) && (R(1) --* Q(x))
+{ apply R(x.f) --* Q(x) }

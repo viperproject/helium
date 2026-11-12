@@ -1,0 +1,7 @@
+// `old[lhs]` names the state a wand's left-hand side is consumed in; neither
+// `apply` nor (unsupported) `package` keeps it.
+field f: Int
+
+method uses_old_lhs(x: Ref)
+  requires acc(x.f) --* (acc(x.f) && x.f == old[lhs](x.f))
+{}

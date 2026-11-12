@@ -248,7 +248,7 @@ fn rejection_is_local_but_infects_dependents() {
     };
     assert!(
         matches!(status("p"), pipeline::MemberStatus::Unsupported(_)),
-        "the predicate using a magic wand must be reported unsupported"
+        "the predicate using a quantified permission must be reported unsupported"
     );
     assert!(
         matches!(status("use_p"), pipeline::MemberStatus::Skipped { .. }),

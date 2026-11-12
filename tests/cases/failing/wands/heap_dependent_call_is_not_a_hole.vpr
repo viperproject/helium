@@ -1,0 +1,14 @@
+// SOUNDNESS. A call to a function with a heap-dependent precondition is not a
+// hole: `Q(snap(x))` and `Q(y)` are different structures, even with
+// `y == snap(x)` (Silicon: magic wand instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+function snap(x: Ref): Ref
+  requires P(x)
+
+method heap_dependent_call_is_not_a_hole(x: Ref)
+  requires P(x) && Q(snap(x)) && (Q(snap(x)) --* Q(x))
+{
+  var y: Ref := snap(x)
+  apply Q(y) --* Q(x)
+}

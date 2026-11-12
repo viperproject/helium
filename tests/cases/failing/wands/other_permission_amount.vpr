@@ -1,0 +1,8 @@
+// SOUNDNESS. A permission amount is a hole: `1/4` is not `1/2` (Silicon: magic
+// wand instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method other_permission_amount(x: Ref)
+  requires acc(P(x), 1/2) && (acc(P(x), 1/2) --* Q(x))
+{ apply acc(P(x), 1/4) --* Q(x) }

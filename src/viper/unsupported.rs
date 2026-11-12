@@ -3,7 +3,7 @@
 //! Everything that reaches here is *parseable*: the grammar accepts the whole
 //! surface syntax it can recognise, and turns the parts we do not implement
 //! into `ExpKind::Unsupported` / `Statement::Unsupported` markers or into
-//! ordinary nodes we then refuse here (a magic wand, `epsilon`, a `Seq` type).
+//! ordinary nodes we then refuse here (`package`, `epsilon`, a `Seq` type).
 //! One scan per declaration is what lets the pipeline report "this declaration
 //! uses `package`" and carry on with the rest of the file, instead of dying at
 //! the first construct with a parse error that names something else.
@@ -39,13 +39,13 @@ impl Scan {
     }
 }
 
-/// Whether an expression mentions `acc(..)` anywhere — what makes a `forall`
-/// body a quantified permission rather than a pure fact.
+/// Whether an expression mentions `acc(..)` or a magic wand anywhere — what
+/// makes a `forall` body a quantified permission rather than a pure fact.
 fn mentions_acc(exp: &Exp) -> bool {
     struct FindAcc(bool);
     impl<'a> AstWalker<'a> for FindAcc {
         fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
-            if matches!(exp, ExpKind::Acc(_)) {
+            if matches!(exp, ExpKind::Acc(_) | ExpKind::MagicWand(..)) {
                 self.0 = true;
             }
             exp.walk_children(self);
@@ -64,8 +64,13 @@ impl<'a> AstWalker<'a> for Scan {
     fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
         match exp {
             ExpKind::Unsupported(what) => self.hit(what),
-            ExpKind::MagicWand(..) => self.hit("magic wand `--*`"),
             ExpKind::ForPerm(..) => self.hit("forperm"),
+            // The state a wand's left-hand side was consumed in: only an
+            // `apply` or `package` could name it, and neither keeps it.
+            ExpKind::Old(Some(Ident::Raw(label)), _) if label == "lhs" => self.hit("old[lhs]"),
+            ExpKind::UnOp(UnOp::Perm, e) if matches!(*e.kind, ExpKind::MagicWand(..)) => {
+                self.hit("perm of a magic wand")
+            }
             ExpKind::Index(..) => self.hit("collection indexing"),
             ExpKind::Quantifier(QuantifierKind::Exists, ..) => self.hit("exists"),
             // `forall x: Ref :: acc(x.f)` — a quantified permission. The
@@ -84,6 +89,8 @@ impl<'a> AstWalker<'a> for Scan {
     fn walk_statement(&mut self, stmt: &'a Statement) {
         match stmt {
             Statement::Unsupported(what) => self.hit(what),
+            // Creating a wand needs its footprint, which is not computed.
+            Statement::Package(..) => self.hit("package"),
             // Viper has no multi-target assignment from an expression; only a
             // method call may bind several targets.
             Statement::Assign(targets, rhs)

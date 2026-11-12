@@ -1,0 +1,84 @@
+// A magic wand is a resource identified by its structure and the values of its
+// holes; `apply A --* B` gives up the wand and `A` and gets `B`. Every method
+// here verifies in Silicon too.
+field f: Int
+predicate P(x: Ref)
+predicate Q(x: Ref)
+predicate R(i: Int)
+function pure_id(x: Ref): Ref
+
+method apply_held(x: Ref)
+  requires P(x) && (P(x) --* Q(x))
+  ensures Q(x)
+{ apply P(x) --* Q(x) }
+
+// Two instances of one wand, two applies.
+method two_instances(x: Ref)
+  requires P(x) && (P(x) --* P(x)) && (P(x) --* P(x))
+  ensures P(x)
+{
+  apply P(x) --* P(x)
+  apply P(x) --* P(x)
+}
+
+// Hole values are compared semantically.
+method equal_holes_match(x: Ref, y: Ref)
+  requires x == y && P(y) && (P(x) --* Q(x))
+  ensures Q(y)
+{ apply P(y) --* Q(y) }
+
+// A call to a function without a precondition is a hole.
+method heap_free_call_is_a_hole(x: Ref)
+  requires P(pure_id(x)) && (P(pure_id(x)) --* Q(x))
+  ensures Q(x)
+{
+  var y: Ref := pure_id(x)
+  apply P(y) --* Q(x)
+}
+
+// Pure facts on the right-hand side are produced by the apply.
+method pure_rhs(x: Ref)
+  requires P(x) && (P(x) --* (Q(x) && x != null))
+  ensures x != null
+{ apply P(x) --* (Q(x) && x != null) }
+
+// A wand whose right-hand side is a wand.
+method nested(x: Ref)
+  requires P(x) && Q(x) && (P(x) --* (Q(x) --* P(x)))
+  ensures P(x)
+{
+  apply P(x) --* (Q(x) --* P(x))
+  apply Q(x) --* P(x)
+}
+
+// A wand over a field.
+method field_wand(x: Ref)
+  requires acc(x.f) && (acc(x.f) --* acc(x.f))
+  ensures acc(x.f)
+{ apply acc(x.f) --* acc(x.f) }
+
+// The heap-dependent part `x.f` is read where the wand is applied.
+method heap_part_read_at_apply(x: Ref)
+  requires acc(x.f) && x.f == 1 && R(2) && (R(x.f) --* Q(x))
+  ensures Q(x)
+{
+  x.f := 2
+  apply R(x.f) --* Q(x)
+}
+
+// A hole under a labelled `old` keeps its value across a heap update.
+method labelled_old_hole(x: Ref)
+  requires acc(x.f) && x.f == 1 && R(1) && (R(1) --* Q(x))
+  ensures Q(x)
+{
+  label l
+  x.f := 2
+  apply R(old[l](x.f)) --* Q(x)
+}
+
+// A connective that holds no resource is a single hole, also on a wand's side
+// (Prusti's `(c ==> d || true)` conjuncts).
+method connective_hole(x: Ref, b: Bool)
+  requires P(x) && (b ==> x != null) && ((P(x) && (b ==> x != null)) --* Q(x))
+  ensures Q(x)
+{ apply (P(x) && (b ==> x != null)) --* Q(x) }

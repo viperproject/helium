@@ -1,7 +1,8 @@
-//! Lower `typed::ResourceExp` (the addressable resources `e.f` / `P(args)`) to
-//! its VMIR address `Val`. An address is an ordinary heap-independent call to
-//! the location's own function — the field's, or the predicate's — with the
-//! `Type::Addr` return type published in `addr_types` during `declare`/`meta`.
+//! Lower `typed::ResourceExp` (the addressable resources `e.f` / `P(args)` /
+//! `A --* B`) to its VMIR address `Val`. An address is an ordinary
+//! heap-independent call to the location's own function — the field's, the
+//! predicate's, or the wand structure's — with the `Type::Addr` return type
+//! published in `addr_types` (`wands`) during `declare`/`meta`.
 
 use crate::dhash::HashMap;
 
@@ -36,6 +37,14 @@ pub(crate) fn lower_resource_addr<Ext: PureExt>(
             }
             addr_call(b, sink, call.name.0, args)
         }
+        R::Wand(id, holes) => {
+            let mut args = Vec::with_capacity(holes.len());
+            for h in holes {
+                args.push(pure_exp::lower(b, env, sink, hctx, h)?);
+            }
+            let (function, ret_ty) = &b.wands[id.0];
+            Ok(emit_addr(sink, *function, ret_ty.clone(), args))
+        }
     }
 }
 
@@ -53,16 +62,21 @@ fn addr_call(
     let unknown = || TranslationError::UnknownIdent(b.interner.resolve(&name).to_string());
     let id = *b.name_map.get(&name).ok_or_else(unknown)?;
     let ret_ty = b.addr_types.get(&name).cloned().ok_or_else(unknown)?;
-    Ok(sink.emit_pure(
+    Ok(emit_addr(sink, id, ret_ty, args))
+}
+
+/// Emit the address function `function` applied to `args`.
+fn emit_addr(sink: &mut Sink, function: vmir::MemberId, ret_ty: vmir::Type, args: Vec<Val>) -> Val {
+    sink.emit_pure(
         ret_ty,
         PureInst::FunctionCall(vmir::FunctionCall {
-            function: id,
+            function,
             type_args: Vec::new(),
             args: args.into(),
             // An address function, not a Silver `function`.
             export: false,
         }),
-    ))
+    )
 }
 
 /// Emit `field(base)`: the field's heap-independent address function applied to

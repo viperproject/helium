@@ -1,0 +1,8 @@
+// SOUNDNESS. `apply` consumes the wand: without it, it fails (Silicon: magic
+// wand instance not found).
+predicate P(x: Ref)
+predicate Q(x: Ref)
+
+method apply_without_wand(x: Ref)
+  requires P(x)
+{ apply P(x) --* Q(x) }
