@@ -7,11 +7,12 @@
 //! the fixpoint cache (engine state) *and* the scratch (prover state), so the
 //! outer type keeps that coordination.
 
+use crate::verify::context::graph_utils;
 use crate::{
     verify::{
         analysis::ConstFold,
         context::{
-            VerifyContext, graph_inconsistent, run_rules, run_rules_until,
+            VerifyContext, graph_inconsistent,
             scratch::{BlockScratch, ScratchId},
         },
         lang::Symbolic,
@@ -279,34 +280,11 @@ impl<'a> VerifyContext<'a> {
     /// Saturate the block scratch under the full rule set if it changed since the
     /// last saturation. Counted separately from the live/probe saturations.
     pub(super) fn saturate_scratch(&mut self) {
-        if !self
-            .scratch
-            .as_ref()
-            .is_some_and(BlockScratch::needs_saturate)
-        {
+        // Take the scratch out for the run: `full_rules` borrows all of `self`.
+        let Some(mut sc) = self.scratch.take_if(|s| s.needs_saturate()) else {
             return;
-        }
-        let mut sc = self.scratch.take().expect("scratch live");
-        let _t = std::time::Instant::now();
-        let before = stats::with_stats(|s| s.sat_iterations);
-        let (n0, c0, _) = sc.sizes();
-        sc.saturate(|g| self.saturate_flat(g));
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            let (n1, c1, t1) = sc.sizes();
-            eprintln!(
-                "[scratch-sat] {n0}n/{c0}c -> {n1}n/{c1}c true={t1} (ground {}n/{}c true={}, {} iters)",
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-                {
-                    let t = self.egraph.find(self.true_id_cached());
-                    self.egraph[t].nodes.len()
-                },
-                stats::with_stats(|s| s.sat_iterations) - before,
-            );
-        }
-        stats::bump(|s| s.block_scratch_saturations += 1);
-        stats::bump(|s| s.block_scratch_iterations += s.sat_iterations - before);
-        stats::bump(|s| s.graph_timing.0.scratch += _t.elapsed().as_secs_f64());
+        };
+        sc.saturate(self.full_rules());
         self.scratch = Some(sc);
     }
 
@@ -316,32 +294,11 @@ impl<'a> VerifyContext<'a> {
     /// separate from [`Self::saturate_scratch`] is what stops every heap lookup from
     /// paying a full saturation (the in-block equivalent of ground's cheap `reduce`).
     pub(super) fn reduce_scratch(&mut self) {
-        if !self
-            .scratch
-            .as_ref()
-            .is_some_and(BlockScratch::needs_reduce)
-        {
+        // Take the scratch out for the run: `reduce_rules` borrows all of `self`.
+        let Some(mut sc) = self.scratch.take_if(|s| s.needs_reduce()) else {
             return;
-        }
-        let mut sc = self.scratch.take().expect("scratch live");
-        let _t = std::time::Instant::now();
-        let (n0, c0, _) = sc.sizes();
-        let mut iterations = Vec::new();
-        sc.reduce(|g| {
-            let (g, its) = run_rules(g, self.static_reduce.iter().chain(self.alloc.rules()), None);
-            iterations = its;
-            g
-        });
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            let (n1, c1, _) = sc.sizes();
-            eprintln!(
-                "[scratch-red] {n0}n/{c0}c -> {n1}n/{c1}c  (ground {}n/{}c)",
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-            );
-        }
-        stats::bump(|s| s.record_run(&iterations));
-        stats::bump(|s| s.graph_timing.0.scratch += _t.elapsed().as_secs_f64());
+        };
+        sc.reduce(self.reduce_rules());
         self.scratch = Some(sc);
     }
 
@@ -792,73 +749,34 @@ impl<'a> VerifyContext<'a> {
                 .all(|(a, b)| self.egraph.find(a.0) == self.egraph.find(b.0) && a.1 == b.1)
     }
 
-    /// Saturate a detached probe e-graph with the full rule set, inside a
-    /// scratch memo scope (its instantiations die with the probe; the live
-    /// base memo lets it skip rebuilding every already-live instance).
+    /// [`graph_utils::run_probe`] with the full rule set.
     pub(crate) fn run_probe(
-        &mut self,
+        &self,
         probe: egg::EGraph<Symbolic, ConstFold>,
     ) -> egg::EGraph<Symbolic, ConstFold> {
-        let _scope = crate::verify::rewrite::ScratchScope::enter();
-        let t = std::time::Instant::now();
-        let iters_before = stats::with_stats(|s| s.sat_iterations);
-        let out = self.saturate_flat(probe);
-        stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
-        stats::bump(|s| s.probe_saturations += 1);
-        stats::bump(|s| s.probe_iterations += s.sat_iterations - iters_before);
-        out
+        graph_utils::run_probe(probe, self.full_rules())
     }
 
-    /// As [`Self::run_probe`], but stopping as soon as `goal` is settled — for a
-    /// probe whose whole purpose is that one question. Sound only because the graph
-    /// is a throwaway; see `run_rules_until`.
+    /// [`graph_utils::run_probe_until`] with the full rule set.
     pub(crate) fn run_probe_until(
-        &mut self,
+        &self,
         probe: egg::EGraph<Symbolic, ConstFold>,
         goal: egg::Id,
     ) -> egg::EGraph<Symbolic, ConstFold> {
-        let _scope = crate::verify::rewrite::ScratchScope::enter();
-        let t = std::time::Instant::now();
-        let iters_before = stats::with_stats(|s| s.sat_iterations);
-        let (out, iterations) = run_rules_until(
-            probe,
-            self.static_rules
-                .iter()
-                .chain(self.alloc.rules())
-                .chain(self.axiom_rules.iter()),
-            None,
-            Some(goal),
-        );
-        stats::bump(|s| s.record_run(&iterations));
-        stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
-        stats::bump(|s| s.probe_saturations += 1);
-        stats::bump(|s| s.probe_iterations += s.sat_iterations - iters_before);
-        out
+        graph_utils::run_probe_until(probe, self.full_rules(), goal)
     }
 
-    /// Run only the terminating structural reductions over a detached probe —
-    /// the `reduce` counterpart of [`Self::run_probe`], driving the same rule set
-    /// as [`VerifyContext::reduce`] and [`Self::reduce_scratch`].
+    /// [`graph_utils::run_reduce`] with the reduce rule set.
     ///
     /// This is what an `ite_decompose` link costs between picks: assuming a
     /// condition makes the surviving arm's `ite` collapse by const-fold plus these
     /// reductions, which is all the *telescope* needs — the full rule set is only
     /// required when the chain stalls (see [`Self::prove_by_ite_decomposition`]).
     fn run_reduce(
-        &mut self,
+        &self,
         probe: egg::EGraph<Symbolic, ConstFold>,
     ) -> egg::EGraph<Symbolic, ConstFold> {
-        let _scope = crate::verify::rewrite::ScratchScope::enter();
-        let t = std::time::Instant::now();
-        let (out, iterations) = run_rules(
-            probe,
-            self.static_reduce.iter().chain(self.alloc.rules()),
-            None,
-        );
-        stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
-        stats::bump(|s| s.probe_reduces += 1);
-        stats::bump(|s| s.record_run(&iterations));
-        out
+        graph_utils::run_reduce(probe, self.reduce_rules())
     }
 
     /// Run `f` with `self.egraph` swapped for a scratch clone of the live

@@ -12,7 +12,10 @@
 //! id cannot be handed to ground (or a ground id to the scratch) by accident.
 
 use crate::dhash::HashMap;
-use crate::verify::{analysis::ConstFold, context::graph_inconsistent, lang::Symbolic, rewrite};
+use crate::verify::context::graph_utils::saturate_flat;
+use crate::verify::{
+    analysis::ConstFold, context::graph_inconsistent, lang::Symbolic, rewrite, stats,
+};
 use crate::vmir::{Literal, Polarity};
 use egg::Language as _;
 
@@ -212,19 +215,48 @@ impl BlockScratch {
         self.dirty_reduce = true;
     }
 
-    /// Run the full rule set (`run` returns the graph saturated), in this graph's
-    /// memo scope.
-    pub(super) fn saturate(&mut self, run: impl FnOnce(Graph) -> Graph) {
+    /// Run the full rule set `rules`, in this graph's memo scope, and record the
+    /// run in the stats.
+    pub(super) fn saturate<'r>(
+        &mut self,
+        rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
+    ) {
+        let _t = std::time::Instant::now();
+        let before = stats::with_stats(|s| s.sat_iterations);
+        let (n0, c0, _) = self.sizes();
         let _scope = rewrite::ScratchScope::resume(self.scope);
-        self.egraph = run(std::mem::take(&mut self.egraph));
+        let graph = std::mem::take(&mut self.egraph);
+        self.egraph = saturate_flat(graph, rules);
         self.dirty = false;
         self.dirty_reduce = false;
+        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
+            let (n1, c1, t1) = self.sizes();
+            eprintln!(
+                "[scratch-sat] {n0}n/{c0}c -> {n1}n/{c1}c true={t1} ({} iters)",
+                stats::with_stats(|s| s.sat_iterations) - before,
+            );
+        }
+        stats::bump(|s| s.block_scratch_saturations += 1);
+        stats::bump(|s| s.block_scratch_iterations += s.sat_iterations - before);
+        stats::bump(|s| s.graph_timing.0.scratch += _t.elapsed().as_secs_f64());
     }
 
-    /// Run the terminating reductions. Not a saturation: `dirty` stays set.
-    pub(super) fn reduce(&mut self, run: impl FnOnce(Graph) -> Graph) {
+    /// Run the terminating reductions `rules`, in this graph's memo scope, and
+    /// record the run in the stats. Not a saturation: `dirty` stays set.
+    pub(super) fn reduce<'r>(
+        &mut self,
+        rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
+    ) {
+        let t = std::time::Instant::now();
+        let (n0, c0, _) = self.sizes();
         let _scope = rewrite::ScratchScope::resume(self.scope);
-        self.egraph = run(std::mem::take(&mut self.egraph));
+        let graph = std::mem::take(&mut self.egraph);
+        self.egraph = saturate_flat(graph, rules);
         self.dirty_reduce = false;
+        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
+            let (n1, c1, _) = self.sizes();
+            eprintln!("[scratch-red] {n0}n/{c0}c -> {n1}n/{c1}c");
+        }
+        stats::bump(|s| s.graph_timing.0.scratch += t.elapsed().as_secs_f64());
     }
 }
