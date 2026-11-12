@@ -18,7 +18,7 @@
 //! appears — required for a resource certificate's grafted nodes to
 //! congruence-match the caller.
 
-use crate::dhash::HashMap;
+use crate::dhash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
@@ -112,6 +112,12 @@ pub struct FuncRegistry {
     /// which is why [`FuncRegistry::new`] mints every head eagerly rather than on
     /// first use.
     ctor_head: HashMap<FuncId, MemberId>,
+    /// The ids of every `unique` domain function (`vmir::Function::unique`). Read
+    /// by the `ConstFold` analysis to decide unique-constant distinctness (two
+    /// different unique constants, or one at two instantiations, sharing an
+    /// e-class ⇒ that class is contradictory). Declaration-backed, so complete
+    /// from [`FuncRegistry::new`] on.
+    unique_fns: HashSet<FuncId>,
     /// The `forall`s **reached so far**, compiled on demand (see
     /// [`crate::verify::quant::intern_forall`]). It lives here because interning a
     /// recipe needs the `FuncId` minting this registry owns. Shared with the single
@@ -189,6 +195,16 @@ impl FuncRegistry {
                 registry
                     .kind
                     .insert(func_id_for_member(id), FuncKind::Decl(id));
+            }
+            if let Declaration::Function(f) = decl
+                && f.unique
+            {
+                assert!(
+                    f.params.is_empty() && f.body.is_none(),
+                    "unique function `{}` must be a nullary abstract constant",
+                    program.name(id)
+                );
+                registry.unique_fns.insert(func_id_for_member(id));
             }
         }
         // Mint every head up front. Lazily minting on first use would leave
@@ -292,6 +308,7 @@ impl FuncRegistry {
             head_names: HashMap::default(),
             variant_names: HashMap::default(),
             ctor_head,
+            unique_fns: HashSet::default(),
             quant_table: Default::default(),
             skolems: Vec::new(),
             coll_skolems: [None, None],
@@ -434,6 +451,12 @@ impl FuncRegistry {
     /// `ConstFold` analysis. Complete: `new` mints every head eagerly.
     pub fn ctor_table(&self) -> std::sync::Arc<HashMap<FuncId, MemberId>> {
         std::sync::Arc::new(self.ctor_head.clone())
+    }
+
+    /// An immutable snapshot of the `unique` function ids, for the `ConstFold`
+    /// analysis. Complete: `new` records every declaration.
+    pub fn unique_table(&self) -> std::sync::Arc<HashSet<FuncId>> {
+        std::sync::Arc::new(self.unique_fns.clone())
     }
 
     pub fn rules(&self) -> &[Rule] {

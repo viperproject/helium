@@ -1,4 +1,4 @@
-use crate::dhash::HashMap;
+use crate::dhash::{HashMap, HashSet};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -20,11 +20,34 @@ pub struct AdtData {
     pub possible: BTreeSet<FuncId>,
 }
 
-/// An e-class's analysis data: its folded value, its instantiation
-/// [`generation`](ClassData::generation), and whether it reaches a quantifier.
+/// A **unique constant**: an application of a `unique` domain function
+/// (`vmir::Function::unique`) at one type instantiation. Two different unique
+/// constants of one type denote different values (Silicon's `distinct`); that
+/// is all `unique` promises. A unique constant may still equal a literal, a
+/// constructor value or any other non-unique term.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UniqueConst {
+    pub func: FuncId,
+    /// The instantiation. Part of the constant's identity: a generic unique
+    /// function is a different constant at each instantiation, and since it is
+    /// nullary its type args are fixed by its return type, so two instances of
+    /// one function never share a type.
+    pub tys: Box<[Type]>,
+}
+
+/// An e-class's analysis data: its folded value, the unique constant it holds,
+/// its instantiation [`generation`](ClassData::generation), and whether it
+/// reaches a quantifier.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassData {
     pub value: Data,
+    /// The unique constant this class holds, if any. Kept **beside** `value`
+    /// rather than as a [`Data`] variant, because it is independent of it: a
+    /// class may hold both `k()` and `5`, and folding to `5` must not forget
+    /// `k()` (or a later merge with `k2()`, also `5`, would miss that `k() ==
+    /// k2()` is a contradiction). Merging two classes with *different* unique
+    /// constants makes `value` [`Data::Inconsistent`].
+    pub unique: Option<UniqueConst>,
     /// How many quantifier instantiations deep the class's oldest term is (Z3's
     /// instance generation): 0 for a term the program built, `g` for one built
     /// by a generation-`g` instance. A node is created at the larger of its
@@ -66,10 +89,41 @@ pub enum Data {
     Inconsistent,
 }
 
-/// What `ConstFold` knows about an e-class's *value*, as a comparison key: a
-/// folded literal, or the ADT variants the value may still be. Two classes
-/// carrying fingerprints that [`Fingerprint::differs_from`] separates cannot
-/// denote the same value, so a rule may use the pair to refute one of them.
+/// What `ConstFold` knows about an e-class's *value*, as a comparison key: what
+/// [`Data`] folded it to, and the unique constant it holds. Two classes carrying
+/// fingerprints that [`Fingerprint::differs_from`] separates cannot denote the
+/// same value, so a rule may use the pair to refute one of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fingerprint<'a> {
+    pub value: Option<ValueFingerprint<'a>>,
+    pub unique: Option<&'a UniqueConst>,
+}
+
+impl Fingerprint<'_> {
+    /// Whether these two values are provably different: their folded values
+    /// differ ([`ValueFingerprint::differs_from`]), or they are two different
+    /// unique constants.
+    ///
+    /// The unique half assumes the two classes have one type, as every caller's
+    /// do (an `ite` and its arms; two applications of one function at one
+    /// argument position). Unique constants of different types are not
+    /// distinct, but comparing values of different types is a type error the
+    /// caller would have made first.
+    pub fn differs_from(&self, other: &Self) -> bool {
+        let value = match (&self.value, &other.value) {
+            (Some(a), Some(b)) => a.differs_from(b),
+            _ => false,
+        };
+        let unique = match (self.unique, other.unique) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        };
+        value || unique
+    }
+}
+
+/// The [`Data`] half of a [`Fingerprint`]: a folded literal, or the ADT
+/// variants the value may still be.
 ///
 /// The variant half rests on **free constructors** — distinct variants of one
 /// ADT head at one instantiation are disjoint, so values with disjoint variant
@@ -78,7 +132,7 @@ pub enum Data {
 /// a class [`Data::Inconsistent`] (see the [`Data`] doc). If the ADT encoding
 /// ever gains non-free constructors, all three sites break together.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Fingerprint<'a> {
+pub enum ValueFingerprint<'a> {
     Lit(&'a Literal),
     /// The variants the value may be, at one instantiation of one head.
     Adt {
@@ -88,7 +142,7 @@ pub enum Fingerprint<'a> {
     },
 }
 
-impl Fingerprint<'_> {
+impl ValueFingerprint<'_> {
     /// Whether these two values are provably different: different literals, or
     /// variant sets with no variant in common.
     ///
@@ -108,14 +162,14 @@ impl Fingerprint<'_> {
     ///   error panic) and reports "not different" if it somehow does.
     pub fn differs_from(&self, other: &Self) -> bool {
         match (self, other) {
-            (Fingerprint::Lit(a), Fingerprint::Lit(b)) => a != b,
+            (ValueFingerprint::Lit(a), ValueFingerprint::Lit(b)) => a != b,
             (
-                Fingerprint::Adt {
+                ValueFingerprint::Adt {
                     head: h1,
                     tys: t1,
                     possible: p1,
                 },
-                Fingerprint::Adt {
+                ValueFingerprint::Adt {
                     head: h2,
                     tys: t2,
                     possible: p2,
@@ -138,15 +192,15 @@ impl Data {
     /// What is known about this e-class's value, as a comparison key. `None`
     /// for `Unknown` (nothing known) and for `Inconsistent` (the graph is
     /// already contradictory; other machinery handles it).
-    pub fn fingerprint(&self) -> Option<Fingerprint<'_>> {
+    pub fn fingerprint(&self) -> Option<ValueFingerprint<'_>> {
         match self {
-            Data::Known(lit) => Some(Fingerprint::Lit(lit)),
+            Data::Known(lit) => Some(ValueFingerprint::Lit(lit)),
             Data::Adt(adt) => {
                 assert!(
                     !adt.possible.is_empty(),
                     "empty variant set must be `Inconsistent`"
                 );
-                Some(Fingerprint::Adt {
+                Some(ValueFingerprint::Adt {
                     head: adt.head,
                     tys: &adt.tys,
                     possible: &adt.possible,
@@ -168,9 +222,14 @@ impl ClassData {
         self.value.known()
     }
 
-    /// See [`Data::fingerprint`].
+    /// What is known about this class's value: [`Data::fingerprint`] and the
+    /// unique constant it holds. `None` when neither is known.
     pub fn fingerprint(&self) -> Option<Fingerprint<'_>> {
-        self.value.fingerprint()
+        let fp = Fingerprint {
+            value: self.value.fingerprint(),
+            unique: self.unique.as_ref(),
+        };
+        (fp.value.is_some() || fp.unique.is_some()).then_some(fp)
     }
 
     /// See [`Data::is_inconsistent`].
@@ -204,6 +263,10 @@ pub struct ConstFold {
     /// ordinary function, not a constructor. Empty by default (tests without
     /// ADTs), which simply disables the variant sets.
     ctors: Arc<HashMap<FuncId, MemberId>>,
+    /// The `unique` function ids (from `FuncRegistry::unique_table`). An
+    /// application of one is a [`UniqueConst`]. Empty by default, which
+    /// disables unique-constant distinctness.
+    uniques: Arc<HashSet<FuncId>>,
     /// While a bucket rule is applied (`rewrite::PerClass`), the classes whose
     /// nodes read differently after each union; see [`Analysis::pre_union`].
     pub(crate) union_log: std::cell::RefCell<Option<Vec<Id>>>,
@@ -214,9 +277,10 @@ pub struct ConstFold {
 }
 
 impl ConstFold {
-    pub fn new(ctors: Arc<HashMap<FuncId, MemberId>>) -> Self {
+    pub fn new(ctors: Arc<HashMap<FuncId, MemberId>>, uniques: Arc<HashSet<FuncId>>) -> Self {
         Self {
             ctors,
+            uniques,
             union_log: Default::default(),
             building: Default::default(),
         }
@@ -225,6 +289,24 @@ impl ConstFold {
     /// The ADT head of `f`, if `f` is a constructor.
     fn head_of(&self, f: FuncId) -> Option<MemberId> {
         self.ctors.get(&f).copied()
+    }
+
+    /// The unique constant `enode` is, if it applies a `unique` function.
+    fn unique_of(&self, enode: &Symbolic) -> Option<UniqueConst> {
+        match enode {
+            Symbolic::FuncApp(f, tys, args) if self.uniques.contains(f) => {
+                assert!(
+                    args.is_empty(),
+                    "unique function {f:?} applied to {} args; it must be nullary",
+                    args.len()
+                );
+                Some(UniqueConst {
+                    func: *f,
+                    tys: tys.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -240,9 +322,22 @@ impl ConstFold {
     }
 
     fn make_value(egraph: &EGraph<Symbolic, Self>, enode: &Symbolic) -> Data {
-        egraph
+        let value = egraph
             .analysis
-            .fold_value(enode, |c: &Id| &egraph[*c].data.value)
+            .fold_value(enode, |c: &Id| &egraph[*c].data.value);
+        // Two different unique constants are different values, so an `==`
+        // between them is `false`. Decided here rather than in `fold_value`,
+        // which sees only the operands' `Data`: the unique constant is kept
+        // beside it (see `ClassData::unique`). A quantifier-guard probe, which
+        // folds through `fold_value` alone, does not see this; that loses
+        // completeness, never soundness.
+        if let (Data::Unknown, Symbolic::Binary(BinOp::Eq, [l, r])) = (&value, enode)
+            && let (Some(a), Some(b)) = (&egraph[*l].data.unique, &egraph[*r].data.unique)
+            && a != b
+        {
+            return Data::Known(Literal::Bool(false));
+        }
+        value
     }
 
     /// The value `enode` folds to, reading each child's value through `value`.
@@ -405,6 +500,7 @@ impl Analysis<Symbolic> for ConstFold {
             .fold(egraph.analysis.building.get(), u32::max);
         ClassData {
             value: Self::make_value(egraph, enode),
+            unique: egraph.analysis.unique_of(enode),
             generation,
             has_forall: Self::reaches_forall(egraph, enode),
         }
@@ -416,21 +512,42 @@ impl Analysis<Symbolic> for ConstFold {
     fn remake(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, id: Id) -> Self::Data {
         ClassData {
             value: Self::make_value(egraph, enode),
+            unique: egraph.analysis.unique_of(enode),
             generation: egraph[id].data.generation,
             has_forall: Self::reaches_forall(egraph, enode),
         }
     }
 
-    /// The value merges as a lattice; the generation is the least of the two;
-    /// `has_forall` is OR-ed. A value or `has_forall` change is reported, as a
-    /// parent reads both; a generation change is not: a parent was created at
-    /// its own generation and does not depend on its children's later ones.
+    /// The value merges as a lattice; the unique constant too (none, one, or
+    /// two different ones, which makes the value `Inconsistent`); the generation
+    /// is the least of the two; `has_forall` is OR-ed. A value, unique or
+    /// `has_forall` change is reported, as a parent reads all three; a
+    /// generation change is not: a parent was created at its own generation and
+    /// does not depend on its children's later ones.
     fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
         a.generation = a.generation.min(b.generation);
         // Reported, so the bit reaches the parents.
         let forall = DidMerge(!a.has_forall && b.has_forall, a.has_forall && !b.has_forall);
         a.has_forall |= b.has_forall;
-        self.merge_value(&mut a.value, b.value) | forall
+        let value = self.merge_value(&mut a.value, b.value);
+        let unique = match (&a.unique, b.unique) {
+            (_, None) => DidMerge(false, a.unique.is_some()),
+            (None, Some(u)) => {
+                a.unique = Some(u);
+                DidMerge(true, false)
+            }
+            (Some(x), Some(y)) if *x == y => DidMerge(false, false),
+            // Two different unique constants in one class: they are distinct by
+            // declaration, so the class is contradictory. `a` keeps its own
+            // constant; `Inconsistent` is the top of the value lattice, so the
+            // result does not depend on which of the two it keeps.
+            (Some(_), Some(_)) => {
+                let changed = a.value != Data::Inconsistent;
+                a.value = Data::Inconsistent;
+                DidMerge(changed, true)
+            }
+        };
+        value | unique | forall
     }
 
     /// When `union_log` is on, record the classes whose nodes will read
@@ -455,8 +572,16 @@ impl Analysis<Symbolic> for ConstFold {
         };
         log.push(keep);
         log.extend(egraph[gone].parents());
-        let (kept, absorbed) = (&egraph[keep].data.value, &egraph[gone].data.value);
-        if kept != absorbed && *absorbed != Data::Unknown && *kept != Data::Inconsistent {
+        let (kept, absorbed) = (&egraph[keep].data, &egraph[gone].data);
+        let value_changes = kept.value != absorbed.value
+            && absorbed.value != Data::Unknown
+            && kept.value != Data::Inconsistent;
+        // The survivor gains a unique constant, or meets a second one (which
+        // makes its value `Inconsistent`).
+        let unique_changes = absorbed.unique.is_some()
+            && kept.unique != absorbed.unique
+            && kept.value != Data::Inconsistent;
+        if value_changes || unique_changes {
             log.extend(egraph[keep].parents());
         }
     }
@@ -655,5 +780,130 @@ mod tests {
         let six = g.lookup(int(6)).expect("folded");
         assert_eq!(g.find(six), g.find(sum));
         assert_eq!(generation(&g, six), 4);
+    }
+
+    /// Unique functions `10`, `11`, `12`; `20` is a plain nullary function.
+    fn unique_graph() -> Graph {
+        let uniques = [10, 11, 12].into_iter().map(FuncId).collect();
+        Graph::new(ConstFold::new(Default::default(), Arc::new(uniques)))
+    }
+
+    fn konst(f: usize, tys: &[Type]) -> Symbolic {
+        Symbolic::FuncApp(FuncId(f), tys.into(), Box::new([]))
+    }
+
+    fn eq(l: Id, r: Id) -> Symbolic {
+        Symbolic::Binary(BinOp::Eq, [l, r])
+    }
+
+    /// Whether the graph has recorded a contradiction (`true == false`).
+    fn contradictory(g: &Graph) -> bool {
+        let t = g.lookup(Symbolic::Lit(Literal::Bool(true)));
+        let f = g.lookup(Symbolic::Lit(Literal::Bool(false)));
+        matches!((t, f), (Some(t), Some(f)) if g.find(t) == g.find(f))
+    }
+
+    /// `==` between two different unique constants folds to `false`; between
+    /// a unique and a plain constant, or a unique and itself, it does not.
+    #[test]
+    fn eq_of_distinct_unique_constants_folds_false() {
+        let mut g = unique_graph();
+        let a = g.add(konst(10, &[]));
+        let b = g.add(konst(11, &[]));
+        let p = g.add(konst(20, &[]));
+        let ab = g.add(eq(a, b));
+        let ap = g.add(eq(a, p));
+        g.rebuild();
+        assert_eq!(g[ab].data.known(), Some(&Literal::Bool(false)));
+        assert_eq!(g[ap].data.known(), None);
+        assert_eq!(
+            g[a].data
+                .fingerprint()
+                .map(|fp| fp.differs_from(&g[b].data.fingerprint().unwrap())),
+            Some(true)
+        );
+        assert!(g[p].data.fingerprint().is_none());
+    }
+
+    /// One generic unique function at two instantiations is two constants.
+    #[test]
+    fn instantiations_are_distinct_constants() {
+        let mut g = unique_graph();
+        let int = g.add(konst(10, &[Type::Int]));
+        let boolean = g.add(konst(10, &[Type::Bool]));
+        let same = g.add(konst(10, &[Type::Int]));
+        assert_eq!(int, same);
+        let e = g.add(eq(int, boolean));
+        g.rebuild();
+        assert_eq!(g[e].data.known(), Some(&Literal::Bool(false)));
+    }
+
+    /// Merging two different unique constants is a contradiction.
+    #[test]
+    fn merging_distinct_unique_constants_is_inconsistent() {
+        let mut g = unique_graph();
+        let a = g.add(konst(10, &[]));
+        let b = g.add(konst(11, &[]));
+        let x = g.add(Symbolic::Fresh(0));
+        g.union(x, a);
+        g.rebuild();
+        assert!(!contradictory(&g));
+        g.union(x, b);
+        g.rebuild();
+        assert!(g[x].data.is_inconsistent());
+        assert!(contradictory(&g));
+    }
+
+    /// Merging a unique constant with a plain one, or with a literal, is not.
+    #[test]
+    fn unique_constant_may_equal_plain_terms() {
+        let mut g = unique_graph();
+        let a = g.add(konst(10, &[]));
+        let p = g.add(konst(20, &[]));
+        let five = g.add(int(5));
+        g.union(a, p);
+        g.union(a, five);
+        g.rebuild();
+        assert!(!contradictory(&g));
+        assert_eq!(g[a].data.known(), Some(&Literal::Int(BigInt::from(5))));
+        assert_eq!(g[a].data.unique.as_ref().map(|u| u.func), Some(FuncId(10)));
+    }
+
+    /// Folding to a literal keeps the unique constant: two unique constants
+    /// both equal to `5` are a contradiction, whichever class absorbs which.
+    #[test]
+    fn literal_does_not_hide_the_unique_constant() {
+        for order in [false, true] {
+            let mut g = unique_graph();
+            let a = g.add(konst(10, &[]));
+            let b = g.add(konst(11, &[]));
+            let five = g.add(int(5));
+            let (first, second) = if order { (a, b) } else { (b, a) };
+            g.union(first, five);
+            g.rebuild();
+            assert!(!contradictory(&g));
+            g.union(second, five);
+            g.rebuild();
+            assert!(contradictory(&g), "order {order}");
+        }
+    }
+
+    /// An `==` built before its operands became unique constants is
+    /// re-folded once they are.
+    #[test]
+    fn eq_refolds_when_operands_learn_unique_constants() {
+        let mut g = unique_graph();
+        let x = g.add(Symbolic::Fresh(0));
+        let y = g.add(Symbolic::Fresh(1));
+        let xy = g.add(eq(x, y));
+        g.rebuild();
+        assert_eq!(g[xy].data.known(), None);
+        let a = g.add(konst(10, &[]));
+        let b = g.add(konst(11, &[]));
+        g.union(x, a);
+        g.union(y, b);
+        g.rebuild();
+        assert_eq!(g[xy].data.known(), Some(&Literal::Bool(false)));
+        assert!(!contradictory(&g));
     }
 }
