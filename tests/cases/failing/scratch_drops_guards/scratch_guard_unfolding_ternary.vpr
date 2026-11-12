@@ -1,0 +1,19 @@
+// REGRESSION (soundness). The block scratch may drop only the block cube's literals
+// from an assumption's guard. `unfolding Q(y, v)` under the ternary's condition `b`
+// assumes the body's facts guarded by `b`, an intra-block literal; the scratch took
+// them unguarded, so `v == 5` held on the `!b` path as well.
+// The `exhale c ==> acc(x.f)` before it is a pc-alias consume, which warms the
+// block scratch.
+//
+// Must FAIL.
+field f: Int
+predicate Q(r: Ref, v: Int) { acc(r.f) && v == 5 }
+
+method scratch_guard_unfolding_ternary(x: Ref, y: Ref, v: Int, b: Bool, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && (c ==> x == y)
+  requires b ==> Q(y, v)
+{
+  exhale c ==> acc(x.f)
+  var t: Int := b ? (unfolding Q(y, v) in 1) : 0
+  assert v == 5
+}

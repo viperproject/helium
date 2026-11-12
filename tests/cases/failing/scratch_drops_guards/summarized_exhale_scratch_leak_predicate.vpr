@@ -1,0 +1,16 @@
+// The scratch leak of summarized_exhale_scratch_leak_false.vpr for a predicate
+// instance: consuming `P(x)` through a join phi must not equate the snapshots of
+// `P(a)` and `P(b)`.
+
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method m(c: Bool, a: Ref, b: Ref)
+  requires P(a) && P(b) && (unfolding P(a) in a.f) == 1 && (unfolding P(b) in b.f) == 2
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  exhale acc(P(x), 1/2)
+  assert false
+}
