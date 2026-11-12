@@ -1,0 +1,26 @@
+// The axioms are evaluated once per program into a seed that every unit copies.
+// Saturating this seed runs into the node backstop (the quantifier doubles its
+// instances every iteration). Units must still run their own rules (here the
+// unfold rules of `f` and `g`) instead of starting from a graph that is already
+// over the limit.
+domain D {
+  function h(x: Int): Int
+  axiom loop { forall x: Int :: { h(x) } h(x) == h(2 * x) + h(2 * x + 1) }
+  axiom seed { h(1) == 5 }
+}
+
+function f(): Int { 3 }
+
+function g(x: Int): Int { x + 1 }
+
+method m_unfold() {
+  assert f() == 3
+}
+
+method m_unfold2(y: Int) {
+  assert g(y) == y + 1
+}
+
+method m_axiom() {
+  assert h(2) + h(3) == 5
+}

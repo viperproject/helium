@@ -97,6 +97,10 @@ pub struct VerifyStats {
     /// peak e-graph size observed in any iteration.
     pub egraph_nodes_peak: usize,
     pub egraph_classes_peak: usize,
+    /// E-nodes of the program's axiom seed copied into the units that start
+    /// from it, summed over the units (`declaration::assume_axioms`): the
+    /// per-unit cost of axiomatizing the state, which no saturation counter sees.
+    pub seed_nodes_copied: u64,
     /// Body instructions fully processed (obligations discharged + evaluated)
     /// across all verification units. A progress marker: a failing member stops
     /// counting at its failing instruction, so a higher count on the same input
@@ -297,6 +301,7 @@ impl VerifyStats {
             sat_iterations,
             egraph_nodes_peak,
             egraph_classes_peak,
+            seed_nodes_copied,
             insts_processed,
             rule_applications,
             per_rule,
@@ -328,6 +333,7 @@ impl VerifyStats {
             ("sat_iterations", n(sat_iterations)),
             ("egraph_nodes_peak", Json::from(*egraph_nodes_peak)),
             ("egraph_classes_peak", Json::from(*egraph_classes_peak)),
+            ("seed_nodes_copied", n(seed_nodes_copied)),
             ("insts_processed", n(insts_processed)),
             ("rule_applications", n(rule_applications)),
             ("prove_calls", n(prove_calls)),

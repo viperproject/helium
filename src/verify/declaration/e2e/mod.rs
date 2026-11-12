@@ -2156,6 +2156,87 @@ function probe(): Int
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
+/// Verify every unit of `input` the way the driver does (one shared axiom seed).
+fn verify_program(input: &str) -> Vec<crate::verify::VerifyResult> {
+    let analyzed = crate::vmir::analyze(lower(input)).expect("acyclic");
+    crate::verify::verify(&analyzed)
+}
+
+/// The result of unit `n` among `results`.
+fn result_of<'r>(
+    results: &'r [crate::verify::VerifyResult],
+    n: &str,
+) -> &'r Result<(), VerifyError> {
+    &results
+        .iter()
+        .find(|(name, _)| name == n)
+        .unwrap_or_else(|| panic!("no result for {n}"))
+        .1
+}
+
+#[test]
+fn axiom_seed_carries_no_unit_facts() {
+    // Every unit starts from a copy of the one axiom seed: what `m1` and `m3`
+    // assume about the axioms' terms must not reach `m2`, whatever the order.
+    let results = verify_program(
+        r#"
+domain D {
+    function c(): Int
+    axiom a { c() >= 0 }
+}
+method m1() {
+    inhale c() == 5
+    assert c() == 5
+}
+method m2() {
+    assert c() >= 0
+    assert c() == 5
+}
+method m3() {
+    inhale c() == 5
+}
+"#,
+    );
+    let get = |n| result_of(&results, n);
+    assert!(get("m1").is_ok(), "{:?}", get("m1"));
+    assert!(get("m3").is_ok(), "{:?}", get("m3"));
+    assert!(
+        matches!(get("m2"), Err(e) if matches!(e.root_cause(), VerifyError::AssertionFailed)),
+        "m2 must not see m1's or m3's inhale: {:?}",
+        get("m2")
+    );
+}
+
+#[test]
+fn axiom_call_unfolds_once_callee_is_certified() {
+    // The axiom's call `f(1)` gets its `f%pre` token only in units that run after
+    // `f` is certified, so the seed (built before) leaves it out and `client`
+    // adds it: `f(1)` unfolds to `2` there.
+    let results = verify_program(
+        r#"
+function f(x: Int): Int { x + 1 }
+domain D {
+    function p(i: Int): Bool
+    axiom a { p(f(1)) }
+}
+method client() {
+    assert p(2)
+}
+method unrelated() {
+    assert p(3)
+}
+"#,
+    );
+    let get = |n| result_of(&results, n);
+    assert!(get("f").is_ok(), "{:?}", get("f"));
+    assert!(get("client").is_ok(), "{:?}", get("client"));
+    assert!(
+        matches!(get("unrelated"), Err(e) if matches!(e.root_cause(), VerifyError::AssertionFailed)),
+        "{:?}",
+        get("unrelated")
+    );
+}
+
 // ---- Pure `forall` quantifiers (v1: domain axioms, no Tier-4) --------------
 
 #[test]
