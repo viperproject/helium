@@ -1,0 +1,14 @@
+// suite: no-z3
+// Unique constants of one type are pairwise distinct; the e-graph analysis
+// must decide this on its own, without Z3.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+  unique function blue(): Color
+}
+
+method m() {
+  assert red() != green()
+  assert green() != blue()
+  assert red() != blue()
+}

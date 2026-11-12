@@ -1,0 +1,10 @@
+// Two unique `Bool` constants are satisfiable (one `true`, one `false`), so
+// this must not verify vacuously. Contrast passing/unique/three_bools_contradict.vpr.
+domain Two {
+  unique function b1(): Bool
+  unique function b2(): Bool
+}
+
+method m() {
+  assert false
+}

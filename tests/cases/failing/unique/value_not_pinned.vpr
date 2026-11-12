@@ -1,0 +1,12 @@
+// Knowing a value is not `red()` does not make it `green()`: the unique
+// constants do not exhaust the type.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+}
+
+method m(c: Color)
+  requires c != red()
+{
+  assert c == green()
+}

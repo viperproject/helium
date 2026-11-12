@@ -1,0 +1,17 @@
+// suite: no-z3
+// In a generic domain, distinctness holds at every instantiation.
+domain Opt[T] {
+  unique function empty(): Opt[T]
+  unique function absent(): Opt[T]
+}
+
+method m() {
+  assert (empty(): Opt[Int]) != (absent(): Opt[Int])
+  assert (empty(): Opt[Bool]) != (absent(): Opt[Bool])
+}
+
+method n(x: Opt[Ref])
+  requires x == (empty(): Opt[Ref])
+{
+  assert x != (absent(): Opt[Ref])
+}

@@ -1,0 +1,9 @@
+// Distinct does not mean ordered.
+domain K {
+  unique function k1(): Int
+  unique function k2(): Int
+}
+
+method m() {
+  assert k1() < k2()
+}

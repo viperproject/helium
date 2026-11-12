@@ -1,0 +1,12 @@
+// `Bool` has only two values, so three pairwise-distinct unique `Bool`
+// constants are contradictory (Silicon's `distinct` is unsat as well).
+// Needs a case split on the constants' values: left to Z3.
+domain Three {
+  unique function b1(): Bool
+  unique function b2(): Bool
+  unique function b3(): Bool
+}
+
+method m() {
+  assert false
+}

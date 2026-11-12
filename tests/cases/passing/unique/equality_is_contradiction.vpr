@@ -1,0 +1,14 @@
+// suite: no-z3
+// Assuming two unique constants equal is a contradiction, so everything
+// after it holds vacuously.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+}
+
+method m(c: Color)
+  requires c == red()
+  requires c == green()
+{
+  assert false
+}

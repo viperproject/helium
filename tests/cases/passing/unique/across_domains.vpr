@@ -1,0 +1,9 @@
+// suite: no-z3
+// Distinctness is per return type, program-wide: unique constants declared
+// in different domains are still distinct when their types agree.
+domain A { unique function a(): Int }
+domain B { unique function b(): Int }
+
+method m() {
+  assert a() != b()
+}
