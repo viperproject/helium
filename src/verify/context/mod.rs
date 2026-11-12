@@ -232,6 +232,7 @@ impl<'a> VerifyContext<'a> {
     /// Union two e-classes in the live graph — the sanctioned mutation path
     /// (invalidates the fixpoint cache). Callers still `rebuild()` after a
     /// batch of unions.
+    /// If a scratch graph exists, then the fact is also added there.
     pub(crate) fn union(&mut self, a: egg::Id, b: egg::Id) -> bool {
         let merged = self.egraph.union(a, b);
         if merged {
@@ -551,32 +552,26 @@ impl<'a> VerifyContext<'a> {
         let imp = self.implication(fact, guards);
         let true_ = expr!(self, true);
         self.union(imp, true_);
-        // Invariant 4: ground guarded, scratch unguarded.
-        self.scratch_assume_unguarded(fact);
         self.egraph.rebuild();
     }
 
     /// [`Self::assume_guarded`] for a **release key** rather than a fact about
     /// program state: a callee's `f%pre` token, minted at a call site under that
-    /// call's path condition. Records the ground guarded implication exactly like
-    /// [`Self::assume_guarded`], but deliberately **skips** the scratch-unguarded
-    /// half of invariant 4.
+    /// call's path condition. Records the guarded implication exactly like
+    /// [`Self::assume_guarded`]; it is a separate entry point only to name the
+    /// token's role.
     ///
-    /// Why skip it: that invariant's licence is that the block scratch already
-    /// bakes in the block PC — but it bakes in the block **cube**, and this token
-    /// exists to carry the *finer* intra-block path condition (a call under a
-    /// ternary or an implication; the same observation as the invariant-5 note in
-    /// [`Self::prove_under_pc`]). Unioning `tok == true` in the warm scratch would
-    /// make the callee's facts available on sibling intra-block paths there —
-    /// precisely the leak this gating closes.
+    /// The token must stay behind its guards: it carries the *finer* intra-block
+    /// path condition (a call under a ternary or an implication), so a bare
+    /// `tok == true` would release the callee's facts on sibling intra-block paths.
     ///
-    /// Nothing is lost by skipping it: [`Self::union`] already mirrors the guarded
-    /// implication into the scratch, so the cube prefix of the guard chain
-    /// collapses there via `ite-reduce` (cube literals *are* unguarded in the
-    /// scratch), and any residual intra-block guard collapses in the probe clone,
-    /// which assumes the obligation's extra pc literals (see
-    /// [`Self::prove_via_scratch`]). The token therefore ends up true in the
-    /// scratch on exactly the paths an obligation is taken under.
+    /// The block scratch gets the same guarded implication, through the mirror in
+    /// [`Self::union`]. There the cube prefix of the guard chain collapses via
+    /// `ite-reduce` (the scratch has assumed the cube), and any residual
+    /// intra-block guard collapses in the probe clone, which assumes the
+    /// obligation's extra pc literals (see [`Self::prove_via_scratch`]). The token
+    /// therefore ends up true in the scratch on exactly the paths an obligation is
+    /// taken under.
     ///
     /// `guards` are in innermost-first fold order, matching [`Self::implication`].
     pub(crate) fn assume_token_guarded(
@@ -603,8 +598,6 @@ impl<'a> VerifyContext<'a> {
         for fact in facts {
             let imp = self.implication(fact, guards.iter().copied());
             self.union(imp, true_);
-            // Invariant 4: ground guarded, scratch unguarded.
-            self.scratch_assume_unguarded(fact);
         }
         self.egraph.rebuild();
     }

@@ -111,8 +111,11 @@ impl<'a> VerifyContext<'a> {
         // into the `true` class makes ground `find` return the `true` leader for it,
         // so canonicalizing first would translate *every* such term to the scratch's
         // `true` — silently turning each mirrored union/assume into `true == true`.
-        // Under invariant 3 (ground never saturates/reduces in-block) ground grows
-        // only through mirrored ops, so the raw id a caller holds is a stable name.
+        // The raw id a caller holds is a stable name: egg never reuses an id, and
+        // `id_to_node` returns the node minted at it. Ground does not grow only
+        // through mirrored ops — `prove_under_pc` saturates it in-block, and recipe
+        // builds write to it directly — so ids past the watermark can be unmirrored;
+        // the import below handles those.
         match self.scratch.as_ref() {
             None => return g,
             Some(sc) => {
@@ -151,24 +154,6 @@ impl<'a> VerifyContext<'a> {
     /// The current block's control cube, as live ids. Empty outside a block body.
     pub(crate) fn current_cube(&self) -> &[(egg::Id, Polarity)] {
         &self.current_cube
-    }
-
-    /// Assume `fact` **unguarded** in the block scratch (invariant 4 of
-    /// `design/block-vmir/82-two-egraph-block-model.md`): the scratch already bakes in
-    /// the block PC and only ever discharges that block's goals, so a Viper
-    /// `assume`/`inhale` fact holds there outright — no need to make `ite-reduce`
-    /// release it from under a guard first. Ground keeps the PC-guarded implication, so
-    /// the fact cannot leak to a sibling path — see [`Self::assume_guarded`].
-    pub(super) fn scratch_assume_unguarded(&mut self, fact: egg::Id) {
-        if self.scratch.is_none() {
-            return;
-        }
-        let tf = self.tr(fact);
-        let sc = self.scratch.as_mut().unwrap();
-        let true_s = sc.true_id;
-        sc.egraph.union(tf, true_s);
-        sc.dirty = true;
-        sc.dirty_reduce = true;
     }
 
     /// Mirror a ground `add` of `node` (which produced ground id `ground_id`)
@@ -575,8 +560,8 @@ impl<'a> VerifyContext<'a> {
             pc_lits.iter().map(|(id, p)| (self.tr(*id), *p)).collect();
         // Tier the scratch the way the ground path is tiered: try the cheap
         // reductions first and saturate only if the goal is still open. Saturating
-        // unconditionally is what made the scratch expensive — with the block PC
-        // assumed *unguarded* (invariant 4) the `ite` guards no longer throttle
+        // unconditionally is what made the scratch expensive — with the block cube
+        // assumed outright, the cube's `ite` guards collapse and no longer throttle
         // function-unfold / axiom-trigger / forall cascades, so a full run can grow
         // the graph 20-30× for a goal the reductions already close.
         self.reduce_scratch();
