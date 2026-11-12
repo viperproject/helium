@@ -643,7 +643,7 @@ fn eval_pure_inst(
             (id, recipe)
         }
         // A discriminator is the tester `Adt::Ctor?(base)`, a `Bool` application;
-        // the `is` / `is-excl` rules give it its meaning.
+        // the `is` / `variant-narrow` rules give it its meaning.
         PureInst::AdtIs {
             adt,
             type_args,

@@ -314,8 +314,8 @@ pub(crate) fn lower<Ext: PureExt>(
         }
         P::AdtDiscriminator(base, variant) => {
             // `e.is<Ctor>` ⇒ the `Bool` tester `AdtIs{adt, variant}(e)`. The
-            // verifier's `is` reduction folds it to a literal when `e` is a known
-            // constructor; `is-excl` relates the testers of one value.
+            // verifier's `is` reduction folds it to a literal from `e`'s variant
+            // set; `variant-narrow` shrinks that set once a tester is decided.
             // Type args come from the scrutinee's type (`base.ty`).
             let type_args = adt_type_args(b, &base.ty);
             let base_v = lower(b, env, sink, hctx, base)?;

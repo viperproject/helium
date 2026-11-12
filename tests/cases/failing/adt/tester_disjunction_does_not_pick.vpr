@@ -1,0 +1,13 @@
+// A disjunction of two testers leaves both open.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method disjunction_does_not_pick(s: Shape)
+{
+    assume s.isCircle || s.isSquare
+    assert s.isCircle
+}

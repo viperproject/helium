@@ -1,0 +1,38 @@
+// suite: no-z3
+// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
+//
+// A nullary variant has exactly one inhabitant, so `c.isRed ==> c == Red()`.
+// This is eta with no destructors (see `eta.vpr`), and the cheapest form of it:
+// a true tester of a nullary constructor could merge the value with the
+// constructor term directly. The two disequality methods also need the
+// converse, `c != Red() ==> !c.isRed`, before last-variant can fire.
+adt Color {
+    Red()
+    Green()
+    Blue()
+}
+
+method nullary_tester_pins_value(c: Color)
+{
+    assume c.isGreen
+    assert c == Green()
+}
+
+method nullary_two_values_equal(c: Color, d: Color)
+{
+    assume c.isRed && d.isRed
+    assert c == d
+}
+
+method nullary_last_variant_pins_value(c: Color)
+{
+    assume !c.isRed && !c.isGreen
+    assert c == Blue()
+}
+
+method nullary_disequalities_pin_value(c: Color)
+{
+    assume c != Red()
+    assume c != Green()
+    assert c == Blue()
+}

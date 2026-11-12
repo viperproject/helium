@@ -1,0 +1,89 @@
+// suite: no-z3
+// Projection reduction `field(Ctor(a0..an)) == a_i` (`proj-*`): a destructor
+// applied to a value whose class holds the matching constructor reduces to that
+// constructor's argument — directly, through a variable, through an assumed
+// equality, and nested several levels deep.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+method proj_direct(r: Int, a: Int, b: Int)
+{
+    assert Circle(r).radius == r
+    assert Square(a).side == a
+    assert Tri(a, b).base == a
+    assert Tri(a, b).height == b
+}
+
+method proj_literal()
+{
+    assert Tri(3, 4).base + Tri(3, 4).height == 7
+}
+
+method proj_through_variable(a: Int, b: Int)
+{
+    var s: Shape := Tri(a, b)
+    assert s.base == a
+    assert s.height == b
+}
+
+method proj_through_assumed_equality(s: Shape, a: Int, b: Int)
+{
+    assume s == Tri(a, b)
+    assert s.base == a
+    assert s.height == b
+}
+
+// The equality is stated with the constructor on the left.
+method proj_through_flipped_equality(s: Shape, r: Int)
+{
+    assume Circle(r) == s
+    assert s.radius == r
+}
+
+// Two hops: `s == t` and `t == Ctor(..)`.
+method proj_through_equality_chain(s: Shape, t: Shape, r: Int)
+{
+    assume s == t
+    assume t == Circle(r)
+    assert s.radius == r
+}
+
+method proj_nested(x: Int, y: Int, z: Int)
+{
+    var l: Lst := Cons(x, Cons(y, Cons(z, Nil())))
+    assert l.head == x
+    assert l.tail.head == y
+    assert l.tail.tail.head == z
+    assert l.tail.tail.tail == Nil()
+}
+
+// Projection of a projection that was rebuilt.
+method proj_rebuilt(a: Int, b: Int)
+{
+    var s: Shape := Tri(a, b)
+    var t: Shape := Tri(s.height, s.base)
+    assert t.base == b
+    assert t.height == a
+}
+
+// The constructed value is returned and projected by the caller.
+method mk_tri(a: Int, b: Int) returns (s: Shape)
+    ensures s == Tri(a, b)
+{
+    s := Tri(a, b)
+}
+
+method proj_of_call_result(a: Int, b: Int)
+{
+    var s: Shape
+    s := mk_tri(a, b)
+    assert s.height == b
+}

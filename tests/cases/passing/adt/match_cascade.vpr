@@ -1,0 +1,130 @@
+// suite: no-z3
+// `match`-style cascades over testers, the shape Prusti emits for Rust enums:
+// each arm adds a negative tester to the path condition, so the final `else`
+// relies on the last-variant rule.
+//
+// One postcondition per method: two tester-guarded postconditions on one
+// cascade are not proven without Z3, but neither are two `Bool`-guarded ones,
+// so that gap is about joins, not ADTs.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+function tag(s: Shape): Int
+{
+    s.isCircle ? 0 : (s.isSquare ? 1 : 2)
+}
+
+// The final `else` is the last variant, inside the arm and after the join.
+method cascade(s: Shape) returns (r: Int)
+    ensures s.isTri ==> r == 2
+{
+    if (s.isCircle) {
+        r := 0
+    } elseif (s.isSquare) {
+        r := 1
+    } else {
+        assert s.isTri
+        r := 2
+    }
+}
+
+method cascade_first_arm(s: Shape) returns (r: Int)
+    ensures s.isCircle ==> r == 0
+{
+    if (s.isCircle) {
+        r := 0
+    } elseif (s.isSquare) {
+        r := 1
+    } else {
+        r := 2
+    }
+}
+
+method cascade_middle_arm(s: Shape) returns (r: Int)
+    ensures s.isSquare ==> r == 1
+{
+    if (s.isCircle) {
+        r := 0
+    } elseif (s.isSquare) {
+        r := 1
+    } else {
+        r := 2
+    }
+}
+
+// The final `else` projects the last variant's payload.
+method cascade_project(s: Shape) returns (r: Int)
+    ensures s.isTri ==> r == s.base + s.height
+{
+    if (s.isCircle) {
+        r := s.radius
+    } elseif (s.isSquare) {
+        r := s.side
+    } else {
+        r := s.base + s.height
+    }
+}
+
+// A cascade that tests the variants in a different order.
+method cascade_reordered(s: Shape) returns (r: Int)
+    ensures s.isSquare ==> r == 1
+{
+    if (s.isTri) {
+        r := 2
+    } elseif (s.isCircle) {
+        r := 0
+    } else {
+        assert s.isSquare
+        r := 1
+    }
+}
+
+method tag_of_ctor(a: Int, b: Int)
+{
+    assert tag(Circle(a)) == 0
+    assert tag(Square(a)) == 1
+    assert tag(Tri(a, b)) == 2
+}
+
+// Inverting the tag function: the tag pins the variant.
+method tag_inverts(s: Shape)
+{
+    assume tag(s) == 2
+    assert s.isTri
+}
+
+method tag_inverts_middle(s: Shape)
+{
+    assume tag(s) == 1
+    assert s.isSquare
+    assert !s.isCircle
+}
+
+// Mapping one variant to another.
+method swap_square_circle(s: Shape) returns (t: Shape)
+    ensures s.isSquare ==> t.isCircle && t.radius == s.side
+{
+    if (s.isCircle) {
+        t := Square(s.radius)
+    } elseif (s.isSquare) {
+        t := Circle(s.side)
+    } else {
+        t := s
+    }
+}
+
+// The last variant's arm passes the value through unchanged.
+method swap_keeps_last(s: Shape) returns (t: Shape)
+    ensures s.isTri ==> t == s
+{
+    if (s.isCircle) {
+        t := Square(s.radius)
+    } elseif (s.isSquare) {
+        t := Circle(s.side)
+    } else {
+        t := s
+    }
+}

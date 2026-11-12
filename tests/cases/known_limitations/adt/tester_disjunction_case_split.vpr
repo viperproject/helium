@@ -1,0 +1,35 @@
+// suite: no-z3
+// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
+//
+// Two overlapping disjunctions of testers pin their common variant:
+// `(isA || isB) && (isB || isC) ==> isB`. Proving it needs a case split on an
+// assumed disjunction (in the `isA` case, exclusivity makes `isB || isC` false,
+// contradiction), which the e-graph tiers do not make. A disjunction
+// minus one of its disjuncts, which needs no split, works (see
+// `passing/adt/tester_exclusivity.vpr`).
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method overlapping_disjunctions(s: Shape)
+{
+    assume s.isCircle || s.isSquare
+    assume s.isSquare || s.isTri
+    assert s.isSquare
+}
+
+method overlapping_disjunctions_four(c: Suit)
+{
+    assume c.isHearts || c.isClubs
+    assume c.isClubs || c.isSpades
+    assert c.isClubs
+}

@@ -1,0 +1,96 @@
+// suite: no-z3
+// KNOWN LIMITATION (e-graph only) — should verify, currently rejected without Z3.
+//
+// Eta / surjectivity: a value of variant `C` equals `C` applied to its own
+// destructors (`x.isC ==> x == C(x.f1, .., x.fn)`). Viper's ADT encoding states
+// it, the Z3 rung proves it, but no e-graph rule does: `proj-*` and
+// `accessor-*` only reason *from* a constructor term already in the value's
+// class, and nothing ever puts `C(x.f1, ..)` there. The variant set does know
+// the value is a `C`, but not that it equals that term. Every method below needs that step.
+//
+// The nullary case (`c.isRed ==> c == Red()`) needs no destructors and is in
+// `nullary_tester_pins_value.vpr`; eta after a call, which Z3 misses too, is in
+// `eta_after_call_z3.vpr`.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Lst {
+    Nil()
+    Cons(head: Int, tail: Lst)
+}
+
+adt Option[T] {
+    None()
+    Some(value: T)
+}
+
+method eta_unary(s: Shape)
+{
+    assume s.isCircle
+    assert s == Circle(s.radius)
+}
+
+method eta_binary(s: Shape)
+{
+    assume s.isTri
+    assert s == Tri(s.base, s.height)
+}
+
+method eta_recursive(l: Lst)
+{
+    assume l.isCons
+    assert l == Cons(l.head, l.tail)
+}
+
+method eta_generic(o: Option[Int])
+{
+    assume o.isSome
+    assert o == Some(o.value)
+}
+
+method eta_with_known_payload(s: Shape)
+{
+    assume s.isCircle
+    assume s.radius == 5
+    assert s == Circle(5)
+}
+
+// Two values of the same variant and payload are equal.
+method same_variant_same_payload_equal(s: Shape, t: Shape)
+{
+    assume s.isSquare && t.isSquare
+    assume s.side == t.side
+    assert s == t
+}
+
+// The last variant, then its payload: needs last-variant (works) plus eta.
+method last_variant_then_project(s: Shape)
+{
+    assume !s.isCircle && !s.isSquare
+    assume s.base == 2 && s.height == 3
+    assert s == Tri(2, 3)
+}
+
+// Disequality with the eta terms rules the variants out.
+method last_variant_via_ctor_disequalities(s: Shape)
+{
+    assume s != Circle(s.radius)
+    assume s != Square(s.side)
+    assert s.isTri
+}
+
+// Rebuilding the value in every arm of a cascade gives back the same value.
+method identity(s: Shape) returns (t: Shape)
+    ensures t == s
+{
+    if (s.isCircle) {
+        t := Circle(s.radius)
+    } elseif (s.isSquare) {
+        t := Square(s.side)
+    } else {
+        t := Tri(s.base, s.height)
+    }
+}

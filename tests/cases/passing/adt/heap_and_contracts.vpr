@@ -1,0 +1,73 @@
+// suite: no-z3
+// ADT values stored on the heap and passed through contracts: the ADT rules
+// must fire on terms built from heap reads and from callee postconditions.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+field shape: Shape
+
+method store_and_read(x: Ref, k: Int)
+    requires acc(x.shape)
+{
+    x.shape := Square(k)
+    assert x.shape.isSquare
+    assert x.shape.side == k
+    assert !x.shape.isCircle
+}
+
+method heap_tester_last_variant(x: Ref)
+    requires acc(x.shape)
+    requires !x.shape.isCircle && !x.shape.isSquare
+    ensures acc(x.shape) && x.shape.isTri
+{
+}
+
+method heap_injectivity(x: Ref, y: Ref, a: Int, b: Int)
+    requires acc(x.shape) && acc(y.shape)
+    requires x.shape == Tri(a, b)
+{
+    y.shape := x.shape
+    assume y.shape == Tri(b, a)
+    assert a == b
+}
+
+// Rewriting the field to a different variant flips the testers.
+method overwrite_variant(x: Ref, r: Int)
+    requires acc(x.shape) && x.shape.isSquare
+    ensures acc(x.shape) && x.shape.isCircle && !x.shape.isSquare
+{
+    x.shape := Circle(r)
+}
+
+method grow(s: Shape) returns (t: Shape)
+    requires s.isCircle
+    ensures t.isCircle && t.radius == s.radius + 1
+{
+    t := Circle(s.radius + 1)
+}
+
+method use_grow(r: Int)
+{
+    var t: Shape
+    t := grow(Circle(r))
+    assert t.radius == r + 1
+    assert !t.isTri
+}
+
+predicate HasCircle(x: Ref)
+{
+    acc(x.shape) && x.shape.isCircle
+}
+
+method fold_unfold_tester(x: Ref, r: Int)
+    requires acc(x.shape)
+{
+    x.shape := Circle(r)
+    fold HasCircle(x)
+    unfold HasCircle(x)
+    assert x.shape.radius == r
+    assert !x.shape.isSquare
+}

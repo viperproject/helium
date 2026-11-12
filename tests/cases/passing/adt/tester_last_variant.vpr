@@ -1,0 +1,156 @@
+// suite: no-z3
+// Last-variant reasoning on an opaque value (`variant-narrow-*` and `is-*`): when
+// every tester but one is false, the remaining one is true, and the testers are
+// exhaustive. All-false and single-variant ADTs are in `all_testers_false.vpr`
+// and `single_variant_tester.vpr`.
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+adt Opt {
+    NoneI()
+    SomeI(val: Int)
+}
+
+method last_variant_two(o: Opt)
+{
+    assume !o.isNoneI
+    assert o.isSomeI
+}
+
+method last_variant_two_other_side(o: Opt)
+{
+    assume !o.isSomeI
+    assert o.isNoneI
+}
+
+// Each of the three variants can be the last one standing.
+method last_variant_first(s: Shape)
+{
+    assume !s.isSquare
+    assume !s.isTri
+    assert s.isCircle
+}
+
+method last_variant_middle(s: Shape)
+{
+    assume !s.isCircle
+    assume !s.isTri
+    assert s.isSquare
+}
+
+method last_variant_four(c: Suit)
+{
+    assume !c.isHearts
+    assume !c.isSpades
+    assume !c.isDiamonds
+    assert c.isClubs
+}
+
+// The negations come in one conjunction.
+method last_variant_conjunction(c: Suit)
+{
+    assume !c.isHearts && !c.isDiamonds && !c.isClubs
+    assert c.isSpades
+}
+
+// The negations come from preconditions.
+method last_variant_from_precondition(s: Shape)
+    requires !s.isCircle
+    requires !s.isSquare
+    ensures s.isTri
+{
+}
+
+method exhaustive_four(c: Suit)
+{
+    assert c.isHearts || c.isDiamonds || c.isClubs || c.isSpades
+}
+
+method exhaustive_two(o: Opt)
+{
+    assert o.isNoneI || o.isSomeI
+}
+
+// One negation leaves a disjunction of the rest.
+method one_negation_leaves_disjunction(s: Shape)
+{
+    assume !s.isTri
+    assert s.isCircle || s.isSquare
+}
+
+// The disjunction query over the variants left open: with the trailing
+// variants false, the leading ones are the only candidates.
+method trailing_false_leaves_disjunction(c: Suit)
+{
+    assume !c.isClubs
+    assume !c.isSpades
+    assert c.isHearts || c.isDiamonds
+}
+
+method trailing_false_leaves_disjunction_conj(c: Suit)
+{
+    assume !c.isClubs && !c.isSpades
+    assert c.isHearts || c.isDiamonds
+}
+
+// The open variants need not be adjacent.
+method scattered_false_leaves_disjunction(c: Suit)
+{
+    assume !c.isHearts
+    assume !c.isClubs
+    assert c.isDiamonds || c.isSpades
+}
+
+// One variant false leaves a three-way disjunction.
+method one_false_leaves_three_way_disjunction(c: Suit)
+{
+    assume !c.isSpades
+    assert c.isHearts || c.isDiamonds || c.isClubs
+}
+
+// The open variants, queried in another order.
+method disjunction_order_irrelevant(c: Suit)
+{
+    assume !c.isHearts && !c.isDiamonds
+    assert c.isSpades || c.isClubs
+}
+
+// The negative testers come from an equal value.
+method disjunction_through_equality(c: Suit, d: Suit)
+{
+    assume c == d
+    assume !d.isClubs && !d.isSpades
+    assert c.isHearts || c.isDiamonds
+}
+
+// The negative testers come from preconditions, the query is a postcondition.
+method disjunction_as_postcondition(c: Suit)
+    requires !c.isClubs
+    requires !c.isSpades
+    ensures c.isHearts || c.isDiamonds
+{
+}
+
+// The last-variant fact feeds a branch: only the else branch is reachable.
+method last_variant_prunes_branch(s: Shape) returns (r: Int)
+    requires !s.isCircle && !s.isTri
+    ensures r == 2
+{
+    if (s.isSquare) {
+        r := 2
+    } else {
+        r := 99
+        assert false
+    }
+}
+

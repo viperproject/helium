@@ -1,0 +1,13 @@
+// Ruling out one nullary constructor leaves two open.
+
+adt Color {
+    Red()
+    Green()
+    Blue()
+}
+
+method enum_two_open(c: Color)
+{
+    assume c != Red()
+    assert c == Green()
+}

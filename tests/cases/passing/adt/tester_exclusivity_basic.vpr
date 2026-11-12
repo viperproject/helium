@@ -1,5 +1,7 @@
+// suite: no-z3
 // Reasoning from discriminators on an opaque value, which needs the testers'
-// exclusivity and last-variant rule (`is-excl`), not a known constructor.
+// exclusivity and last variant (decided testers narrow the value's variant set,
+// `variant-narrow-*`), not a known constructor.
 // A negative test (`!s.isCircle`) is a tester merged with `false`, an equality
 // the e-graph can use; an integer tag would make it an unusable disequality.
 adt Shape {

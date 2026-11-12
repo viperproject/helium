@@ -1,0 +1,15 @@
+// A disjunction of only ruled-out variants is false, so asserting it fails. The
+// state itself is consistent: Hearts and Diamonds are still open.
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method only_ruled_out(c: Suit)
+{
+    assume !c.isClubs && !c.isSpades
+    assert c.isClubs || c.isSpades
+}

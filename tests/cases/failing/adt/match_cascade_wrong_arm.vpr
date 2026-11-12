@@ -1,0 +1,17 @@
+// In the final `else` of a cascade over Circle/Tri, the value is a Square;
+// claiming it is a Tri must fail.
+
+adt Shape {
+    Circle(radius: Int)
+    Square(side: Int)
+    Tri(base: Int, height: Int)
+}
+
+method cascade_wrong_arm(s: Shape)
+{
+    if (s.isCircle) {
+    } elseif (s.isTri) {
+    } else {
+        assert s.isTri
+    }
+}

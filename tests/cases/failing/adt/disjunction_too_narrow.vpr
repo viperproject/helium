@@ -1,0 +1,15 @@
+// One variant false leaves three open; a disjunction of two of them misses the
+// third.
+
+adt Suit {
+    Hearts()
+    Diamonds()
+    Clubs()
+    Spades()
+}
+
+method too_narrow(c: Suit)
+{
+    assume !c.isSpades
+    assert c.isHearts || c.isDiamonds
+}
