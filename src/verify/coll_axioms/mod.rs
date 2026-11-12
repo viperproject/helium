@@ -1,13 +1,14 @@
 //! The axioms of the built-in collection types, as quantifier recipes the one
 //! `forall` rule (`rewrite::forall_rule`) instantiates, in place of a Viper
-//! prelude domain. One table per [`CollKind`]: `Seq[T]` ([`seq`]); `Set[T]`
-//! has none yet.
+//! prelude domain. One table per [`CollKind`]: `Seq[T]` ([`seq`]) and
+//! `Set[T]` ([`set`]).
 //!
-//! Adapted from Silicon's `dafny_axioms`. As recipes, they need none of the
-//! domains' helper functions: `Seq_add`/`Seq_sub` are plain `+`/`-` (their
-//! round-trip equalities stay, see [`seq`]), `Seq_contains_trigger` is gone,
-//! and `Seq_equal` is a program's typed collection equality
-//! (`CollOp::is_eq`, in the untyped equality's own e-class). The skolem functions stay (see [`Witness`]), as
+//! Adapted from Silicon's `dafny_axioms/sequences.vpr` and `sets.vpr`. As
+//! recipes, they need none of the domains' helper functions: `Seq_add`/
+//! `Seq_sub` are plain `+`/`-` (their round-trip equalities stay, see
+//! [`seq`]), `Seq_contains_trigger` is gone, and `Seq_equal`/`Set_equal` are
+//! a program's typed collection equality (`CollOp::is_eq`, in the untyped
+//! equality's own e-class). The skolem functions stay (see [`Witness`]), as
 //! functions the registry mints rather than domain functions: a witness is a
 //! term of the instance's binders, so building an instance again finds the
 //! same witness instead of adding another one.
@@ -31,6 +32,7 @@
 //! every [`STerm::Op`] it applies (checked when the table is built).
 
 pub(crate) mod seq;
+pub(crate) mod set;
 
 use std::sync::LazyLock;
 
@@ -63,7 +65,8 @@ impl VarSort {
 /// A term of an axiom, over its bound variables and the element type `E`.
 /// Boolean connectives use the shapes the program's own lowering builds
 /// (`translate::pure_exp`), so a guard finds the program's terms by lookup:
-/// `!a` is `ite(a, false, true)`, `a && b` is `ite(a, b, false)`, `a <= b` is `!(b < a)`.
+/// `!a` is `ite(a, false, true)`, `a && b` is `ite(a, b, false)`, `a || b` is
+/// `ite(a, true, b)`, `a ==> b` is `ite(a, b, true)`, `a <= b` is `!(b < a)`.
 #[derive(Clone, Debug)]
 pub(crate) enum STerm {
     Var(usize),
@@ -93,6 +96,16 @@ pub(crate) enum Witness {
     /// have one. Both equality axioms use it, as in the domain: one function
     /// satisfies both.
     SeqDiff,
+    /// `Set_skolem_diff(a, b)`: an element of exactly one of `a` and `b`, when
+    /// they have one.
+    SetDiff,
+    /// An element of `s`, when `|s| != 0`: the existential of Dafny's
+    /// `Set_card_zero`.
+    SetMember,
+    /// An element of `a` that is not in `b`, when there is one: the
+    /// counterexample to `a subset b`, which skolemizes the nested `forall` of
+    /// Dafny's `Set_subset_def`.
+    SetSubset,
 }
 
 impl Witness {
@@ -100,13 +113,14 @@ impl Witness {
     fn of(kind: CollKind) -> &'static [Witness] {
         match kind {
             CollKind::Seq => &[Witness::SeqIndexOf, Witness::SeqDiff],
-            CollKind::Set => &[],
+            CollKind::Set => &[Witness::SetDiff, Witness::SetMember, Witness::SetSubset],
         }
     }
 
     fn kind(self) -> CollKind {
         match self {
             Witness::SeqIndexOf | Witness::SeqDiff => CollKind::Seq,
+            Witness::SetDiff | Witness::SetMember | Witness::SetSubset => CollKind::Set,
         }
     }
 
@@ -114,6 +128,9 @@ impl Witness {
         match self {
             Witness::SeqIndexOf => "Seq_skolem",
             Witness::SeqDiff => "Seq_skolem_diff",
+            Witness::SetDiff => "Set_skolem_diff",
+            Witness::SetMember => "Set_skolem_member",
+            Witness::SetSubset => "Set_skolem_subset",
         }
     }
 
@@ -124,6 +141,8 @@ impl Witness {
         let (params, ret) = match self {
             Witness::SeqIndexOf => (vec![coll(), e()], Type::Int),
             Witness::SeqDiff => (vec![coll(), coll()], Type::Int),
+            Witness::SetDiff | Witness::SetSubset => (vec![coll(), coll()], e()),
+            Witness::SetMember => (vec![coll()], e()),
         };
         SkolemSig { params, ret }
     }
@@ -178,13 +197,13 @@ pub(crate) struct CollAxiom {
     pub(crate) int_only: bool,
 }
 
-/// The axioms of `kind`, checked once when first built. Sets have none yet:
-/// their operations are uninterpreted.
+/// The axioms of `kind`, checked once when first built.
 pub(crate) fn axioms(kind: CollKind) -> &'static [CollAxiom] {
     static SEQ: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(seq::build()));
+    static SET: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(set::build()));
     match kind {
         CollKind::Seq => &SEQ,
-        CollKind::Set => &[],
+        CollKind::Set => &SET,
     }
 }
 
@@ -307,6 +326,12 @@ fn not(x: STerm) -> STerm {
 }
 fn and(a: STerm, b: STerm) -> STerm {
     ite(a, b, STerm::Bool(false))
+}
+fn or(a: STerm, b: STerm) -> STerm {
+    ite(a, STerm::Bool(true), b)
+}
+fn implies(a: STerm, b: STerm) -> STerm {
+    ite(a, b, STerm::Bool(true))
 }
 fn ne(l: STerm, r: STerm) -> STerm {
     not(eq(l, r))
@@ -554,5 +579,6 @@ mod tests {
     fn every_trigger_group_binds_every_variable() {
         // `axioms()` checks each axiom when the table is first built.
         assert!(!super::axioms(CollKind::Seq).is_empty());
+        assert!(!super::axioms(CollKind::Set).is_empty());
     }
 }
