@@ -1,6 +1,7 @@
 pub(crate) mod prove;
+mod scratch;
 
-use prove::BlockScratch;
+use scratch::BlockScratch;
 
 use crate::dhash::HashMap;
 
@@ -238,15 +239,8 @@ impl<'a> VerifyContext<'a> {
         if merged {
             self.clean = None;
         }
-        if self.scratch.is_some() {
-            // Mirror into the block scratch. A same-typed conflict there (the
-            // cube made this union contradictory) folds to `Inconsistent`, not a
-            // panic — that just makes the block's goals vacuously provable.
-            let (ta, tb) = (self.tr(a), self.tr(b));
-            let sc = self.scratch.as_mut().unwrap();
-            sc.egraph.union(ta, tb);
-            sc.dirty = true;
-            sc.dirty_reduce = true;
+        if let Some(sc) = self.scratch.as_mut() {
+            sc.mirror_union(&self.egraph, a, b);
         }
         merged
     }
@@ -433,16 +427,17 @@ impl<'a> VerifyContext<'a> {
     /// scratch had to be run (`reduce` = the cheap reductions sufficed).
     fn trace_probe(&self, g0: (usize, usize, usize), fresh: bool, ran: &str) {
         let sc = self.scratch.as_ref().expect("scratch live");
-        let st = sc.egraph.find(sc.true_id);
+        let g = sc.graph();
+        let st = sc.find(sc.true_id()).raw();
         eprintln!(
             "[probe] ground {}n/{}c true={} | scratch {}n/{}c true={} | ratio {:.2} | {} | {}",
             g0.0,
             g0.1,
             g0.2,
-            sc.egraph.total_number_of_nodes(),
-            sc.egraph.number_of_classes(),
-            sc.egraph[st].nodes.len(),
-            sc.egraph.total_number_of_nodes() as f64 / g0.0.max(1) as f64,
+            g.total_number_of_nodes(),
+            g.number_of_classes(),
+            g[st].nodes.len(),
+            g.total_number_of_nodes() as f64 / g0.0.max(1) as f64,
             ran,
             if fresh { "built" } else { "warm" },
         );
@@ -457,7 +452,9 @@ impl<'a> VerifyContext<'a> {
             if self.egraph.total_size() != before {
                 self.clean = None;
             }
-            self.mirror_add(id, node);
+            if let Some(sc) = self.scratch.as_mut() {
+                sc.mirror_add(&self.egraph, id, node);
+            }
             id
         } else {
             let id = self.egraph.add(node);
