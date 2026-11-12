@@ -8,7 +8,8 @@ use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
 use crate::vmir::{
-    self, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, TRUE, Val,
+    self, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp, TRUE, Type,
+    Val,
 };
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
@@ -229,7 +230,10 @@ pub(crate) fn lower<Ext: PureExt>(
                     ty.clone(),
                     PureInst::Binary(vmir::BinOp::sub(&ty), zero_literal(&ty), v),
                 )),
-                typed::UnOp::Cardinality => Err(TranslationError::Unsupported("cardinality")),
+                typed::UnOp::Cardinality => {
+                    let elem_ty = seq_elem(b, &x.ty);
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Len, vec![v])))
+                }
             }
         }
         P::Binary(op, l, r) => lower_binary(b, env, sink, hctx, ty, op, l, r),
@@ -243,11 +247,10 @@ pub(crate) fn lower<Ext: PureExt>(
             })?;
             Ok(sink.emit_pure(ty, PureInst::Ternary(c, t, e)))
         }
-        // A domain function call (pure, heap-free). Domains are monomorphic, so
-        // the application carries no type arguments — only ADT constructors and
-        // projections do.
+        // A domain function call (pure, heap-free). Its type arguments
+        // instantiate the domain parameters its signature mentions, recovered
+        // from the actual argument / result types.
         P::DomainFunctionCall(call) => {
-            let type_args = Vec::new();
             let mut args = Vec::with_capacity(call.args.len());
             for a in &call.args {
                 args.push(lower(b, env, sink, hctx, a)?);
@@ -255,6 +258,7 @@ pub(crate) fn lower<Ext: PureExt>(
             let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
+            let type_args = domain_call_type_args(b, function, &call.args, &ty);
             Ok(sink.emit_pure(
                 ty,
                 PureInst::FunctionCall(vmir::FunctionCall {
@@ -312,6 +316,77 @@ pub(crate) fn lower<Ext: PureExt>(
                 },
             ))
         }
+        P::SeqLit(value) => {
+            let Type::Seq(elem_ty) = &ty else {
+                panic!("sequence literal of type {ty}");
+            };
+            let elem_ty = (**elem_ty).clone();
+            let elems = value
+                .iter()
+                .map(|v| lower(b, env, sink, hctx, v))
+                .collect::<Result<Vec<_>, _>>()?;
+            // As Silicon does: `Seq(a, b, c)` is `Seq(a) ++ (Seq(b) ++ Seq(c))`.
+            let singletons: Vec<Val> = elems
+                .into_iter()
+                .map(|elem| {
+                    let elem_ty = elem_ty.clone();
+                    sink.emit_pure(ty.clone(), PureInst::SeqLit { elem_ty, elem })
+                })
+                .collect();
+            let concat = singletons.into_iter().rev().reduce(|tail, head| {
+                sink.emit_pure(
+                    ty.clone(),
+                    PureInst::seq(elem_ty.clone(), SeqOp::Concat, vec![head, tail]),
+                )
+            });
+            Ok(concat.unwrap_or_else(|| {
+                sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Empty, vec![]))
+            }))
+        }
+        P::SeqIndex(seq, op) => {
+            use typed::SeqIndexOp as I;
+            let elem_ty = seq_elem(b, &seq.ty);
+            let s = lower(b, env, sink, hctx, seq)?;
+            match op {
+                // `s[i]` and `s[i := v]` need `0 <= i < |s|`, checked like a
+                // divisor in the current value heap.
+                I::Index(i) => {
+                    let i = lower(b, env, sink, hctx, i)?;
+                    Ok(sink.with_heap(hctx.value, |sink| {
+                        sink.emit_pure_guarded(ty, PureInst::seq(elem_ty, SeqOp::Index, vec![s, i]))
+                    }))
+                }
+                I::Update(i, v) => {
+                    let i = lower(b, env, sink, hctx, i)?;
+                    let v = lower(b, env, sink, hctx, v)?;
+                    Ok(sink.with_heap(hctx.value, |sink| {
+                        sink.emit_pure_guarded(
+                            ty,
+                            PureInst::seq(elem_ty, SeqOp::Update, vec![s, i, v]),
+                        )
+                    }))
+                }
+                // Total: Viper clamps the bounds.
+                I::Take(n) => {
+                    let n = lower(b, env, sink, hctx, n)?;
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Take, vec![s, n])))
+                }
+                I::Drop(n) => {
+                    let n = lower(b, env, sink, hctx, n)?;
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![s, n])))
+                }
+                // `s[a..z]` is `s[..z][a..]`, the same shape as in a trigger.
+                I::Slice(a, z) => {
+                    let a = lower(b, env, sink, hctx, a)?;
+                    let z = lower(b, env, sink, hctx, z)?;
+                    let taken = sink.emit_pure(
+                        ty.clone(),
+                        PureInst::seq(elem_ty.clone(), SeqOp::Take, vec![s, z]),
+                    );
+                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![taken, a])))
+                }
+            }
+        }
         P::AdtDiscriminator(base, variant) => {
             // `e.is<Ctor>` ⇒ the `Bool` tester `AdtIs{adt, variant}(e)`. The
             // verifier's `is` reduction folds it to a literal from `e`'s variant
@@ -357,6 +432,37 @@ fn dtor_projection(
         .get(&(adt.0, field.0))
         .copied()
         .ok_or_else(|| TranslationError::UnknownIdent(b.interner.resolve(&field.0).to_string()))
+}
+
+/// The type arguments of a call to `function`: the instantiation of the generic
+/// parameters its signature mentions (`Generic(k)` ↦ `k`-th entry), found by
+/// matching the signature against the actual argument types and the result type
+/// `ret`. Empty for a callee with no recorded domain signature (a Silver
+/// function) or a ground signature.
+fn domain_call_type_args<Ext>(
+    b: &TranslationContext<'_>,
+    function: vmir::MemberId,
+    args: &[typed::TypedPureExp<Ext>],
+    ret: &vmir::Type,
+) -> Vec<vmir::Type> {
+    let Some(sig) = b.domain_fn_sigs.get(&function) else {
+        return Vec::new();
+    };
+    let mut bound: Vec<Option<vmir::Type>> = vec![None; sig.ty_params];
+    for (param, arg) in sig.params.iter().zip(args) {
+        assert!(
+            param.match_generics(&b.lower_type(&arg.ty), &mut bound),
+            "typecheck guarantees domain call arguments match the signature"
+        );
+    }
+    assert!(
+        sig.ret.match_generics(ret, &mut bound),
+        "typecheck guarantees a domain call's result matches the signature"
+    );
+    bound
+        .into_iter()
+        .map(|t| t.expect("every generic of a signature occurs in it, so a call binds it"))
+        .collect()
 }
 
 fn adt_type_args(b: &TranslationContext<'_>, ty: &typed::Type) -> Vec<vmir::Type> {
@@ -455,6 +561,11 @@ fn lower_binary<Ext: PureExt>(
     // either one, since the typechecker equates the two
     // (`viper::typecheck`, `Lt | Le | Gt | Ge` imposes `lk.equate_with(rk)`).
     let cmp = &lty;
+    // `l == r`: over sequences, the typed `SeqOp::Eq`.
+    let eq_of = |lv, rv| match &lty {
+        vmir::Type::Seq(elem_ty) => PureInst::seq((**elem_ty).clone(), SeqOp::Eq, vec![lv, rv]),
+        _ => PureInst::Binary(V::Eq, lv, rv),
+    };
     Ok(match op {
         B::Plus => sink.emit_pure(ty.clone(), PureInst::Binary(V::add(&ty), lv, rv)),
         B::Minus => sink.emit_pure(ty.clone(), PureInst::Binary(V::sub(&ty), lv, rv)),
@@ -469,11 +580,11 @@ fn lower_binary<Ext: PureExt>(
         B::Mod => sink.with_heap(hctx.value, |sink| {
             sink.emit_pure_guarded(ty, PureInst::Binary(V::Mod, lv, rv))
         }),
-        B::Eq => sink.emit_pure(ty, PureInst::Binary(V::Eq, lv, rv)),
+        B::Eq => sink.emit_pure(ty, eq_of(lv, rv)),
         B::Lt => sink.emit_pure(ty, PureInst::Binary(V::lt(cmp), lv, rv)),
         // Desugarings:
         B::Neq => {
-            let eq = sink.emit_pure(vmir::Type::Bool, PureInst::Binary(V::Eq, lv, rv));
+            let eq = sink.emit_pure(vmir::Type::Bool, eq_of(lv, rv));
             sink.emit_pure(ty, PureInst::Ternary(eq, FALSE, TRUE))
         }
         B::Le => {
@@ -489,7 +600,22 @@ fn lower_binary<Ext: PureExt>(
         }
         B::And | B::Or | B::Implies => unreachable!("handled above"),
         B::Iff => sink.emit_pure(ty, PureInst::Binary(V::Eq, lv, rv)),
-        B::In | B::Union | B::SetMinus | B::Intersection | B::Subset | B::Concat | B::Range => {
+        // `ty` is the node's own type: `Seq<T>` for `++`, `Seq<Int>` for `[a..b)`,
+        // `Bool` for `in`.
+        B::Concat => sink.emit_pure(
+            ty,
+            PureInst::seq(seq_elem(b, &l.ty), SeqOp::Concat, vec![lv, rv]),
+        ),
+        B::Range => sink.emit_pure(
+            ty,
+            PureInst::seq(vmir::Type::Int, SeqOp::Range, vec![lv, rv]),
+        ),
+        // `x in s` is `Contains(s, x)`: the sequence comes first.
+        B::In => sink.emit_pure(
+            ty,
+            PureInst::seq(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv]),
+        ),
+        B::Union | B::SetMinus | B::Intersection | B::Subset => {
             return Err(TranslationError::Unsupported("collection operator"));
         }
     })
@@ -828,9 +954,11 @@ fn lower_trig_term(
             let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
+            // A Silver function has no `domain_fn_sigs` entry: no type arguments.
+            let type_args = domain_call_type_args(b, function, &call.args, &b.lower_type(&term.ty));
             Ok(vmir::TrigTerm::App {
                 head: vmir::TrigHead::Func(function),
-                type_args: Vec::new(),
+                type_args,
                 args: lower_args(&call.args)?.into(),
             })
         }
@@ -875,6 +1003,57 @@ fn lower_trig_term(
                 args: Box::new([lower_trig_term(b, base, env)?]),
             })
         }
+        // Sequence terms, which typecheck accepts as triggers as Silicon does.
+        // Each lowers to the operand order `PureInst::Seq` uses, so the pattern
+        // matches what a body builds. That includes a literal's shape: right-nested
+        // concatenations of singletons, or `SeqOp::Empty`.
+        P::SeqLit(elems) => {
+            let elem_ty = seq_elem(b, &term.ty);
+            let singletons = lower_args(elems)?
+                .into_iter()
+                .map(|elem| vmir::TrigTerm::App {
+                    head: vmir::TrigHead::SeqLit,
+                    type_args: vec![elem_ty.clone()],
+                    args: Box::new([elem]),
+                });
+            Ok(singletons
+                .rev()
+                .reduce(|tail, head| seq_trig(&elem_ty, vmir::SeqOp::Concat, [head, tail]))
+                .unwrap_or_else(|| seq_trig(&elem_ty, vmir::SeqOp::Empty, [])))
+        }
+        P::SeqIndex(base, op) => {
+            use typed::SeqIndexOp as I;
+            let elem_ty = seq_elem(b, &base.ty);
+            let s = lower_trig_term(b, base, env)?;
+            let t = |e| lower_trig_term(b, e, env);
+            Ok(match op {
+                I::Index(i) => seq_trig(&elem_ty, vmir::SeqOp::Index, [s, t(i)?]),
+                I::Take(n) => seq_trig(&elem_ty, vmir::SeqOp::Take, [s, t(n)?]),
+                I::Drop(n) => seq_trig(&elem_ty, vmir::SeqOp::Drop, [s, t(n)?]),
+                I::Update(i, v) => seq_trig(&elem_ty, vmir::SeqOp::Update, [s, t(i)?, t(v)?]),
+                // `s[a..b]` is `s[..b][a..]`, as in the body.
+                I::Slice(a, z) => {
+                    let taken = seq_trig(&elem_ty, vmir::SeqOp::Take, [s, t(z)?]);
+                    seq_trig(&elem_ty, vmir::SeqOp::Drop, [taken, t(a)?])
+                }
+            })
+        }
+        P::Unary(typed::UnOp::Cardinality, s) => Ok(seq_trig(
+            &seq_elem(b, &s.ty),
+            vmir::SeqOp::Len,
+            [lower_trig_term(b, s, env)?],
+        )),
+        P::Binary(op @ (typed::BinOp::Concat | typed::BinOp::In | typed::BinOp::Range), l, r) => {
+            let (l_ty, r_ty) = (&l.ty, &r.ty);
+            let l = lower_trig_term(b, l, env)?;
+            let r = lower_trig_term(b, r, env)?;
+            Ok(match op {
+                typed::BinOp::Concat => seq_trig(&seq_elem(b, l_ty), vmir::SeqOp::Concat, [l, r]),
+                typed::BinOp::Range => seq_trig(&vmir::Type::Int, vmir::SeqOp::Range, [l, r]),
+                // `x in s` is `Contains(s, x)`: the sequence comes first.
+                _ => seq_trig(&seq_elem(b, r_ty), vmir::SeqOp::Contains, [r, l]),
+            })
+        }
         P::Unary(..)
         | P::Binary(..)
         | P::Ternary { .. }
@@ -882,6 +1061,29 @@ fn lower_trig_term(
         | P::Ext(typed::AxiomExt::Forall(_)) => {
             unreachable!("typecheck rejects non-matchable trigger subterms")
         }
+    }
+}
+
+/// A trigger application of the sequence operation `op`, checking its arity
+/// as `PureInst::seq` does.
+fn seq_trig<const N: usize>(
+    elem_ty: &vmir::Type,
+    op: vmir::SeqOp,
+    args: [vmir::TrigTerm; N],
+) -> vmir::TrigTerm {
+    assert_eq!(N, op.arity(), "`{op:?}` takes {} operands", op.arity());
+    vmir::TrigTerm::App {
+        head: vmir::TrigHead::Seq(op),
+        type_args: vec![elem_ty.clone()],
+        args: Box::new(args),
+    }
+}
+
+/// The element type of an expression that typecheck has given a sequence type.
+fn seq_elem(b: &TranslationContext<'_>, ty: &typed::Type) -> vmir::Type {
+    match ty {
+        typed::Type::Collection(typed::BuiltinCollection::Seq(t)) => b.lower_type(t),
+        other => panic!("a sequence operation on a value of type {other:?}"),
     }
 }
 

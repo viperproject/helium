@@ -1,0 +1,10 @@
+// Seq[Ref]: permission to `xs[0].val` does not cover `xs[1].val` (the two
+// elements may be different references).
+
+field val: Int
+
+method write_second(xs: Seq[Ref])
+  requires |xs| >= 2 && acc(xs[0].val)
+{
+  xs[1].val := 5
+}

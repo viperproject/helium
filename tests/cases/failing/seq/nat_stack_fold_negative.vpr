@@ -1,0 +1,19 @@
+// Seq in a predicate body: pushing a value that may be negative breaks the
+// predicate's "all elements are non-negative" clause, so the fold must fail.
+
+field elems: Seq[Int]
+
+predicate nat_stack(this: Ref) {
+  acc(this.elems) && |this.elems| <= 10 &&
+  forall i: Int :: { this.elems[i] } 0 <= i && i < |this.elems| ==> this.elems[i] >= 0
+}
+
+method push_any(this: Ref, v: Int)
+  requires nat_stack(this)
+  requires unfolding nat_stack(this) in |this.elems| < 10
+  ensures nat_stack(this)
+{
+  unfold nat_stack(this)
+  this.elems := this.elems ++ Seq(v)
+  fold nat_stack(this)
+}

@@ -3,16 +3,19 @@
 //! axioms to a `vmir::Axiom`. One `DomainTranslator` owns the domain
 //! stub *and* every function/axiom slot the domain declares.
 //!
-//! Domains are **monomorphic**: a domain declaring type parameters is rejected
-//! (`GenericDomainUnsupported`). A generic domain's axioms could only be
-//! instantiated off a *type* trigger, which Silver has no syntax to write —
-//! rather than infer one, we refuse. Generics live on ADTs.
+//! Domains may be **generic**. A domain function is generic over only the
+//! domain parameters its signature mentions, renumbered `0..k` in order of first
+//! occurrence, so every call recovers its type arguments from its argument and
+//! result types. An axiom keeps the domain's own numbering; every use of a
+//! parameter in it must be fixable by a trigger match (`check_typed`), since that
+//! is how the verifier instantiates it.
 
-use crate::dhash::HashMap;
+use crate::dhash::{HashMap, HashSet};
 use std::marker::PhantomData;
 
 use lasso::Spur;
 
+use crate::translate::context::DomainFnSig;
 use crate::translate::lower_type;
 use crate::translate::{DeclSlot, Declarator, Definer};
 use crate::translate::{Declared, Metaed, TranslationContext, TranslationError, pure_exp};
@@ -74,8 +77,38 @@ impl<'a> DomainTranslator<'a, Declared> {
         }
     }
 
-    /// No `name_map`-dependent metadata to publish.
-    pub(crate) fn meta(self, _ctx: &mut TranslationContext<'_>) -> DomainTranslator<'a, Metaed> {
+    /// Publish each domain function's lowered signature, so a call site (in any
+    /// body, whatever order `define` runs in) can recover the instantiation.
+    pub(crate) fn meta(self, ctx: &mut TranslationContext<'_>) -> DomainTranslator<'a, Metaed> {
+        let domain_params: Vec<Spur> = self.src.type_params.iter().map(|i| i.0).collect();
+        for df in &self.src.functions {
+            let params: Vec<vmir::Type> = df
+                .params
+                .iter()
+                .map(|p| lower_type(&ctx.name_map, &domain_params, &p.ty))
+                .collect();
+            let ret = lower_type(&ctx.name_map, &domain_params, &df.ret);
+            // Generic over only the parameters the signature mentions,
+            // renumbered `0..k` in order of first occurrence.
+            let mut order = Vec::new();
+            params
+                .iter()
+                .chain([&ret])
+                .for_each(|t| generics_in_order(t, &mut order));
+            let mut compact = vec![vmir::Type::Generic(0); domain_params.len()];
+            for (new, &old) in order.iter().enumerate() {
+                compact[old] = vmir::Type::Generic(new);
+            }
+            let id = ctx.name_map[&df.name.0];
+            ctx.domain_fn_sigs.insert(
+                id,
+                DomainFnSig {
+                    params: params.iter().map(|t| t.subst_generics(&compact)).collect(),
+                    ret: ret.subst_generics(&compact),
+                    ty_params: order.len(),
+                },
+            );
+        }
         DomainTranslator {
             src: self.src,
             silver_name: self.silver_name,
@@ -94,25 +127,26 @@ impl DomainTranslator<'_, Metaed> {
         definer: &mut impl Definer,
     ) -> Result<(), TranslationError> {
         let name_str = ctx.interner.resolve(&self.silver_name).to_string();
-        if !self.src.type_params.is_empty() {
-            return Err(TranslationError::GenericDomainUnsupported(name_str));
-        }
         let name = definer.intern_name(&name_str);
-        definer.define_domain(self.slot, vmir::Domain { name });
+        let domain_params: Vec<Spur> = self.src.type_params.iter().map(|i| i.0).collect();
+        let declared = domain_params.len();
+        definer.define_domain(
+            self.slot,
+            vmir::Domain {
+                name,
+                ty_params: declared.into(),
+            },
+        );
         for (df, fslot) in self.src.functions.iter().zip(self.fn_slots) {
-            let params: Vec<vmir::Type> = df
-                .params
-                .iter()
-                .map(|p| lower_type(&ctx.name_map, &[], &p.ty))
-                .collect();
-            let ret = lower_type(&ctx.name_map, &[], &df.ret);
+            let sig = ctx.domain_fn_sigs[&ctx.name_map[&df.name.0]].clone();
             let fn_name = definer.intern_name(ctx.interner.resolve(&df.name.0));
             definer.define_function(
                 fslot,
                 vmir::Function {
                     name: fn_name,
-                    params: params.into(),
-                    ret,
+                    ty_params: sig.ty_params.into(),
+                    params: sig.params.into(),
+                    ret: sig.ret,
                     body: None,
                     requires: None,
                     ensures: None,
@@ -124,8 +158,17 @@ impl DomainTranslator<'_, Metaed> {
         // `Empty` heap is never read. Axiom bodies are never verified, only
         // assumed.
         let env = HashMap::default();
+        // The domain's parameters are in scope for every axiom body.
+        ctx.decl_generics = domain_params;
+        let mut result = Ok(());
         for (i, (ax, aslot)) in self.src.axioms.iter().zip(self.axiom_slots).enumerate() {
-            let body = pure_exp::lower_axiom_body(ctx, &env, &ax.exp)?;
+            let body = match pure_exp::lower_axiom_body(ctx, &env, &ax.exp) {
+                Ok(body) => body,
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            };
             // The axiom's carried name matches its slot registration: the
             // Silver name when given, the generated `{domain}#axiom{i}` slot
             // name otherwise.
@@ -133,15 +176,88 @@ impl DomainTranslator<'_, Metaed> {
                 Some(n) => ctx.interner.resolve(&n.0).to_string(),
                 None => format!("{name_str}#axiom{i}"),
             };
+            if !check_typed(&body, &HashSet::default()) {
+                result = Err(TranslationError::UntypedGenericAxiom(ax_name));
+                break;
+            }
             let name = definer.intern_name(&ax_name);
             definer.define_axiom(
                 aslot,
                 vmir::Axiom {
                     name: Some(name),
+                    ty_params: declared.into(),
                     body,
                 },
             );
         }
-        Ok(())
+        ctx.decl_generics.clear();
+        result
+    }
+}
+
+/// Append each `Generic(i)` of `ty` not yet in `out`, in order of occurrence.
+fn generics_in_order(ty: &vmir::Type, out: &mut Vec<usize>) {
+    match ty {
+        vmir::Type::Generic(i) if !out.contains(i) => out.push(*i),
+        vmir::Type::Domain(_, args) => args.iter().for_each(|a| generics_in_order(a, out)),
+        vmir::Type::Option(t) | vmir::Type::Seq(t) => generics_in_order(t, out),
+        vmir::Type::Addr { value, .. } => generics_in_order(value, out),
+        _ => {}
+    }
+}
+
+/// Whether every domain parameter `body` mentions is fixed when the verifier
+/// builds it: in `fixed` (what the enclosing `forall` instantiations determine;
+/// nothing at the top of an axiom), or — inside a `forall` — bound by the type
+/// arguments of **each** of its trigger groups, since any one group alone
+/// instantiates it. A binder's type does not fix anything: an e-class carries
+/// no type, only a matched application's payload does.
+fn check_typed(body: &vmir::FunctionBody, fixed: &HashSet<usize>) -> bool {
+    let mut mentioned = HashSet::default();
+    for inst in &body.insts {
+        let vmir::InstKind::Pure(ty, pi) = &inst.kind else {
+            continue;
+        };
+        ty.collect_generics(&mut mentioned);
+        match pi {
+            vmir::PureInst::FunctionCall(fc) => fc
+                .type_args
+                .iter()
+                .for_each(|t| t.collect_generics(&mut mentioned)),
+            vmir::PureInst::AdtCons { type_args, .. }
+            | vmir::PureInst::AdtProj { type_args, .. }
+            | vmir::PureInst::AdtIs { type_args, .. } => type_args
+                .iter()
+                .for_each(|t| t.collect_generics(&mut mentioned)),
+            vmir::PureInst::Seq { elem_ty, .. } => elem_ty.collect_generics(&mut mentioned),
+            vmir::PureInst::Forall(q) => {
+                let mut own = HashSet::default();
+                q.bound.iter().for_each(|t| t.collect_generics(&mut own));
+                let typed_under =
+                    |fix: &HashSet<usize>| own.is_subset(fix) && check_typed(&q.body, fix);
+                let typed = q.triggers.iter().all(|g| {
+                    let mut fix = fixed.clone();
+                    g.terms.iter().for_each(|t| trig_generics(t, &mut fix));
+                    typed_under(&fix)
+                });
+                // `triggers` is never empty (typecheck-enforced).
+                if !typed {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    mentioned.is_subset(fixed)
+}
+
+/// Every parameter the type arguments of a trigger term's applications mention.
+fn trig_generics(term: &vmir::TrigTerm, out: &mut HashSet<usize>) {
+    if let vmir::TrigTerm::App {
+        type_args, args, ..
+    } = term
+    {
+        type_args.iter().for_each(|t| t.collect_generics(out));
+        args.iter().for_each(|a| trig_generics(a, out));
     }
 }

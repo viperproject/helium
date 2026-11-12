@@ -60,12 +60,12 @@ peg::parser! {
             / "Perm" { Type::Real }
             / "Ref" { Type::Ref }
             / "Rational"   { Type::Real }
-            // The collection types are parsed but not implemented: they are kept
+            // The collection types are parsed but not implemented (expect Seq): they are kept
             // as ordinary domain types under their own name so that
             // `scan_unsupported` can name the construct and reject only the
             // declaration that mentions one, instead of failing the whole file
             // with a parse error.
-            / "Seq" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Seq".to_string()), vec![ty]) }
+            / "Seq" _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
             / "Set" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Set".to_string()), vec![ty]) }
             / "Multiset" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Multiset".to_string()), vec![ty]) }
             / "Map" _ "[" _ a:type_() _ "," _ b:type_() _ "]" { Type::Domain(Ident::Raw("Map".to_string()), vec![a, b]) }
@@ -102,31 +102,33 @@ peg::parser! {
 
         /// Expressions
 
-        /// Collection literals. Parsed into an `Unsupported` marker rather than
-        /// a real expression: the construct is named, the declaration around it
-        /// is rejected, and the rest of the file still runs.
+        /// A sequence literal: `Seq[T]()`, `Seq()`, `Seq(e1, ..., en)`, or
+        /// `Seq[T](e1, ..., en)`. `kw` keeps `Sequence(..)` a function call.
+        rule seq_exp() -> ExpKind
+            = kw(<"Seq">) _ ty:("[" _ ty:type_() _ "]" { ty })? _ "(" _ es:(exp() ** comma()) _ ")"
+                { ExpKind::SeqLit(ty, es) }
+
+        /// The other collection literals. Parsed into an `Unsupported` marker
+        /// rather than a real expression: the construct is named, the
+        /// declaration around it is rejected, and the rest of the file still runs.
         rule collection_exp() -> ExpKind
-            = n:$("Seq" / "Set" / "Multiset" / "Map") _ ("[" _ type_() ** comma() _ "]")? _ "(" _ collection_elems() _ ")"
+            = n:$("Set" / "Multiset" / "Map") _ ("[" _ type_() ** comma() _ "]")? _ "(" _ collection_elems() _ ")"
                 { ExpKind::Unsupported(collection_name(n)) }
 
         rule collection_elems() = (e:exp() _ (":=" _ exp())? {}) ** comma()
 
-        /// `|s|` — the cardinality of a collection.
-        rule cardinality_exp() -> ExpKind = "|" _ exp() _ "|" { ExpKind::Unsupported("|s| (cardinality)") }
+        /// `|s|` — the length of a sequence.
+        rule cardinality_exp() -> ExpKind = "|" _ e:exp() _ "|" { ExpKind::UnOp(UnOp::Cardinality, e) }
 
-        /// `[a..b)` — a sequence range.
-        rule range_exp() -> ExpKind = "[" _ exp() _ ".." _ exp() _ ")" { ExpKind::Unsupported("[a..b) (sequence range)") }
+        /// `[a..b)` — the sequence of the integers from `a` (inclusive) to `b`
+        /// (exclusive).
+        rule range_exp() -> ExpKind = "[" _ a:exp() _ ".." _ b:exp() _ ")" { ExpKind::BinOp(BinOp::Range, a, b) }
 
         // rule set_constructor_exp() -> ExpKind
         //     = "Set" _ "[" _ ty:type_() _ "]" _ "(" _ ")" { ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::set(), args: Vec::new() })), Type::Domain(Ident::set(), vec![ty])) }
         //     / "Set" _ "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: Ident::set(), args: es }) }
         //     / "Multiset" _ "[" _ ty:type_() _ "]" _ "(" _ ")"{ ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::multiset(), args: Vec::new() })), Type::Domain(Ident::multiset(), vec![ty])) }
         //     / "Multiset" _ "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: Ident::multiset(), args: es }) }
-        //
-        // rule seq_constructor_exp() -> ExpKind
-        //     = "Seq" _ "[" _ ty:type_() _ "]" _ "(" _ ")" { ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::seq(), args: Vec::new() })), Type::Domain(Ident::seq(), vec![ty])) }
-        //     / "Seq" _ "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: Ident::seq(), args: es }) }
-        //     / "[" _ s:exp() _ ".." _ e:exp() _ ")" { ExpKind::BinOp(BinOp::Range, s, e) }
         //
         // rule map_constructor_exp() -> ExpKind
         //     = "Map" _ "[" _ a:type_() _ "," _ b:type_() _ "]" _ "(" _ ")" { ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::map(), args: Vec::new() })), Type::Domain(Ident::map(), vec![a, b])) }
@@ -172,6 +174,7 @@ peg::parser! {
             / kw(<"forall">) _ args:(formal_arg() ++ comma()) _ "::" _ triggers:(trigger()**_) _ e:exp() { ExpKind::Quantifier(QuantifierKind::Forall, args, triggers, e) }
             / kw(<"exists">) _ args:(formal_arg() ++ comma()) _ "::" _ triggers:(trigger()**_) _ e:exp() { ExpKind::Quantifier(QuantifierKind::Exists, args, triggers, e) }
 
+            / seq_exp()
             / collection_exp()
             / cardinality_exp()
             / range_exp()
@@ -477,7 +480,6 @@ peg::parser! {
 /// (the grammar action only has a borrowed slice of the input).
 fn collection_name(n: &str) -> &'static str {
     match n {
-        "Seq" => "Seq",
         "Set" => "Set",
         "Multiset" => "Multiset",
         _ => "Map",
@@ -497,4 +499,54 @@ fn precedence_test() {
             ))
         ))
     );
+}
+
+#[cfg(test)]
+fn raw_ident(name: &str) -> Exp {
+    Exp::unknown(ExpKind::Ident(Ident::Raw(name.to_string())))
+}
+
+#[cfg(test)]
+fn int_lit(n: i64) -> Exp {
+    Exp::unknown(ExpKind::Const(ConstKind::Int(n.into())))
+}
+
+#[test]
+fn seq_literals() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    assert_eq!(
+        parse("Seq[Int]()"),
+        ExpKind::SeqLit(Some(Type::Int), vec![])
+    );
+    assert_eq!(parse("Seq()"), ExpKind::SeqLit(None, vec![]));
+    assert_eq!(
+        parse("Seq(1, x)"),
+        ExpKind::SeqLit(None, vec![int_lit(1), raw_ident("x")])
+    );
+    assert_eq!(
+        parse("Seq[Seq[Bool]](s)"),
+        ExpKind::SeqLit(Some(Type::Seq(Box::new(Type::Bool))), vec![raw_ident("s")])
+    );
+    // `Seq` must stand alone: a longer name is an ordinary function call.
+    assert!(matches!(parse("Sequence(1)"), ExpKind::Call(_)));
+}
+
+#[test]
+fn seq_length_and_range() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    assert_eq!(
+        parse("|s|"),
+        ExpKind::UnOp(UnOp::Cardinality, raw_ident("s"))
+    );
+    assert_eq!(
+        parse("[0..n)"),
+        ExpKind::BinOp(BinOp::Range, int_lit(0), raw_ident("n"))
+    );
+    // `|s ++ t| == |s| + |t|` keeps each `|..|` around its own operand.
+    let ExpKind::BinOp(BinOp::Eq, lhs, rhs) = parse("|s ++ t| == |s| + |t|") else {
+        panic!("expected an equality");
+    };
+    assert!(matches!(&*lhs.kind, ExpKind::UnOp(UnOp::Cardinality, inner)
+        if matches!(&*inner.kind, ExpKind::BinOp(BinOp::Concat, ..))));
+    assert!(matches!(&*rhs.kind, ExpKind::BinOp(BinOp::Plus, ..)));
 }

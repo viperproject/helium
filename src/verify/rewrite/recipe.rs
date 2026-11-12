@@ -9,14 +9,15 @@ use egg::{EGraph, Id, SearchMatches, Searcher, Subst, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
-use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
+use crate::vmir::{BinOp, Literal, Polarity, SeqOp, Type, Val};
 
 use super::*;
 
 /// A pure step of a prepared body. Mirrors the `PureInst` subset legal in an
 /// axiom, with every callee resolved to its verifier `FuncId` up front (the
-/// applier has no registry access) and its type arguments ground (only ADTs are
-/// generic, and their instantiations are fixed at translation).
+/// applier has no registry access). Its type arguments are ground, except in a
+/// generic axiom's quantifier, where they may mention its `Generic(i)` until an
+/// instantiation substitutes them ([`subst_types`]).
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) enum AxiomPure {
     Binary(BinOp, Val, Val),
@@ -26,6 +27,15 @@ pub(crate) enum AxiomPure {
         func: FuncId,
         type_args: Vec<Type>,
         args: Vec<Val>,
+    },
+    Seq {
+        elem_ty: Type,
+        op: SeqOp,
+        args: Vec<Val>,
+    },
+    SeqLit {
+        elem_ty: Type,
+        elem: Val,
     },
 }
 
@@ -41,6 +51,10 @@ pub(crate) enum AxiomInst {
     Assume(Val),
     Forall {
         recipe: RecipeId,
+        /// The inner node's type payload (see [`Symbolic::Forall`]), in the
+        /// enclosing body's type parameters: open (`Generic(i)`) until the
+        /// enclosing instantiation substitutes it.
+        type_args: Vec<Type>,
         caps: Vec<Val>,
     },
     /// A callee's `f%pre(args)` presence token, materialized alongside the
@@ -56,9 +70,66 @@ pub(crate) enum AxiomInst {
     /// fails does not fire the callee's own axioms.
     Token {
         func: FuncId,
+        /// The call's type arguments: the token is per instantiation, like the
+        /// application it accompanies.
+        type_args: Vec<Type>,
         args: Vec<Val>,
         guards: Vec<(Val, Polarity)>,
     },
+}
+
+/// `insts` with every `Generic(i)` in a type argument replaced by `tys[i]`: how
+/// a generic quantifier's body is instantiated at the types its match fixed.
+pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
+    let subst = |ts: &[Type]| ts.iter().map(|t| t.subst_generics(tys)).collect();
+    insts
+        .iter()
+        .map(|inst| match inst {
+            AxiomInst::Val(AxiomPure::App {
+                func,
+                type_args,
+                args,
+            }) => AxiomInst::Val(AxiomPure::App {
+                func: *func,
+                type_args: subst(type_args),
+                args: args.clone(),
+            }),
+            AxiomInst::Val(AxiomPure::Seq { elem_ty, op, args }) => {
+                AxiomInst::Val(AxiomPure::Seq {
+                    elem_ty: elem_ty.subst_generics(tys),
+                    op: *op,
+                    args: args.clone(),
+                })
+            }
+            AxiomInst::Val(AxiomPure::SeqLit { elem_ty, elem }) => {
+                AxiomInst::Val(AxiomPure::SeqLit {
+                    elem_ty: elem_ty.subst_generics(tys),
+                    elem: elem.clone(),
+                })
+            }
+            AxiomInst::Forall {
+                recipe,
+                type_args,
+                caps,
+            } => AxiomInst::Forall {
+                recipe: *recipe,
+                type_args: subst(type_args),
+                caps: caps.clone(),
+            },
+            AxiomInst::Token {
+                func,
+                type_args,
+                args,
+                guards,
+            } => AxiomInst::Token {
+                func: *func,
+                type_args: subst(type_args),
+                args: args.clone(),
+                guards: guards.clone(),
+            },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// Searcher: any e-class containing an application of the trigger function
@@ -292,6 +363,23 @@ pub(super) fn build_instance_vals_impl(
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
                     }
+                    AxiomPure::Seq { elem_ty, op, args } => {
+                        let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
+                        let id =
+                            egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args.clone()));
+                        // A sequence equality shares its class with the untyped one.
+                        if *op == SeqOp::Eq {
+                            let eq = egraph.add(Symbolic::Binary(BinOp::Eq, [args[0], args[1]]));
+                            if egraph.union(id, eq) {
+                                changed.push(egraph.find(id));
+                            }
+                        }
+                        id
+                    }
+                    AxiomPure::SeqLit { elem_ty, elem } => {
+                        let elem = get(egraph, &vals, elem);
+                        egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), elem))
+                    }
                 };
                 vals.push(id);
             }
@@ -302,12 +390,22 @@ pub(super) fn build_instance_vals_impl(
                     changed.push(egraph.find(id));
                 }
             }
-            AxiomInst::Forall { recipe, caps } => {
+            AxiomInst::Forall {
+                recipe,
+                type_args,
+                caps,
+            } => {
                 let caps: Box<[Id]> = caps.iter().map(|v| get(egraph, &vals, v)).collect();
-                let id = egraph.add(Symbolic::Forall(*recipe, caps));
+                let tys: Box<[Type]> = type_args.iter().cloned().collect();
+                let id = egraph.add(Symbolic::Forall(*recipe, tys, caps));
                 vals.push(id);
             }
-            AxiomInst::Token { func, args, guards } => {
+            AxiomInst::Token {
+                func,
+                type_args,
+                args,
+                guards,
+            } => {
                 // A nested callee's `g%pre(gargs)` (Silicon's
                 // `bodyPreconditionPropagation`). Adding the node is what lets `g`
                 // materialize when *this* body is unfolded; releasing its truth is
@@ -318,7 +416,8 @@ pub(super) fn build_instance_vals_impl(
                 // becomes true outright, which is the old presence⇒release
                 // behavior.
                 let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                let tok = egraph.add(Symbolic::FuncApp(*func, Box::new([]), args));
+                let tys: Box<[Type]> = type_args.iter().cloned().collect();
+                let tok = egraph.add(Symbolic::FuncApp(*func, tys, args));
                 // Body-internal guards inside the enclosing gate, matching the
                 // function case's `outer ==> (b ==> g%pre(..))`.
                 let guarded = fold_guards(egraph, &vals, guards, tok);

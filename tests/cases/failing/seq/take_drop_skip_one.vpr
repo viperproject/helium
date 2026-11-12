@@ -1,0 +1,6 @@
+// Seq: `s[..n] ++ s[n + 1..]` drops `s[n]`, so it is not `s`.
+method take_drop_skip_one(s: Seq[Int], n: Int)
+  requires 0 <= n && n < |s|
+{
+  assert s[..n] ++ s[n + 1..] == s
+}

@@ -1,0 +1,43 @@
+// KNOWN LIMITATION: `ys[0].val := 1` with `ys = xs[0 := y]` looks the address
+// up before the update axiom has made `ys[0] == y` (an `assert ys[0] == y`
+// first makes it verify).
+// Seq[Ref]: permissions to fields of sequence elements, held element by
+// element (no quantified permissions). Holding full permission to two
+// elements' fields forces those elements to be distinct.
+
+field val: Int
+
+method write_first(xs: Seq[Ref])
+  requires |xs| > 0 && acc(xs[0].val)
+  ensures acc(xs[0].val) && xs[0].val == 5
+{
+  xs[0].val := 5
+}
+
+method distinct_by_permission(xs: Seq[Ref])
+  requires |xs| >= 2
+  requires acc(xs[0].val) && acc(xs[1].val)
+  ensures acc(xs[0].val) && acc(xs[1].val)
+  ensures xs[0] != xs[1]
+{
+}
+
+method swap_vals(xs: Seq[Ref])
+  requires |xs| >= 2
+  requires acc(xs[0].val) && acc(xs[1].val)
+  ensures acc(xs[0].val) && acc(xs[1].val)
+  ensures xs[0].val == old(xs[1].val) && xs[1].val == old(xs[0].val)
+{
+  var t: Int := xs[0].val
+  xs[0].val := xs[1].val
+  xs[1].val := t
+}
+
+method update_ref_seq(xs: Seq[Ref], y: Ref)
+  requires |xs| > 0 && acc(y.val)
+  ensures acc(y.val)
+{
+  var ys: Seq[Ref] := xs[0 := y]
+  ys[0].val := 1
+  assert y.val == 1
+}

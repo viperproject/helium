@@ -9,17 +9,17 @@ use crate::viper::{
     interner::Interner,
     typed::{
         self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MethodBodyExt, MethodEnsuresExt,
-        PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind,
-        Type, TypedIdent, TypedPureExp, UnOp,
+        PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp, SpatialExp,
+        SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
     },
 };
 
 mod error;
 mod lattice;
 
+use crate::viper::typed::BuiltinCollection;
 pub use error::TypeError;
 use lattice::{ViperTcType, type_to_tc};
-
 // ==========================================
 // 3. Context types
 // ==========================================
@@ -76,7 +76,8 @@ fn check_type(
                 Some(GlobalSignature::Domain(d)) => d.type_arity,
                 Some(GlobalSignature::Adt(a)) => a.type_arity,
                 // The collection types: parsed so `scan_unsupported` can name
-                // them, rejected there.
+                // them, rejected there. A well-formed `Seq[T]` is `P::Seq`; `Seq`
+                // only lands here with the wrong number of type arguments.
                 _ => match interner.resolve(&name) {
                     "Seq" | "Set" | "Multiset" => 1,
                     "Map" => 2,
@@ -93,6 +94,7 @@ fn check_type(
             args.iter()
                 .try_for_each(|a| check_type(a, globals, interner, is_param))
         }
+        P::Seq(ty) => check_type(ty, globals, interner, is_param),
     }
 }
 
@@ -216,7 +218,9 @@ impl<'g> LocalEnv<'g> {
             }
         }
         let table = c.tc.type_check().map_err(TypeError::from)?;
-        LoweringCtx::new(self, &table).lower_pure::<typed::AxiomExt>(exp)
+        LoweringCtx::new(self, &table)
+            .with_rigid(rigid)
+            .lower_pure::<typed::AxiomExt>(exp)
     }
 
     /// Typecheck a spatial (assertion) expression and lower it to `typed`.
@@ -303,11 +307,23 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 struct LoweringCtx<'a, 'g> {
     env: &'a LocalEnv<'g>,
     table: &'a TypeTable,
+    /// Type parameters in scope as rigid types (a domain's, while lowering its
+    /// axioms): a bare binder type naming one lowers to `Generic`.
+    rigid: Vec<Spur>,
 }
 
 impl<'a, 'g> LoweringCtx<'a, 'g> {
     fn new(env: &'a LocalEnv<'g>, table: &'a TypeTable) -> Self {
-        Self { env, table }
+        Self {
+            env,
+            table,
+            rigid: Vec::new(),
+        }
+    }
+
+    fn with_rigid(mut self, rigid: &[Spur]) -> Self {
+        self.rigid = rigid.to_vec();
+        self
     }
 
     fn resolved_ty(&self, exp: &viper::Exp) -> Result<Type, TypeError> {
@@ -599,6 +615,13 @@ fn collect_generics(ty: &Type, acc: &mut Vec<Spur>) {
                 collect_generics(a, acc);
             }
         }
+        Type::Collection(BuiltinCollection::Seq(ty)) => {
+            if let Type::Generic(generic) = **ty
+                && !acc.contains(&generic.0)
+            {
+                acc.push(generic.0);
+            }
+        }
         _ => {}
     }
 }
@@ -679,7 +702,10 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
             ExpKind::Ascribe(inner, ascribed_ty) => {
                 self.check_binder_type(ascribed_ty)?;
-                let target = Type::from(&*ascribed_ty);
+                // As for a binder: a type parameter in scope (a domain axiom's
+                // `T`) is that parameter, not a type of the same name.
+                let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+                let target = type_with_generics(ascribed_ty, &rigid);
                 let inner_key = self.constrain_pure(inner)?;
                 self.impose_type(inner_key, &target, &HashMap::default())?;
                 self.impose_type(key, &target, &HashMap::default())?;
@@ -792,9 +818,10 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                         ));
                     }
                     self.check_binder_type(&bv.ty)?;
-                    let ty = Type::from(&bv.ty);
+                    let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+                    let ty = type_with_generics(&bv.ty, &rigid);
                     let bk = self.tc.new_term_key();
-                    self.tc.impose(bk.concretizes_explicit(type_to_tc(&ty)))?;
+                    self.impose_type(bk, &ty, &HashMap::default())?;
                     let prev = self.let_bindings.insert(bv.idn.0.id(), bk);
                     prev_bindings.push((bv.idn.0.id(), prev));
                 }
@@ -823,14 +850,66 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
             }
 
-            _ => {
+            ExpKind::SeqLit(ty, elems) => {
+                self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
+                let elem = self.tc.get_child_key(key, 0)?;
+                if let Some(t) = ty {
+                    self.check_binder_type(t)?;
+                    let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+                    let written = type_with_generics(t, &rigid);
+                    self.impose_type(elem, &written, &HashMap::default())?;
+                }
+                for e in elems {
+                    let k = self.constrain_pure(e)?;
+                    self.tc.impose(k.equate_with(elem))?;
+                }
+            }
+            ExpKind::Index(base, op) => {
+                let base_key = self.constrain_pure(base)?;
+                self.tc
+                    .impose(base_key.concretizes_explicit(ViperTcType::Seq))?;
+                let elem = self.tc.get_child_key(base_key, 0)?;
+                let int = |this: &mut Self, e: &mut viper::Exp| -> Result<(), TypeError> {
+                    let k = this.constrain_pure(e)?;
+                    this.tc.impose(k.concretizes_explicit(ViperTcType::Int))?;
+                    Ok(())
+                };
+                match op {
+                    // `s[i]` is an element.
+                    viper::IndexOp::Index(i) => {
+                        int(self, i)?;
+                        self.tc.impose(key.equate_with(elem))?;
+                    }
+                    // Take, drop and slice keep the sequence type.
+                    viper::IndexOp::UpperBound(n) | viper::IndexOp::LowerBound(n) => {
+                        int(self, n)?;
+                        self.tc.impose(key.equate_with(base_key))?;
+                    }
+                    viper::IndexOp::Range(a, b) => {
+                        int(self, a)?;
+                        int(self, b)?;
+                        self.tc.impose(key.equate_with(base_key))?;
+                    }
+                    // `s[i := v]`: `v` is an element, the result a sequence.
+                    viper::IndexOp::Assign(i, v) => {
+                        int(self, i)?;
+                        let v_key = self.constrain_pure(v)?;
+                        self.tc.impose(v_key.equate_with(elem))?;
+                        self.tc.impose(key.equate_with(base_key))?;
+                    }
+                }
+            }
+            ExpKind::Acc(_)
+            | ExpKind::ForPerm(_, _, _)
+            | ExpKind::MagicWand(_, _)
+            | ExpKind::HeapUpdate(_, _, _)
+            | ExpKind::Unsupported(_) => {
                 return Err(TypeError::Other(format!(
                     "unsupported pure expression: {:?}",
                     exp.kind
                 )));
             }
         }
-
         Ok(key)
     }
 
@@ -929,6 +1008,12 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Real))?;
             }
+            viper::UnOp::Cardinality => {
+                let inner_key = self.constrain_pure(inner)?;
+                self.tc
+                    .impose(inner_key.concretizes_explicit(ViperTcType::Seq))?;
+                self.tc.impose(key.concretizes_explicit(ViperTcType::Int))?;
+            }
         }
         Ok(())
     }
@@ -987,6 +1072,29 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Numeric))?;
             }
+            // `a ++ b`: both sides and the result are one sequence type.
+            SBinOp::Concat => {
+                self.tc.impose(lk.concretizes_explicit(ViperTcType::Seq))?;
+                self.tc.impose(rk.equate_with(lk))?;
+                self.tc.impose(key.equate_with(lk))?;
+            }
+            // `x in s`: `x` has the element type of `s`.
+            SBinOp::In => {
+                self.tc.impose(rk.concretizes_explicit(ViperTcType::Seq))?;
+                let elem = self.tc.get_child_key(rk, 0)?;
+                self.tc.impose(lk.equate_with(elem))?;
+                self.tc
+                    .impose(key.concretizes_explicit(ViperTcType::Bool))?;
+            }
+            // `[a..b)`: a `Seq[Int]`.
+            SBinOp::Range => {
+                self.tc.impose(lk.concretizes_explicit(ViperTcType::Int))?;
+                self.tc.impose(rk.concretizes_explicit(ViperTcType::Int))?;
+                self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
+                let elem = self.tc.get_child_key(key, 0)?;
+                self.tc
+                    .impose(elem.concretizes_explicit(ViperTcType::Int))?;
+            }
             _ => {
                 return Err(TypeError::Other(format!(
                     "unsupported binary operator: {op:?}"
@@ -1039,8 +1147,12 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     self.impose_type(child, arg, subst)?;
                 }
             }
-            // Built-in collections are not yet modelled in the lattice; leave
-            // the key unconstrained (Top) as before.
+            // `Seq[T]`: the key is a `Seq`, its one child the element type.
+            Type::Collection(BuiltinCollection::Seq(elem)) => {
+                self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
+                let child = self.tc.get_child_key(key, 0)?;
+                self.impose_type(child, elem, subst)?;
+            }
             Type::Collection(_) => {}
         }
         Ok(())
@@ -1350,7 +1462,7 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     .iter()
                     .map(|bv| TypedIdent {
                         name: Ident(bv.idn.0.id()),
-                        ty: Type::from(&bv.ty),
+                        ty: type_with_generics(&bv.ty, &self.rigid),
                     })
                     .collect();
                 let lowered_triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>> = triggers
@@ -1370,6 +1482,30 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                 }
                 Ext::build_forall(*kind, bound, lowered_triggers, lowered_body)
             }
+
+            ExpKind::Index(base, op) => {
+                let base = self.lower_pure::<Ext>(base)?;
+                let op = match op {
+                    viper::IndexOp::Index(i) => SeqIndexOp::Index(self.lower_pure::<Ext>(i)?),
+                    viper::IndexOp::UpperBound(n) => SeqIndexOp::Take(self.lower_pure::<Ext>(n)?),
+                    viper::IndexOp::LowerBound(n) => SeqIndexOp::Drop(self.lower_pure::<Ext>(n)?),
+                    viper::IndexOp::Range(a, b) => {
+                        SeqIndexOp::Slice(self.lower_pure::<Ext>(a)?, self.lower_pure::<Ext>(b)?)
+                    }
+                    viper::IndexOp::Assign(i, v) => {
+                        SeqIndexOp::Update(self.lower_pure::<Ext>(i)?, self.lower_pure::<Ext>(v)?)
+                    }
+                };
+                Ok(PureExpKind::SeqIndex(base, op))
+            }
+            // The element type is not stored: it is the resolved `Seq[T]` of
+            // this node, which `lower_pure` attaches.
+            ExpKind::SeqLit(_, elems) => Ok(PureExpKind::SeqLit(
+                elems
+                    .iter()
+                    .map(|e| self.lower_pure::<Ext>(e))
+                    .collect::<Result<_, _>>()?,
+            )),
 
             // Everything that has no pure lowering. `scan_declaration` names
             // most of these before typechecking runs; this is the backstop, and
@@ -1396,6 +1532,10 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                 let resource = self.lower_resource::<Ext>(inner)?;
                 Ok(PureExpKind::Ext(Ext::lower_perm(resource)?))
             }
+            viper::UnOp::Cardinality => Ok(PureExpKind::Unary(
+                UnOp::Cardinality,
+                self.lower_pure::<Ext>(inner)?,
+            )),
         }
     }
 
@@ -1593,7 +1733,15 @@ fn lower_bin_op(op: &viper::BinOp) -> BinOp {
         S::Div => BinOp::Div,
         S::IntDiv => BinOp::IntDiv,
         S::Mod => BinOp::Mod,
-        other => panic!("unsupported binary operator: {other:?}"),
+        S::Concat => BinOp::Concat,
+        S::In => BinOp::In,
+        S::Range => BinOp::Range,
+        S::Union => BinOp::Union,
+        S::SetMinus => BinOp::SetMinus,
+        S::Intersection => BinOp::Intersection,
+        S::Subset => BinOp::Subset,
+        // No pure lowering: `constrain_binop` rejects it before lowering runs.
+        S::InhaleExhale => unreachable!("`[A, B]` is rejected by constrain_binop"),
     }
 }
 
@@ -1960,6 +2108,10 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
                 .map(|a| type_with_generics(a, type_params))
                 .collect(),
         ),
+        P::Seq(t) => Type::Collection(BuiltinCollection::Seq(Box::new(type_with_generics(
+            t,
+            type_params,
+        )))),
     }
 }
 
@@ -2241,7 +2393,27 @@ fn is_trigger_application(term: &TypedPureExp<typed::AxiomExt>) -> bool {
             | P::AdtDestructor(..)
             | P::AdtDiscriminator(..)
             | P::Ext(typed::AxiomExt::FunctionCall(_))
-    )
+    ) || seq_trigger_operands(term).is_some()
+}
+
+/// The operands of a sequence operation that Silicon accepts as a trigger
+/// term (`s[i]`, `|s|`, `s ++ t`, `x in s`, `Seq(..)`, take/drop/slice/update,
+/// `[a..b)`), or `None` if `term` is not one.
+fn seq_trigger_operands(
+    term: &TypedPureExp<typed::AxiomExt>,
+) -> Option<Vec<&TypedPureExp<typed::AxiomExt>>> {
+    use PureExpKind as P;
+    match term.exp.as_ref() {
+        P::SeqLit(elems) => Some(elems.iter().collect()),
+        P::SeqIndex(base, op) => {
+            let mut v = vec![base];
+            v.extend(op.operands());
+            Some(v)
+        }
+        P::Unary(UnOp::Cardinality, e) => Some(vec![e]),
+        P::Binary(BinOp::Concat | BinOp::In | BinOp::Range, l, r) => Some(vec![l, r]),
+        _ => None,
+    }
 }
 
 /// Walk a trigger term, rejecting any subterm that is not a variable, a literal
@@ -2258,6 +2430,12 @@ fn check_trigger_subterms(
             Ok(())
         }
         P::Const(_) => Ok(()),
+        _ if let Some(operands) = seq_trigger_operands(term) => {
+            for e in operands {
+                check_trigger_subterms(e, seen)?;
+            }
+            Ok(())
+        }
         P::AdtDestructor(e, _) | P::AdtDiscriminator(e, _) => check_trigger_subterms(e, seen),
         P::DomainFunctionCall(call)
         | P::AdtConstructor(call)
@@ -2271,6 +2449,8 @@ fn check_trigger_subterms(
         | P::Binary(..)
         | P::Ternary { .. }
         | P::LetIn { .. }
+        | P::SeqLit(_)
+        | P::SeqIndex(..)
         | P::Ext(typed::AxiomExt::Forall(_)) => Err(TypeError::TriggerBadSubterm),
     }
 }
@@ -2309,6 +2489,15 @@ fn check_axiom_function_calls(
             check_axiom_function_calls(exp, fns_with_precond, interner)
         }
         P::DomainFunctionCall(call) | P::AdtConstructor(call) => check_call(call),
+        P::SeqLit(elems) => elems
+            .iter()
+            .try_for_each(|e| check_axiom_function_calls(e, fns_with_precond, interner)),
+        P::SeqIndex(base, op) => {
+            check_axiom_function_calls(base, fns_with_precond, interner)?;
+            op.operands()
+                .into_iter()
+                .try_for_each(|e| check_axiom_function_calls(e, fns_with_precond, interner))
+        }
         P::Ext(typed::AxiomExt::FunctionCall(call)) => {
             if fns_with_precond.contains(&call.name.0) {
                 return Err(TypeError::PreconditionedFunctionInAxiom(
@@ -3440,6 +3629,23 @@ function TryFromBytes_impl(Self$0_trait: Type): Bool
         ] {
             assert_rejected(decl, |e| matches!(e, TypeError::WrongTypeArgCount { .. }));
         }
+    }
+
+    #[test]
+    fn seq_with_wrong_type_argument_count_rejected() {
+        for decl in ["method m(x: Seq)", "method m(x: Seq[Int, Int])"] {
+            assert_rejected(
+                decl,
+                |e| matches!(e, TypeError::WrongTypeArgCount { name, expected: 1, .. } if name == "Seq"),
+            );
+        }
+    }
+
+    #[test]
+    fn uninferable_empty_seq_rejected() {
+        assert_rejected("method m() { assert |Seq()| == 0 }", |e| {
+            matches!(e, TypeError::CannotInferType)
+        });
     }
 
     #[test]

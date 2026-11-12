@@ -48,6 +48,8 @@ pub(crate) fn infer_type(
             }
             // A quantifier is a proposition.
             Symbolic::Forall(..) => Some(Type::Bool),
+            Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
+            Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
         };
         if t.is_some() {
             result = t;

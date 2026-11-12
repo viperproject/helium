@@ -1,0 +1,4 @@
+// Seq: `[a..b)` with `b < a` is empty, so `|[a..b)| == b - a` needs `a <= b`.
+method range_length_reversed(a: Int, b: Int) {
+  assert |[a..b)| == b - a
+}

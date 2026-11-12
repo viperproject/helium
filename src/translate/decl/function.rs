@@ -78,6 +78,7 @@ impl<'a> FunctionTranslator<'a, Declared> {
                 requires,
                 ensures,
                 heap_dep,
+                rets: Vec::new(),
             },
         );
 
@@ -197,6 +198,7 @@ impl FunctionTranslator<'_, Metaed> {
                     definer.define_function(
                         slot,
                         vmir::Function {
+                            ty_params: 0.into(),
                             name,
                             params: params.clone().into(),
                             ret: vmir::Type::Bool,
@@ -287,6 +289,7 @@ impl FunctionTranslator<'_, Metaed> {
             definer.define_function(
                 slot,
                 vmir::Function {
+                    ty_params: 0.into(),
                     name,
                     params: ens_params.into(),
                     ret: vmir::Type::Bool,
@@ -361,6 +364,7 @@ impl FunctionTranslator<'_, Metaed> {
         definer.define_function(
             fn_slot,
             vmir::Function {
+                ty_params: 0.into(),
                 name,
                 params: fn_params.into(),
                 ret,

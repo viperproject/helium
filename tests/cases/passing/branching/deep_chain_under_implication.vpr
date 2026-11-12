@@ -1,0 +1,14 @@
+// An assertion whose own implication (`n == 0 ==> ...`) enables a multi-pattern
+// chain 15 instances deep: only a graph that assumes `n == 0` builds it, so the
+// rungs that decompose the implication must see its full depth.
+domain G {
+  function g(i: Int): Bool
+  function h(i: Int): Bool
+  axiom step { forall i: Int :: { g(i), h(i) } (g(i) == g(i + 1)) && (h(i) == h(i + 1)) }
+}
+
+method m(n: Int)
+  requires g(n) && h(0)
+{
+  assert n == 0 ==> g(15)
+}

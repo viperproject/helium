@@ -1,0 +1,6 @@
+// Seq: `[a..b)` is half-open; `b` is not in it.
+method range_includes_upper_bound(a: Int, b: Int)
+  requires a < b
+{
+  assert b in [a..b)
+}

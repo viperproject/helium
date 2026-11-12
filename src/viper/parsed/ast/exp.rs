@@ -80,10 +80,15 @@ pub enum ExpKind {
     /// e1 --* e2
     MagicWand(Exp, Exp),
 
+    /// A sequence literal: `Seq[T]()`, `Seq()`, `Seq(e1, ..., en)` or
+    /// `Seq[T](e1, ..., en)`. The element type is `Some` only when written;
+    /// an empty literal without one gets its type from inference.
+    SeqLit(Option<Type>, Vec<Exp>),
+
     /// A construct the verifier does not implement, parsed only so that the
     /// declaration containing it can be reported as unsupported instead of
     /// taking the whole file down with a parse error. Carries the construct's
-    /// name (`Seq`, `lhs`, `folding`, ...). Never lowered: typecheck turns it
+    /// name (`Set`, `lhs`, `folding`, ...). Never lowered: typecheck turns it
     /// into `TypeError::Unsupported`.
     Unsupported(&'static str),
 }
@@ -177,6 +182,8 @@ pub enum UnOp {
     Not,
     Neg,
     Perm,
+    /// `|e|`: the length of a sequence (the cardinality of a collection).
+    Cardinality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

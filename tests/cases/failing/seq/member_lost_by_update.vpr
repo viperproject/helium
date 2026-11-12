@@ -1,0 +1,6 @@
+// Seq: overwriting index `i` can remove the only occurrence of `s[i]`.
+method member_lost_by_update(s: Seq[Int], i: Int, v: Int)
+  requires 0 <= i && i < |s|
+{
+  assert s[i] in s[i := v]
+}

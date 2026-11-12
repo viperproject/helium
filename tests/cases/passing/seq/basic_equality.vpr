@@ -1,0 +1,43 @@
+// What sequences support without their axioms: every operation is an
+// uninterpreted term, so equal operands give equal results (congruence), and a
+// sequence round-trips through the heap and through method contracts.
+field elems: Seq[Int]
+
+method congruence(s: Seq[Int], t: Seq[Int], i: Int)
+  requires s == t
+  requires 0 <= i && i < |s|
+{
+  assert |s| == |t|
+  assert s ++ Seq(1) == t ++ Seq(1)
+  assert s[i] == t[i]
+  assert s[..i] == t[..i]
+  assert s[i..] == t[i..]
+  assert (i in s) == (i in t)
+}
+
+method literals(x: Int)
+{
+  assert Seq(x, 2) == Seq(x, 2)
+  assert Seq[Int]() == Seq[Int]()
+  assert [0..x) == [0..x)
+}
+
+method heap(r: Ref, s: Seq[Int])
+  requires acc(r.elems)
+  ensures acc(r.elems) && r.elems == s
+{
+  r.elems := s
+}
+
+method caller(r: Ref, s: Seq[Int])
+  requires acc(r.elems)
+{
+  heap(r, s)
+  assert r.elems == s
+}
+
+method generic_elements(s: Seq[Seq[Bool]], t: Seq[Seq[Bool]])
+  requires s == t
+{
+  assert s ++ t == t ++ s
+}

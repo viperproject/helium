@@ -1,0 +1,6 @@
+// Seq: index `|s| + i` of `s ++ t` is in `t`, not `s`.
+method concat_index_wrong_side(s: Seq[Int], t: Seq[Int], i: Int)
+  requires 0 <= i && i < |t| && i < |s|
+{
+  assert (s ++ t)[|s| + i] == s[i]
+}

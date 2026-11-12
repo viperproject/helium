@@ -311,6 +311,7 @@ walk_enum!(
     Quantifier(kind, vars, triggers, e),
     ForPerm(vars, p, e),
     MagicWand(l, r),
+    SeqLit(t, es),
     Unsupported(what)
 );
 walk_enum!(
@@ -396,7 +397,15 @@ walk_enum!(
     Range,
     InhaleExhale
 );
-walk_enum!(UnOp, walk_un_op, walk_mut_un_op, Not, Neg, Perm);
+walk_enum!(
+    UnOp,
+    walk_un_op,
+    walk_mut_un_op,
+    Not,
+    Neg,
+    Perm,
+    Cardinality
+);
 walk_struct!(Trigger, walk_trigger, walk_mut_trigger, exp);
 walk_enum!(
     ResAccess,
@@ -509,7 +518,8 @@ walk_enum!(
     Real,
     Ref,
     Generic(g),
-    Domain(i, ts)
+    Domain(i, ts),
+    Seq(t)
 );
 walk_struct!(
     Predicate,

@@ -1,0 +1,28 @@
+// Seq (verification-heavy): recursive binary search that recurses into the
+// WRONG half when `xs[mid] < key` (the key, if present, is to the right of
+// mid, but the search goes left). The "not found" postcondition must fail.
+
+function sorted(xs: Seq[Int]): Bool
+{
+  forall i: Int, j: Int :: { xs[i], xs[j] } 0 <= i && i < j && j < |xs| ==> xs[i] <= xs[j]
+}
+
+method bsearch(xs: Seq[Int], key: Int, lo: Int, hi: Int) returns (index: Int)
+  requires sorted(xs)
+  requires 0 <= lo && lo <= hi && hi <= |xs|
+  ensures index == -1 || (lo <= index && index < hi && xs[index] == key)
+  ensures index == -1 ==> forall i: Int :: { xs[i] } lo <= i && i < hi ==> xs[i] != key
+{
+  if (lo == hi) {
+    index := -1
+  } else {
+    var mid: Int := lo + (hi - lo) \ 2
+    if (xs[mid] == key) {
+      index := mid
+    } elseif (xs[mid] < key) {
+      index := bsearch(xs, key, lo, mid)
+    } else {
+      index := bsearch(xs, key, lo, mid)
+    }
+  }
+}

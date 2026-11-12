@@ -1,9 +1,8 @@
-use egg::*;
-use std::fmt::{Display, Formatter};
-
-use crate::vmir::BinOp;
 use crate::vmir::Literal;
 use crate::vmir::Type;
+use crate::vmir::{BinOp, SeqOp};
+use egg::*;
+use std::fmt::{Display, Formatter};
 
 /// A verifier-allocated function-application id in the e-graph. **Disconnected
 /// from VMIR `MemberId`**: the verifier assigns these (see `verify::func_registry`) — a
@@ -57,7 +56,20 @@ pub enum Symbolic {
     /// Instantiation adds the guarded clause
     /// `Ite(forall, body[caps, σ], true) == true`, so the instance is released only
     /// once this node merges `true`.
-    Forall(RecipeId, Box<[Id]>),
+    ///
+    /// The type payload instantiates the recipe's type parameters (a generic
+    /// axiom's `Generic(i)`), one entry per parameter: entry `i` is either ground
+    /// (fixed by an enclosing instantiation) or `Generic(i)` itself (still open, to
+    /// be fixed by the type arguments of the trigger terms an instantiation
+    /// matches). Empty for a ground quantifier. Like `FuncApp`'s, it is payload,
+    /// not a child, and not in the discriminant.
+    Forall(RecipeId, Box<[Type]>, Box<[Id]>),
+
+    Seq(Box<Type>, SeqOp, Box<[Id]>),
+
+    /// The singleton sequence of one element, of this element type. A longer
+    /// literal is a concatenation of these (`PureInst::SeqLit`).
+    SeqLit(Box<Type>, Id),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -79,6 +91,8 @@ pub enum Discriminant {
     /// bought nothing — and it made the searcher enumerate every recipe in the
     /// program, including the quantifiers of methods this unit will never touch.
     Forall,
+    Seq(SeqOp),
+    SeqLit,
 }
 
 impl Language for Symbolic {
@@ -95,6 +109,8 @@ impl Language for Symbolic {
             S::FuncApp(id, _, _) => D::FuncApp(*id),
             S::RealCast(_) => D::RealCast,
             S::Forall(..) => D::Forall,
+            S::Seq(_, op, _) => D::Seq(*op),
+            S::SeqLit(..) => D::SeqLit,
         }
     }
 
@@ -112,7 +128,9 @@ impl Language for Symbolic {
             (FuncApp(id1, _, args1), FuncApp(id2, _, args2)) => {
                 id1 == id2 && args1.len() == args2.len()
             }
-            (Forall(r1, caps1), Forall(r2, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
+            (Forall(r1, _, caps1), Forall(r2, _, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
+            (Seq(_, op1, _), Seq(_, op2, _)) => op1 == op2,
+            (SeqLit(..), SeqLit(..)) => true,
             _ => false,
         }
     }
@@ -126,8 +144,10 @@ impl Language for Symbolic {
             RealCast(id) => std::slice::from_ref(id),
             // Type args are in the payload, not children — only value args.
             FuncApp(_, _, ids) => ids,
-            // The recipe is payload; the captures are the children.
-            Forall(_, caps) => caps,
+            // The recipe and types are payload; the captures are the children.
+            Forall(_, _, caps) => caps,
+            Seq(_, _, ids) => ids,
+            SeqLit(_, id) => std::slice::from_ref(id),
         }
     }
 
@@ -139,7 +159,9 @@ impl Language for Symbolic {
             Ite(ids) => ids,
             RealCast(id) => std::slice::from_mut(id),
             FuncApp(_, _, ids) => ids,
-            Forall(_, caps) => caps,
+            Forall(_, _, caps) => caps,
+            Seq(_, _, ids) => ids,
+            SeqLit(_, id) => std::slice::from_mut(id),
         }
     }
 }
@@ -167,7 +189,16 @@ impl Display for Symbolic {
                     write!(f, "fn{}<{}>", id.0, args.join(", "))
                 }
             }
-            Symbolic::Forall(r, _) => write!(f, "forall#{}", r.0),
+            Symbolic::Forall(r, tys, _) => {
+                if tys.is_empty() {
+                    write!(f, "forall#{}", r.0)
+                } else {
+                    let args: Vec<String> = tys.iter().map(|t| t.to_string()).collect();
+                    write!(f, "forall#{}<{}>", r.0, args.join(", "))
+                }
+            }
+            Symbolic::Seq(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
+            Symbolic::SeqLit(ty, _) => write!(f, "Seq<{ty}>"),
         }
     }
 }
@@ -235,6 +266,8 @@ impl FromOp for Symbolic {
                     Err(FromOpError(format!("unknown leaf `{lit}`")))
                 }
             }
+            // `Symbolic::Seq` is deliberately absent: an operator name alone has no
+            // element type, and a placeholder would build a wrong node.
             _ => Err(FromOpError(format!("unknown op `{op}`/{}", children.len()))),
         }
     }

@@ -9,10 +9,13 @@ pub enum TranslationError {
     /// name. Typecheck rejects this first (`TypeError::AbstractPredicateNotFoldable`);
     /// this is the backstop that keeps the `ResourceCall` unbuildable.
     AbstractPredicateNotFoldable(String),
-    /// A `domain` declaring type parameters. Generics live on ADTs only: a
-    /// generic domain would need a *type* trigger to instantiate its axioms, and
-    /// Silver has no syntax to write one.
-    GenericDomainUnsupported(String),
+    /// A generic domain's axiom (named) with a part whose type parameters nothing
+    /// fixes: a use of a parameter outside every `forall`, or a `forall` whose
+    /// trigger groups (with the types an enclosing `forall` already fixes) do not
+    /// bind every parameter it mentions. The verifier instantiates a generic
+    /// axiom only at the types its trigger matches fix, so such a part could
+    /// never be assumed.
+    UntypedGenericAxiom(String),
     /// A heap-dependent function called inside a `forall` body. Its snapshot
     /// (a frame-only `exhale`) would have to be taken *per instance*, over a footprint
     /// that may mention the binders — quantified permissions, which are not
@@ -32,9 +35,9 @@ impl fmt::Display for TranslationError {
                 f,
                 "predicate `{name}` has no body: it cannot be folded, unfolded, or used in `unfolding`"
             ),
-            TranslationError::GenericDomainUnsupported(name) => write!(
+            TranslationError::UntypedGenericAxiom(name) => write!(
                 f,
-                "domain `{name}` declares type parameters: generic domains are not supported, declare an `adt` instead"
+                "axiom `{name}` uses a domain type parameter that no trigger fixes: every use must sit in a `forall` whose triggers (or an enclosing `forall`'s) bind it"
             ),
             TranslationError::HeapDepFunctionInQuantifier(name) => write!(
                 f,
@@ -52,7 +55,7 @@ impl TranslationError {
         matches!(
             self,
             TranslationError::Unsupported(_)
-                | TranslationError::GenericDomainUnsupported(_)
+                | TranslationError::UntypedGenericAxiom(_)
                 | TranslationError::HeapDepFunctionInQuantifier(_)
         )
     }

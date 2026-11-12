@@ -6,14 +6,13 @@
 //! precondition equality) never rides along into a caller — the caller re-derives
 //! whatever it needs itself. See the plan's Findings B/C.
 
-use egg::{EGraph, Id};
-
 use crate::verify::analysis::ConstFold;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::LocationKind;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{AxiomInst, AxiomPure};
 use crate::vmir::{MemberId, PermInst, PermVal, Polarity, Type, Val};
+use egg::{EGraph, Id};
 /// A (non-recursive) function's verified body as a **pure term recipe** — the
 /// definition `f(params) == <steps>[res]`, add-only. Unlike a certificate this
 /// imports **no e-classes**: the function unfold rule rebuilds `steps` at each
@@ -317,11 +316,15 @@ impl RecipeBuilder {
     pub(crate) fn emit_forall(
         &mut self,
         recipe: crate::verify::lang::RecipeId,
+        type_args: Vec<crate::vmir::Type>,
         caps: Vec<Val>,
     ) -> Val {
         let v = self.next_temp();
-        self.steps
-            .push(RecipeStep::Inst(AxiomInst::Forall { recipe, caps }));
+        self.steps.push(RecipeStep::Inst(AxiomInst::Forall {
+            recipe,
+            type_args,
+            caps,
+        }));
         v
     }
 
@@ -523,6 +526,8 @@ fn for_each_operand_mut(inst: &mut AxiomInst, mut f: impl FnMut(&mut Val)) {
             }
             AxiomPure::RealCast(v) => f(v),
             AxiomPure::App { args, .. } => args.iter_mut().for_each(f),
+            AxiomPure::Seq { args, .. } => args.iter_mut().for_each(f),
+            AxiomPure::SeqLit { elem, .. } => f(elem),
         },
         AxiomInst::Forall { caps, .. } => caps.iter_mut().for_each(f),
         AxiomInst::Assume(v) => f(v),
@@ -554,6 +559,8 @@ fn for_each_operand(inst: &AxiomInst, mut f: impl FnMut(&Val)) {
             }
             AxiomPure::RealCast(v) => f(v),
             AxiomPure::App { args, .. } => args.iter().for_each(f),
+            AxiomPure::Seq { args, .. } => args.iter().for_each(f),
+            AxiomPure::SeqLit { elem, .. } => f(elem),
         },
         AxiomInst::Forall { caps, .. } => caps.iter().for_each(f),
         AxiomInst::Assume(v) => f(v),

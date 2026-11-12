@@ -1,6 +1,7 @@
 use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
+use crate::vmir::SeqOp;
 use crate::vmir::display::VmirDisplay;
 use crate::{
     verify::{
@@ -531,14 +532,27 @@ fn eval_pure_inst(
             let (recipe_id, free) = crate::verify::quant::intern_forall(ctx.alloc, &names, q)?;
             let free: Vec<Val> = free.iter().map(|&k| Val::Temp(k)).collect();
             let caps: Box<[egg::Id]> = free.iter().map(|v| state.get_val(ctx, v)).collect();
-            let id = ctx.add(Symbolic::Forall(recipe_id, caps));
+            // Stated directly (not inside an instantiated quantifier), so every
+            // type parameter of a generic axiom's quantifier is still open.
+            let type_args = ctx
+                .alloc
+                .quant_table()
+                .read()
+                .expect("recipe table lock")
+                .get(recipe_id)
+                .open_types();
+            let id = ctx.add(Symbolic::Forall(
+                recipe_id,
+                type_args.iter().cloned().collect(),
+                caps,
+            ));
             let recipe = if ctx.recipe.is_some() {
                 let caps: Vec<Val> = free
                     .iter()
                     .map(|v| state.require_recipe(v, OPERAND_RECIPE))
                     .collect::<Result<_, _>>()?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit_forall(recipe_id, caps))
+                Some(rb.emit_forall(recipe_id, type_args, caps))
             } else {
                 None
             };
@@ -670,6 +684,48 @@ fn eval_pure_inst(
                 None
             };
             (id, recipe)
+        }
+        PureInst::Seq { elem_ty, op, args } => {
+            let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
+            let recipe = if ctx.recipe.is_some() {
+                let args: Vec<Val> = args
+                    .iter()
+                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
+                    .collect::<Result<_, _>>()?;
+                let rb = ctx.recipe.as_mut().unwrap();
+                Some(rb.emit(AxiomPure::Seq {
+                    elem_ty: elem_ty.clone(),
+                    op: *op,
+                    args,
+                }))
+            } else {
+                None
+            };
+            let id = ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids.clone()));
+            // A sequence equality (`SeqOp::Eq`) shares its class with the untyped
+            // `l == r`, which the rest of equality reasoning reads.
+            if *op == SeqOp::Eq {
+                let eq = ctx.add(Symbolic::Binary(BinOp::Eq, [ids[0], ids[1]]));
+                ctx.union(id, eq);
+            }
+            (id, recipe)
+        }
+        PureInst::SeqLit { elem_ty, elem } => {
+            let id = state.get_val(ctx, elem);
+            let recipe = if ctx.recipe.is_some() {
+                let elem = state.require_recipe(elem, OPERAND_RECIPE)?;
+                let rb = ctx.recipe.as_mut().unwrap();
+                Some(rb.emit(AxiomPure::SeqLit {
+                    elem_ty: elem_ty.clone(),
+                    elem,
+                }))
+            } else {
+                None
+            };
+            (
+                ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), id)),
+                recipe,
+            )
         }
     })
 }
@@ -1928,12 +1984,53 @@ fn eval_from_snap(
     Ok(out)
 }
 
+/// Whether the program has a sequence anywhere: a value of a type that mentions
+/// `Seq` (a parameter, a local, a field read, an operation's result) or a
+/// sequence operation (`|s|` is an `Int` over one). Every sequence the program
+/// can build or compare is one of these.
+fn decls_use_seq(decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>) -> bool {
+    fn mentions_seq(ty: &Type) -> bool {
+        match ty {
+            Type::Seq(_) => true,
+            Type::Domain(_, args) => args.iter().any(mentions_seq),
+            Type::Option(t) => mentions_seq(t),
+            Type::Addr { value, .. } => mentions_seq(value),
+            _ => false,
+        }
+    }
+    fn insts_use_seq(insts: &[vmir::Inst]) -> bool {
+        insts.iter().any(|i| match &i.kind {
+            InstKind::Pure(ty, pi) => {
+                mentions_seq(ty) || matches!(pi, PureInst::Seq { .. } | PureInst::SeqLit { .. })
+            }
+            _ => false,
+        })
+    }
+    decls.iter().any(|d| match d {
+        vmir::Declaration::Method(m) => insts_use_seq(&m.flatten()),
+        vmir::Declaration::Function(f) => {
+            f.params.iter().any(mentions_seq)
+                || mentions_seq(&f.ret)
+                || f.body.as_ref().is_some_and(|b| insts_use_seq(&b.insts))
+        }
+        vmir::Declaration::Resource(r) => {
+            r.params.iter().any(mentions_seq) || insts_use_seq(&r.body.insts)
+        }
+        vmir::Declaration::Axiom(a) => insts_use_seq(&a.body.insts),
+        _ => false,
+    })
+}
+
 /// Axiomatize the state: make every domain axiom's fact available to the unit
 /// about to be verified. An axiom body is evaluated into the e-graph and its
-/// boolean merged with `true` up front — domains are monomorphic, so there is no
-/// type-σ instantiation; quantification over *values* is a `forall` in the body,
-/// which becomes its own lazy-instantiation rule below. Axiom bodies are trusted
-/// — no obligations (div-by-zero, deref permission) are checked on them.
+/// boolean merged with `true` up front; quantification over *values* is a
+/// `forall` in the body, which becomes its own lazy-instantiation rule below.
+/// A **generic** axiom is evaluated the same way: outside its `forall`s it is
+/// ground (translation-enforced), and each `forall` node carries its type
+/// parameters open in its payload, fixed per instance by the trigger terms it
+/// matches (`rewrite::forall_rule`) — there is no up-front type instantiation.
+/// Axiom bodies are trusted — no obligations (div-by-zero, deref permission) are
+/// checked on them.
 ///
 /// Invariant: the eager ground-axiom evaluation below only ever sees **nullary**
 /// quantifier occurrences — axioms are closed and `let` is rejected in pure
@@ -1983,6 +2080,30 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         let res = state.get_val(ctx, &ax.body.res);
         let true_ = expr!(ctx, true);
         ctx.union(res, true_);
+        ctx.egraph.rebuild();
+    }
+    // The built-in sequence axioms (`verify::seq_axioms`): each a closed `forall`
+    // node, true, whose element type stays open for its trigger matches to fix.
+    // Only a program that has sequences gets them, so others pay nothing.
+    if decls_use_seq(&program.decls) {
+        let ids = ctx.alloc.seq_axioms();
+        // The witnesses' type, for type inference (`types::infer_type`).
+        for (f, ret) in ctx.alloc.skolem_ret_types() {
+            ctx.func_ret_types.entry(f).or_insert(ret);
+        }
+        for rid in ids {
+            let tys: Box<[Type]> = ctx
+                .alloc
+                .quant_table()
+                .read()
+                .expect("recipe table lock")
+                .get(rid)
+                .open_types()
+                .into();
+            let q = ctx.add(Symbolic::Forall(rid, tys, Box::new([])));
+            let true_ = expr!(ctx, true);
+            ctx.union(q, true_);
+        }
         ctx.egraph.rebuild();
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`
@@ -2037,19 +2158,19 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
     Ok(())
 }
 
-/// Resolve a trigger pattern term's heads to verifier `FuncId`s — the same
-/// mapping [`prepare_body`] applies to the corresponding `PureInst`, so a
-/// pattern matches exactly the nodes a body would build — and canonicalize its
-/// variables into recipe space: at or above `binder_base` a variable is a binder
-/// (`Bound`), below it a free enclosing value whose capture slot is `slot`.
+/// Resolve a trigger pattern term's heads to what the e-graph speaks — the same
+/// mapping [`prepare_body`] applies to the corresponding `PureInst`, so a pattern
+/// matches exactly the nodes a body would build — and canonicalize its variables
+/// into recipe space: at or above `binder_base` a variable is a binder (`Bound`),
+/// below it a free enclosing value whose capture slot is `slot`.
 pub(crate) fn prepare_trig_term(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     term: &vmir::TrigTerm,
     binder_base: usize,
     slot: &crate::dhash::HashMap<usize, usize>,
-) -> crate::verify::rewrite::PreparedTerm {
-    use crate::verify::rewrite::PreparedTerm;
-    match term {
+) -> Result<crate::verify::rewrite::PreparedTerm, VerifyError> {
+    use crate::verify::rewrite::{PreparedTerm, TermHead};
+    Ok(match term {
         vmir::TrigTerm::Var(k) if *k >= binder_base => PreparedTerm::Bound(k - binder_base),
         vmir::TrigTerm::Var(k) => PreparedTerm::Capture(slot[k]),
         vmir::TrigTerm::Lit(lit) => PreparedTerm::Lit(lit.clone()),
@@ -2058,26 +2179,43 @@ pub(crate) fn prepare_trig_term(
             type_args,
             args,
         } => {
-            let func = match head {
-                vmir::TrigHead::Func(id) => crate::verify::func_registry::func_id_for_member(*id),
-                vmir::TrigHead::AdtCons { adt, variant } => alloc.cons(*adt, *variant),
+            let func = |func| TermHead::Func {
+                func,
+                type_args: type_args.iter().cloned().collect(),
+            };
+            let head = match head {
+                vmir::TrigHead::Func(id) => {
+                    func(crate::verify::func_registry::func_id_for_member(*id))
+                }
+                vmir::TrigHead::AdtCons { adt, variant } => func(alloc.cons(*adt, *variant)),
                 vmir::TrigHead::AdtProj {
                     adt,
                     variant,
                     field,
-                } => alloc.proj(*adt, *variant, *field),
-                vmir::TrigHead::AdtIs { adt, variant } => alloc.adt_is(*adt, *variant),
+                } => func(alloc.proj(*adt, *variant, *field)),
+                vmir::TrigHead::AdtIs { adt, variant } => func(alloc.adt_is(*adt, *variant)),
+                vmir::TrigHead::Seq(op) => {
+                    let [elem_ty] = &type_args[..] else {
+                        panic!("a `{op:?}` trigger names its element type: {type_args:?}");
+                    };
+                    TermHead::Seq(elem_ty.clone(), *op)
+                }
+                vmir::TrigHead::SeqLit => {
+                    let [elem_ty] = &type_args[..] else {
+                        panic!("a sequence literal trigger names its element type: {type_args:?}");
+                    };
+                    TermHead::SeqLit(elem_ty.clone())
+                }
             };
             PreparedTerm::App {
-                func,
-                type_args: type_args.iter().cloned().collect(),
+                head,
                 args: args
                     .iter()
                     .map(|a| prepare_trig_term(alloc, a, binder_base, slot))
-                    .collect(),
+                    .collect::<Result<_, _>>()?,
             }
         }
-    }
+    })
 }
 
 /// Lower an axiom/quantifier body's inst stream into registry-resolved pure
@@ -2102,6 +2240,7 @@ pub(crate) fn prepare_body(
             let (recipe, free) = quants.entry_of(q)?;
             out.push(AxiomInst::Forall {
                 recipe: *recipe,
+                type_args: quants.get(*recipe).open_types(),
                 caps: free.iter().map(|&k| Val::Temp(k)).collect(),
             });
             continue;
@@ -2126,6 +2265,7 @@ pub(crate) fn prepare_body(
             // identity-wise, so `inst.pc`'s literals transfer directly.
             out.push(AxiomInst::Token {
                 func: alloc.fn_pre_token(fc.function, &names(fc.function)),
+                type_args: fc.type_args.clone(),
                 args,
                 guards: inst.pc.conds.clone(),
             });
@@ -2175,6 +2315,15 @@ pub(crate) fn prepare_body(
                 | PureInst::Forall(_) => {
                     return Err(VerifyError::Unimplemented("impure inst in axiom body"));
                 }
+                PureInst::Seq { elem_ty, op, args } => AxiomPure::Seq {
+                    elem_ty: elem_ty.clone(),
+                    op: *op,
+                    args: args.clone(),
+                },
+                PureInst::SeqLit { elem_ty, elem } => AxiomPure::SeqLit {
+                    elem_ty: elem_ty.clone(),
+                    elem: elem.clone(),
+                },
             }),
             InstKind::Assume(v) => AxiomInst::Assume(v.clone()),
             // Never verified; nothing to record.
@@ -2964,6 +3113,36 @@ fn inst_obligations(
             // Divisor must be non-zero: not (divisor == 0).
             let goal = expr!(ctx, not({ rv } == { zero }));
             vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
+        }
+
+        InstKind::Pure(
+            _,
+            PureInst::Seq {
+                elem_ty,
+                op,
+                args: val,
+            },
+        ) if op.has_bound_check() => {
+            // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
+            let s = state.get_val(ctx, &val[0]);
+            let i = state.get_val(ctx, &val[1]);
+            let len = ctx.add(Symbolic::Seq(
+                Box::new(elem_ty.clone()),
+                SeqOp::Len,
+                Box::new([s]),
+            ));
+            let lower = expr!(ctx, not({ i } <i 0));
+            let upper = expr!(ctx, { i } < i { len });
+            vec![
+                (
+                    lower,
+                    VerifyError::SideCondition("sequence index may be negative"),
+                ),
+                (
+                    upper,
+                    VerifyError::SideCondition("sequence index may be out of bounds"),
+                ),
+            ]
         }
         _ => vec![],
     }

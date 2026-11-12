@@ -158,6 +158,7 @@ impl PredicateTranslator<'_, Metaed> {
                 definer.define_function(
                     loc,
                     vmir::Function {
+                        ty_params: 0.into(),
                         name,
                         params: params.into(),
                         ret,
@@ -167,7 +168,13 @@ impl PredicateTranslator<'_, Metaed> {
                     },
                 );
                 let snap_name = definer.intern_name(&format!("{name_str}#snap"));
-                definer.define_domain(snap, vmir::Domain { name: snap_name });
+                definer.define_domain(
+                    snap,
+                    vmir::Domain {
+                        name: snap_name,
+                        ty_params: 0.into(),
+                    },
+                );
             }
         }
         Ok(())

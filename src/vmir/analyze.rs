@@ -372,6 +372,7 @@ mod tests {
             kind: InstKind::Pure(Type::Int, PureInst::FunctionCall(call)),
         };
         Declaration::Function(Function {
+            ty_params: 0.into(),
             name: lasso::Spur::try_from_usize(0).unwrap(),
             params: vec![].into(),
             ret: Type::Int,

@@ -115,6 +115,104 @@ pub fn write() -> Val {
     Val::Literal(Literal::Real(num::BigInt::from(1).into()))
 }
 
+/// A sequence operation. Shared by `PureInst::Seq`, `TrigHead::Seq` and
+/// `Symbolic::Seq`, so the three layers cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SeqOp {
+    /// `|s|` : Int
+    Len,
+    /// `s ++ t` : Seq<T>
+    Concat,
+    /// `s[i]` : T. SIDECOND: `0 <= i < |s|`.
+    Index,
+    /// `s[i := v]` : Seq<T>. SIDECOND: `0 <= i < |s|`.
+    Update,
+    /// `s[..n]` : Seq<T>. Total: Viper clamps `n`.
+    Take,
+    /// `s[n..]` : Seq<T>. Total: Viper clamps `n`.
+    Drop,
+    /// `x in s` : Bool. Operands are `[s, x]`: the sequence always comes first.
+    Contains,
+    /// `[a..b)` : Seq<Int>
+    Range,
+    /// `Seq[T]()` : Seq<T>. Takes no operands, so `elem_ty` is all that names `T`.
+    Empty,
+    /// `s == t` : Bool, a program's equality of two sequences. Typed, unlike
+    /// `BinOp::Eq`, so the extensionality axioms can trigger on it: the
+    /// verifier keeps it in one e-class with the untyped `s == t`, which every
+    /// other part of equality reasoning reads.
+    Eq,
+}
+
+impl SeqOp {
+    /// How many operands `PureInst::Seq` of this operation takes.
+    pub fn arity(self) -> usize {
+        match self {
+            SeqOp::Empty => 0,
+            SeqOp::Len => 1,
+            SeqOp::Concat
+            | SeqOp::Index
+            | SeqOp::Take
+            | SeqOp::Drop
+            | SeqOp::Contains
+            | SeqOp::Range
+            | SeqOp::Eq => 2,
+            SeqOp::Update => 3,
+        }
+    }
+
+    /// Whether this op has the in-range side condition, so `emit_pure_guarded`
+    /// must check it (the counterpart of `BinOp::is_div_or_mod`).
+    pub fn has_bound_check(self) -> bool {
+        matches!(self, SeqOp::Index | SeqOp::Update)
+    }
+
+    /// The operand types, in operand order, for a sequence of element type
+    /// `elem_ty` (for a `Range`, `Int`).
+    pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
+        let seq = || Type::Seq(Box::new(elem_ty.clone()));
+        match self {
+            SeqOp::Empty => vec![],
+            SeqOp::Len => vec![seq()],
+            SeqOp::Concat | SeqOp::Eq => vec![seq(), seq()],
+            SeqOp::Index | SeqOp::Take | SeqOp::Drop => vec![seq(), Type::Int],
+            SeqOp::Update => vec![seq(), Type::Int, elem_ty.clone()],
+            SeqOp::Contains => vec![seq(), elem_ty.clone()],
+            SeqOp::Range => vec![Type::Int, Type::Int],
+        }
+    }
+
+    /// The result type, for a sequence of element type `elem_ty`.
+    pub fn result_type(self, elem_ty: &Type) -> Type {
+        match self {
+            SeqOp::Len => Type::Int,
+            SeqOp::Contains | SeqOp::Eq => Type::Bool,
+            SeqOp::Index => elem_ty.clone(),
+            SeqOp::Concat
+            | SeqOp::Update
+            | SeqOp::Take
+            | SeqOp::Drop
+            | SeqOp::Range
+            | SeqOp::Empty => Type::Seq(Box::new(elem_ty.clone())),
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            SeqOp::Len => "seq.len",
+            SeqOp::Index => "seq.at",
+            SeqOp::Update => "seq.upd",
+            SeqOp::Concat => "seq.++",
+            SeqOp::Take => "seq.take",
+            SeqOp::Drop => "seq.drop",
+            SeqOp::Range => "seq.range",
+            SeqOp::Contains => "seq.in",
+            SeqOp::Empty => "seq.empty",
+            SeqOp::Eq => "seq.eq",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PureInst {
     Fresh,
@@ -174,6 +272,22 @@ pub enum PureInst {
         base: Val,
     },
 
+    /// The singleton sequence `Seq(elem)`. A longer literal is a right-nested
+    /// concatenation of these, `Seq(a, b, c)` being `Seq(a) ++ (Seq(b) ++ Seq(c))`,
+    /// and an empty one is `SeqOp::Empty`.
+    SeqLit {
+        elem_ty: Type,
+        elem: Val,
+    },
+    /// A sequence operation. Build it with `PureInst::seq`, which checks the arity.
+    /// `elem_ty` is the element type of the sequence it works on (`Int` for `Range`):
+    /// the result does not always say, as `|s|` shows.
+    Seq {
+        elem_ty: Type,
+        op: SeqOp,
+        args: Vec<Val>,
+    },
+
     /// An inline, nestable pure `forall` (see [`Forall`](crate::vmir::Forall)).
     /// Produces the quantified `Bool`. Its body shares *this* temp space —
     /// capture is implicit, so a free occurrence is just the enclosing temp.
@@ -200,12 +314,23 @@ impl PureInst {
             | PureInst::Deref(_, v)
             | PureInst::Perm(_, v)
             | PureInst::AdtProj { base: v, .. }
-            | PureInst::AdtIs { base: v, .. } => f(v),
+            | PureInst::AdtIs { base: v, .. }
+            | PureInst::SeqLit { elem: v, .. } => f(v),
             PureInst::FunctionCall(fc) => fc.args.iter().for_each(&mut *f),
             PureInst::OptionUnwrap(v) => f(v),
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
+            PureInst::Seq { args, .. } => args.iter().for_each(&mut *f),
         }
+    }
+    pub fn seq(elem_ty: Type, op: SeqOp, args: Vec<Val>) -> PureInst {
+        assert_eq!(
+            args.len(),
+            op.arity(),
+            "`{op:?}` takes {} operands, got {args:?}",
+            op.arity()
+        );
+        PureInst::Seq { elem_ty, op, args }
     }
 }
 
@@ -295,6 +420,25 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 adt, variant, base, ..
             } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
             PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
+            PureInst::SeqLit { elem_ty, elem } => {
+                write!(f, "Seq<{}>({elem})", self.with(elem_ty))
+            }
+            PureInst::Seq { elem_ty, op, args } => match (op, args.as_slice()) {
+                (SeqOp::Empty, []) => write!(f, "Seq<{}>()", self.with(elem_ty)),
+                (SeqOp::Len, [s]) => write!(f, "|{s}|"),
+                (SeqOp::Concat, [s, t]) => write!(f, "{s} ++ {t}"),
+                (SeqOp::Index, [s, i]) => write!(f, "{s}[{i}]"),
+                (SeqOp::Update, [s, i, v]) => write!(f, "{s}[{i} := {v}]"),
+                (SeqOp::Take, [s, n]) => write!(f, "{s}[..{n}]"),
+                (SeqOp::Drop, [s, n]) => write!(f, "{s}[{n}..]"),
+                (SeqOp::Contains, [s, x]) => write!(f, "{x} in {s}"),
+                (SeqOp::Range, [a, b]) => write!(f, "[{a}..{b})"),
+                (SeqOp::Eq, [s, t]) => write!(f, "{s} ==seq {t}"),
+                (op, args) => unreachable!(
+                    "`{op:?}` with {} operands; `PureInst::seq` checks arity",
+                    args.len()
+                ),
+            },
         }
     }
 }

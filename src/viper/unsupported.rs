@@ -3,7 +3,7 @@
 //! Everything that reaches here is *parseable*: the grammar accepts the whole
 //! surface syntax it can recognise, and turns the parts we do not implement
 //! into `ExpKind::Unsupported` / `Statement::Unsupported` markers or into
-//! ordinary nodes we then refuse here (a magic wand, `epsilon`, a `Seq` type).
+//! ordinary nodes we then refuse here (a magic wand, `epsilon`).
 //! One scan per declaration is what lets the pipeline report "this declaration
 //! uses `package`" and carry on with the rest of the file, instead of dying at
 //! the first construct with a parse error that names something else.
@@ -56,9 +56,10 @@ fn mentions_acc(exp: &Exp) -> bool {
     find.0
 }
 
-/// The collection types, which are parsed as plain named types so that a
-/// declaration mentioning one can be reported rather than failing the parse.
-const COLLECTION_TYPES: [&str; 4] = ["Seq", "Set", "Multiset", "Map"];
+/// The collection types other than `Seq`, which are parsed as plain named types
+/// so that a declaration mentioning one can be reported rather than failing the
+/// parse. (`Seq` has its own `Type::Seq`.)
+const COLLECTION_TYPES: [&str; 3] = ["Set", "Multiset", "Map"];
 
 impl<'a> AstWalker<'a> for Scan {
     fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
@@ -66,7 +67,6 @@ impl<'a> AstWalker<'a> for Scan {
             ExpKind::Unsupported(what) => self.hit(what),
             ExpKind::MagicWand(..) => self.hit("magic wand `--*`"),
             ExpKind::ForPerm(..) => self.hit("forperm"),
-            ExpKind::Index(..) => self.hit("collection indexing"),
             ExpKind::Quantifier(QuantifierKind::Exists, ..) => self.hit("exists"),
             // `forall x: Ref :: acc(x.f)` — a quantified permission. The
             // quantifier's body has to stay heap-free.
@@ -122,9 +122,6 @@ impl<'a> AstWalker<'a> for Scan {
             BinOp::SetMinus => self.hit("setminus"),
             BinOp::Intersection => self.hit("intersection"),
             BinOp::Subset => self.hit("subset"),
-            BinOp::Concat => self.hit("++ (sequence concatenation)"),
-            BinOp::Range => self.hit("[a..b) (sequence range)"),
-            BinOp::In => self.hit("in (collection membership)"),
             _ => {}
         }
         op.walk_children(self);

@@ -1,16 +1,18 @@
-use crate::vmir::FunctionBody;
 use crate::vmir::display::VmirDisplay;
+use crate::vmir::{FunctionBody, TyParams};
 use std::fmt::{self, Display, Formatter};
 
 use lasso::Spur;
 
-/// A domain — a monomorphic namespace of uninterpreted functions. Generics live
-/// on ADTs: a domain declaring type parameters is rejected at translation
-/// (`GenericDomainUnsupported`), since instantiating its axioms would need a
-/// *type* trigger, which Silver has no syntax to write.
+/// A domain — a namespace of uninterpreted functions, generic over `ty_params`
+/// types. Its functions and axioms are free-standing declarations: a function is
+/// generic over the domain parameters its signature mentions (renumbered, see
+/// [`Function::ty_params`](crate::vmir::Function::ty_params)), an axiom over all
+/// of them (the domain's own numbering).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Domain {
     pub name: Spur,
+    pub ty_params: TyParams,
 }
 
 /// An axiom: a closed boolean fact the verifier **assumes** in every
@@ -21,18 +23,25 @@ pub struct Domain {
 /// axiom's boolean — merged with `true` before verification. Axiom bodies are
 /// **never verified**: no well-definedness obligations (div-by-zero etc.) are
 /// checked on them. Quantification over *values* is an inline
-/// [`Forall`](crate::vmir::Forall) step in the body; there is no quantification
-/// over types.
+/// [`Forall`](crate::vmir::Forall) step in the body.
+///
+/// A **generic** axiom (`ty_params > 0`, the parameters of the domain it came
+/// from, as `Generic(i)`) holds at every instantiation. There is no type
+/// quantifier: every `Generic` in the body occurs inside a `forall`, and the
+/// types are fixed when that `forall` is instantiated, by the type arguments of
+/// the trigger terms it matched (or by an enclosing instantiation). Outside any
+/// `forall` the body is ground (translation-enforced).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Axiom {
     pub name: Option<Spur>,
+    pub ty_params: TyParams,
     pub body: FunctionBody,
 }
 
 impl<'a> Display for VmirDisplay<'a, &'a Domain> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let name = self.interner.resolve(&self.item.name);
-        writeln!(f, "domain {name}")
+        writeln!(f, "domain {name}{}", self.item.ty_params)
     }
 }
 
@@ -42,7 +51,7 @@ impl<'a> Display for VmirDisplay<'a, &'a Axiom> {
         if let Some(n) = &self.item.name {
             write!(f, " {}", self.interner.resolve(n))?;
         }
-        writeln!(f, " {{")?;
+        writeln!(f, "{} {{", self.item.ty_params)?;
         write!(
             f,
             "{}",

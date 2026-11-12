@@ -1,0 +1,7 @@
+// Seq in the heap: reading a sequence-typed field still needs permission.
+
+field elems: Seq[Int]
+
+method read_without_permission(this: Ref) returns (n: Int) {
+  n := |this.elems|
+}

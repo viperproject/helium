@@ -491,20 +491,72 @@ function len(l: List[Int]): Int
 }
 
 #[test]
-fn generic_domain_rejected() {
-    // Generics live on ADTs. A generic domain's axioms could only be
-    // instantiated off a *type* trigger, which Silver has no syntax to write —
-    // rather than infer one, translation refuses the domain.
-    let err = run_err(
-        r#"
-domain Box[T] {
-    function wrap(x: T): T
+fn generic_domain_members() {
+    // A domain function is generic over only the domain parameters its signature
+    // mentions, renumbered from 0; an axiom keeps the domain's arity; a call
+    // carries its instantiation.
+    let p = run(r#"
+domain Two[A, B] {
+    function second(x: B): B
+    function zero(): Int
+    axiom ax { forall b: B :: { second(b) } second(b) == b }
 }
-"#,
-    );
+method m() { assert second(true) == true }
+"#);
+    let decl = |name: &str| &p.decls[p.id(name).expect(name)];
+    let vmir::Declaration::Domain(two) = decl("Two") else {
+        panic!("Two")
+    };
+    assert_eq!(two.ty_params.count(), 2);
+    let vmir::Declaration::Function(second) = decl("second") else {
+        panic!("second")
+    };
+    assert_eq!(second.ty_params.count(), 1);
+    assert_eq!(second.ret, vmir::Type::Generic(0));
+    let vmir::Declaration::Function(zero) = decl("zero") else {
+        panic!("zero")
+    };
+    assert_eq!(zero.ty_params.count(), 0);
+    let vmir::Declaration::Axiom(ax) = decl("ax") else {
+        panic!("ax")
+    };
+    assert_eq!(ax.ty_params.count(), 2);
+    // `second(b)` in the axiom is instantiated at the domain's `B`, i.e. `Generic(1)`.
+    let vmir::InstKind::Pure(_, vmir::PureInst::Forall(q)) = &ax.body.insts[0].kind else {
+        panic!("axiom body starts with its forall")
+    };
+    let vmir::TrigTerm::App { type_args, .. } = &q.triggers[0].terms[0] else {
+        panic!("trigger is an application")
+    };
+    assert_eq!(type_args, &vec![vmir::Type::Generic(1)]);
+}
+
+#[test]
+fn untyped_generic_axiom_rejected() {
+    // The verifier instantiates a generic axiom only at the types its trigger
+    // matches fix: a part that no trigger can type is refused.
+    let no_quantifier = r#"
+domain Box[T] {
+    function emp(): Box[T]
+    function full(b: Box[T]): Bool
+    axiom closed { !full(emp()) }
+}
+"#;
     assert_eq!(
-        err,
-        TranslationError::GenericDomainUnsupported("Box".to_string())
+        run_err(no_quantifier),
+        TranslationError::UntypedGenericAxiom("closed".to_string())
+    );
+    // `h(x)` carries no type arguments, so nothing fixes the `T` of `g(x)`.
+    let trigger_misses_param = r#"
+domain D[T] {
+    function g(x: Int): D[T]
+    function h(x: Int): Int
+    axiom loose { forall x: Int :: { h(x) } g(x) == g(x) }
+}
+"#;
+    assert_eq!(
+        run_err(trigger_misses_param),
+        TranslationError::UntypedGenericAxiom("loose".to_string())
     );
 }
 
@@ -1500,4 +1552,155 @@ method m(a: Bool, b: Bool, c: Bool) returns (r: Int) {
                 && !b.join.is_empty()),
         "the synthetic join blocks have a join phase and an empty body"
     );
+}
+
+#[test]
+fn seq_trigger_lowers_to_seq_heads() {
+    // `x in s` puts the sequence first, and a slice is a take then a drop, the
+    // operand order `PureInst::Seq` uses.
+    let input = r#"
+domain D {
+    function f(s: Seq[Int]): Bool
+    axiom len { forall s: Seq[Int] :: {|s|} f(s) }
+    axiom mem { forall s: Seq[Int], x: Int :: {x in s} f(s) }
+    axiom slice { forall s: Seq[Int], a: Int, b: Int :: {s[a..b]} f(s) }
+    axiom lit { forall x: Int :: {Seq(x)} x == x }
+}
+"#;
+    let p = run(input);
+    use vmir::{SeqOp, TrigHead, TrigTerm};
+    let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
+        head,
+        type_args: vec![vmir::Type::Int],
+        args: args.into(),
+    };
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "len")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Len));
+    assert_eq!(args, &[TrigTerm::Var(0)]);
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Contains));
+    assert_eq!(
+        args,
+        &[TrigTerm::Var(0), TrigTerm::Var(1)],
+        "sequence first"
+    );
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "slice")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Drop));
+    let take = app(
+        TrigHead::Seq(SeqOp::Take),
+        vec![TrigTerm::Var(0), TrigTerm::Var(2)],
+    );
+    assert_eq!(args, &[take, TrigTerm::Var(1)]);
+
+    let [
+        TrigTerm::App {
+            head,
+            type_args,
+            args,
+        },
+    ] = &only_group(axiom_forall(&p, "lit")).terms[..]
+    else {
+        panic!("expected one application");
+    };
+    assert_eq!(*head, TrigHead::SeqLit);
+    assert_eq!(type_args, &[vmir::Type::Int], "the element type");
+    assert_eq!(&args[..], &[TrigTerm::Var(0)]);
+}
+
+#[test]
+fn seq_literal_trigger_lowers_to_concatenated_singletons() {
+    let input = r#"
+domain D {
+    function f(s: Seq[Int]): Bool
+    axiom three { forall x: Int, y: Int, z: Int :: {Seq(x, y, z)} f(Seq(x, y, z)) }
+}
+"#;
+    let p = run(input);
+    use vmir::{SeqOp, TrigHead, TrigTerm};
+    let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
+        head,
+        type_args: vec![vmir::Type::Int],
+        args: args.into(),
+    };
+    let single = |k| app(TrigHead::SeqLit, vec![TrigTerm::Var(k)]);
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "three")));
+    assert_eq!(*head, TrigHead::Seq(SeqOp::Concat));
+    let tail = app(TrigHead::Seq(SeqOp::Concat), vec![single(1), single(2)]);
+    assert_eq!(args, &[single(0), tail], "right-nested, in source order");
+}
+
+#[test]
+fn seq_literal_lowers_to_concatenated_singletons() {
+    use vmir::{InstKind, PureInst, SeqOp, Val};
+    let seq_steps = |input: &str| -> Vec<PureInst> {
+        let p = run(input);
+        let vmir::Declaration::Method(method) = &p.decls[p.id("m").expect("missing m")] else {
+            panic!("m must be a Method");
+        };
+        method
+            .iter_insts()
+            .filter_map(|inst| match &inst.kind {
+                InstKind::Pure(_, pi @ (PureInst::SeqLit { .. } | PureInst::Seq { .. })) => {
+                    Some(pi.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let steps = seq_steps("method m(a: Int, b: Int, c: Int) { var s: Seq[Int] := Seq(a, b, c) }");
+    let [
+        PureInst::SeqLit {
+            elem: Val::Temp(a), ..
+        },
+        PureInst::SeqLit {
+            elem: Val::Temp(b), ..
+        },
+        PureInst::SeqLit {
+            elem: Val::Temp(c), ..
+        },
+        PureInst::Seq {
+            op: SeqOp::Concat,
+            args: inner,
+            ..
+        },
+        PureInst::Seq {
+            op: SeqOp::Concat,
+            args: outer,
+            ..
+        },
+    ] = &steps[..]
+    else {
+        panic!("expected three singletons and two concatenations, got {steps:?}");
+    };
+    assert_eq!((*b, *c), (*a + 1, *a + 2), "singletons in source order");
+
+    // The five steps are emitted in a row, so their temps are consecutive.
+    let [Val::Temp(tail), _] = &inner[..] else {
+        panic!("expected a temp operand, got {inner:?}");
+    };
+    let first = *tail - 1;
+    assert_eq!(inner, &[Val::Temp(first + 1), Val::Temp(first + 2)]);
+    assert_eq!(
+        outer,
+        &[Val::Temp(first), Val::Temp(first + 3)],
+        "right-nested"
+    );
+
+    let steps = seq_steps("method m() { var s: Seq[Int] := Seq[Int]() }");
+    let [
+        PureInst::Seq {
+            elem_ty: vmir::Type::Int,
+            op: SeqOp::Empty,
+            args,
+        },
+    ] = &steps[..]
+    else {
+        panic!("expected one empty sequence, got {steps:?}");
+    };
+    assert!(args.is_empty());
 }

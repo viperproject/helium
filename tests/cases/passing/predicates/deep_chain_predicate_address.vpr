@@ -1,0 +1,17 @@
+// The address of the unfolded predicate instance equals the held one only through
+// a quantifier chain 15 instances deep (`h(i) == h(i + 1)`, `h(0) == x`). The
+// heap's address lookup must see the whole chain.
+domain H {
+  function h(i: Int): Ref
+  axiom step { forall i: Int :: { h(i) } h(i) == h(i + 1) }
+}
+
+field v: Int
+
+predicate P(r: Ref) { acc(r.v) }
+
+method m(x: Ref)
+  requires P(x) && h(0) == x
+{
+  unfold P(h(15))
+}

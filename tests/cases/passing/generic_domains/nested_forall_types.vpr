@@ -1,0 +1,13 @@
+// The outer quantifier's trigger fixes `A`; the inner one, built by an outer
+// instance with `A` already fixed, fixes `B` from its own trigger.
+domain P[A, B] {
+  function f(a: A): Int
+  function g(a: A, b: B): Int
+
+  axiom nest { forall a: A :: { f(a) } forall b: B :: { g(a, b) } g(a, b) == f(a) }
+}
+
+method m(x: Int, y: Bool) {
+  assume f(x) == 3
+  assert g(x, y) == 3
+}

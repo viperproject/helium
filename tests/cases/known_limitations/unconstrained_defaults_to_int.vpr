@@ -1,0 +1,10 @@
+// Silver's ground() rule: `emp()`'s parameter is `T` itself inside `Box`'s axiom, so the
+// axiom holds at every instance, and `Int` in the method, where nothing pins it.
+domain Box[T] {
+  function emp(): Box[T]
+  function full(b: Box[T]): Bool
+
+  axiom empty_is_not_full { !full(emp()) }
+}
+
+method m() { assert !full(emp()) }

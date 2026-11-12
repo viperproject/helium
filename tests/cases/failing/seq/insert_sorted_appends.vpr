@@ -1,0 +1,16 @@
+// Seq (verification-heavy): "insert" that always appends at the end, so the
+// result is not sorted when `x` is smaller than the last element
+// (s = [5], x = 1 gives [5, 1]).
+
+function sorted(s: Seq[Int]): Bool
+{
+  forall i: Int, j: Int :: { s[i], s[j] } 0 <= i && i < j && j < |s| ==> s[i] <= s[j]
+}
+
+method insert_sorted(s: Seq[Int], x: Int) returns (r: Seq[Int])
+  requires sorted(s)
+  ensures sorted(r)
+  ensures |r| == |s| + 1
+{
+  r := s ++ Seq(x)
+}

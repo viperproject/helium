@@ -1,0 +1,8 @@
+// Seq well-definedness inside a contract: the postcondition reads `s[0]`
+// without anything guaranteeing `|s| > 0`.
+method head(s: Seq[Int]) returns (x: Int)
+  ensures x == s[0]
+{
+  x := 0
+  assume false
+}

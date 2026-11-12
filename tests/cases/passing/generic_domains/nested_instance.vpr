@@ -1,0 +1,9 @@
+// `box(box(3))` needs `Box[Box[Int]]`, a seed because the program mentions it.
+domain Box[T] {
+  function box(x: T): Box[T]
+  function unbox(b: Box[T]): T
+
+  axiom inverse { forall x: T :: { box(x) } unbox(box(x)) == x }
+}
+
+method nested() { assert unbox(unbox(box(box(3)))) == 3 }
