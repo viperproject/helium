@@ -4,16 +4,16 @@
 //! the mirrors of a ground `add`/`union`, [`BlockScratch::import`] of a ground
 //! term, and rule runs. There is deliberately no way to assume a fact in the
 //! scratch alone: it would hold on every path of the block
-//! (`tests/cases/failing/scratch_drops_guards/`). Reads go through
-//! [`BlockScratch::graph`].
+//! (`tests/cases/failing/scratch_drops_guards/`). Reads are queries by
+//! [`ScratchId`]; the graph itself is never handed out.
 //!
 //! The scratch records the cube it assumed ([`BlockScratch::assumed`]): anything
 //! read off it holds under that cube only. Its ids are [`ScratchId`]s, so a scratch
 //! id cannot be handed to ground (or a ground id to the scratch) by accident.
 
 use crate::dhash::HashMap;
-use crate::verify::{analysis::ConstFold, lang::Symbolic, rewrite};
-use crate::vmir::Polarity;
+use crate::verify::{analysis::ConstFold, context::graph_inconsistent, lang::Symbolic, rewrite};
+use crate::vmir::{Literal, Polarity};
 use egg::Language as _;
 
 type Graph = egg::EGraph<Symbolic, ConstFold>;
@@ -23,9 +23,9 @@ type Graph = egg::EGraph<Symbolic, ConstFold>;
 pub(super) struct ScratchId(egg::Id);
 
 impl ScratchId {
-    /// The plain id, for egg calls on the scratch's [`BlockScratch::graph`] or on
-    /// a clone of it (a clone keeps its source's ids).
-    pub(super) fn raw(self) -> egg::Id {
+    /// The id in a [`BlockScratch::detached_clone`] (a clone keeps its source's
+    /// ids). The only way a scratch id becomes a plain egg id.
+    pub(super) fn in_clone(self) -> egg::Id {
         self.0
     }
 }
@@ -101,23 +101,45 @@ impl BlockScratch {
         }
     }
 
-    /// Read-only view. Writing goes through the methods of this type.
-    pub(super) fn graph(&self) -> &Graph {
-        &self.egraph
-    }
-
     /// The cube this scratch assumed: what it derives holds under it only.
     pub(super) fn assumed(&self) -> &[(egg::Id, Polarity)] {
         &self.assumed
     }
 
-    /// The `true` literal's class.
-    pub(super) fn true_id(&self) -> ScratchId {
-        ScratchId(self.true_id)
+    /// Whether the scratch holds `true == false` (the cube is unsatisfiable, or a
+    /// mirrored union conflicts under it).
+    pub(super) fn is_inconsistent(&self) -> bool {
+        graph_inconsistent(&self.egraph)
     }
 
-    pub(super) fn find(&self, id: ScratchId) -> ScratchId {
-        ScratchId(self.egraph.find(id.0))
+    /// Whether `id` is in the `true` class.
+    pub(super) fn is_true(&self, id: ScratchId) -> bool {
+        self.same_class(id, ScratchId(self.true_id))
+    }
+
+    pub(super) fn same_class(&self, a: ScratchId, b: ScratchId) -> bool {
+        self.egraph.find(a.0) == self.egraph.find(b.0)
+    }
+
+    /// The literal `id`'s class folds to, if any.
+    pub(super) fn known(&self, id: ScratchId) -> Option<&Literal> {
+        self.egraph[self.egraph.find(id.0)].data.known()
+    }
+
+    /// A throwaway copy to assume more in (a probe); read ids into it with
+    /// [`ScratchId::in_clone`].
+    pub(super) fn detached_clone(&self) -> Graph {
+        self.egraph.clone()
+    }
+
+    /// `(nodes, classes, nodes in the true class)`, for tracing.
+    pub(super) fn sizes(&self) -> (usize, usize, usize) {
+        let t = self.egraph.find(self.true_id);
+        (
+            self.egraph.total_number_of_nodes(),
+            self.egraph.number_of_classes(),
+            self.egraph[t].nodes.len(),
+        )
     }
 
     pub(super) fn watermark(&self) -> usize {

@@ -260,7 +260,7 @@ impl<'a> VerifyContext<'a> {
         // once; every later obligation short-circuits at the top of
         // `prove_under_pc`. (The implication form would be strictly weaker —
         // const-fold does not collapse the `ite` chain of an unsatisfiable pc.)
-        self.block_dead = graph_inconsistent(sc.graph());
+        self.block_dead = sc.is_inconsistent();
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
             eprintln!(
                 "[scratch-build] ground {}n/{}c ids {} cube {} | clone+union+rebuild {:?}",
@@ -289,20 +289,12 @@ impl<'a> VerifyContext<'a> {
         let mut sc = self.scratch.take().expect("scratch live");
         let _t = std::time::Instant::now();
         let before = stats::with_stats(|s| s.sat_iterations);
-        let (n0, c0) = (
-            sc.graph().total_number_of_nodes(),
-            sc.graph().number_of_classes(),
-        );
+        let (n0, c0, _) = sc.sizes();
         sc.saturate(|g| self.saturate_flat(g));
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
+            let (n1, c1, t1) = sc.sizes();
             eprintln!(
-                "[scratch-sat] {n0}n/{c0}c -> {}n/{}c true={} (ground {}n/{}c true={}, {} iters)",
-                sc.graph().total_number_of_nodes(),
-                sc.graph().number_of_classes(),
-                {
-                    let t = sc.find(sc.true_id()).raw();
-                    sc.graph()[t].nodes.len()
-                },
+                "[scratch-sat] {n0}n/{c0}c -> {n1}n/{c1}c true={t1} (ground {}n/{}c true={}, {} iters)",
                 self.egraph.total_number_of_nodes(),
                 self.egraph.number_of_classes(),
                 {
@@ -333,10 +325,7 @@ impl<'a> VerifyContext<'a> {
         }
         let mut sc = self.scratch.take().expect("scratch live");
         let _t = std::time::Instant::now();
-        let (n0, c0) = (
-            sc.graph().total_number_of_nodes(),
-            sc.graph().number_of_classes(),
-        );
+        let (n0, c0, _) = sc.sizes();
         let mut iterations = Vec::new();
         sc.reduce(|g| {
             let (g, its) = run_rules(g, self.static_reduce.iter().chain(self.alloc.rules()), None);
@@ -344,10 +333,9 @@ impl<'a> VerifyContext<'a> {
             g
         });
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
+            let (n1, c1, _) = sc.sizes();
             eprintln!(
-                "[scratch-red] {n0}n/{c0}c -> {}n/{}c  (ground {}n/{}c)",
-                sc.graph().total_number_of_nodes(),
-                sc.graph().number_of_classes(),
+                "[scratch-red] {n0}n/{c0}c -> {n1}n/{c1}c  (ground {}n/{}c)",
                 self.egraph.total_number_of_nodes(),
                 self.egraph.number_of_classes(),
             );
@@ -411,11 +399,11 @@ impl<'a> VerifyContext<'a> {
             let sc = self.block_scratch();
             // A cube that only contradicts once reduced still kills the block, and
             // latching it here spares every later obligation the same discovery.
-            if graph_inconsistent(sc.graph()) {
+            if sc.is_inconsistent() {
                 self.block_dead = true;
                 return true;
             }
-            if sc.find(tg) == sc.find(sc.true_id()) {
+            if sc.is_true(tg) {
                 stats::bump(|s| s.block_scratch_freehits += 1);
                 if trace {
                     self.trace_probe(g0, fresh, "reduce");
@@ -430,28 +418,28 @@ impl<'a> VerifyContext<'a> {
 
         // A contradictory cube (or a mirrored union that conflicts under it)
         // makes every goal vacuously provable — and kills the rest of the block.
-        if graph_inconsistent(self.block_scratch().graph()) {
+        if self.block_scratch().is_inconsistent() {
             self.block_dead = true;
             return true;
         }
         let sc = self.block_scratch();
-        if sc.find(tg) == sc.find(sc.true_id()) {
+        if sc.is_true(tg) {
             stats::bump(|s| s.block_scratch_freehits += 1);
             return true;
         }
         let all_sat = tpc.iter().all(|(tid, pol)| {
             matches!(
-                sc.graph()[sc.find(*tid).raw()].data.known(),
+                sc.known(*tid),
                 Some(Literal::Bool(b)) if *b == matches!(pol, Polarity::Positive)
             )
         });
-        let probe_base = sc.graph().clone();
+        let probe_base = sc.detached_clone();
 
         // Free hit: the cube already implies the pc — no extra assumption needed,
         // go straight to the goal-structural decomposition on the warm scratch.
         if all_sat {
             stats::bump(|s| s.block_scratch_freehits += 1);
-            return self.prove_by_ite_decomposition(&probe_base, tg.raw(), Rung::Saturated);
+            return self.prove_by_ite_decomposition(&probe_base, tg.in_clone(), Rung::Saturated);
         }
 
         // Off-path: a literal that already folds against its required polarity
@@ -460,7 +448,7 @@ impl<'a> VerifyContext<'a> {
         // telescoping the ones outside it.
         if tpc.iter().any(|(tid, pol)| {
             matches!(
-                probe_base[probe_base.find(tid.raw())].data.known(),
+                sc.known(*tid),
                 Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
             )
         }) {
@@ -472,14 +460,14 @@ impl<'a> VerifyContext<'a> {
         // the same work, one reduce per literal instead of one saturation for the
         // batch, and it shares the machinery that already had to handle a guarded
         // goal. The chain is built exactly as `VerifyContext::implication` builds
-        // the ground one, but in a clone of the scratch (same ids, hence `raw`), so
+        // the ground one, but in a clone of the scratch (same ids, hence `in_clone`), so
         // the nodes die with the clone;
         // `prove_under_pc` still memoizes the ground `imp`.
         let mut probe = probe_base;
         let true_p = probe.add(Symbolic::Lit(Literal::Bool(true)));
-        let mut imp = tg.raw();
+        let mut imp = tg.in_clone();
         for (tid, pol) in tpc.iter().rev() {
-            let id = tid.raw();
+            let id = tid.in_clone();
             imp = match pol {
                 Polarity::Positive => probe.add(Symbolic::Ite([id, imp, true_p])),
                 Polarity::Negative => probe.add(Symbolic::Ite([id, true_p, imp])),
@@ -771,10 +759,9 @@ impl<'a> VerifyContext<'a> {
         self.saturate_scratch();
         let ground = self.egraph.find(addr);
         let sc = self.block_scratch();
-        let canon = sc.find(ta);
         let mut out = Vec::new();
         for (c, tc) in chunk_addrs.iter().zip(tcs) {
-            if sc.find(tc) == canon && self.egraph.find(*c) != ground {
+            if sc.same_class(tc, ta) && self.egraph.find(*c) != ground {
                 out.push(*c);
             }
         }

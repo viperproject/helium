@@ -426,18 +426,13 @@ impl<'a> VerifyContext<'a> {
     /// reached versus the scratch size the obligation reasons over, and how far the
     /// scratch had to be run (`reduce` = the cheap reductions sufficed).
     fn trace_probe(&self, g0: (usize, usize, usize), fresh: bool, ran: &str) {
-        let sc = self.scratch.as_ref().expect("scratch live");
-        let g = sc.graph();
-        let st = sc.find(sc.true_id()).raw();
+        let (n, c, tn) = self.scratch.as_ref().expect("scratch live").sizes();
         eprintln!(
-            "[probe] ground {}n/{}c true={} | scratch {}n/{}c true={} | ratio {:.2} | {} | {}",
+            "[probe] ground {}n/{}c true={} | scratch {n}n/{c}c true={tn} | ratio {:.2} | {} | {}",
             g0.0,
             g0.1,
             g0.2,
-            g.total_number_of_nodes(),
-            g.number_of_classes(),
-            g[st].nodes.len(),
-            g.total_number_of_nodes() as f64 / g0.0.max(1) as f64,
+            n as f64 / g0.0.max(1) as f64,
             ran,
             if fresh { "built" } else { "warm" },
         );
