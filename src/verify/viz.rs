@@ -1,8 +1,7 @@
 //! Per-instruction Graphviz snapshots of the e-graph + heap.
 //!
-//! Enabled by the `SILVER_OXIDE_VIZ` env var (its value is the output base
-//! directory; empty → `./log`). Disabled = zero work beyond an env read at
-//! method entry. One snapshot is taken after every executed instruction
+//! Enabled by a trace session's `viz_dir` (`verify --viz=DIR`). Disabled = zero
+//! work beyond one lookup at method entry. One snapshot is taken after every executed instruction
 //! (method body + resource bodies); each dumps the *raw* live e-graph (no
 //! saturation) plus the latest heap as a `cluster_heap` subgraph whose chunk
 //! nodes point at the relevant e-class clusters, and carries a top annotation
@@ -27,7 +26,7 @@ use crate::verify::lang::Symbolic;
 use crate::vmir::Type;
 
 pub(crate) struct Snapshotter {
-    /// `None` = disabled (env var unset).
+    /// `None` = disabled (no `viz_dir`).
     dir: Option<PathBuf>,
     /// Filename-safe method name (output stem).
     method: String,
@@ -36,12 +35,10 @@ pub(crate) struct Snapshotter {
 }
 
 impl Snapshotter {
-    pub(crate) fn from_env(method_name: &str) -> Self {
-        let dir = crate::util::log_dir().map(|base| {
-            let dir = PathBuf::from(base);
-            // Best-effort: a failed create just means later writes no-op-fail.
-            let _ = std::fs::create_dir_all(&dir);
-            dir
+    pub(crate) fn new(method_name: &str) -> Self {
+        // Best-effort: a failed create just means later writes no-op-fail.
+        let dir = crate::trace::viz_dir().inspect(|dir| {
+            let _ = std::fs::create_dir_all(dir);
         });
         Self {
             dir,
@@ -50,7 +47,7 @@ impl Snapshotter {
         }
     }
 
-    /// Whether snapshots are being recorded (`SILVER_OXIDE_VIZ` set). Callers
+    /// Whether snapshots are being recorded. Callers
     /// use this to skip building the snapshot inputs (heap clones, rendered
     /// instruction text) on the hot path.
     pub(crate) fn enabled(&self) -> bool {
@@ -329,11 +326,6 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Whether the perm-term diagnostic dump is enabled (`SILVER_OXIDE_DUMP_PERM`).
-pub(crate) fn dump_perm_enabled() -> bool {
-    std::env::var_os("SILVER_OXIDE_DUMP_PERM").is_some()
 }
 
 /// Diagnostic: render the term DAG rooted at `root` as a flat class listing,

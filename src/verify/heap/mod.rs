@@ -1,6 +1,5 @@
 pub(crate) mod algebra;
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use lasso::Spur;
@@ -13,76 +12,6 @@ use crate::vmir::{Bound, Literal, Polarity, Type};
 /// literals (the analog of a block's `PathConds`, already minimized by
 /// `reach.rs` at lowering). Shared `Rc` so cloning a `Heap` per-inst stays O(1).
 pub type HeapPc = Rc<[(egg::Id, Polarity)]>;
-
-/// S0 merge instrumentation (gated by `SILVER_OXIDE_TRACE_MERGE`). Counts the
-/// join-merge structures the pc-hoist plan aims to flatten: `Select` nodes
-/// actually built (reachability towers), `0`-leaf constructions (absence encoded
-/// as a `?:0` amount), and the deepest `Select` tree seen. Reset/dumped per
-/// method by [`MergeTrace::take`]. Pure diagnostics — no effect when the flag is
-/// off (the `enabled()` check short-circuits every hot-path bump).
-#[derive(Default, Clone, Copy)]
-pub struct MergeTrace {
-    pub selects_built: u64,
-    pub zero_leaves: u64,
-    pub max_depth: u32,
-}
-
-thread_local! {
-    static MERGE_TRACE: Cell<MergeTrace> = const { Cell::new(MergeTrace {
-        selects_built: 0,
-        zero_leaves: 0,
-        max_depth: 0,
-    }) };
-    static MERGE_TRACE_ON: Cell<Option<bool>> = const { Cell::new(None) };
-}
-
-impl MergeTrace {
-    fn enabled() -> bool {
-        MERGE_TRACE_ON.with(|c| match c.get() {
-            Some(b) => b,
-            None => {
-                let b = std::env::var_os("SILVER_OXIDE_TRACE_MERGE").is_some();
-                c.set(Some(b));
-                b
-            }
-        })
-    }
-
-    fn bump_select(depth: u32) {
-        if !Self::enabled() {
-            return;
-        }
-        MERGE_TRACE.with(|c| {
-            let mut t = c.get();
-            t.selects_built += 1;
-            t.max_depth = t.max_depth.max(depth);
-            c.set(t);
-        });
-    }
-
-    pub(crate) fn bump_zero() {
-        if !Self::enabled() {
-            return;
-        }
-        MERGE_TRACE.with(|c| {
-            let mut t = c.get();
-            t.zero_leaves += 1;
-            c.set(t);
-        });
-    }
-
-    /// Read and reset the per-thread counters. `None` when tracing is off.
-    pub fn take() -> Option<MergeTrace> {
-        if !Self::enabled() {
-            return None;
-        }
-        MERGE_TRACE.with(|c| {
-            let t = c.get();
-            c.set(MergeTrace::default());
-            Some(t)
-        })
-    }
-}
 
 impl ChunkPerm {
     /// The `Select`-nesting depth of this perm tree (a `Leaf` is 0). Diagnostic.
@@ -235,7 +164,8 @@ impl ChunkPerm {
             then: Box::new(then),
             els: Box::new(els),
         };
-        MergeTrace::bump_select(out.depth());
+        // How deep join merges stack conditional permissions.
+        crate::trace::trace_tally!(Heap, "select", [depth = out.depth()], built = 1);
         out
     }
 

@@ -14,7 +14,9 @@ use crate::dhash::HashMap;
 use crate::{
     verify::{
         analysis::ConstFold,
-        context::{VerifyContext, graph_inconsistent, run_rules, run_rules_until},
+        context::{
+            RunKind, VerifyContext, graph_inconsistent, run_rules, run_rules_until, true_class_size,
+        },
         lang::Symbolic,
         rewrite::{self},
         stats,
@@ -430,17 +432,18 @@ impl<'a> VerifyContext<'a> {
         // `prove_under_pc`. (The implication form would be strictly weaker —
         // const-fold does not collapse the `ite` chain of an unsatisfiable pc.)
         self.block_dead = graph_inconsistent(&egraph);
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            eprintln!(
-                "[scratch-build] ground {}n/{}c ids {} cube {} | clone+union {:?} rebuild {:?}",
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-                watermark,
-                cube.len(),
-                t_clone.elapsed() - t_rebuild.elapsed(),
-                t_rebuild.elapsed(),
-            );
-        }
+        let timed = crate::trace::enabled(crate::trace::Category::Time);
+        crate::trace::trace_event!(
+            Scratch,
+            "build",
+            ground_nodes = self.egraph.total_size(),
+            ground_classes = self.egraph.number_of_classes(),
+            ids = watermark,
+            cube = cube.len(),
+            dead = self.block_dead,
+            clone_secs = timed.then(|| (t_rebuild - t_clone).as_secs_f64()),
+            rebuild_secs = timed.then(|| t_rebuild.elapsed().as_secs_f64()),
+        );
         self.current_cube = cube;
         self.scratch = Some(BlockScratch {
             egraph,
@@ -465,29 +468,7 @@ impl<'a> VerifyContext<'a> {
         let _scope = rewrite::ScratchScope::resume(sc.scope);
         let _t = std::time::Instant::now();
         let before = stats::with_stats(|s| s.sat_iterations);
-        let (n0, c0) = (
-            sc.egraph.total_number_of_nodes(),
-            sc.egraph.number_of_classes(),
-        );
-        sc.egraph = self.saturate_flat(sc.egraph);
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            eprintln!(
-                "[scratch-sat] {n0}n/{c0}c -> {}n/{}c true={} (ground {}n/{}c true={}, {} iters)",
-                sc.egraph.total_number_of_nodes(),
-                sc.egraph.number_of_classes(),
-                {
-                    let t = sc.egraph.find(sc.true_id);
-                    sc.egraph[t].nodes.len()
-                },
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-                {
-                    let t = self.egraph.find(self.true_id_cached());
-                    self.egraph[t].nodes.len()
-                },
-                stats::with_stats(|s| s.sat_iterations) - before,
-            );
-        }
+        sc.egraph = self.saturate_flat(sc.egraph, RunKind::Scratch);
         stats::bump(|s| s.block_scratch_saturations += 1);
         stats::bump(|s| s.block_scratch_iterations += s.sat_iterations - before);
         sc.dirty = false;
@@ -509,22 +490,13 @@ impl<'a> VerifyContext<'a> {
         let _scope = rewrite::ScratchScope::resume(sc.scope);
         let _t = std::time::Instant::now();
         let egraph = std::mem::take(&mut sc.egraph);
-        let (n0, c0) = (egraph.total_number_of_nodes(), egraph.number_of_classes());
         let (egraph, iterations) = run_rules(
             egraph,
             self.static_reduce.iter().chain(self.alloc.rules()),
             None,
+            RunKind::ScratchReduce,
         );
         sc.egraph = egraph;
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            eprintln!(
-                "[scratch-red] {n0}n/{c0}c -> {}n/{}c  (ground {}n/{}c)",
-                sc.egraph.total_number_of_nodes(),
-                sc.egraph.number_of_classes(),
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-            );
-        }
         stats::bump(|s| s.record_run(&iterations));
         // A reduce is not a saturation: leave `dirty` set so the next obligation
         // still runs the full rule set.
@@ -546,16 +518,15 @@ impl<'a> VerifyContext<'a> {
         goal: egg::Id,
         pc_lits: &[(egg::Id, Polarity)],
     ) -> bool {
-        // Ground size at the moment the `probe` tier is reached, before the scratch is built or
-        // touched — paired below with the scratch size the obligation actually
-        // reasons over (`SILVER_OXIDE_TRACE_SCRATCH`).
-        let trace = std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some();
+        // Ground size at the moment the `probe` tier is reached, before the scratch
+        // is built or touched — paired in the trace with the scratch size the
+        // obligation actually reasons over.
+        let trace = crate::trace::enabled(crate::trace::Category::Scratch);
         let g0 = if trace {
-            let t = self.egraph.find(self.true_id_cached());
             (
-                self.egraph.total_number_of_nodes(),
+                self.egraph.total_size(),
                 self.egraph.number_of_classes(),
-                self.egraph[t].nodes.len(),
+                true_class_size(&self.egraph),
             )
         } else {
             (0, 0, 0)
@@ -937,7 +908,7 @@ impl<'a> VerifyContext<'a> {
         let _scope = crate::verify::rewrite::ScratchScope::enter();
         let t = std::time::Instant::now();
         let iters_before = stats::with_stats(|s| s.sat_iterations);
-        let out = self.saturate_flat(probe);
+        let out = self.saturate_flat(probe, RunKind::Probe);
         stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
         stats::bump(|s| s.probe_saturations += 1);
         stats::bump(|s| s.probe_iterations += s.sat_iterations - iters_before);
@@ -963,6 +934,7 @@ impl<'a> VerifyContext<'a> {
                 .chain(self.axiom_rules.iter()),
             None,
             Some(goal),
+            RunKind::Probe,
         );
         stats::bump(|s| s.record_run(&iterations));
         stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
@@ -989,6 +961,7 @@ impl<'a> VerifyContext<'a> {
             probe,
             self.static_reduce.iter().chain(self.alloc.rules()),
             None,
+            RunKind::ProbeReduce,
         );
         stats::bump(|s| s.graph_timing.0.probe += t.elapsed().as_secs_f64());
         stats::bump(|s| s.probe_reduces += 1);
