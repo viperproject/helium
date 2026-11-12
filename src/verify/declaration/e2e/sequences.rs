@@ -248,7 +248,7 @@ method m(a: Seq[Int], b: Seq[Int], y: Int)
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
-// The sequence axioms (`verify::seq_axioms`), through the whole pipeline.
+// The sequence axioms (`verify::coll_axioms::seq`), through the whole pipeline.
 
 #[test]
 fn axioms_give_lengths_indices_and_slices() {

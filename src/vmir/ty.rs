@@ -1,5 +1,5 @@
-use crate::vmir::MemberId;
 use crate::vmir::display::VmirDisplay;
+use crate::vmir::{CollKind, MemberId};
 use lasso::{Key, Spur};
 use std::fmt::{self, Display, Formatter};
 
@@ -42,7 +42,8 @@ pub enum Type {
     /// Substituted by the type arguments at monomorphization.
     Generic(usize),
 
-    Seq(Box<Type>),
+    /// A built-in collection, `Seq[E]` or `Set[E]`, of element type `E`.
+    Coll(CollKind, Box<Type>),
 }
 
 /// Permission bound of a heap location (cap on total permission per cell).
@@ -66,6 +67,24 @@ impl Type {
             group,
             value: Box::new(value),
             bound,
+        }
+    }
+
+    /// `Seq[elem]`.
+    pub fn seq(elem: Type) -> Self {
+        Type::Coll(CollKind::Seq, Box::new(elem))
+    }
+
+    /// `Set[elem]`.
+    pub fn set(elem: Type) -> Self {
+        Type::Coll(CollKind::Set, Box::new(elem))
+    }
+
+    /// The kind and element type of a collection type, else `None`.
+    pub fn as_coll(&self) -> Option<(CollKind, &Type)> {
+        match self {
+            Type::Coll(kind, elem) => Some((*kind, elem)),
+            _ => None,
         }
     }
 
@@ -99,7 +118,7 @@ impl Type {
             Type::Option(t) => t.collect_generics(out),
             Type::Addr { value, .. } => value.collect_generics(out),
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => {}
-            Type::Seq(t) => t.collect_generics(out),
+            Type::Coll(_, t) => t.collect_generics(out),
         }
     }
 
@@ -121,7 +140,7 @@ impl Type {
                 bound: bound.clone(),
             },
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => self.clone(),
-            Type::Seq(t) => Type::Seq(Box::new(t.subst_generics(args))),
+            Type::Coll(kind, t) => Type::Coll(*kind, Box::new(t.subst_generics(args))),
         }
     }
 
@@ -145,9 +164,8 @@ impl Type {
                         .zip(ys.iter())
                         .all(|(x, y)| x.match_generics(y, out))
             }
-            (Type::Option(x), Type::Option(y)) | (Type::Seq(x), Type::Seq(y)) => {
-                x.match_generics(y, out)
-            }
+            (Type::Option(x), Type::Option(y)) => x.match_generics(y, out),
+            (Type::Coll(k1, x), Type::Coll(k2, y)) => k1 == k2 && x.match_generics(y, out),
             (
                 Type::Addr {
                     group: g1,
@@ -184,7 +202,7 @@ impl Display for Type {
                 bound,
             } => write!(f, "&[g{}] {value} @ {bound}", group.into_usize()),
             Type::Generic(i) => write!(f, "?{i}"),
-            Type::Seq(t) => write!(f, "Seq<{t}>"),
+            Type::Coll(kind, t) => write!(f, "{}<{t}>", kind.name()),
         }
     }
 }
@@ -218,7 +236,7 @@ impl<'a> Display for VmirDisplay<'a, &'a Type> {
                 self.groups.resolve(group),
                 self.with(value.as_ref())
             ),
-            Type::Seq(ty) => write!(f, "Seq<{}>", self.with(ty.as_ref())),
+            Type::Coll(kind, ty) => write!(f, "{}<{}>", kind.name(), self.with(ty.as_ref())),
             ty => write!(f, "{ty}"),
         }
     }
@@ -243,4 +261,30 @@ fn fmt_args<T>(
         each(a, f)?;
     }
     write!(f, ">")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A collection type pattern binds its element type only against a
+    /// collection of the same kind.
+    #[test]
+    fn coll_generics_match_only_their_own_kind() {
+        let pat = Type::set(Type::Generic(0));
+        let mut out = [None];
+        assert!(pat.match_generics(&Type::set(Type::Bool), &mut out));
+        assert_eq!(out, [Some(Type::Bool)]);
+        let mut out = [None];
+        assert!(!pat.match_generics(&Type::seq(Type::Bool), &mut out));
+        assert_eq!(
+            Type::set(Type::Generic(0)).subst_generics(&[Type::seq(Type::Int)]),
+            Type::set(Type::seq(Type::Int))
+        );
+        assert_eq!(Type::set(Type::Int).to_string(), "Set<Int>");
+        assert_eq!(
+            Type::set(Type::Int).as_coll(),
+            Some((CollKind::Set, &Type::Int))
+        );
+    }
 }

@@ -47,7 +47,7 @@ pub(crate) fn lower_type(
             None => vmir::Type::Ref,
         },
         typed::Type::Collection(BuiltinCollection::Seq(ty)) => {
-            vmir::Type::Seq(Box::new(lower_type(names, generics, ty)))
+            vmir::Type::seq(lower_type(names, generics, ty))
         }
         // TODO: Set — modeled as builtin parametric types like Option.
         typed::Type::Collection(_) => vmir::Type::Ref,

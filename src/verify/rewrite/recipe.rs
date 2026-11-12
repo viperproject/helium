@@ -9,7 +9,7 @@ use egg::{EGraph, Id, SearchMatches, Searcher, Subst, Var};
 
 use crate::verify::analysis::ConstFold;
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
-use crate::vmir::{BinOp, Literal, Polarity, SeqOp, Type, Val};
+use crate::vmir::{BinOp, CollKind, CollOp, Literal, Polarity, Type, Val};
 
 use super::*;
 
@@ -28,12 +28,13 @@ pub(crate) enum AxiomPure {
         type_args: Vec<Type>,
         args: Vec<Val>,
     },
-    Seq {
+    Coll {
         elem_ty: Type,
-        op: SeqOp,
+        op: CollOp,
         args: Vec<Val>,
     },
-    SeqLit {
+    CollLit {
+        kind: CollKind,
         elem_ty: Type,
         elem: Val,
     },
@@ -94,19 +95,22 @@ pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
                 type_args: subst(type_args),
                 args: args.clone(),
             }),
-            AxiomInst::Val(AxiomPure::Seq { elem_ty, op, args }) => {
-                AxiomInst::Val(AxiomPure::Seq {
+            AxiomInst::Val(AxiomPure::Coll { elem_ty, op, args }) => {
+                AxiomInst::Val(AxiomPure::Coll {
                     elem_ty: elem_ty.subst_generics(tys),
                     op: *op,
                     args: args.clone(),
                 })
             }
-            AxiomInst::Val(AxiomPure::SeqLit { elem_ty, elem }) => {
-                AxiomInst::Val(AxiomPure::SeqLit {
-                    elem_ty: elem_ty.subst_generics(tys),
-                    elem: elem.clone(),
-                })
-            }
+            AxiomInst::Val(AxiomPure::CollLit {
+                kind,
+                elem_ty,
+                elem,
+            }) => AxiomInst::Val(AxiomPure::CollLit {
+                kind: *kind,
+                elem_ty: elem_ty.subst_generics(tys),
+                elem: elem.clone(),
+            }),
             AxiomInst::Forall {
                 recipe,
                 type_args,
@@ -363,12 +367,15 @@ pub(super) fn build_instance_vals_impl(
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
                     }
-                    AxiomPure::Seq { elem_ty, op, args } => {
+                    AxiomPure::Coll { elem_ty, op, args } => {
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                        let id =
-                            egraph.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, args.clone()));
-                        // A sequence equality shares its class with the untyped one.
-                        if *op == SeqOp::Eq {
+                        let id = egraph.add(Symbolic::Coll(
+                            Box::new(elem_ty.clone()),
+                            *op,
+                            args.clone(),
+                        ));
+                        // A collection equality shares its class with the untyped one.
+                        if op.is_eq() {
                             let eq = egraph.add(Symbolic::Binary(BinOp::Eq, [args[0], args[1]]));
                             if egraph.union(id, eq) {
                                 changed.push(egraph.find(id));
@@ -376,9 +383,13 @@ pub(super) fn build_instance_vals_impl(
                         }
                         id
                     }
-                    AxiomPure::SeqLit { elem_ty, elem } => {
+                    AxiomPure::CollLit {
+                        kind,
+                        elem_ty,
+                        elem,
+                    } => {
                         let elem = get(egraph, &vals, elem);
-                        egraph.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), elem))
+                        egraph.add(Symbolic::CollLit(*kind, Box::new(elem_ty.clone()), elem))
                     }
                 };
                 vals.push(id);

@@ -115,8 +115,131 @@ pub fn write() -> Val {
     Val::Literal(Literal::Real(num::BigInt::from(1).into()))
 }
 
-/// A sequence operation. Shared by `PureInst::Seq`, `TrigHead::Seq` and
-/// `Symbolic::Seq`, so the three layers cannot drift apart.
+/// Which built-in collection a [`Type::Coll`] is. Both are values of an
+/// element type `E`, axiomatized rather than modelled (see
+/// `verify::coll_axioms`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CollKind {
+    Seq,
+    Set,
+}
+
+impl CollKind {
+    /// The Viper name of the collection type, `Seq` or `Set`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CollKind::Seq => "Seq",
+            CollKind::Set => "Set",
+        }
+    }
+}
+
+/// An operation on a built-in collection. Shared by `PureInst::Coll`,
+/// `TrigHead::Coll` and `Symbolic::Coll`, so the three layers cannot drift
+/// apart. Every operation works on one collection kind, the one
+/// [`CollOp::kind`] names; its operands follow that kind's own order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::From)]
+pub enum CollOp {
+    Seq(SeqOp),
+    Set(SetOp),
+}
+
+impl CollOp {
+    /// The collection kind this operation works on.
+    pub fn kind(self) -> CollKind {
+        match self {
+            CollOp::Seq(_) => CollKind::Seq,
+            CollOp::Set(_) => CollKind::Set,
+        }
+    }
+
+    /// The empty collection of `kind`.
+    pub fn empty(kind: CollKind) -> CollOp {
+        match kind {
+            CollKind::Seq => CollOp::Seq(SeqOp::Empty),
+            CollKind::Set => CollOp::Set(SetOp::Empty),
+        }
+    }
+
+    /// The program's typed equality of two collections of `kind`.
+    pub fn eq(kind: CollKind) -> CollOp {
+        match kind {
+            CollKind::Seq => CollOp::Seq(SeqOp::Eq),
+            CollKind::Set => CollOp::Set(SetOp::Eq),
+        }
+    }
+
+    /// `|c|`: a sequence's length or a set's cardinality.
+    pub fn size(kind: CollKind) -> CollOp {
+        match kind {
+            CollKind::Seq => CollOp::Seq(SeqOp::Len),
+            CollKind::Set => CollOp::Set(SetOp::Card),
+        }
+    }
+
+    /// `x in c`: operands `[c, x]`, the collection first.
+    pub fn contains(kind: CollKind) -> CollOp {
+        match kind {
+            CollKind::Seq => CollOp::Seq(SeqOp::Contains),
+            CollKind::Set => CollOp::Set(SetOp::Contains),
+        }
+    }
+
+    /// Whether this is the typed equality of its kind, which the verifier keeps
+    /// in one e-class with the untyped `==` (see [`SeqOp::Eq`]).
+    pub fn is_eq(self) -> bool {
+        matches!(self, CollOp::Seq(SeqOp::Eq) | CollOp::Set(SetOp::Eq))
+    }
+
+    /// The element type of the collection this operation works on, given the
+    /// element type written on the node: a `Range` is always on `Seq<Int>`.
+    pub fn elem_ty(self, elem_ty: &Type) -> Type {
+        match self {
+            CollOp::Seq(SeqOp::Range) => Type::Int,
+            _ => elem_ty.clone(),
+        }
+    }
+
+    /// How many operands `PureInst::Coll` of this operation takes.
+    pub fn arity(self) -> usize {
+        match self {
+            CollOp::Seq(op) => op.arity(),
+            CollOp::Set(op) => op.arity(),
+        }
+    }
+
+    /// Whether this op has the in-range side condition, so `emit_pure_guarded`
+    /// must check it (the counterpart of `BinOp::is_div_or_mod`).
+    pub fn has_bound_check(self) -> bool {
+        matches!(self, CollOp::Seq(op) if op.has_bound_check())
+    }
+
+    /// The operand types, in operand order, for a collection of element type
+    /// `elem_ty`.
+    pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
+        match self {
+            CollOp::Seq(op) => op.operand_types(elem_ty),
+            CollOp::Set(op) => op.operand_types(elem_ty),
+        }
+    }
+
+    /// The result type, for a collection of element type `elem_ty`.
+    pub fn result_type(self, elem_ty: &Type) -> Type {
+        match self {
+            CollOp::Seq(op) => op.result_type(elem_ty),
+            CollOp::Set(op) => op.result_type(elem_ty),
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            CollOp::Seq(op) => op.token(),
+            CollOp::Set(op) => op.token(),
+        }
+    }
+}
+
+/// A sequence operation (see [`CollOp`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SeqOp {
     /// `|s|` : Int
@@ -145,7 +268,7 @@ pub enum SeqOp {
 }
 
 impl SeqOp {
-    /// How many operands `PureInst::Seq` of this operation takes.
+    /// How many operands `PureInst::Coll` of this operation takes.
     pub fn arity(self) -> usize {
         match self {
             SeqOp::Empty => 0,
@@ -170,7 +293,7 @@ impl SeqOp {
     /// The operand types, in operand order, for a sequence of element type
     /// `elem_ty` (for a `Range`, `Int`).
     pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
-        let seq = || Type::Seq(Box::new(elem_ty.clone()));
+        let seq = || Type::seq(elem_ty.clone());
         match self {
             SeqOp::Empty => vec![],
             SeqOp::Len => vec![seq()],
@@ -193,7 +316,7 @@ impl SeqOp {
             | SeqOp::Take
             | SeqOp::Drop
             | SeqOp::Range
-            | SeqOp::Empty => Type::Seq(Box::new(elem_ty.clone())),
+            | SeqOp::Empty => Type::seq(elem_ty.clone()),
         }
     }
 
@@ -209,6 +332,86 @@ impl SeqOp {
             SeqOp::Contains => "seq.in",
             SeqOp::Empty => "seq.empty",
             SeqOp::Eq => "seq.eq",
+        }
+    }
+}
+
+/// A set operation (see [`CollOp`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SetOp {
+    /// `|s|` : Int
+    Card,
+    /// `x in s` : Bool. Operands are `[s, x]`: the set always comes first.
+    Contains,
+    /// `s union t` : Set<T>
+    Union,
+    /// `s intersection t` : Set<T>
+    Intersection,
+    /// `s setminus t` : Set<T>
+    Difference,
+    /// `s subset t` : Bool
+    Subset,
+    /// `s union Set(x)` : Set<T>, Silicon's `Set_unionone`. No surface syntax:
+    /// a literal `Set(a, b, c)` is `Set(a)` with `b`, then `c`, added, which is
+    /// what lets its cardinality follow without an extensionality argument.
+    Add,
+    /// `Set[T]()` : Set<T>. Takes no operands, so `elem_ty` is all that names `T`.
+    Empty,
+    /// `s == t` : Bool, a program's equality of two sets (see [`SeqOp::Eq`]).
+    Eq,
+}
+
+impl SetOp {
+    /// How many operands `PureInst::Coll` of this operation takes.
+    pub fn arity(self) -> usize {
+        match self {
+            SetOp::Empty => 0,
+            SetOp::Card => 1,
+            SetOp::Contains
+            | SetOp::Union
+            | SetOp::Intersection
+            | SetOp::Difference
+            | SetOp::Subset
+            | SetOp::Add
+            | SetOp::Eq => 2,
+        }
+    }
+
+    /// The operand types, in operand order, for a set of element type `elem_ty`.
+    pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
+        let set = || Type::set(elem_ty.clone());
+        match self {
+            SetOp::Empty => vec![],
+            SetOp::Card => vec![set()],
+            SetOp::Contains | SetOp::Add => vec![set(), elem_ty.clone()],
+            SetOp::Union | SetOp::Intersection | SetOp::Difference | SetOp::Subset | SetOp::Eq => {
+                vec![set(), set()]
+            }
+        }
+    }
+
+    /// The result type, for a set of element type `elem_ty`.
+    pub fn result_type(self, elem_ty: &Type) -> Type {
+        match self {
+            SetOp::Card => Type::Int,
+            SetOp::Contains | SetOp::Subset | SetOp::Eq => Type::Bool,
+            SetOp::Union | SetOp::Intersection | SetOp::Difference | SetOp::Add | SetOp::Empty => {
+                Type::set(elem_ty.clone())
+            }
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            SetOp::Card => "set.card",
+            SetOp::Contains => "set.in",
+            SetOp::Union => "set.union",
+            SetOp::Intersection => "set.inter",
+            SetOp::Difference => "set.diff",
+            SetOp::Subset => "set.subset",
+            SetOp::Add => "set.add",
+            SetOp::Empty => "set.empty",
+            SetOp::Eq => "set.eq",
         }
     }
 }
@@ -272,19 +475,21 @@ pub enum PureInst {
         base: Val,
     },
 
-    /// The singleton sequence `Seq(elem)`. A longer literal is a right-nested
-    /// concatenation of these, `Seq(a, b, c)` being `Seq(a) ++ (Seq(b) ++ Seq(c))`,
-    /// and an empty one is `SeqOp::Empty`.
-    SeqLit {
+    /// The singleton collection `Seq(elem)` or `Set(elem)`. A longer sequence
+    /// literal is a right-nested concatenation of these, `Seq(a, b, c)` being
+    /// `Seq(a) ++ (Seq(b) ++ Seq(c))`; a longer set literal adds each further
+    /// element (`SetOp::Add`); an empty one is the kind's `Empty`.
+    CollLit {
+        kind: CollKind,
         elem_ty: Type,
         elem: Val,
     },
-    /// A sequence operation. Build it with `PureInst::seq`, which checks the arity.
-    /// `elem_ty` is the element type of the sequence it works on (`Int` for `Range`):
-    /// the result does not always say, as `|s|` shows.
-    Seq {
+    /// A collection operation. Build it with `PureInst::coll`, which checks the
+    /// arity. `elem_ty` is the element type of the collection it works on (`Int`
+    /// for `Range`): the result does not always say, as `|s|` shows.
+    Coll {
         elem_ty: Type,
-        op: SeqOp,
+        op: CollOp,
         args: Vec<Val>,
     },
 
@@ -315,22 +520,23 @@ impl PureInst {
             | PureInst::Perm(_, v)
             | PureInst::AdtProj { base: v, .. }
             | PureInst::AdtIs { base: v, .. }
-            | PureInst::SeqLit { elem: v, .. } => f(v),
+            | PureInst::CollLit { elem: v, .. } => f(v),
             PureInst::FunctionCall(fc) => fc.args.iter().for_each(&mut *f),
             PureInst::OptionUnwrap(v) => f(v),
             PureInst::AdtCons { args, .. } => args.iter().for_each(&mut *f),
             PureInst::Forall(q) => q.free_temps().iter().for_each(|k| f(&Val::Temp(*k))),
-            PureInst::Seq { args, .. } => args.iter().for_each(&mut *f),
+            PureInst::Coll { args, .. } => args.iter().for_each(&mut *f),
         }
     }
-    pub fn seq(elem_ty: Type, op: SeqOp, args: Vec<Val>) -> PureInst {
+    pub fn coll(elem_ty: Type, op: impl Into<CollOp>, args: Vec<Val>) -> PureInst {
+        let op = op.into();
         assert_eq!(
             args.len(),
             op.arity(),
             "`{op:?}` takes {} operands, got {args:?}",
             op.arity()
         );
-        PureInst::Seq { elem_ty, op, args }
+        PureInst::Coll { elem_ty, op, args }
     }
 }
 
@@ -420,25 +626,84 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                 adt, variant, base, ..
             } => write!(f, "{}?({base})", self.adt_variant(*adt, *variant)),
             PureInst::Forall(q) => write!(f, "{}", self.with(&**q)),
-            PureInst::SeqLit { elem_ty, elem } => {
-                write!(f, "Seq<{}>({elem})", self.with(elem_ty))
+            PureInst::CollLit {
+                kind,
+                elem_ty,
+                elem,
+            } => {
+                write!(f, "{}<{}>({elem})", kind.name(), self.with(elem_ty))
             }
-            PureInst::Seq { elem_ty, op, args } => match (op, args.as_slice()) {
-                (SeqOp::Empty, []) => write!(f, "Seq<{}>()", self.with(elem_ty)),
-                (SeqOp::Len, [s]) => write!(f, "|{s}|"),
-                (SeqOp::Concat, [s, t]) => write!(f, "{s} ++ {t}"),
-                (SeqOp::Index, [s, i]) => write!(f, "{s}[{i}]"),
-                (SeqOp::Update, [s, i, v]) => write!(f, "{s}[{i} := {v}]"),
-                (SeqOp::Take, [s, n]) => write!(f, "{s}[..{n}]"),
-                (SeqOp::Drop, [s, n]) => write!(f, "{s}[{n}..]"),
-                (SeqOp::Contains, [s, x]) => write!(f, "{x} in {s}"),
-                (SeqOp::Range, [a, b]) => write!(f, "[{a}..{b})"),
-                (SeqOp::Eq, [s, t]) => write!(f, "{s} ==seq {t}"),
-                (op, args) => unreachable!(
-                    "`{op:?}` with {} operands; `PureInst::seq` checks arity",
-                    args.len()
-                ),
-            },
+            PureInst::Coll { elem_ty, op, args } => {
+                use CollOp::{Seq, Set};
+                match (op, args.as_slice()) {
+                    (Seq(SeqOp::Empty) | Set(SetOp::Empty), []) => {
+                        write!(f, "{}<{}>()", op.kind().name(), self.with(elem_ty))
+                    }
+                    (Seq(SeqOp::Len) | Set(SetOp::Card), [s]) => write!(f, "|{s}|"),
+                    (Seq(SeqOp::Concat), [s, t]) => write!(f, "{s} ++ {t}"),
+                    (Seq(SeqOp::Index), [s, i]) => write!(f, "{s}[{i}]"),
+                    (Seq(SeqOp::Update), [s, i, v]) => write!(f, "{s}[{i} := {v}]"),
+                    (Seq(SeqOp::Take), [s, n]) => write!(f, "{s}[..{n}]"),
+                    (Seq(SeqOp::Drop), [s, n]) => write!(f, "{s}[{n}..]"),
+                    (Seq(SeqOp::Contains) | Set(SetOp::Contains), [s, x]) => {
+                        write!(f, "{x} in {s}")
+                    }
+                    (Seq(SeqOp::Range), [a, b]) => write!(f, "[{a}..{b})"),
+                    (Seq(SeqOp::Eq), [s, t]) => write!(f, "{s} ==seq {t}"),
+                    (Set(SetOp::Union), [s, t]) => write!(f, "{s} union {t}"),
+                    (Set(SetOp::Intersection), [s, t]) => write!(f, "{s} intersection {t}"),
+                    (Set(SetOp::Difference), [s, t]) => write!(f, "{s} setminus {t}"),
+                    (Set(SetOp::Subset), [s, t]) => write!(f, "{s} subset {t}"),
+                    (Set(SetOp::Add), [s, x]) => write!(f, "{s} add {x}"),
+                    (Set(SetOp::Eq), [s, t]) => write!(f, "{s} ==set {t}"),
+                    (op, args) => unreachable!(
+                        "`{op:?}` with {} operands; `PureInst::coll` checks arity",
+                        args.len()
+                    ),
+                }
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SET_OPS: [SetOp; 9] = [
+        SetOp::Card,
+        SetOp::Contains,
+        SetOp::Union,
+        SetOp::Intersection,
+        SetOp::Difference,
+        SetOp::Subset,
+        SetOp::Add,
+        SetOp::Empty,
+        SetOp::Eq,
+    ];
+
+    /// Every set operation's operand types agree with its arity, it works on
+    /// a set, and its token is its own.
+    #[test]
+    fn set_op_tables_agree() {
+        let mut tokens = std::collections::HashSet::new();
+        for op in SET_OPS {
+            let c = CollOp::from(op);
+            assert_eq!(c.kind(), CollKind::Set);
+            assert_eq!(c.operand_types(&Type::Int).len(), c.arity(), "{op:?}");
+            assert!(!c.has_bound_check(), "{op:?}");
+            assert!(tokens.insert(c.token()), "{op:?} reuses a token");
+        }
+        assert_eq!(CollOp::size(CollKind::Set), SetOp::Card.into());
+        assert_eq!(CollOp::contains(CollKind::Set), SetOp::Contains.into());
+        assert_eq!(CollOp::empty(CollKind::Set), SetOp::Empty.into());
+        assert!(CollOp::eq(CollKind::Set).is_eq() && CollOp::eq(CollKind::Seq).is_eq());
+        assert!(!CollOp::from(SetOp::Subset).is_eq());
+    }
+
+    #[test]
+    #[should_panic(expected = "takes 2 operands")]
+    fn coll_checks_set_arity() {
+        PureInst::coll(Type::Int, SetOp::Union, vec![Val::Temp(0)]);
     }
 }

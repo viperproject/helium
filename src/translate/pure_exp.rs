@@ -8,8 +8,8 @@ use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
 use crate::vmir::{
-    self, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp, TRUE, Type,
-    Val,
+    self, CollKind, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall, SeqOp,
+    TRUE, Type, Val,
 };
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
@@ -232,7 +232,7 @@ pub(crate) fn lower<Ext: PureExt>(
                 )),
                 typed::UnOp::Cardinality => {
                     let elem_ty = seq_elem(b, &x.ty);
-                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Len, vec![v])))
+                    Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Len, vec![v])))
                 }
             }
         }
@@ -317,7 +317,7 @@ pub(crate) fn lower<Ext: PureExt>(
             ))
         }
         P::SeqLit(value) => {
-            let Type::Seq(elem_ty) = &ty else {
+            let Type::Coll(CollKind::Seq, elem_ty) = &ty else {
                 panic!("sequence literal of type {ty}");
             };
             let elem_ty = (**elem_ty).clone();
@@ -330,17 +330,25 @@ pub(crate) fn lower<Ext: PureExt>(
                 .into_iter()
                 .map(|elem| {
                     let elem_ty = elem_ty.clone();
-                    sink.emit_pure(ty.clone(), PureInst::SeqLit { elem_ty, elem })
+                    let kind = CollKind::Seq;
+                    sink.emit_pure(
+                        ty.clone(),
+                        PureInst::CollLit {
+                            kind,
+                            elem_ty,
+                            elem,
+                        },
+                    )
                 })
                 .collect();
             let concat = singletons.into_iter().rev().reduce(|tail, head| {
                 sink.emit_pure(
                     ty.clone(),
-                    PureInst::seq(elem_ty.clone(), SeqOp::Concat, vec![head, tail]),
+                    PureInst::coll(elem_ty.clone(), SeqOp::Concat, vec![head, tail]),
                 )
             });
             Ok(concat.unwrap_or_else(|| {
-                sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Empty, vec![]))
+                sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Empty, vec![]))
             }))
         }
         P::SeqIndex(seq, op) => {
@@ -353,7 +361,10 @@ pub(crate) fn lower<Ext: PureExt>(
                 I::Index(i) => {
                     let i = lower(b, env, sink, hctx, i)?;
                     Ok(sink.with_heap(hctx.value, |sink| {
-                        sink.emit_pure_guarded(ty, PureInst::seq(elem_ty, SeqOp::Index, vec![s, i]))
+                        sink.emit_pure_guarded(
+                            ty,
+                            PureInst::coll(elem_ty, SeqOp::Index, vec![s, i]),
+                        )
                     }))
                 }
                 I::Update(i, v) => {
@@ -362,18 +373,18 @@ pub(crate) fn lower<Ext: PureExt>(
                     Ok(sink.with_heap(hctx.value, |sink| {
                         sink.emit_pure_guarded(
                             ty,
-                            PureInst::seq(elem_ty, SeqOp::Update, vec![s, i, v]),
+                            PureInst::coll(elem_ty, SeqOp::Update, vec![s, i, v]),
                         )
                     }))
                 }
                 // Total: Viper clamps the bounds.
                 I::Take(n) => {
                     let n = lower(b, env, sink, hctx, n)?;
-                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Take, vec![s, n])))
+                    Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Take, vec![s, n])))
                 }
                 I::Drop(n) => {
                     let n = lower(b, env, sink, hctx, n)?;
-                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![s, n])))
+                    Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Drop, vec![s, n])))
                 }
                 // `s[a..z]` is `s[..z][a..]`, the same shape as in a trigger.
                 I::Slice(a, z) => {
@@ -381,9 +392,9 @@ pub(crate) fn lower<Ext: PureExt>(
                     let z = lower(b, env, sink, hctx, z)?;
                     let taken = sink.emit_pure(
                         ty.clone(),
-                        PureInst::seq(elem_ty.clone(), SeqOp::Take, vec![s, z]),
+                        PureInst::coll(elem_ty.clone(), SeqOp::Take, vec![s, z]),
                     );
-                    Ok(sink.emit_pure(ty, PureInst::seq(elem_ty, SeqOp::Drop, vec![taken, a])))
+                    Ok(sink.emit_pure(ty, PureInst::coll(elem_ty, SeqOp::Drop, vec![taken, a])))
                 }
             }
         }
@@ -561,9 +572,11 @@ fn lower_binary<Ext: PureExt>(
     // either one, since the typechecker equates the two
     // (`viper::typecheck`, `Lt | Le | Gt | Ge` imposes `lk.equate_with(rk)`).
     let cmp = &lty;
-    // `l == r`: over sequences, the typed `SeqOp::Eq`.
+    // `l == r`: over collections, the kind's typed equality.
     let eq_of = |lv, rv| match &lty {
-        vmir::Type::Seq(elem_ty) => PureInst::seq((**elem_ty).clone(), SeqOp::Eq, vec![lv, rv]),
+        vmir::Type::Coll(kind, elem_ty) => {
+            PureInst::coll((**elem_ty).clone(), vmir::CollOp::eq(*kind), vec![lv, rv])
+        }
         _ => PureInst::Binary(V::Eq, lv, rv),
     };
     Ok(match op {
@@ -604,16 +617,16 @@ fn lower_binary<Ext: PureExt>(
         // `Bool` for `in`.
         B::Concat => sink.emit_pure(
             ty,
-            PureInst::seq(seq_elem(b, &l.ty), SeqOp::Concat, vec![lv, rv]),
+            PureInst::coll(seq_elem(b, &l.ty), SeqOp::Concat, vec![lv, rv]),
         ),
         B::Range => sink.emit_pure(
             ty,
-            PureInst::seq(vmir::Type::Int, SeqOp::Range, vec![lv, rv]),
+            PureInst::coll(vmir::Type::Int, SeqOp::Range, vec![lv, rv]),
         ),
         // `x in s` is `Contains(s, x)`: the sequence comes first.
         B::In => sink.emit_pure(
             ty,
-            PureInst::seq(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv]),
+            PureInst::coll(seq_elem(b, &r.ty), SeqOp::Contains, vec![rv, lv]),
         ),
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
             return Err(TranslationError::Unsupported("collection operator"));
@@ -1004,7 +1017,7 @@ fn lower_trig_term(
             })
         }
         // Sequence terms, which typecheck accepts as triggers as Silicon does.
-        // Each lowers to the operand order `PureInst::Seq` uses, so the pattern
+        // Each lowers to the operand order `PureInst::Coll` uses, so the pattern
         // matches what a body builds. That includes a literal's shape: right-nested
         // concatenations of singletons, or `SeqOp::Empty`.
         P::SeqLit(elems) => {
@@ -1012,7 +1025,7 @@ fn lower_trig_term(
             let singletons = lower_args(elems)?
                 .into_iter()
                 .map(|elem| vmir::TrigTerm::App {
-                    head: vmir::TrigHead::SeqLit,
+                    head: vmir::TrigHead::CollLit(CollKind::Seq),
                     type_args: vec![elem_ty.clone()],
                     args: Box::new([elem]),
                 });
@@ -1065,7 +1078,7 @@ fn lower_trig_term(
 }
 
 /// A trigger application of the sequence operation `op`, checking its arity
-/// as `PureInst::seq` does.
+/// as `PureInst::coll` does.
 fn seq_trig<const N: usize>(
     elem_ty: &vmir::Type,
     op: vmir::SeqOp,
@@ -1073,7 +1086,7 @@ fn seq_trig<const N: usize>(
 ) -> vmir::TrigTerm {
     assert_eq!(N, op.arity(), "`{op:?}` takes {} operands", op.arity());
     vmir::TrigTerm::App {
-        head: vmir::TrigHead::Seq(op),
+        head: vmir::TrigHead::Coll(op.into()),
         type_args: vec![elem_ty.clone()],
         args: Box::new(args),
     }

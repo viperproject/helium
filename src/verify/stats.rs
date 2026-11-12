@@ -101,7 +101,7 @@ pub struct VerifyStats {
     /// Quantifier instances found beyond the generation bound and deferred
     /// (counted each time a match finds one).
     pub inst_deferred: u64,
-    /// Quantifier instances skipped because the recipe's guard (a sequence
+    /// Quantifier instances skipped because the recipe's guard (a collection
     /// axiom's) was not yet true (counted each time a match finds one).
     pub inst_guard_skips: u64,
     /// The deepest generation of a quantifier instance built.

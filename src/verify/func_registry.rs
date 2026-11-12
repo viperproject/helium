@@ -121,8 +121,9 @@ pub struct FuncRegistry {
     quant_table: std::sync::Arc<std::sync::RwLock<crate::verify::quant::RecipeTable>>,
     /// The signature of each skolem function, by its [`FuncKind::Skolem`] index.
     skolems: Vec<SkolemSig>,
-    /// The sequence axioms' skolem functions, minted with their recipes.
-    seq_skolems: Option<crate::verify::seq_axioms::SeqSkolems>,
+    /// Each collection kind's axiom skolem functions, minted with its
+    /// recipes, by `CollKind` (`Seq` first).
+    coll_skolems: [Option<crate::verify::coll_axioms::Skolems>; 2],
 }
 
 // Builtin reserved operator ids (starting from the top of the usize space).
@@ -293,7 +294,7 @@ impl FuncRegistry {
             ctor_head,
             quant_table: Default::default(),
             skolems: Vec::new(),
-            seq_skolems: None,
+            coll_skolems: [None, None],
         }
     }
 
@@ -383,29 +384,30 @@ impl FuncRegistry {
             .collect()
     }
 
-    /// The recipes of the built-in sequence axioms (`verify::seq_axioms`),
-    /// compiled into the recipe table on the first call, with the skolem
-    /// functions their witnesses are terms of.
-    pub(crate) fn seq_axioms(&mut self) -> Vec<crate::verify::lang::RecipeId> {
-        let skolems = match self.seq_skolems {
-            Some(s) => s,
-            None => {
-                let s =
-                    crate::verify::seq_axioms::SeqSkolems::mint(|name, sig| self.skolem(name, sig));
-                self.seq_skolems = Some(s);
-                s
-            }
-        };
+    /// The recipes of the built-in axioms of the collection `kind`
+    /// (`verify::coll_axioms`), compiled into the recipe table on the first
+    /// call, with the skolem functions their witnesses are terms of.
+    pub(crate) fn coll_axioms(
+        &mut self,
+        kind: crate::vmir::CollKind,
+    ) -> Vec<crate::verify::lang::RecipeId> {
+        let slot = kind as usize;
+        if self.coll_skolems[slot].is_none() {
+            let s =
+                crate::verify::coll_axioms::Skolems::mint(kind, |name, sig| self.skolem(name, sig));
+            self.coll_skolems[slot] = Some(s);
+        }
+        let skolems = self.coll_skolems[slot].as_ref().expect("just minted");
         self.quant_table
             .write()
             .expect("recipe table lock")
-            .seq_axioms(&skolems)
+            .coll_axioms(kind, skolems)
     }
 
     // ---- Builtin `Option` resolution -------------------------------------
     // `Option[T]` is a builtin parametric type (`vmir::Type::Option`). These are
     // the dedicated way to request its monomorphic instance, rather than open-
-    // coding `cons`/`proj`. (Future `Seq`/`Set` follow the same shape.)
+    // coding `cons`/`proj`. (`Seq`/`Set` are `Type::Coll`, axiomatized in `verify::coll_axioms`.)
 
     /// `Option[elem]` as a vmir type (the builtin parametric `Type::Option`).
     pub fn option_type(&self, elem: Type) -> Type {

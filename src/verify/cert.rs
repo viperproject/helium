@@ -526,8 +526,8 @@ fn for_each_operand_mut(inst: &mut AxiomInst, mut f: impl FnMut(&mut Val)) {
             }
             AxiomPure::RealCast(v) => f(v),
             AxiomPure::App { args, .. } => args.iter_mut().for_each(f),
-            AxiomPure::Seq { args, .. } => args.iter_mut().for_each(f),
-            AxiomPure::SeqLit { elem, .. } => f(elem),
+            AxiomPure::Coll { args, .. } => args.iter_mut().for_each(f),
+            AxiomPure::CollLit { elem, .. } => f(elem),
         },
         AxiomInst::Forall { caps, .. } => caps.iter_mut().for_each(f),
         AxiomInst::Assume(v) => f(v),
@@ -559,8 +559,8 @@ fn for_each_operand(inst: &AxiomInst, mut f: impl FnMut(&Val)) {
             }
             AxiomPure::RealCast(v) => f(v),
             AxiomPure::App { args, .. } => args.iter().for_each(f),
-            AxiomPure::Seq { args, .. } => args.iter().for_each(f),
-            AxiomPure::SeqLit { elem, .. } => f(elem),
+            AxiomPure::Coll { args, .. } => args.iter().for_each(f),
+            AxiomPure::CollLit { elem, .. } => f(elem),
         },
         AxiomInst::Forall { caps, .. } => caps.iter().for_each(f),
         AxiomInst::Assume(v) => f(v),

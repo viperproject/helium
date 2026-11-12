@@ -1,8 +1,8 @@
 use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
-use crate::vmir::SeqOp;
 use crate::vmir::display::VmirDisplay;
+use crate::vmir::{CollKind, SeqOp};
 use crate::{
     verify::{
         cert::{FunctionDefinition, ResourceDefinition},
@@ -685,7 +685,7 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
-        PureInst::Seq { elem_ty, op, args } => {
+        PureInst::Coll { elem_ty, op, args } => {
             let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
             let recipe = if ctx.recipe.is_some() {
                 let args: Vec<Val> = args
@@ -693,7 +693,7 @@ fn eval_pure_inst(
                     .map(|v| state.require_recipe(v, OPERAND_RECIPE))
                     .collect::<Result<_, _>>()?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Seq {
+                Some(rb.emit(AxiomPure::Coll {
                     elem_ty: elem_ty.clone(),
                     op: *op,
                     args,
@@ -701,21 +701,26 @@ fn eval_pure_inst(
             } else {
                 None
             };
-            let id = ctx.add(Symbolic::Seq(Box::new(elem_ty.clone()), *op, ids.clone()));
-            // A sequence equality (`SeqOp::Eq`) shares its class with the untyped
-            // `l == r`, which the rest of equality reasoning reads.
-            if *op == SeqOp::Eq {
+            let id = ctx.add(Symbolic::Coll(Box::new(elem_ty.clone()), *op, ids.clone()));
+            // A collection equality (`CollOp::is_eq`) shares its class with the
+            // untyped `l == r`, which the rest of equality reasoning reads.
+            if op.is_eq() {
                 let eq = ctx.add(Symbolic::Binary(BinOp::Eq, [ids[0], ids[1]]));
                 ctx.union(id, eq);
             }
             (id, recipe)
         }
-        PureInst::SeqLit { elem_ty, elem } => {
+        PureInst::CollLit {
+            kind,
+            elem_ty,
+            elem,
+        } => {
             let id = state.get_val(ctx, elem);
             let recipe = if ctx.recipe.is_some() {
                 let elem = state.require_recipe(elem, OPERAND_RECIPE)?;
                 let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::SeqLit {
+                Some(rb.emit(AxiomPure::CollLit {
+                    kind: *kind,
                     elem_ty: elem_ty.clone(),
                     elem,
                 }))
@@ -723,7 +728,7 @@ fn eval_pure_inst(
                 None
             };
             (
-                ctx.add(Symbolic::SeqLit(Box::new(elem_ty.clone()), id)),
+                ctx.add(Symbolic::CollLit(*kind, Box::new(elem_ty.clone()), id)),
                 recipe,
             )
         }
@@ -1984,39 +1989,51 @@ fn eval_from_snap(
     Ok(out)
 }
 
-/// Whether the program has a sequence anywhere: a value of a type that mentions
-/// `Seq` (a parameter, a local, a field read, an operation's result) or a
-/// sequence operation (`|s|` is an `Int` over one). Every sequence the program
-/// can build or compare is one of these.
-fn decls_use_seq(decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>) -> bool {
-    fn mentions_seq(ty: &Type) -> bool {
+/// Whether the program has a collection of `kind` anywhere: a value of a type
+/// that mentions one (a parameter, a local, a field read, an operation's
+/// result) or an operation on one (`|s|` is an `Int` over one). Every
+/// collection the program can build or compare is one of these.
+fn decls_use_coll(
+    decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
+    kind: CollKind,
+) -> bool {
+    fn mentions(ty: &Type, kind: CollKind) -> bool {
         match ty {
-            Type::Seq(_) => true,
-            Type::Domain(_, args) => args.iter().any(mentions_seq),
-            Type::Option(t) => mentions_seq(t),
-            Type::Addr { value, .. } => mentions_seq(value),
+            Type::Coll(k, elem) => *k == kind || mentions(elem, kind),
+            Type::Domain(_, args) => args.iter().any(|a| mentions(a, kind)),
+            Type::Option(t) => mentions(t, kind),
+            Type::Addr { value, .. } => mentions(value, kind),
             _ => false,
         }
     }
-    fn insts_use_seq(insts: &[vmir::Inst]) -> bool {
+    let insts_use = |insts: &[vmir::Inst]| {
         insts.iter().any(|i| match &i.kind {
             InstKind::Pure(ty, pi) => {
-                mentions_seq(ty) || matches!(pi, PureInst::Seq { .. } | PureInst::SeqLit { .. })
+                mentions(ty, kind)
+                    || match pi {
+                        PureInst::Coll { op, elem_ty, .. } => {
+                            op.kind() == kind || mentions(elem_ty, kind)
+                        }
+                        PureInst::CollLit {
+                            kind: k, elem_ty, ..
+                        } => *k == kind || mentions(elem_ty, kind),
+                        _ => false,
+                    }
             }
             _ => false,
         })
-    }
+    };
     decls.iter().any(|d| match d {
-        vmir::Declaration::Method(m) => insts_use_seq(&m.flatten()),
+        vmir::Declaration::Method(m) => insts_use(&m.flatten()),
         vmir::Declaration::Function(f) => {
-            f.params.iter().any(mentions_seq)
-                || mentions_seq(&f.ret)
-                || f.body.as_ref().is_some_and(|b| insts_use_seq(&b.insts))
+            f.params.iter().any(|t| mentions(t, kind))
+                || mentions(&f.ret, kind)
+                || f.body.as_ref().is_some_and(|b| insts_use(&b.insts))
         }
         vmir::Declaration::Resource(r) => {
-            r.params.iter().any(mentions_seq) || insts_use_seq(&r.body.insts)
+            r.params.iter().any(|t| mentions(t, kind)) || insts_use(&r.body.insts)
         }
-        vmir::Declaration::Axiom(a) => insts_use_seq(&a.body.insts),
+        vmir::Declaration::Axiom(a) => insts_use(&a.body.insts),
         _ => false,
     })
 }
@@ -2082,11 +2099,15 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         ctx.union(res, true_);
         ctx.egraph.rebuild();
     }
-    // The built-in sequence axioms (`verify::seq_axioms`): each a closed `forall`
-    // node, true, whose element type stays open for its trigger matches to fix.
-    // Only a program that has sequences gets them, so others pay nothing.
-    if decls_use_seq(&program.decls) {
-        let ids = ctx.alloc.seq_axioms();
+    // The built-in collection axioms (`verify::coll_axioms`): each a closed
+    // `forall` node, true, whose element type stays open for its trigger
+    // matches to fix. Only a program that has collections of a kind gets that
+    // kind's axioms, so others pay nothing.
+    for kind in [CollKind::Seq, CollKind::Set] {
+        if !decls_use_coll(&program.decls, kind) {
+            continue;
+        }
+        let ids = ctx.alloc.coll_axioms(kind);
         // The witnesses' type, for type inference (`types::infer_type`).
         for (f, ret) in ctx.alloc.skolem_ret_types() {
             ctx.func_ret_types.entry(f).or_insert(ret);
@@ -2194,17 +2215,19 @@ pub(crate) fn prepare_trig_term(
                     field,
                 } => func(alloc.proj(*adt, *variant, *field)),
                 vmir::TrigHead::AdtIs { adt, variant } => func(alloc.adt_is(*adt, *variant)),
-                vmir::TrigHead::Seq(op) => {
+                vmir::TrigHead::Coll(op) => {
                     let [elem_ty] = &type_args[..] else {
                         panic!("a `{op:?}` trigger names its element type: {type_args:?}");
                     };
-                    TermHead::Seq(elem_ty.clone(), *op)
+                    TermHead::Coll(elem_ty.clone(), *op)
                 }
-                vmir::TrigHead::SeqLit => {
+                vmir::TrigHead::CollLit(kind) => {
                     let [elem_ty] = &type_args[..] else {
-                        panic!("a sequence literal trigger names its element type: {type_args:?}");
+                        panic!(
+                            "a `{kind:?}` literal trigger names its element type: {type_args:?}"
+                        );
                     };
-                    TermHead::SeqLit(elem_ty.clone())
+                    TermHead::CollLit(*kind, elem_ty.clone())
                 }
             };
             PreparedTerm::App {
@@ -2315,12 +2338,17 @@ pub(crate) fn prepare_body(
                 | PureInst::Forall(_) => {
                     return Err(VerifyError::Unimplemented("impure inst in axiom body"));
                 }
-                PureInst::Seq { elem_ty, op, args } => AxiomPure::Seq {
+                PureInst::Coll { elem_ty, op, args } => AxiomPure::Coll {
                     elem_ty: elem_ty.clone(),
                     op: *op,
                     args: args.clone(),
                 },
-                PureInst::SeqLit { elem_ty, elem } => AxiomPure::SeqLit {
+                PureInst::CollLit {
+                    kind,
+                    elem_ty,
+                    elem,
+                } => AxiomPure::CollLit {
+                    kind: *kind,
                     elem_ty: elem_ty.clone(),
                     elem: elem.clone(),
                 },
@@ -3117,7 +3145,7 @@ fn inst_obligations(
 
         InstKind::Pure(
             _,
-            PureInst::Seq {
+            PureInst::Coll {
                 elem_ty,
                 op,
                 args: val,
@@ -3126,9 +3154,9 @@ fn inst_obligations(
             // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
             let s = state.get_val(ctx, &val[0]);
             let i = state.get_val(ctx, &val[1]);
-            let len = ctx.add(Symbolic::Seq(
+            let len = ctx.add(Symbolic::Coll(
                 Box::new(elem_ty.clone()),
-                SeqOp::Len,
+                SeqOp::Len.into(),
                 Box::new([s]),
             ));
             let lower = expr!(ctx, not({ i } <i 0));

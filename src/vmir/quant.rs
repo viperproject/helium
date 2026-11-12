@@ -145,13 +145,13 @@ pub enum TrigHead {
         adt: crate::vmir::MemberId,
         variant: usize,
     },
-    /// A sequence operation. The `App`'s `args` are its operands in
-    /// `PureInst::Seq` order (so `x in s` is `Contains(s, x)`), and `type_args`
-    /// is `[elem_ty]`, the element type of the sequence it works on.
-    Seq(crate::vmir::SeqOp),
-    /// The singleton sequence of the `App`'s one argument, `PureInst::SeqLit`.
-    /// `type_args` is `[elem_ty]`.
-    SeqLit,
+    /// A collection operation. The `App`'s `args` are its operands in
+    /// `PureInst::Coll` order (so `x in s` is `Contains(s, x)`), and `type_args`
+    /// is `[elem_ty]`, the element type of the collection it works on.
+    Coll(crate::vmir::CollOp),
+    /// The singleton collection of the `App`'s one argument,
+    /// `PureInst::CollLit`. `type_args` is `[elem_ty]`.
+    CollLit(crate::vmir::CollKind),
 }
 
 /// A trigger term, rendered in the enclosing temp syntax: every variable is an
@@ -181,8 +181,8 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
                     TrigHead::AdtIs { adt, variant } => {
                         write!(f, "{}?", self.adt_variant(*adt, *variant))?
                     }
-                    TrigHead::Seq(op) => write!(f, "{}", op.token())?,
-                    TrigHead::SeqLit => write!(f, "Seq")?,
+                    TrigHead::Coll(op) => write!(f, "{}", op.token())?,
+                    TrigHead::CollLit(kind) => write!(f, "{}", kind.name())?,
                 }
                 if !type_args.is_empty() {
                     write!(f, "<")?;

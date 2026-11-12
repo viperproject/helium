@@ -1,0 +1,558 @@
+//! The axioms of the built-in collection types, as quantifier recipes the one
+//! `forall` rule (`rewrite::forall_rule`) instantiates, in place of a Viper
+//! prelude domain. One table per [`CollKind`]: `Seq[T]` ([`seq`]); `Set[T]`
+//! has none yet.
+//!
+//! Adapted from Silicon's `dafny_axioms`. As recipes, they need none of the
+//! domains' helper functions: `Seq_add`/`Seq_sub` are plain `+`/`-` (their
+//! round-trip equalities stay, see [`seq`]), `Seq_contains_trigger` is gone,
+//! and `Seq_equal` is a program's typed collection equality
+//! (`CollOp::is_eq`, in the untyped equality's own e-class). The skolem functions stay (see [`Witness`]), as
+//! functions the registry mints rather than domain functions: a witness is a
+//! term of the instance's binders, so building an instance again finds the
+//! same witness instead of adding another one.
+//!
+//! Each axiom reads `forall vars :: {triggers} conds ==> conclusions` and holds
+//! at every element type `E`: its recipe is generic over `E` (`Generic(0)`), so
+//! a trigger match fixes `E` from the matched collection node's element type,
+//! as for a generic domain axiom. An axiom only about ranges is ground at
+//! `E = Int`. Its body is that implication, an ordinary quantifier body. An
+//! axiom whose body was a conjunction of implications is split into one axiom
+//! per conjunct.
+//!
+//! Separately, an axiom may have a guard, the recipe's [`Guard`]: an estimate
+//! of when an instance is worth building, not part of what the axiom says. An
+//! instance is built only where the guard is already known `true`. Today every
+//! axiom with a condition is guarded by that condition, as an instance where it
+//! is not yet known says nothing yet but adds terms the next round matches.
+//!
+//! Every axiom of one table is about one collection kind: its [`VarSort::Coll`]
+//! binders, [`STerm::Empty`] and [`STerm::Unit`] are of that kind, and so is
+//! every [`STerm::Op`] it applies (checked when the table is built).
+
+pub(crate) mod seq;
+
+use std::sync::LazyLock;
+
+use crate::verify::func_registry::SkolemSig;
+use crate::verify::lang::FuncId;
+use crate::verify::quant::{Guard, QuantRecipe};
+use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
+use crate::vmir::{BinOp, CollKind, CollOp, Literal, Type, Val};
+
+/// What a bound variable of an axiom ranges over, given the element type `E`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VarSort {
+    /// A collection of the table's kind.
+    Coll,
+    Elem,
+    Int,
+}
+
+impl VarSort {
+    /// The binder type, for a collection of `kind` at element type `elem`.
+    fn ty(self, kind: CollKind, elem: &Type) -> Type {
+        match self {
+            VarSort::Coll => Type::Coll(kind, Box::new(elem.clone())),
+            VarSort::Elem => elem.clone(),
+            VarSort::Int => Type::Int,
+        }
+    }
+}
+
+/// A term of an axiom, over its bound variables and the element type `E`.
+/// Boolean connectives use the shapes the program's own lowering builds
+/// (`translate::pure_exp`), so a guard finds the program's terms by lookup:
+/// `!a` is `ite(a, false, true)`, `a && b` is `ite(a, b, false)`, `a <= b` is `!(b < a)`.
+#[derive(Clone, Debug)]
+pub(crate) enum STerm {
+    Var(usize),
+    Int(i64),
+    Bool(bool),
+    /// The empty collection of the table's kind.
+    Empty,
+    /// The singleton collection of the table's kind, `Seq(e)` or `Set(e)`.
+    Unit(Box<STerm>),
+    /// A collection operation on a collection of `E` (a `Range` is on
+    /// `Seq[Int]`), operands in `PureInst::Coll` order. Never an `Empty`,
+    /// which is [`STerm::Empty`].
+    Op(CollOp, Vec<STerm>),
+    /// A witness: a skolem function applied to its operands.
+    Skolem(Witness, Vec<STerm>),
+    Bin(BinOp, Box<[STerm; 2]>),
+    Ite(Box<[STerm; 3]>),
+}
+
+/// The skolem functions of the collection axioms, each the witness of an
+/// existential in a conclusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum Witness {
+    /// `Seq_skolem(s, x)`: an index of `x` in `s`, when `x in s`.
+    SeqIndexOf,
+    /// `Seq_skolem_diff(a, b)`: an index where `a` and `b` differ, when they
+    /// have one. Both equality axioms use it, as in the domain: one function
+    /// satisfies both.
+    SeqDiff,
+}
+
+impl Witness {
+    /// The witnesses the axioms of `kind` use, in minting order.
+    fn of(kind: CollKind) -> &'static [Witness] {
+        match kind {
+            CollKind::Seq => &[Witness::SeqIndexOf, Witness::SeqDiff],
+            CollKind::Set => &[],
+        }
+    }
+
+    fn kind(self) -> CollKind {
+        match self {
+            Witness::SeqIndexOf | Witness::SeqDiff => CollKind::Seq,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Witness::SeqIndexOf => "Seq_skolem",
+            Witness::SeqDiff => "Seq_skolem_diff",
+        }
+    }
+
+    /// The signature, generic over the element type (`Generic(0)`).
+    fn sig(self) -> SkolemSig {
+        let e = || Type::Generic(0);
+        let coll = || Type::Coll(self.kind(), Box::new(e()));
+        let (params, ret) = match self {
+            Witness::SeqIndexOf => (vec![coll(), e()], Type::Int),
+            Witness::SeqDiff => (vec![coll(), coll()], Type::Int),
+        };
+        SkolemSig { params, ret }
+    }
+}
+
+/// The function ids of one collection kind's [`Witness`]es, generic over the
+/// element type (`Generic(0)`), minted by the registry
+/// (`FuncRegistry::coll_axioms`).
+#[derive(Clone, Debug)]
+pub(crate) struct Skolems {
+    funcs: Vec<(Witness, FuncId)>,
+}
+
+impl Skolems {
+    /// Mint every witness function of `kind` through `mint`, with its name and
+    /// signature.
+    pub(crate) fn mint(kind: CollKind, mut mint: impl FnMut(&str, SkolemSig) -> FuncId) -> Self {
+        Skolems {
+            funcs: Witness::of(kind)
+                .iter()
+                .map(|w| (*w, mint(w.name(), w.sig())))
+                .collect(),
+        }
+    }
+
+    fn func(&self, w: Witness) -> FuncId {
+        self.funcs
+            .iter()
+            .find(|(x, _)| *x == w)
+            .unwrap_or_else(|| panic!("witness {w:?} was not minted with its kind's axioms"))
+            .1
+    }
+}
+
+/// One axiom: `forall vars :: {triggers} guards ==> concls`.
+pub(crate) struct CollAxiom {
+    pub(crate) name: &'static str,
+    /// The collection kind every collection term of the axiom has.
+    pub(crate) kind: CollKind,
+    pub(crate) vars: Vec<VarSort>,
+    /// Alternative trigger groups, each a conjunctive multi-pattern of
+    /// applications covering every variable.
+    pub(crate) triggers: Vec<Vec<STerm>>,
+    /// The left-hand side, as a conjunction.
+    pub(crate) conds: Vec<STerm>,
+    /// The right-hand side, as a conjunction of boolean terms.
+    pub(crate) concls: Vec<STerm>,
+    /// The instantiation guard, as a conjunction: an instance is built only
+    /// where it is already known `true` (see [`Guard`]). Empty: every match.
+    pub(crate) guard: Vec<STerm>,
+    /// Only meaningful at `E = Int`: the axiom is about `[a..b)`.
+    pub(crate) int_only: bool,
+}
+
+/// The axioms of `kind`, checked once when first built. Sets have none yet:
+/// their operations are uninterpreted.
+pub(crate) fn axioms(kind: CollKind) -> &'static [CollAxiom] {
+    static SEQ: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(seq::build()));
+    match kind {
+        CollKind::Seq => &SEQ,
+        CollKind::Set => &[],
+    }
+}
+
+fn checked(all: Vec<CollAxiom>) -> Vec<CollAxiom> {
+    for ax in &all {
+        ax.check();
+    }
+    all
+}
+
+impl CollAxiom {
+    /// Every trigger group must bind every variable: the e-graph rule reads σ off
+    /// a match, and Z3 rejects a pattern that leaves a binder out. Every term
+    /// must be about the axiom's own kind.
+    fn check(&self) {
+        assert!(
+            !self.triggers.is_empty(),
+            "collection axiom {} has no trigger",
+            self.name
+        );
+        for group in &self.triggers {
+            let mut seen = vec![false; self.vars.len()];
+            for t in group {
+                t.mark_vars(&mut seen);
+            }
+            assert!(
+                seen.iter().all(|&s| s),
+                "a trigger group of collection axiom {} misses a variable",
+                self.name
+            );
+        }
+        let terms = self.triggers.iter().flatten();
+        for t in terms
+            .chain(&self.conds)
+            .chain(&self.concls)
+            .chain(&self.guard)
+        {
+            t.check_kind(self.kind, self.name);
+        }
+    }
+}
+
+impl STerm {
+    fn mark_vars(&self, seen: &mut [bool]) {
+        match self {
+            STerm::Var(i) => seen[*i] = true,
+            STerm::Int(_) | STerm::Bool(_) | STerm::Empty => {}
+            STerm::Unit(e) => e.mark_vars(seen),
+            STerm::Skolem(_, args) | STerm::Op(_, args) => {
+                args.iter().for_each(|a| a.mark_vars(seen))
+            }
+            STerm::Bin(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
+            STerm::Ite(args) => args.iter().for_each(|a| a.mark_vars(seen)),
+        }
+    }
+
+    fn check_kind(&self, kind: CollKind, axiom: &str) {
+        match self {
+            STerm::Var(_) | STerm::Int(_) | STerm::Bool(_) | STerm::Empty => {}
+            STerm::Unit(e) => e.check_kind(kind, axiom),
+            STerm::Op(op, args) => {
+                assert_eq!(op.kind(), kind, "collection axiom {axiom} applies {op:?}");
+                args.iter().for_each(|a| a.check_kind(kind, axiom));
+            }
+            STerm::Skolem(w, args) => {
+                assert_eq!(
+                    w.kind(),
+                    kind,
+                    "collection axiom {axiom} uses witness {w:?}"
+                );
+                args.iter().for_each(|a| a.check_kind(kind, axiom));
+            }
+            STerm::Bin(_, args) => args.iter().for_each(|a| a.check_kind(kind, axiom)),
+            STerm::Ite(args) => args.iter().for_each(|a| a.check_kind(kind, axiom)),
+        }
+    }
+}
+
+// Term constructors shared by the tables, named after the Viper syntax they
+// stand for.
+
+fn v(i: usize) -> STerm {
+    STerm::Var(i)
+}
+fn int(n: i64) -> STerm {
+    STerm::Int(n)
+}
+fn empty() -> STerm {
+    STerm::Empty
+}
+fn unit(e: STerm) -> STerm {
+    STerm::Unit(Box::new(e))
+}
+fn op(o: impl Into<CollOp>, args: Vec<STerm>) -> STerm {
+    STerm::Op(o.into(), args)
+}
+fn skolem(w: Witness, args: Vec<STerm>) -> STerm {
+    STerm::Skolem(w, args)
+}
+fn bin(o: BinOp, l: STerm, r: STerm) -> STerm {
+    STerm::Bin(o, Box::new([l, r]))
+}
+fn ite(c: STerm, t: STerm, e: STerm) -> STerm {
+    STerm::Ite(Box::new([c, t, e]))
+}
+fn eq(l: STerm, r: STerm) -> STerm {
+    bin(BinOp::Eq, l, r)
+}
+fn add(l: STerm, r: STerm) -> STerm {
+    bin(BinOp::AddI, l, r)
+}
+fn sub(l: STerm, r: STerm) -> STerm {
+    bin(BinOp::SubI, l, r)
+}
+fn lt(l: STerm, r: STerm) -> STerm {
+    bin(BinOp::LtI, l, r)
+}
+fn not(x: STerm) -> STerm {
+    ite(x, STerm::Bool(false), STerm::Bool(true))
+}
+fn and(a: STerm, b: STerm) -> STerm {
+    ite(a, b, STerm::Bool(false))
+}
+fn ne(l: STerm, r: STerm) -> STerm {
+    not(eq(l, r))
+}
+fn le(l: STerm, r: STerm) -> STerm {
+    not(lt(r, l))
+}
+fn ge(l: STerm, r: STerm) -> STerm {
+    not(lt(l, r))
+}
+fn gt(l: STerm, r: STerm) -> STerm {
+    lt(r, l)
+}
+
+/// An axiom under construction.
+struct Ax {
+    name: &'static str,
+    kind: CollKind,
+    vars: Vec<VarSort>,
+    triggers: Vec<Vec<STerm>>,
+    conds: Vec<STerm>,
+    concls: Vec<STerm>,
+    guard: Vec<STerm>,
+}
+
+impl Ax {
+    fn new(name: &'static str, kind: CollKind, vars: &[VarSort]) -> Self {
+        Ax {
+            name,
+            kind,
+            vars: vars.to_vec(),
+            triggers: vec![],
+            conds: vec![],
+            concls: vec![],
+            guard: vec![],
+        }
+    }
+    fn trig(mut self, group: Vec<STerm>) -> Self {
+        self.triggers.push(group);
+        self
+    }
+    /// Conjuncts of the left-hand side.
+    fn when(mut self, cs: impl IntoIterator<Item = STerm>) -> Self {
+        self.conds.extend(cs);
+        self
+    }
+    /// Conjuncts of the instantiation guard.
+    fn guard(mut self, gs: impl IntoIterator<Item = STerm>) -> Self {
+        self.guard.extend(gs);
+        self
+    }
+    /// The left-hand side so far as the instantiation guard as well.
+    fn guard_when(self) -> Self {
+        let conds = self.conds.clone();
+        self.guard(conds)
+    }
+    fn then(mut self, cs: impl IntoIterator<Item = STerm>) -> Self {
+        self.concls.extend(cs);
+        self
+    }
+    fn done(self) -> CollAxiom {
+        self.finish(false)
+    }
+    fn int_only(self) -> CollAxiom {
+        self.finish(true)
+    }
+    fn finish(self, int_only: bool) -> CollAxiom {
+        CollAxiom {
+            name: self.name,
+            kind: self.kind,
+            vars: self.vars,
+            triggers: self.triggers,
+            conds: self.conds,
+            concls: self.concls,
+            guard: self.guard,
+            int_only,
+        }
+    }
+}
+
+/// One recipe per axiom of `kind`, in [`axioms`] order, its witnesses
+/// applications of `skolems`. See the module docs.
+pub(crate) fn recipes(kind: CollKind, skolems: &Skolems) -> Vec<QuantRecipe> {
+    axioms(kind).iter().map(|ax| ax.recipe(skolems)).collect()
+}
+
+impl CollAxiom {
+    fn recipe(&self, skolems: &Skolems) -> QuantRecipe {
+        // A range is a `Seq[Int]` whatever `E` is, so its axioms are ground.
+        let (elem, n_tys) = if self.int_only {
+            (Type::Int, 0)
+        } else {
+            (Type::Generic(0), 1)
+        };
+        // The guard and the body are separate step lists, each starting after
+        // the binders.
+        let steps = || Steps {
+            next: self.vars.len(),
+            insts: Vec::new(),
+            kind: self.kind,
+            elem: elem.clone(),
+            skolems,
+        };
+        let mut guard = steps();
+        let conds: Vec<Val> = self.guard.iter().map(|g| guard.emit(g)).collect();
+        let mut body = steps();
+        let concl = conj(&self.concls);
+        let res = if self.conds.is_empty() {
+            body.emit(&concl)
+        } else {
+            body.emit(&ite(conj(&self.conds), concl, STerm::Bool(true)))
+        };
+        let groups = self
+            .triggers
+            .iter()
+            .map(|g| g.iter().map(|t| trigger(t, self.kind, &elem)).collect())
+            .collect();
+        QuantRecipe {
+            n_caps: 0,
+            bound: self.vars.iter().map(|v| v.ty(self.kind, &elem)).collect(),
+            n_tys,
+            own_tys: (0..n_tys).collect(),
+            groups,
+            insts: body.insts,
+            res,
+            guard: (!conds.is_empty()).then_some(Guard {
+                insts: guard.insts,
+                conds,
+            }),
+        }
+    }
+}
+
+/// The steps of a recipe under construction, in its temp space: the binders
+/// first, then one temp per value-producing step.
+struct Steps<'a> {
+    next: usize,
+    insts: Vec<AxiomInst>,
+    kind: CollKind,
+    elem: Type,
+    skolems: &'a Skolems,
+}
+
+impl Steps<'_> {
+    fn push(&mut self, p: AxiomPure) -> Val {
+        self.insts.push(AxiomInst::Val(p));
+        self.next += 1;
+        Val::Temp(self.next - 1)
+    }
+
+    /// The value of `t`, adding the steps that build it.
+    fn emit(&mut self, t: &STerm) -> Val {
+        let elem = self.elem.clone();
+        match t {
+            STerm::Var(i) => Val::Temp(*i),
+            STerm::Int(n) => Val::Literal(Literal::Int((*n).into())),
+            STerm::Bool(b) => Val::Literal(Literal::Bool(*b)),
+            STerm::Empty => self.push(AxiomPure::Coll {
+                elem_ty: elem,
+                op: CollOp::empty(self.kind),
+                args: vec![],
+            }),
+            STerm::Unit(e) => {
+                let e = self.emit(e);
+                self.push(AxiomPure::CollLit {
+                    kind: self.kind,
+                    elem_ty: elem,
+                    elem: e,
+                })
+            }
+            STerm::Op(op, args) => {
+                assert!(
+                    !op.is_eq(),
+                    "a collection axiom has the program's typed equality only in a trigger"
+                );
+                let args = args.iter().map(|a| self.emit(a)).collect();
+                self.push(AxiomPure::Coll {
+                    elem_ty: op.elem_ty(&elem),
+                    op: *op,
+                    args,
+                })
+            }
+            // Generic in the element type like the axiom, so an instance's
+            // type substitution fixes it.
+            STerm::Skolem(w, args) => {
+                let args = args.iter().map(|a| self.emit(a)).collect();
+                self.push(AxiomPure::App {
+                    func: self.skolems.func(*w),
+                    type_args: vec![elem],
+                    args,
+                })
+            }
+            STerm::Bin(op, args) => {
+                let (l, r) = (self.emit(&args[0]), self.emit(&args[1]));
+                self.push(AxiomPure::Binary(*op, l, r))
+            }
+            STerm::Ite(args) => {
+                let c = self.emit(&args[0]);
+                let t = self.emit(&args[1]);
+                let e = self.emit(&args[2]);
+                self.push(AxiomPure::Ternary(c, t, e))
+            }
+        }
+    }
+}
+
+/// `t1 && .. && tn` (`true` when empty), in the shape the program's own
+/// lowering builds, so the e-graph's `ite` rule splits a true one.
+fn conj(ts: &[STerm]) -> STerm {
+    match ts {
+        [] => STerm::Bool(true),
+        [t] => t.clone(),
+        [t, rest @ ..] => and(t.clone(), conj(rest)),
+    }
+}
+
+/// A trigger term of a `kind` axiom at element type `elem`: always rooted at a
+/// collection term.
+fn trigger(t: &STerm, kind: CollKind, elem: &Type) -> PreparedTerm {
+    let app = |head, args: &[STerm]| PreparedTerm::App {
+        head,
+        args: args.iter().map(|a| trigger(a, kind, elem)).collect(),
+    };
+    match t {
+        STerm::Var(i) => PreparedTerm::Bound(*i),
+        STerm::Int(n) => PreparedTerm::Lit(Literal::Int((*n).into())),
+        STerm::Bool(b) => PreparedTerm::Lit(Literal::Bool(*b)),
+        STerm::Empty => app(TermHead::Coll(elem.clone(), CollOp::empty(kind)), &[]),
+        STerm::Unit(e) => app(
+            TermHead::CollLit(kind, elem.clone()),
+            std::slice::from_ref(&**e),
+        ),
+        STerm::Op(op, args) => app(TermHead::Coll(op.elem_ty(elem), *op), args),
+        STerm::Bin(..) | STerm::Ite(..) | STerm::Skolem(..) => {
+            panic!("a collection-axiom trigger is built from collection terms, not {t:?}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::vmir::CollKind;
+
+    #[test]
+    fn every_trigger_group_binds_every_variable() {
+        // `axioms()` checks each axiom when the table is first built.
+        assert!(!super::axioms(CollKind::Seq).is_empty());
+    }
+}

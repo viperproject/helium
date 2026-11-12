@@ -1557,7 +1557,7 @@ method m(a: Bool, b: Bool, c: Bool) returns (r: Int) {
 #[test]
 fn seq_trigger_lowers_to_seq_heads() {
     // `x in s` puts the sequence first, and a slice is a take then a drop, the
-    // operand order `PureInst::Seq` uses.
+    // operand order `PureInst::Coll` uses.
     let input = r#"
 domain D {
     function f(s: Seq[Int]): Bool
@@ -1568,7 +1568,7 @@ domain D {
 }
 "#;
     let p = run(input);
-    use vmir::{SeqOp, TrigHead, TrigTerm};
+    use vmir::{CollKind, CollOp, SeqOp, TrigHead, TrigTerm};
     let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
         head,
         type_args: vec![vmir::Type::Int],
@@ -1576,11 +1576,11 @@ domain D {
     };
 
     let (head, args) = only_app(only_group(axiom_forall(&p, "len")));
-    assert_eq!(*head, TrigHead::Seq(SeqOp::Len));
+    assert_eq!(*head, TrigHead::Coll(CollOp::Seq(SeqOp::Len)));
     assert_eq!(args, &[TrigTerm::Var(0)]);
 
     let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
-    assert_eq!(*head, TrigHead::Seq(SeqOp::Contains));
+    assert_eq!(*head, TrigHead::Coll(CollOp::Seq(SeqOp::Contains)));
     assert_eq!(
         args,
         &[TrigTerm::Var(0), TrigTerm::Var(1)],
@@ -1588,9 +1588,9 @@ domain D {
     );
 
     let (head, args) = only_app(only_group(axiom_forall(&p, "slice")));
-    assert_eq!(*head, TrigHead::Seq(SeqOp::Drop));
+    assert_eq!(*head, TrigHead::Coll(CollOp::Seq(SeqOp::Drop)));
     let take = app(
-        TrigHead::Seq(SeqOp::Take),
+        TrigHead::Coll(CollOp::Seq(SeqOp::Take)),
         vec![TrigTerm::Var(0), TrigTerm::Var(2)],
     );
     assert_eq!(args, &[take, TrigTerm::Var(1)]);
@@ -1605,7 +1605,7 @@ domain D {
     else {
         panic!("expected one application");
     };
-    assert_eq!(*head, TrigHead::SeqLit);
+    assert_eq!(*head, TrigHead::CollLit(CollKind::Seq));
     assert_eq!(type_args, &[vmir::Type::Int], "the element type");
     assert_eq!(&args[..], &[TrigTerm::Var(0)]);
 }
@@ -1619,23 +1619,26 @@ domain D {
 }
 "#;
     let p = run(input);
-    use vmir::{SeqOp, TrigHead, TrigTerm};
+    use vmir::{CollKind, CollOp, SeqOp, TrigHead, TrigTerm};
     let app = |head, args: Vec<TrigTerm>| TrigTerm::App {
         head,
         type_args: vec![vmir::Type::Int],
         args: args.into(),
     };
-    let single = |k| app(TrigHead::SeqLit, vec![TrigTerm::Var(k)]);
+    let single = |k| app(TrigHead::CollLit(CollKind::Seq), vec![TrigTerm::Var(k)]);
 
     let (head, args) = only_app(only_group(axiom_forall(&p, "three")));
-    assert_eq!(*head, TrigHead::Seq(SeqOp::Concat));
-    let tail = app(TrigHead::Seq(SeqOp::Concat), vec![single(1), single(2)]);
+    assert_eq!(*head, TrigHead::Coll(CollOp::Seq(SeqOp::Concat)));
+    let tail = app(
+        TrigHead::Coll(CollOp::Seq(SeqOp::Concat)),
+        vec![single(1), single(2)],
+    );
     assert_eq!(args, &[single(0), tail], "right-nested, in source order");
 }
 
 #[test]
 fn seq_literal_lowers_to_concatenated_singletons() {
-    use vmir::{InstKind, PureInst, SeqOp, Val};
+    use vmir::{CollOp, InstKind, PureInst, SeqOp, Val};
     let seq_steps = |input: &str| -> Vec<PureInst> {
         let p = run(input);
         let vmir::Declaration::Method(method) = &p.decls[p.id("m").expect("missing m")] else {
@@ -1644,7 +1647,7 @@ fn seq_literal_lowers_to_concatenated_singletons() {
         method
             .iter_insts()
             .filter_map(|inst| match &inst.kind {
-                InstKind::Pure(_, pi @ (PureInst::SeqLit { .. } | PureInst::Seq { .. })) => {
+                InstKind::Pure(_, pi @ (PureInst::CollLit { .. } | PureInst::Coll { .. })) => {
                     Some(pi.clone())
                 }
                 _ => None,
@@ -1654,22 +1657,22 @@ fn seq_literal_lowers_to_concatenated_singletons() {
 
     let steps = seq_steps("method m(a: Int, b: Int, c: Int) { var s: Seq[Int] := Seq(a, b, c) }");
     let [
-        PureInst::SeqLit {
+        PureInst::CollLit {
             elem: Val::Temp(a), ..
         },
-        PureInst::SeqLit {
+        PureInst::CollLit {
             elem: Val::Temp(b), ..
         },
-        PureInst::SeqLit {
+        PureInst::CollLit {
             elem: Val::Temp(c), ..
         },
-        PureInst::Seq {
-            op: SeqOp::Concat,
+        PureInst::Coll {
+            op: CollOp::Seq(SeqOp::Concat),
             args: inner,
             ..
         },
-        PureInst::Seq {
-            op: SeqOp::Concat,
+        PureInst::Coll {
+            op: CollOp::Seq(SeqOp::Concat),
             args: outer,
             ..
         },
@@ -1693,9 +1696,9 @@ fn seq_literal_lowers_to_concatenated_singletons() {
 
     let steps = seq_steps("method m() { var s: Seq[Int] := Seq[Int]() }");
     let [
-        PureInst::Seq {
+        PureInst::Coll {
             elem_ty: vmir::Type::Int,
-            op: SeqOp::Empty,
+            op: CollOp::Seq(SeqOp::Empty),
             args,
         },
     ] = &steps[..]
