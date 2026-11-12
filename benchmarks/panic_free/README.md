@@ -11,7 +11,6 @@ corpus turns them on because they *are* the measurement.
     encode_all.sh      src -> vpr
     expected.txt       per-member OK/FAIL expectation
     check.sh           run + diff against expected.txt
-    strip_prelude.py   works around one typecheck gap; see "Known blocker" below
 
 ## Current state (2026-08-13, after the case split was retired)
 
@@ -164,18 +163,6 @@ So the order-fact gap is **not** the only thing standing between us and panic-fr
 Equality transitivity, constant distinctness, join reasoning, and same-object field
 framing each block unreachability independently. `enum_rematch` is a fourth class again —
 a permission failure rather than a proof failure.
-
-## Known blocker: `old` under a quantifier
-
-Prusti emits `p_{Slice,Array}_{fold,unfold}_index` whenever a program mentions `panic!` or
-an array, and their postconditions put `old(...)` inside a `forall` body. We lower
-quantifier bodies in a pure context that rejects `old`, so those files fail at typecheck
-with `IllegalOldUsage` before a single member runs — four of five files here, including
-all of `must_fail.rs`.
-
-Nothing calls those declarations, so `strip_prelude.py` drops them into `check.sh`'s
-workdir (`vpr/` stays byte-for-byte what Prusti emitted) and refuses to strip a
-declaration that has a call site. Delete the script once `old`-under-a-quantifier lowers.
 
 ## Two encoder changes this corpus needed
 

@@ -1,0 +1,17 @@
+// A quantifier whose guard is false says nothing about the value it reads:
+// inhaling it must not pin `x.f`. Silicon rejects this (assertion might not
+// hold).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } false ==> x.f == i
+  assume t(0)
+  assert x.f == 0
+}

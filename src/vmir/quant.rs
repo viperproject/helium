@@ -82,6 +82,9 @@ impl Forall {
         for inst in &self.body.insts {
             inst.for_each_operand(&mut visit);
         }
+        // The result is an operand too: a body that is just a captured value
+        // (`forall i :: {t(i)} b`) has no instruction mentioning it.
+        visit(&self.body.res);
         out
     }
 }

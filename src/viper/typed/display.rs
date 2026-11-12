@@ -87,7 +87,11 @@ fn fmt_heap_node<Ext: ShowExt>(
 }
 
 /// Render a `forall` quantifier (binders, trigger groups, body).
-fn fmt_forall(q: &Forall, f: &mut Formatter<'_>, interner: &Interner) -> fmt::Result {
+fn fmt_forall<Ext: ShowExt>(
+    q: &Forall<Ext>,
+    f: &mut Formatter<'_>,
+    interner: &Interner,
+) -> fmt::Result {
     write!(f, "forall ")?;
     for (i, bv) in q.bound.iter().enumerate() {
         if i > 0 {

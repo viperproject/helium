@@ -1,0 +1,27 @@
+// KNOWN LIMITATION — should verify, currently rejected (insufficient permission).
+//
+// Same mechanism as forall_read_framed_by_closed_guard.vpr: a binder-free heap
+// read inside a quantifier is framed where the quantifier is stated, without
+// the body's guards. Silicon checks it for an arbitrary instance under those
+// guards, so a guard on the binder still matters through whether any instance
+// satisfies it: `vacuous` has no instance at all, and in `nonempty_range` an
+// instance exists only when `n > 0`, which is what frames `x.f`. Silicon
+// verifies both. A per-instance framing check (with the read's value taken
+// under the same guards) would be needed to close this.
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method vacuous(x: Ref)
+{
+  inhale forall i: Int :: { t(i) } false ==> x.f == i
+}
+
+method nonempty_range(x: Ref, n: Int)
+  requires n > 0 ==> acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } 0 <= i && i < n ==> x.f == i
+}

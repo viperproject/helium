@@ -1,0 +1,20 @@
+// A heap-dependent function called inside a quantifier needs its precondition
+// at the call, as anywhere: here `acc(x.f)` was given away before the inhale.
+// Silicon rejects this (precondition of function `get` might not hold).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+function get(x: Ref): Int
+  requires acc(x.f)
+{ x.f }
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  exhale acc(x.f)
+  inhale forall i: Int :: { t(i) } t(i) ==> get(x) == i
+}

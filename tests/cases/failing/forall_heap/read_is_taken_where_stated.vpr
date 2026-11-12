@@ -1,0 +1,19 @@
+// A read in an inhaled quantifier is the value at the inhale, not a read of
+// whatever heap is current when the quantifier is later instantiated. If it
+// were re-read after the write, `x.f == 1` and `x.f == 2` would make `false`
+// provable. Silicon rejects this (assertion might not hold).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> x.f == 1
+  x.f := 2
+  assume t(0)
+  assert false
+}

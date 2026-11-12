@@ -2649,14 +2649,15 @@ method m() {
 }
 
 #[test]
-fn heap_dependent_call_in_a_forall_body_is_rejected() {
+fn binder_dependent_heap_call_in_a_forall_body_is_rejected() {
     // A quantifier body must stay pure and heap-free: its compiled recipe is
     // rebuilt inside a rewrite rule, which can neither read the symbolic heap nor
-    // discharge the `Snap`'s implicit precondition check. (A binder-dependent
-    // footprint would need quantified permissions, which are unsupported.)
+    // discharge the `Snap`'s implicit precondition check. A call mentioning no
+    // binder is evaluated where the quantifier is stated; `get(r)` mentions the
+    // binder, so its footprint differs per instance (quantified permissions).
     let input = r#"
 field f: Int
-domain D { function t(i: Int): Bool }
+domain D { function t(r: Ref): Bool }
 
 function get(x: Ref): Int
     requires acc(x.f)
@@ -2665,16 +2666,16 @@ function get(x: Ref): Int
 method m(y: Ref)
     requires acc(y.f)
 {
-    inhale forall i: Int :: {t(i)} get(y) == get(y)
+    inhale forall r: Ref :: {t(r)} r == y ==> get(r) == get(y)
 }
 "#;
     let errs = lower_err(input);
     assert!(
         errs.iter().any(|e| matches!(
             e,
-            crate::translate::TranslationError::HeapDepFunctionInQuantifier(_)
+            crate::translate::TranslationError::BinderDependentHeapRead(_)
         )),
-        "expected HeapDepFunctionInQuantifier, got {errs:?}"
+        "expected BinderDependentHeapRead, got {errs:?}"
     );
 }
 

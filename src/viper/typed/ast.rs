@@ -205,9 +205,9 @@ pub struct PredicateWithPerm<PureExt> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeapExt {
     Heap(HeapNode<HeapExt>),
-    /// A pure `forall` quantifier. Its innards are always [`AxiomExt`]-typed:
-    /// quantifier bodies are pure and heap-free regardless of host position.
-    Forall(Box<Forall>),
+    /// A `forall` quantifier; its innards share this context's extension (see
+    /// [`Forall`]).
+    Forall(Box<Forall<HeapExt>>),
 }
 
 /// The extensions allowed in a domain axiom: a call to a Silver `function`
@@ -220,14 +220,12 @@ pub enum HeapExt {
 /// `check_axiom_function_calls` (`viper::typecheck`, raising
 /// `TypeError::PreconditionedFunctionInAxiom`) — not after lowering. That check
 /// runs *only* over domain axioms, and it bars **any** precondition, heap-free
-/// ones included. A `forall` hosted in a contract, a statement, or a predicate
-/// body is `AxiomExt`-typed too but never reaches it; there the only gate on a
-/// heap-dependent callee is at lowering (see `translate::pure_exp`'s
-/// `in_quantifier` rejection).
+/// ones included. A `forall` hosted in an axiom is `AxiomExt`-typed too, so the
+/// same rules hold inside it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AxiomExt {
     FunctionCall(Call<AxiomExt>),
-    Forall(Box<Forall>),
+    Forall(Box<Forall<AxiomExt>>),
 }
 
 /// A pure universal quantifier: `forall x: T, ... :: { trig } body`. The `body`
@@ -235,17 +233,17 @@ pub enum AxiomExt {
 /// conjunction of trigger terms (Silver's `{ .. }{ .. }` syntax). Only
 /// `forall` reaches here — `exists` is rejected at typechecking.
 ///
-/// Triggers and body are [`AxiomExt`]-typed in **every** host position
-/// (axioms, contracts, predicate bodies, method statements): quantifier
-/// bodies are pure and heap-free, so heap derefs, `unfolding`, `old`,
-/// `result`, and `perm` inside a `forall` are rejected by `AxiomExt`'s rules.
-/// Free variables of the enclosing scope are permitted — translation turns
-/// them into capture parameters.
+/// Triggers and body are typed in the **host's** extension `Ext`, as Silver
+/// types them: inside a method postcondition they may read the heap and use
+/// `old`, inside an axiom they may not. Free variables of the enclosing scope
+/// are permitted — translation turns them into capture parameters. Which heap
+/// reads translation can actually support (those that do not mention a
+/// binder) is decided there, not here.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Forall {
+pub struct Forall<Ext> {
     pub bound: Vec<TypedIdent>,
-    pub triggers: Vec<Vec<TypedPureExp<AxiomExt>>>,
-    pub body: TypedPureExp<AxiomExt>,
+    pub triggers: Vec<Vec<TypedPureExp<Ext>>>,
+    pub body: TypedPureExp<Ext>,
 }
 
 /// Extensions allowed in function postconditions: heap access + `result`.
@@ -254,8 +252,8 @@ pub enum FuncEnsuresExt {
     Heap(HeapNode<FuncEnsuresExt>),
     Result,
     Old(TypedPureExp<FuncEnsuresExt>),
-    /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
-    Forall(Box<Forall>),
+    /// A `forall` quantifier (innards in this extension; see [`Forall`]).
+    Forall(Box<Forall<FuncEnsuresExt>>),
 }
 
 /// Extensions allowed in method postconditions: heap access + `old`.
@@ -263,8 +261,8 @@ pub enum FuncEnsuresExt {
 pub enum MethodEnsuresExt {
     Heap(HeapNode<MethodEnsuresExt>),
     Old(TypedPureExp<MethodEnsuresExt>),
-    /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
-    Forall(Box<Forall>),
+    /// A `forall` quantifier (innards in this extension; see [`Forall`]).
+    Forall(Box<Forall<MethodEnsuresExt>>),
 }
 
 /// Extensions allowed in imperative method bodies: heap access + labelled `old`
@@ -274,8 +272,8 @@ pub enum MethodBodyExt {
     Heap(HeapNode<MethodBodyExt>),
     Old(Option<Spur>, TypedPureExp<MethodBodyExt>),
     Perm(ResourceExp<MethodBodyExt>),
-    /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
-    Forall(Box<Forall>),
+    /// A `forall` quantifier (innards in this extension; see [`Forall`]).
+    Forall(Box<Forall<MethodBodyExt>>),
 }
 
 pub type PureMethodExp = TypedPureExp<MethodBodyExt>;
