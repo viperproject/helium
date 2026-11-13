@@ -26,8 +26,8 @@ pub(crate) enum TermHead {
         func: FuncId,
         type_args: Box<[Type]>,
     },
-    /// A `Symbolic::Coll` of this element type and operation.
-    Coll(Type, CollOp),
+    /// A `Symbolic::Coll` of these collection type arguments and operation.
+    Coll(Box<[Type]>, CollOp),
     /// A `Symbolic::CollLit` of this kind and element type.
     CollLit(CollKind, Type),
 }
@@ -55,11 +55,9 @@ impl TermHead {
             {
                 Some((type_args, tys, children))
             }
-            (TermHead::Coll(elem_ty, op), Symbolic::Coll(e, o, children)) if o == op => Some((
-                std::slice::from_ref(elem_ty),
-                std::slice::from_ref(&**e),
-                children,
-            )),
+            (TermHead::Coll(pat, op), Symbolic::Coll(tys, o, children)) if o == op => {
+                Some((pat, tys, children))
+            }
             (TermHead::CollLit(kind, elem_ty), Symbolic::CollLit(k, e, elem)) if k == kind => {
                 Some((
                     std::slice::from_ref(elem_ty),
@@ -413,6 +411,8 @@ fn guard_holds(
 fn probe_shape<'a>(inst: &'a AxiomInst, tys: &[Type]) -> Option<(Symbolic, Vec<&'a Val>)> {
     let ix = |n: usize| -> Box<[Id]> { (0..n).map(Id::from).collect() };
     let ty = |t: &Type| Box::new(t.subst_generics(tys));
+    let coll_tys =
+        |ts: &[Type]| -> Box<[Type]> { ts.iter().map(|t| t.subst_generics(tys)).collect() };
     let [i0, i1, i2] = [0, 1, 2].map(Id::from);
     Some(match inst {
         AxiomInst::Val(p) => match p {
@@ -435,8 +435,8 @@ fn probe_shape<'a>(inst: &'a AxiomInst, tys: &[Type]) -> Option<(Symbolic, Vec<&
             AxiomPure::Coll { op, args, .. } if op.is_eq() => {
                 (Symbolic::Binary(BinOp::Eq, [i0, i1]), args.iter().collect())
             }
-            AxiomPure::Coll { elem_ty, op, args } => (
-                Symbolic::Coll(ty(elem_ty), *op, ix(args.len())),
+            AxiomPure::Coll { tys: ts, op, args } => (
+                Symbolic::Coll(coll_tys(ts), *op, ix(args.len())),
                 args.iter().collect(),
             ),
             AxiomPure::CollLit {
@@ -695,19 +695,20 @@ mod tests {
         let mut g = EGraph::<Symbolic, ConstFold>::default();
         let (s, x) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
         let int = || Box::new(Type::Int);
-        let bool_ = || Box::new(Type::Bool);
+        let ints = || -> Box<[Type]> { Box::new([Type::Int]) };
+        let bools = || -> Box<[Type]> { Box::new([Type::Bool]) };
         g.add(Symbolic::Coll(
-            int(),
+            ints(),
             SeqOp::Contains.into(),
             Box::new([s, x]),
         ));
         g.add(Symbolic::Coll(
-            int(),
+            ints(),
             SetOp::Contains.into(),
             Box::new([s, x]),
         ));
         g.add(Symbolic::Coll(
-            bool_(),
+            bools(),
             SetOp::Contains.into(),
             Box::new([s, x]),
         ));
@@ -721,7 +722,7 @@ mod tests {
         };
 
         let contains = PreparedTerm::App {
-            head: TermHead::Coll(Type::Generic(0), SetOp::Contains.into()),
+            head: TermHead::Coll(Box::new([Type::Generic(0)]), SetOp::Contains.into()),
             args: vec![PreparedTerm::Bound(0), PreparedTerm::Bound(1)],
         };
         let mut tys: Vec<Type> = match_term_anywhere(&g, &contains, &[], &open)

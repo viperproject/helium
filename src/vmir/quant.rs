@@ -147,7 +147,8 @@ pub enum TrigHead {
     },
     /// A collection operation. The `App`'s `args` are its operands in
     /// `PureInst::Coll` order (so `x in s` is `Contains(s, x)`), and `type_args`
-    /// is `[elem_ty]`, the element type of the collection it works on.
+    /// is the type arguments of the collection it works on (`[E]`, or `[K, V]`
+    /// for a map).
     Coll(crate::vmir::CollOp),
     /// The singleton collection of the `App`'s one argument,
     /// `PureInst::CollLit`. `type_args` is `[elem_ty]`.

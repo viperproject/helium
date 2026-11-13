@@ -24,7 +24,7 @@ pub(crate) struct Z3Translation {
     func_cache: HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
     /// The collection functions declared so far, by element type (see
     /// `coll_apply`).
-    coll_funcs: HashMap<(CollFn, Type), FuncDecl>,
+    coll_funcs: HashMap<(CollFn, Box<[Type]>), FuncDecl>,
     max_node_id: usize,
     max_merges_is: usize,
     /// The program's `Forall` nodes, by node index. Never asserted for good: a
@@ -317,8 +317,8 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
             FuncKind::IsVariant { .. } => Some(Type::Bool),
             FuncKind::Skolem(i) => Some(ctxt.alloc.skolem_signature(i, tys).1),
         },
-        Symbolic::CollLit(kind, elem_ty, _) => Some(Type::Coll(*kind, elem_ty.clone())),
-        Symbolic::Coll(elem_ty, op, _) => Some(op.result_type(elem_ty)),
+        Symbolic::CollLit(kind, elem_ty, _) => Some(Type::coll(*kind, [(**elem_ty).clone()])),
+        Symbolic::Coll(tys, op, _) => Some(op.result_type(tys)),
     }
 }
 
@@ -535,10 +535,8 @@ fn collect_trigger_patterns(
     };
     match head {
         TermHead::Func { func, type_args } => funcs.push((*func, type_args.clone())),
-        TermHead::Coll(elem_ty, op) => sorts.push(Type::Coll(op.kind(), Box::new(elem_ty.clone()))),
-        TermHead::CollLit(kind, elem_ty) => {
-            sorts.push(Type::Coll(*kind, Box::new(elem_ty.clone())))
-        }
+        TermHead::Coll(tys, op) => sorts.push(Type::coll(op.kind(), op.coll_tys(tys))),
+        TermHead::CollLit(kind, elem_ty) => sorts.push(Type::coll(*kind, [elem_ty.clone()])),
     }
     for arg in args {
         collect_trigger_patterns(arg, sorts, funcs);
@@ -627,9 +625,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
         }
         Type::Generic(_) => unreachable!("generics are currently not supported"),
         // Uninterpreted, as are its operations (see `coll_apply`).
-        Type::Coll(kind, elem_ty) => {
-            Sort::uninterpreted(format!("{}<{elem_ty}>", kind.name()).into())
-        }
+        Type::Coll(..) => Sort::uninterpreted(ty.to_string().into()),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -698,9 +694,9 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
         Symbolic::Forall(..) => {
             unreachable!("a quantifier is asserted per instance (`forall_fact`)")
         }
-        Symbolic::Coll(elem_ty, op, args) => {
+        Symbolic::Coll(tys, op, args) => {
             // Each operand read at the sort the operation takes it at.
-            let params = op.operand_types(elem_ty);
+            let params = op.operand_types(tys);
             let args: Vec<Dynamic> = args
                 .iter()
                 .zip(&params)
@@ -709,12 +705,17 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
                     class_const_given_sort(ctxt, *arg, &s)
                 })
                 .collect();
-            coll_to_z3(ctxt, elem_ty, *op, &args)
+            coll_to_z3(ctxt, tys, *op, &args)
         }
         Symbolic::CollLit(kind, elem_ty, elem) => {
             let s = sort(ctxt, elem_ty);
             let elem = class_const_given_sort(ctxt, *elem, &s);
-            coll_apply(ctxt, CollFn::Unit(*kind), elem_ty, &[&elem])
+            coll_apply(
+                ctxt,
+                CollFn::Unit(*kind),
+                std::slice::from_ref(&**elem_ty),
+                &[&elem],
+            )
         }
     })
 }
@@ -736,35 +737,33 @@ enum CollFn {
     Unit(CollKind),
 }
 
-/// `f(args)` at element type `elem_ty`, its operands already at `f`'s parameter
-/// sorts. Like Silicon, Helium does not hand collections to Z3's sequence or
+/// `f(args)` on a collection of type arguments `tys`, its operands already at
+/// `f`'s parameter sorts. Like Silicon, Helium does not hand collections to Z3's sequence or
 /// array theories: Z3 rewrites its `seq.nth`, so a trigger on an index would
 /// never match. A collection is a value of an uninterpreted sort, each
-/// operation an uninterpreted function per element type, declared on first
+/// operation an uninterpreted function per instantiation, declared on first
 /// use, and what Z3 knows about them is what the collection axioms
 /// (`verify::coll_axioms`) say.
-fn coll_apply(ctxt: &mut VerifyContext, f: CollFn, elem_ty: &Type, args: &[&dyn Ast]) -> Dynamic {
-    let key = (f, elem_ty.clone());
+fn coll_apply(ctxt: &mut VerifyContext, f: CollFn, tys: &[Type], args: &[&dyn Ast]) -> Dynamic {
+    let key: (CollFn, Box<[Type]>) = (f, tys.into());
     if !ctxt.z3translator.coll_funcs.contains_key(&key) {
         let (token, params, ret) = match f {
-            CollFn::Op(op) => (
-                op.token(),
-                op.operand_types(elem_ty),
-                op.result_type(elem_ty),
-            ),
+            CollFn::Op(op) => (op.token(), op.operand_types(tys), op.result_type(tys)),
             CollFn::Unit(kind) => (
                 match kind {
                     CollKind::Seq => "seq.unit",
                     CollKind::Set => "set.unit",
+                    CollKind::Map => unreachable!("a map has no one-element literal"),
                 },
-                vec![elem_ty.clone()],
-                Type::Coll(kind, Box::new(elem_ty.clone())),
+                tys.to_vec(),
+                Type::coll(kind, tys),
             ),
         };
         let domain: Vec<Sort> = params.iter().map(|t| sort(ctxt, t)).collect();
         let domain_refs: Vec<&Sort> = domain.iter().collect();
         let range = sort(ctxt, &ret);
-        let decl = FuncDecl::new(format!("{token}<{elem_ty}>"), &domain_refs, &range);
+        let tys: Vec<String> = tys.iter().map(|t| t.to_string()).collect();
+        let decl = FuncDecl::new(format!("{token}<{}>", tys.join(", ")), &domain_refs, &range);
         ctxt.z3translator.coll_funcs.insert(key.clone(), decl);
     }
     ctxt.z3translator.coll_funcs[&key].apply(args)
@@ -776,21 +775,21 @@ fn coll_apply(ctxt: &mut VerifyContext, f: CollFn, elem_ty: &Type, args: &[&dyn 
 /// e-class holding one also holds the untyped `l == r`, which reaches Z3 as
 /// Z3's own equality, and a quantifier body reads it as that equality (see
 /// [`translate_axiom_pure`]).
-fn coll_to_z3(ctxt: &mut VerifyContext, elem_ty: &Type, op: CollOp, args: &[Dynamic]) -> Dynamic {
+fn coll_to_z3(ctxt: &mut VerifyContext, tys: &[Type], op: CollOp, args: &[Dynamic]) -> Dynamic {
     let refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-    coll_apply(ctxt, CollFn::Op(op), elem_ty, &refs)
+    coll_apply(ctxt, CollFn::Op(op), tys, &refs)
 }
 
 /// [`coll_to_z3`] for operands built inside a quantifier body, whose sorts
 /// come from the terms themselves: `None` when one does not fit the operation.
 fn coll_to_z3_checked(
     ctxt: &mut VerifyContext,
-    elem_ty: &Type,
+    tys: &[Type],
     op: CollOp,
     args: &[Dynamic],
 ) -> Option<Dynamic> {
-    let params = op.operand_types(elem_ty);
-    sorts_fit(ctxt, &params, args).then(|| coll_to_z3(ctxt, elem_ty, op, args))
+    let params = op.operand_types(tys);
+    sorts_fit(ctxt, &params, args).then(|| coll_to_z3(ctxt, tys, op, args))
 }
 
 /// The singleton collection `Seq(elem)` or `Set(elem)`, `None` when `elem` is
@@ -806,7 +805,14 @@ fn coll_unit_checked(
         std::slice::from_ref(elem_ty),
         std::slice::from_ref(elem),
     )
-    .then(|| coll_apply(ctxt, CollFn::Unit(kind), elem_ty, &[elem]))
+    .then(|| {
+        coll_apply(
+            ctxt,
+            CollFn::Unit(kind),
+            std::slice::from_ref(elem_ty),
+            &[elem],
+        )
+    })
 }
 
 /// Whether `args` has exactly the sorts of `params`.
@@ -906,9 +912,10 @@ fn translate_axiom_pure(
             let (l, r) = (val(&args[0]), val(&args[1]));
             (l.get_sort() == r.get_sort()).then(|| l.eq(&r).into())
         }
-        AxiomPure::Coll { elem_ty, op, args } => {
+        AxiomPure::Coll { tys, op, args } => {
             let args: Vec<Dynamic> = args.iter().map(val).collect();
-            coll_to_z3_checked(ctxt, &ty(elem_ty), *op, &args)
+            let tys: Vec<Type> = tys.iter().map(ty).collect();
+            coll_to_z3_checked(ctxt, &tys, *op, &args)
         }
         AxiomPure::CollLit {
             kind,
@@ -1060,7 +1067,10 @@ fn trigger_to_z3(
                     let type_args: Vec<Type> = type_args.iter().map(ty).collect();
                     apply_function_checked(ctxt, func, &type_args, &args)
                 }
-                TermHead::Coll(elem_ty, op) => coll_to_z3_checked(ctxt, &ty(elem_ty), *op, &args),
+                TermHead::Coll(coll_tys, op) => {
+                    let coll_tys: Vec<Type> = coll_tys.iter().map(ty).collect();
+                    coll_to_z3_checked(ctxt, &coll_tys, *op, &args)
+                }
                 TermHead::CollLit(kind, elem_ty) => match &args[..] {
                     [elem] => coll_unit_checked(ctxt, *kind, &ty(elem_ty), elem),
                     _ => None,

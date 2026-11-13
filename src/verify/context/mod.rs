@@ -313,7 +313,10 @@ impl<'a> VerifyContext<'a> {
             Type::Snap(id) => format!("{}@snap", self.member_name(*id)),
             Type::Option(t) => format!("Option<{}>", self.type_name(t)),
             Type::Generic(i) => format!("?{i}"),
-            Type::Coll(kind, t) => format!("{}<{}>", kind.name(), self.type_name(t)),
+            Type::Coll(kind, tys) => {
+                let tys: Vec<String> = tys.iter().map(|t| self.type_name(t)).collect();
+                format!("{}<{}>", kind.name(), tys.join(", "))
+            }
         }
     }
 

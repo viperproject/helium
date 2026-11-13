@@ -42,21 +42,26 @@ use crate::verify::quant::{Guard, QuantRecipe};
 use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 use crate::vmir::{BinOp, CollKind, CollOp, Literal, Type, Val};
 
-/// What a bound variable of an axiom ranges over, given the element type `E`.
+/// What a bound variable of an axiom ranges over, given the collection's type
+/// arguments (the element type `E` of a `Seq` or `Set`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VarSort {
     /// A collection of the table's kind.
     Coll,
+    /// An element `E` of a `Seq` or `Set`.
     Elem,
     Int,
 }
 
 impl VarSort {
-    /// The binder type, for a collection of `kind` at element type `elem`.
-    fn ty(self, kind: CollKind, elem: &Type) -> Type {
+    /// The binder type, for a collection of `kind` at type arguments `tys`.
+    fn ty(self, kind: CollKind, tys: &[Type]) -> Type {
         match self {
-            VarSort::Coll => Type::Coll(kind, Box::new(elem.clone())),
-            VarSort::Elem => elem.clone(),
+            VarSort::Coll => Type::coll(kind, tys),
+            VarSort::Elem => {
+                assert!(kind.has_unit(), "a {kind:?} axiom binds an element");
+                tys[0].clone()
+            }
             VarSort::Int => Type::Int,
         }
     }
@@ -74,7 +79,8 @@ pub(crate) enum STerm {
     Bool(bool),
     /// The empty collection of the table's kind.
     Empty,
-    /// The singleton collection of the table's kind, `Seq(e)` or `Set(e)`.
+    /// The singleton collection of the table's kind, `Seq(e)` or `Set(e)`
+    /// (never a map's: see `CollKind::has_unit`).
     Unit(Box<STerm>),
     /// A collection operation on a collection of `E` (a `Range` is on
     /// `Seq[Int]`), operands in `PureInst::Coll` order. Never an `Empty`,
@@ -114,6 +120,7 @@ impl Witness {
         match kind {
             CollKind::Seq => &[Witness::SeqIndexOf, Witness::SeqDiff],
             CollKind::Set => &[Witness::SetDiff, Witness::SetMember, Witness::SetSubset],
+            CollKind::Map => &[],
         }
     }
 
@@ -137,7 +144,7 @@ impl Witness {
     /// The signature, generic over the element type (`Generic(0)`).
     fn sig(self) -> SkolemSig {
         let e = || Type::Generic(0);
-        let coll = || Type::Coll(self.kind(), Box::new(e()));
+        let coll = || Type::coll(self.kind(), [e()]);
         let (params, ret) = match self {
             Witness::SeqIndexOf => (vec![coll(), e()], Type::Int),
             Witness::SeqDiff => (vec![coll(), coll()], Type::Int),
@@ -204,6 +211,8 @@ pub(crate) fn axioms(kind: CollKind) -> &'static [CollAxiom] {
     match kind {
         CollKind::Seq => &SEQ,
         CollKind::Set => &SET,
+        // The map axioms are not written yet.
+        CollKind::Map => &[],
     }
 }
 
@@ -421,10 +430,13 @@ pub(crate) fn recipes(kind: CollKind, skolems: &Skolems) -> Vec<QuantRecipe> {
 impl CollAxiom {
     fn recipe(&self, skolems: &Skolems) -> QuantRecipe {
         // A range is a `Seq[Int]` whatever `E` is, so its axioms are ground.
-        let (elem, n_tys) = if self.int_only {
-            (Type::Int, 0)
+        // Otherwise the collection's type arguments are the recipe's own,
+        // `Generic(0..arity)`.
+        let (tys, n_tys): (Box<[Type]>, usize) = if self.int_only {
+            (Box::new([Type::Int]), 0)
         } else {
-            (Type::Generic(0), 1)
+            let n = self.kind.arity();
+            ((0..n).map(Type::Generic).collect(), n)
         };
         // The guard and the body are separate step lists, each starting after
         // the binders.
@@ -432,7 +444,7 @@ impl CollAxiom {
             next: self.vars.len(),
             insts: Vec::new(),
             kind: self.kind,
-            elem: elem.clone(),
+            tys: tys.clone(),
             skolems,
         };
         let mut guard = steps();
@@ -447,11 +459,11 @@ impl CollAxiom {
         let groups = self
             .triggers
             .iter()
-            .map(|g| g.iter().map(|t| trigger(t, self.kind, &elem)).collect())
+            .map(|g| g.iter().map(|t| trigger(t, self.kind, &tys)).collect())
             .collect();
         QuantRecipe {
             n_caps: 0,
-            bound: self.vars.iter().map(|v| v.ty(self.kind, &elem)).collect(),
+            bound: self.vars.iter().map(|v| v.ty(self.kind, &tys)).collect(),
             n_tys,
             own_tys: (0..n_tys).collect(),
             groups,
@@ -471,7 +483,8 @@ struct Steps<'a> {
     next: usize,
     insts: Vec<AxiomInst>,
     kind: CollKind,
-    elem: Type,
+    /// The collection's type arguments.
+    tys: Box<[Type]>,
     skolems: &'a Skolems,
 }
 
@@ -484,13 +497,13 @@ impl Steps<'_> {
 
     /// The value of `t`, adding the steps that build it.
     fn emit(&mut self, t: &STerm) -> Val {
-        let elem = self.elem.clone();
+        let tys = self.tys.clone();
         match t {
             STerm::Var(i) => Val::Temp(*i),
             STerm::Int(n) => Val::Literal(Literal::Int((*n).into())),
             STerm::Bool(b) => Val::Literal(Literal::Bool(*b)),
             STerm::Empty => self.push(AxiomPure::Coll {
-                elem_ty: elem,
+                tys,
                 op: CollOp::empty(self.kind),
                 args: vec![],
             }),
@@ -498,7 +511,7 @@ impl Steps<'_> {
                 let e = self.emit(e);
                 self.push(AxiomPure::CollLit {
                     kind: self.kind,
-                    elem_ty: elem,
+                    elem_ty: unit_elem(self.kind, &tys),
                     elem: e,
                 })
             }
@@ -509,18 +522,18 @@ impl Steps<'_> {
                 );
                 let args = args.iter().map(|a| self.emit(a)).collect();
                 self.push(AxiomPure::Coll {
-                    elem_ty: op.elem_ty(&elem),
+                    tys: op.coll_tys(&tys),
                     op: *op,
                     args,
                 })
             }
-            // Generic in the element type like the axiom, so an instance's
-            // type substitution fixes it.
+            // Generic in the collection's type arguments like the axiom, so an
+            // instance's type substitution fixes them.
             STerm::Skolem(w, args) => {
                 let args = args.iter().map(|a| self.emit(a)).collect();
                 self.push(AxiomPure::App {
                     func: self.skolems.func(*w),
-                    type_args: vec![elem],
+                    type_args: tys.to_vec(),
                     args,
                 })
             }
@@ -548,23 +561,33 @@ fn conj(ts: &[STerm]) -> STerm {
     }
 }
 
-/// A trigger term of a `kind` axiom at element type `elem`: always rooted at a
-/// collection term.
-fn trigger(t: &STerm, kind: CollKind, elem: &Type) -> PreparedTerm {
+/// The element type of the singleton collection of `kind`, a `Seq` or `Set`
+/// of type arguments `tys`.
+fn unit_elem(kind: CollKind, tys: &[Type]) -> Type {
+    assert!(
+        kind.has_unit(),
+        "a {kind:?} axiom builds a one-element literal"
+    );
+    tys[0].clone()
+}
+
+/// A trigger term of a `kind` axiom at collection type arguments `tys`:
+/// always rooted at a collection term.
+fn trigger(t: &STerm, kind: CollKind, tys: &[Type]) -> PreparedTerm {
     let app = |head, args: &[STerm]| PreparedTerm::App {
         head,
-        args: args.iter().map(|a| trigger(a, kind, elem)).collect(),
+        args: args.iter().map(|a| trigger(a, kind, tys)).collect(),
     };
     match t {
         STerm::Var(i) => PreparedTerm::Bound(*i),
         STerm::Int(n) => PreparedTerm::Lit(Literal::Int((*n).into())),
         STerm::Bool(b) => PreparedTerm::Lit(Literal::Bool(*b)),
-        STerm::Empty => app(TermHead::Coll(elem.clone(), CollOp::empty(kind)), &[]),
+        STerm::Empty => app(TermHead::Coll(tys.into(), CollOp::empty(kind)), &[]),
         STerm::Unit(e) => app(
-            TermHead::CollLit(kind, elem.clone()),
+            TermHead::CollLit(kind, unit_elem(kind, tys)),
             std::slice::from_ref(&**e),
         ),
-        STerm::Op(op, args) => app(TermHead::Coll(op.elem_ty(elem), *op), args),
+        STerm::Op(op, args) => app(TermHead::Coll(op.coll_tys(tys), *op), args),
         STerm::Bin(..) | STerm::Ite(..) | STerm::Skolem(..) => {
             panic!("a collection-axiom trigger is built from collection terms, not {t:?}")
         }

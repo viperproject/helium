@@ -122,8 +122,8 @@ pub struct FuncRegistry {
     /// The signature of each skolem function, by its [`FuncKind::Skolem`] index.
     skolems: Vec<SkolemSig>,
     /// Each collection kind's axiom skolem functions, minted with its
-    /// recipes, by `CollKind` (`Seq` first).
-    coll_skolems: [Option<crate::verify::coll_axioms::Skolems>; 2],
+    /// recipes, by `CollKind` (`CollKind::ALL` order).
+    coll_skolems: [Option<crate::verify::coll_axioms::Skolems>; 3],
 }
 
 // Builtin reserved operator ids (starting from the top of the usize space).
@@ -294,7 +294,7 @@ impl FuncRegistry {
             ctor_head,
             quant_table: Default::default(),
             skolems: Vec::new(),
-            coll_skolems: [None, None],
+            coll_skolems: [None, None, None],
         }
     }
 
