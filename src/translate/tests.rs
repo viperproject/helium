@@ -1894,7 +1894,11 @@ fn map_operators_lower_to_map_ops() {
             "a[k := true] == b",
             vec![MapOp::Update.into(), MapOp::Eq.into()],
         ),
-        ("k in a", vec![MapOp::Contains.into()]),
+        // `k in a` is `k in domain(a)`.
+        (
+            "k in a",
+            vec![MapOp::Domain.into(), CollOp::Set(vmir::SetOp::Contains)],
+        ),
         ("|a| == 0", vec![MapOp::Card.into()]),
         (
             "k in domain(a)",
@@ -1914,12 +1918,12 @@ fn map_operators_lower_to_map_ops() {
             .collect();
         assert_eq!(got, want, "`{exp}`");
     }
-    // `k in a` puts the map first, as `m[k]` does.
+    // `k in a` takes the domain of the map `a[k]` looks up.
     let ops = map_ops(&src("(k in a) && a[k]"));
-    let [(MapOp::Contains, mem), (MapOp::Lookup, look)] = &ops[..] else {
-        panic!("expected a membership test and a lookup, got {ops:?}");
+    let [(MapOp::Domain, dom), (MapOp::Lookup, look)] = &ops[..] else {
+        panic!("expected a domain and a lookup, got {ops:?}");
     };
-    assert_eq!(mem, look, "`k in a` and `a[k]` take `[a, k]`");
+    assert_eq!(dom[0], look[0], "both on `a`");
 }
 
 /// A lookup is the one map operation with a side condition: it is emitted
@@ -1972,9 +1976,15 @@ domain D {
 
     let (head, _) = only_app(only_group(axiom_forall(&p, "dom")));
     assert_eq!(*head, map(MapOp::Domain));
+    // `{k in m}` is `{k in domain(m)}`.
     let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
-    assert_eq!(*head, map(MapOp::Contains));
-    assert_eq!(args, &[TrigTerm::Var(0), TrigTerm::Var(1)], "map first");
+    assert_eq!(*head, TrigHead::Coll(CollOp::Set(vmir::SetOp::Contains)));
+    let domain = TrigTerm::App {
+        head: map(MapOp::Domain),
+        type_args: tys.clone(),
+        args: Box::new([TrigTerm::Var(0)]),
+    };
+    assert_eq!(args, &[domain, TrigTerm::Var(1)]);
 
     // `Map(k := v)` is `Map()[k := v]`, as in a body, at the map's types.
     let (head, args) = only_app(only_group(axiom_forall(&p, "lit")));

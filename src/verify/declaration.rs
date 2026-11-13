@@ -2102,9 +2102,12 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
     // The built-in collection axioms (`verify::coll_axioms`): each a closed
     // `forall` node, true, whose element type stays open for its trigger
     // matches to fix. Only a program that has collections of a kind gets that
-    // kind's axioms, so others pay nothing.
+    // kind's axioms, so others pay nothing. A map brings the set axioms too:
+    // its axioms are about the sets `domain(m)` and `range(m)`.
+    let uses = |kind| decls_use_coll(&program.decls, kind);
     for kind in CollKind::ALL {
-        if !decls_use_coll(&program.decls, kind) {
+        let needed = uses(kind) || (kind == CollKind::Set && uses(CollKind::Map));
+        if !needed {
             continue;
         }
         let ids = ctx.alloc.coll_axioms(kind);
@@ -3145,7 +3148,7 @@ fn inst_obligations(
             vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
         }
 
-        // A map lookup `m[k]` needs `k in m`.
+        // A map lookup `m[k]` needs `k in m`, i.e. `k in domain(m)`.
         InstKind::Pure(
             _,
             PureInst::Coll {
@@ -3156,10 +3159,15 @@ fn inst_obligations(
         ) => {
             let m = state.get_val(ctx, &val[0]);
             let k = state.get_val(ctx, &val[1]);
-            let present = ctx.add(Symbolic::Coll(
+            let domain = ctx.add(Symbolic::Coll(
                 tys.clone(),
-                MapOp::Contains.into(),
-                Box::new([m, k]),
+                MapOp::Domain.into(),
+                Box::new([m]),
+            ));
+            let present = ctx.add(Symbolic::Coll(
+                Box::new([tys[0].clone()]),
+                vmir::SetOp::Contains.into(),
+                Box::new([domain, k]),
             ));
             vec![(
                 present,

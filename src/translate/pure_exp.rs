@@ -705,13 +705,24 @@ fn lower_binary<Ext: PureExt>(
             PureInst::coll([vmir::Type::Int], SeqOp::Range, vec![lv, rv]),
         ),
         // `x in c` is `Contains(c, x)`: the collection comes first.
-        B::In => {
-            let (kind, tys) = coll_tys(b, &r.ty);
-            sink.emit_pure(
+        // For a map, `k in m` is `k in domain(m)`, as in Silicon.
+        B::In => match coll_tys(b, &r.ty) {
+            (CollKind::Map, tys) => {
+                let key_set = vmir::Type::set(tys[0].clone());
+                let domain = sink.emit_pure(
+                    key_set,
+                    PureInst::coll(tys.clone(), MapOp::Domain, vec![rv]),
+                );
+                sink.emit_pure(
+                    ty,
+                    PureInst::coll([tys[0].clone()], SetOp::Contains, vec![domain, lv]),
+                )
+            }
+            (kind, tys) => sink.emit_pure(
                 ty,
                 PureInst::coll(tys, CollOp::contains(kind), vec![rv, lv]),
-            )
-        }
+            ),
+        },
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
             let (_, tys) = coll_tys(b, &l.ty);
             sink.emit_pure(ty, PureInst::coll(tys, set_op(op), vec![lv, rv]))
@@ -1206,10 +1217,14 @@ fn lower_trig_term(
                 typed::BinOp::Concat => seq_trig(&seq_elem(b, l_ty), vmir::SeqOp::Concat, [l, r]),
                 typed::BinOp::Range => seq_trig(&vmir::Type::Int, vmir::SeqOp::Range, [l, r]),
                 // `x in c` is `Contains(c, x)`: the collection comes first.
-                typed::BinOp::In => {
-                    let (kind, tys) = coll_tys(b, r_ty);
-                    coll_trig(&tys, CollOp::contains(kind), [r, l])
-                }
+                // `k in m` is `k in domain(m)`, as in a body.
+                typed::BinOp::In => match coll_tys(b, r_ty) {
+                    (CollKind::Map, tys) => {
+                        let domain = coll_trig(&tys, MapOp::Domain, [r]);
+                        coll_trig(&[tys[0].clone()], SetOp::Contains, [domain, l])
+                    }
+                    (kind, tys) => coll_trig(&tys, CollOp::contains(kind), [r, l]),
+                },
                 set => coll_trig(&coll_tys(b, l_ty).1, set_op(set), [l, r]),
             })
         }

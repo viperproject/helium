@@ -1,0 +1,6 @@
+// Map: an update is never the empty map, with no term `|m[k := 0]|` written.
+// Silicon does not prove this; Helium does, with Z3, from the terms its
+// e-graph instances add.
+method update_not_empty(m: Map[Int, Int], k: Int) {
+  assert m[k := 0] != Map[Int, Int]()
+}
