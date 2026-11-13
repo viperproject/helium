@@ -94,7 +94,7 @@ pub(crate) fn spatial_contains_acc<Ext>(exp: &typed::SpatialExp<Ext>) -> bool {
         S::Conj(l, r) => spatial_contains_acc(l) || spatial_contains_acc(r),
         S::Implies(_, r) => spatial_contains_acc(r),
         S::Ternary { then, else_, .. } => spatial_contains_acc(then) || spatial_contains_acc(else_),
-        S::Forall(_) => todo!("Implement QPs"),
+        S::Forall(_) => true
     }
 }
 
@@ -225,6 +225,7 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
             let h_out = sink.emit_heap_guarded(inst);
             Ok((h_out, None))
         }
+        S::Forall(_quant_perm) => todo!("Implement QPS"),
         S::Conj(l, r) => {
             let (h_mid, b_l) = lower_spatial(b, env, sink, acc_heap, mode, old, l)?;
             // `A && B`: by short-circuit semantics B is only reached when A
@@ -294,7 +295,6 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
             let v = pure_exp::lower(b, env, sink, hctx, p)?;
             Ok((acc_heap, Some(v)))
         }
-        S::Forall(_) => todo!("implement QPs")
     }
 }
 

@@ -1175,6 +1175,8 @@ fn eval_heap_inst(
                 Chunk::new_perm(addr, perm, new_val).with_guard(guard),
             ))
         }
+        HeapInst::AddForall { .. } => Err(VerifyError::Unimplemented("add forall to heap")),
+        HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
     }
 }
 

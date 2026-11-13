@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{MemberId, ResourceCall, Type, Val};
+use crate::vmir::{MemberId, QuantChunks, ResourceCall, Type, Val};
 use std::fmt::{self, Display, Formatter};
 
 /// Heap-typed value.
@@ -160,6 +160,11 @@ pub enum HeapInst {
         /// unchanged. Output arity, exactly like `Exhale::frame_only`.
         yields_value: bool,
     },
+
+    AddForall { base: HeapVal, q: Box<QuantChunks>, bind: Bind },
+    SubForall { base: HeapVal, q: Box<QuantChunks> },
+
+
     /// `h[, s] := base inhale <call> @ <perm>`. Add the resource's delta (scaled by
     /// `perm`) to `base` **and assume** its boolean condition. When the callee is
     /// **self-framed** the inst additionally yields a pure `Val` `s : Snap(callee)`
@@ -390,6 +395,9 @@ impl<'a> Display for VmirDisplay<'a, &'a HeapInst> {
                 perm,
                 bind,
             } => write!(f, "{base} + {loc} @ {perm} with {bind}"),
+            HeapInst::AddForall { q, bind, base } => {
+                write!(f, "{base} + {} with {bind}", self.with(&**q))
+            }
             HeapInst::Sub {
                 base, loc, perm, ..
             } => write!(f, "{base} - {loc} @ {perm}"),
@@ -414,6 +422,8 @@ impl<'a> Display for VmirDisplay<'a, &'a HeapInst> {
                 els_h,
             } => write!(f, "merge {cond} ? {then_h} : {els_h}"),
             HeapInst::Union { a, b } => write!(f, "union {a} {b}"),
+
+            HeapInst::SubForall { base, q } => write!(f, "{base} - {}", self.with(&**q)),
         }
     }
 }
