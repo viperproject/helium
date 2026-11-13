@@ -1,13 +1,15 @@
 //! The axioms of the built-in collection types, as quantifier recipes the one
 //! `forall` rule (`rewrite::forall_rule`) instantiates, in place of a Viper
 //! prelude domain. One table per [`CollKind`]: `Seq[T]` ([`seq`]), `Set[T]`
-//! ([`set`]) and `Map[K, V]` ([`map`]).
+//! ([`set`]), `Map[K, V]` ([`map`]) and `Multiset[T]` ([`multiset`]).
 //!
-//! Adapted from Silicon's `dafny_axioms/sequences.vpr`, `sets.vpr` and
-//! `maps.vpr`. As recipes, they need none of the domains' helper functions:
+//! Adapted from Silicon's `dafny_axioms/sequences.vpr`, `sets.vpr`,
+//! `maps.vpr` and `multisets.vpr`. As recipes, they need none of the domains'
+//! helper functions:
 //! `Seq_add`/`Seq_sub` are plain `+`/`-` (their round-trip equalities stay,
 //! see [`seq`]), `Seq_contains_trigger` is gone, and `Seq_equal`/
-//! `Set_equal`/`Map_equal` are a program's typed collection equality
+//! `Set_equal`/`Map_equal`/`Multiset_equal` are a program's typed collection
+//! equality
 //! (`CollOp::is_eq`, in the untyped equality's own e-class). The skolem functions stay (see [`Witness`]), as
 //! functions the registry mints rather than domain functions: a witness is a
 //! term of the instance's binders, so building an instance again finds the
@@ -37,6 +39,7 @@
 //! (`declaration::assume_axioms`).
 
 pub(crate) mod map;
+pub(crate) mod multiset;
 pub(crate) mod seq;
 pub(crate) mod set;
 
@@ -55,7 +58,7 @@ use crate::vmir::{BinOp, CollKind, CollOp, Literal, Type, Val};
 pub(crate) enum VarSort {
     /// A collection of the table's kind.
     Coll,
-    /// An element `E` of a `Seq` or `Set`.
+    /// An element `E` of a `Seq`, `Set` or `Multiset`.
     Elem,
     /// A key `K` of a `Map`.
     Key,
@@ -97,8 +100,8 @@ pub(crate) enum STerm {
     Bool(bool),
     /// The empty collection of the table's kind.
     Empty,
-    /// The singleton collection of the table's kind, `Seq(e)` or `Set(e)`
-    /// (never a map's: see `CollKind::has_unit`).
+    /// The singleton collection of the table's kind, `Seq(e)`, `Set(e)` or
+    /// `Multiset(e)` (never a map's: see `CollKind::has_unit`).
     Unit(Box<STerm>),
     /// A collection operation on a collection of `E` (a `Range` is on
     /// `Seq[Int]`), operands in `PureInst::Coll` order. Never an `Empty`,
@@ -144,6 +147,16 @@ pub(crate) enum Witness {
     /// `Map_range_domain_skolem(m, v)`: a key of `m` with value `v`, when
     /// `v in range(m)`.
     MapRangeKey,
+    /// `Multiset_skolem_diff(a, b)`: an element whose count in `a` and `b`
+    /// differs, when there is one.
+    MultisetDiff,
+    /// An element that occurs in `s`, when `|s| != 0`: the existential of
+    /// Dafny's `MS_card_zero`.
+    MultisetMember,
+    /// An element that occurs more often in `a` than in `b`, when there is
+    /// one: the counterexample to `a subset b`, which skolemizes the nested
+    /// `forall` of Dafny's `MS_subset_def`.
+    MultisetSubset,
 }
 
 impl Witness {
@@ -153,7 +166,11 @@ impl Witness {
             CollKind::Seq => &[Witness::SeqIndexOf, Witness::SeqDiff],
             CollKind::Set => &[Witness::SetDiff, Witness::SetMember, Witness::SetSubset],
             CollKind::Map => &[Witness::MapDiff, Witness::MapMember, Witness::MapRangeKey],
-            CollKind::Multiset => &[],
+            CollKind::Multiset => &[
+                Witness::MultisetDiff,
+                Witness::MultisetMember,
+                Witness::MultisetSubset,
+            ],
         }
     }
 
@@ -162,6 +179,9 @@ impl Witness {
             Witness::SeqIndexOf | Witness::SeqDiff => CollKind::Seq,
             Witness::SetDiff | Witness::SetMember | Witness::SetSubset => CollKind::Set,
             Witness::MapDiff | Witness::MapMember | Witness::MapRangeKey => CollKind::Map,
+            Witness::MultisetDiff | Witness::MultisetMember | Witness::MultisetSubset => {
+                CollKind::Multiset
+            }
         }
     }
 
@@ -175,6 +195,9 @@ impl Witness {
             Witness::MapDiff => "Map_skolem_diff",
             Witness::MapMember => "Map_skolem_member",
             Witness::MapRangeKey => "Map_range_domain_skolem",
+            Witness::MultisetDiff => "Multiset_skolem_diff",
+            Witness::MultisetMember => "Multiset_skolem_member",
+            Witness::MultisetSubset => "Multiset_skolem_subset",
         }
     }
 
@@ -190,8 +213,11 @@ impl Witness {
         let (params, ret) = match self {
             Witness::SeqIndexOf => (vec![coll(), e()], Type::Int),
             Witness::SeqDiff => (vec![coll(), coll()], Type::Int),
-            Witness::SetDiff | Witness::SetSubset => (vec![coll(), coll()], e()),
-            Witness::SetMember => (vec![coll()], e()),
+            Witness::SetDiff
+            | Witness::SetSubset
+            | Witness::MultisetDiff
+            | Witness::MultisetSubset => (vec![coll(), coll()], e()),
+            Witness::SetMember | Witness::MultisetMember => (vec![coll()], e()),
             Witness::MapDiff => (vec![coll(), coll()], e()),
             Witness::MapMember => (vec![coll()], e()),
             Witness::MapRangeKey => (vec![coll(), v()], e()),
@@ -254,12 +280,12 @@ pub(crate) fn axioms(kind: CollKind) -> &'static [CollAxiom] {
     static SEQ: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(seq::build()));
     static SET: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(set::build()));
     static MAP: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(map::build()));
+    static MULTISET: LazyLock<Vec<CollAxiom>> = LazyLock::new(|| checked(multiset::build()));
     match kind {
         CollKind::Seq => &SEQ,
         CollKind::Set => &SET,
         CollKind::Map => &MAP,
-        // The multiset axioms are not written yet.
-        CollKind::Multiset => &[],
+        CollKind::Multiset => &MULTISET,
     }
 }
 
@@ -688,6 +714,41 @@ mod tests {
         assert!(!super::axioms(CollKind::Seq).is_empty());
         assert!(!super::axioms(CollKind::Set).is_empty());
         assert!(!super::axioms(CollKind::Map).is_empty());
+        assert!(!super::axioms(CollKind::Multiset).is_empty());
+    }
+
+    /// Every multiset axiom keeps to its own kind: a multiset table builds
+    /// no set term, so `x in m` is always the count, never a set membership.
+    #[test]
+    fn multiset_recipes_are_generic_over_the_element() {
+        use super::*;
+        let skolems = Skolems::mint(CollKind::Multiset, {
+            let mut next = 0;
+            move |_, _| {
+                next += 1;
+                FuncId(2000 + next)
+            }
+        });
+        let recipes = recipes(CollKind::Multiset, &skolems);
+        let names: Vec<&str> = axioms(CollKind::Multiset).iter().map(|a| a.name).collect();
+        for (r, name) in recipes.iter().zip(&names) {
+            assert_eq!(r.n_tys, 1, "{name}");
+        }
+        let at = names
+            .iter()
+            .position(|n| *n == "multiset-count-nonneg")
+            .expect("multiset-count-nonneg");
+        let PreparedTerm::App { head, .. } = &recipes[at].groups[0][0] else {
+            panic!("multiset-count-nonneg triggers on an application");
+        };
+        assert!(
+            *head
+                == TermHead::Coll(
+                    Box::new([Type::Generic(0)]),
+                    crate::vmir::MultisetOp::Count.into()
+                ),
+            "`x in m` is the multiset count at the element type"
+        );
     }
 
     /// A map recipe is generic over the key and the value type, and a set
