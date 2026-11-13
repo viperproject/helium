@@ -344,8 +344,8 @@ pub(crate) fn lower_method(
 
         // --- join phase: reach/edge emissions ---
         let join_mark = sink.insts.len();
-        let (pc, edges) = if is_entry {
-            (PathConds::default(), Vec::new())
+        let (pc, edges, syn_pcs) = if is_entry {
+            (PathConds::default(), Vec::new(), Vec::new())
         } else {
             // The reach is the OR of the incoming edges' conditions; in the same
             // pass build the per-pred materialized `Val` that phis reconcile over.
@@ -396,6 +396,13 @@ pub(crate) fn lower_method(
                 edges.push((p, reach.val(&mut sink, g)));
             }
             let (pc, disjunctive) = reach.pc(&mut sink, f);
+            // An n-ary join's synthetic level `i` is reached by edges `i..` only,
+            // so that, not the whole join's reach, is the cube its merged heap
+            // exists on. Emitted here, among the reach insts, so it precedes
+            // every level's `Merge`.
+            let syn_pcs: Vec<PathConds> = (1..care.len().saturating_sub(2))
+                .map(|i| reach.pc(&mut sink, care[i]).0)
+                .collect();
             // A join splits into its incoming edges. A single edge adds its
             // literal to each part of the pred's split: the disjunction came
             // from the pred, and `(∨ᵢ eᵢ) ∧ l = ∨ᵢ (eᵢ ∧ l)`.
@@ -411,7 +418,7 @@ pub(crate) fn lower_method(
                     .collect(),
                 _ => edge_pcs,
             };
-            (pc, edges)
+            (pc, edges, syn_pcs)
         };
         reach_pc[bid] = pc.clone();
         // Reach insts precede every phi; carried into the real block's join
@@ -493,11 +500,12 @@ pub(crate) fn lower_method(
                                 real = Some((new_env, kind, join));
                             } else {
                                 let sid = vmir::BlockId(blocks.len());
+                                let syn_pc = &syn_pcs[i - 1];
                                 // A synthetic join has an empty body, so its exit
                                 // heap is exactly its `Merge`.
                                 let syn_h_out = {
                                     let mark = sink.insts.len();
-                                    let m = sink.with_conds(&pc, |sink| {
+                                    let m = sink.with_conds(syn_pc, |sink| {
                                         sink.emit_heap_guarded(HeapInst::Merge {
                                             cond: ev.clone(),
                                             then_h: h_out_of[&then_],
@@ -508,7 +516,7 @@ pub(crate) fn lower_method(
                                     m
                                 };
                                 blocks.push(vmir::Block {
-                                    cube: pc.clone(),
+                                    cube: syn_pc.clone(),
                                     preds: kind,
                                     join,
                                     body: Vec::new(),

@@ -25,16 +25,20 @@ method m(a: Ref, b: Ref, c: Bool, d: Bool)
 ```
 
 **How it was fixed.** The heap algebra reads no ambient cube. Every `Heap` carries a
-`heap::Region`: the absolute block cube it exists on, a typed value and never a delta pc.
-No constructor omits it, and every derived heap keeps its source's. A heap enters an
-instruction only through `fetch_heap` (`declaration.rs`), which homes it at the cube of
-the phase being walked. That is the block's `cube` in the join phase as well as the body
-phase. `Heap` and `Region` live in `heap/store.rs`, so the algebra reaches the region
-only through `Heap::region`. `assume_location_axioms` gates by it; `merge_heaps` and
-`union_heaps` assert their operands share one. `VerifyContext::current_cube` is
-private to `context/`. Code outside it asks for `effective_pc` (an instruction's pc), so
-the heap code cannot read the walker's ambient state again.
+`heap::Region`, the absolute block cube it exists on; no `Heap` constructor omits it, and
+every derived heap keeps its source's. By convention only `fetch_heap` (`declaration.rs`)
+builds a region, from the block's `cube`, and every heap enters an instruction through
+it. That covers the join phase as well as the body phase. An n-ary join's synthetic
+blocks get the reach of the edges they merge as their cube, not the whole join's.
+`Heap` and `Region` live in `heap/store.rs`, so the algebra reaches the region only
+through `Heap::region`. `assume_location_axioms` gates by it. `merge_heaps` and
+`union_heaps` assert, as a precondition of the algebra, that their operands share a
+region. `fetch_heap` satisfies this today, so the assertions guard future callers.
+`VerifyContext::current_cube` is private to `context/`. Code outside it asks for
+`effective_pc` (an instruction's pc), so the heap code cannot read the walker's ambient
+state again.
 
-Cases: the three `join_merge_*` cases (row 3: the `Merge` at a join), and
-`loop_head_nonaliasing_leak` (row 5: the loop head's re-inhale of the invariant, also
-a join-phase `heap_union`).
+Cases: the three `join_merge_*` cases (row 3: the `Merge` at a join),
+`nary_join_nonaliasing_leak` (a synthetic block of a three-way join), and
+`loop_head_nonaliasing_leak` (row 5: the loop head's re-inhale of the invariant, also a
+join-phase `heap_union`).

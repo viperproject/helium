@@ -25,4 +25,4 @@ the call sites these programs reach, not the root cause.
 | `refute_on_failed_proof/` | a `refute` passes because its proof attempt was cut by a termination bound | §4.4 / §9.1 | 1 | #55 |
 
 Closed classes, now under `tests/cases/failing/`: `scratch_drops_guards/` (B, 20 cases)
-and `join_merge_ambient_cube/` (A, 4 cases).
+and `join_merge_ambient_cube/` (A, 5 cases).

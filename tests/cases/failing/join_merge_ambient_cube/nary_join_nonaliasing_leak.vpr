@@ -1,0 +1,22 @@
+// REGRESSION (soundness). A three-way join is lowered as two binary merges; the
+// inner one is a synthetic block that merges the edges from `!d` only. It was
+// given the whole join's cube (here: every path), so the inner merge stated
+// `a != b` (1/1 + 1/2 > 1) on the `d` path too, where `a == b` is consistent
+// (1/2 + 1/2).
+//
+// Must FAIL.
+field f: Int
+
+method m(a: Ref, b: Ref, c: Bool, d: Bool)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+{
+  if (d) { goto L }
+  inhale acc(a.f, 1/2)
+  if (c) { goto L }
+  goto L
+  label L
+  if (d) {
+    assume a == b
+    assert false
+  }
+}

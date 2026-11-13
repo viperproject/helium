@@ -236,10 +236,11 @@ fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec
             | HeapInst::Inhale { base, .. }
             | HeapInst::Exhale { base, .. },
         ) => {
-            let mut res = match base {
-                HeapVal::Temp(n) => vec![(base.to_string(), state.heaps[*n].clone())],
-                HeapVal::Empty => vec![],
+            let heap = match base {
+                HeapVal::Temp(n) => state.heaps[*n].clone(),
+                HeapVal::Empty => Heap::empty(Region::of_cube(Vec::new())),
             };
+            let mut res = vec![(base.to_string(), heap)];
             if heaps_before < state.heaps.len() {
                 res.push((
                     format!("h{heaps_before}"),
@@ -1006,8 +1007,8 @@ fn eval_heap_inst(
         // location add and values there must agree. Contrast `Merge`, which
         // selects between mutually exclusive predecessor states.
         HeapInst::Union { a, b } => {
-            let ha = fetch_heap(ctx, state, a).clone();
-            let hb = fetch_heap(ctx, state, b).clone();
+            let ha = fetch_heap(ctx, state, a);
+            let hb = fetch_heap(ctx, state, b);
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
