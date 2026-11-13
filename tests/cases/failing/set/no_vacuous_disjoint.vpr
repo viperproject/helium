@@ -1,0 +1,7 @@
+// Set: disjoint nonempty sets are consistent.
+method no_vacuous_disjoint(a: Set[Int], b: Set[Int])
+  requires 1 in a && 2 in b
+  requires a intersection b == Set[Int]()
+{
+  assert false
+}

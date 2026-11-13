@@ -312,6 +312,7 @@ walk_enum!(
     ForPerm(vars, p, e),
     MagicWand(l, r),
     SeqLit(t, es),
+    SetLit(t, es),
     Unsupported(what)
 );
 walk_enum!(
@@ -519,7 +520,8 @@ walk_enum!(
     Ref,
     Generic(g),
     Domain(i, ts),
-    Seq(t)
+    Seq(t),
+    Set(t)
 );
 walk_struct!(
     Predicate,

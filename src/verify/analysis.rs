@@ -319,8 +319,8 @@ impl ConstFold {
                     _ => Unknown,
                 },
             },
-            Symbolic::Seq(..) => Unknown,
-            Symbolic::SeqLit(_, _) => Unknown,
+            Symbolic::Coll(..) => Unknown,
+            Symbolic::CollLit(..) => Unknown,
         }
     }
 

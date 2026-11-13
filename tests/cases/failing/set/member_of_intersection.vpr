@@ -1,0 +1,6 @@
+// Set: x may be in a only.
+method member_of_intersection(a: Set[Int], b: Set[Int], x: Int)
+  requires x in a
+{
+  assert x in (a intersection b)
+}

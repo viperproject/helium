@@ -14,7 +14,7 @@ use crate::verify::analysis::{ConstFold, Data};
 use crate::verify::lang::{Discriminant, FuncId, RecipeId, Symbolic};
 use crate::verify::quant::{Guard, RecipeTable};
 use crate::verify::stats;
-use crate::vmir::{BinOp, Literal, SeqOp, Type, Val};
+use crate::vmir::{BinOp, CollKind, CollOp, Literal, Type, Val};
 
 use super::*;
 
@@ -26,10 +26,10 @@ pub(crate) enum TermHead {
         func: FuncId,
         type_args: Box<[Type]>,
     },
-    /// A `Symbolic::Seq` of this element type and operation.
-    Seq(Type, SeqOp),
-    /// A `Symbolic::SeqLit` of this element type.
-    SeqLit(Type),
+    /// A `Symbolic::Coll` of this element type and operation.
+    Coll(Type, CollOp),
+    /// A `Symbolic::CollLit` of this kind and element type.
+    CollLit(CollKind, Type),
 }
 
 impl TermHead {
@@ -37,8 +37,8 @@ impl TermHead {
     fn discriminant(&self) -> Discriminant {
         match self {
             TermHead::Func { func, .. } => Discriminant::FuncApp(*func),
-            TermHead::Seq(_, op) => Discriminant::Seq(*op),
-            TermHead::SeqLit(_) => Discriminant::SeqLit,
+            TermHead::Coll(_, op) => Discriminant::Coll(*op),
+            TermHead::CollLit(kind, _) => Discriminant::CollLit(*kind),
         }
     }
 
@@ -55,16 +55,18 @@ impl TermHead {
             {
                 Some((type_args, tys, children))
             }
-            (TermHead::Seq(elem_ty, op), Symbolic::Seq(e, o, children)) if o == op => Some((
+            (TermHead::Coll(elem_ty, op), Symbolic::Coll(e, o, children)) if o == op => Some((
                 std::slice::from_ref(elem_ty),
                 std::slice::from_ref(&**e),
                 children,
             )),
-            (TermHead::SeqLit(elem_ty), Symbolic::SeqLit(e, elem)) => Some((
-                std::slice::from_ref(elem_ty),
-                std::slice::from_ref(&**e),
-                std::slice::from_ref(elem),
-            )),
+            (TermHead::CollLit(kind, elem_ty), Symbolic::CollLit(k, e, elem)) if k == kind => {
+                Some((
+                    std::slice::from_ref(elem_ty),
+                    std::slice::from_ref(&**e),
+                    std::slice::from_ref(elem),
+                ))
+            }
             _ => None,
         }
     }
@@ -430,16 +432,18 @@ fn probe_shape<'a>(inst: &'a AxiomInst, tys: &[Type]) -> Option<(Symbolic, Vec<&
                 args.iter().collect(),
             ),
             // Its value is the untyped equality's, which the probe can fold.
-            AxiomPure::Seq {
-                op: SeqOp::Eq,
-                args,
-                ..
-            } => (Symbolic::Binary(BinOp::Eq, [i0, i1]), args.iter().collect()),
-            AxiomPure::Seq { elem_ty, op, args } => (
-                Symbolic::Seq(ty(elem_ty), *op, ix(args.len())),
+            AxiomPure::Coll { op, args, .. } if op.is_eq() => {
+                (Symbolic::Binary(BinOp::Eq, [i0, i1]), args.iter().collect())
+            }
+            AxiomPure::Coll { elem_ty, op, args } => (
+                Symbolic::Coll(ty(elem_ty), *op, ix(args.len())),
                 args.iter().collect(),
             ),
-            AxiomPure::SeqLit { elem_ty, elem } => (Symbolic::SeqLit(ty(elem_ty), i0), vec![elem]),
+            AxiomPure::CollLit {
+                kind,
+                elem_ty,
+                elem,
+            } => (Symbolic::CollLit(*kind, ty(elem_ty), i0), vec![elem]),
         },
         AxiomInst::Forall {
             recipe,
@@ -679,6 +683,64 @@ mod tests {
         };
         let sigmas = match_term_anywhere(&g, &trigger, &[], &empty);
         assert_eq!(sigmas.len(), n as usize);
+    }
+
+    /// A collection trigger head names its kind through its operation (or, for
+    /// a literal, its `CollKind`): a set trigger matches the set nodes only,
+    /// never the sequence node of the same shape, and fixes the open element
+    /// type from the node it matched.
+    #[test]
+    fn collection_trigger_matches_its_own_kind_only() {
+        use crate::vmir::{CollKind, SeqOp, SetOp};
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let (s, x) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let int = || Box::new(Type::Int);
+        let bool_ = || Box::new(Type::Bool);
+        g.add(Symbolic::Coll(
+            int(),
+            SeqOp::Contains.into(),
+            Box::new([s, x]),
+        ));
+        g.add(Symbolic::Coll(
+            int(),
+            SetOp::Contains.into(),
+            Box::new([s, x]),
+        ));
+        g.add(Symbolic::Coll(
+            bool_(),
+            SetOp::Contains.into(),
+            Box::new([s, x]),
+        ));
+        g.add(Symbolic::CollLit(CollKind::Seq, int(), x));
+        g.rebuild();
+        // The element type is still open: `Generic(0)` stands for itself.
+        let open = Sigma {
+            vals: vec![None, None],
+            tys: vec![Type::Generic(0)],
+            generation: 0,
+        };
+
+        let contains = PreparedTerm::App {
+            head: TermHead::Coll(Type::Generic(0), SetOp::Contains.into()),
+            args: vec![PreparedTerm::Bound(0), PreparedTerm::Bound(1)],
+        };
+        let mut tys: Vec<Type> = match_term_anywhere(&g, &contains, &[], &open)
+            .into_iter()
+            .map(|m| m.tys[0].clone())
+            .collect();
+        tys.sort();
+        let mut expected = vec![Type::Int, Type::Bool];
+        expected.sort();
+        assert_eq!(tys, expected, "one match per set node, at its element type");
+
+        let set_lit = PreparedTerm::App {
+            head: TermHead::CollLit(CollKind::Set, Type::Generic(0)),
+            args: vec![PreparedTerm::Bound(0)],
+        };
+        assert!(
+            match_term_anywhere(&g, &set_lit, &[], &open).is_empty(),
+            "a set literal trigger must not match `Seq(x)`"
+        );
     }
 
     /// `forall x :: {f(x)} f(g(x))` from `f(a)`: the instance at `x = g^k(a)` has

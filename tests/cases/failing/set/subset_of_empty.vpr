@@ -1,0 +1,4 @@
+// Set: only the empty set is a subset of the empty set.
+method subset_of_empty(s: Set[Int]) {
+  assert s subset Set[Int]()
+}

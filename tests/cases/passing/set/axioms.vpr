@@ -1,0 +1,43 @@
+// The set axioms, at more than one element type: one generic recipe per
+// axiom serves every `Set[T]`.
+method empty_contains_nothing(x: Int) { assert !(x in Set[Int]()) }
+method empty_card() { assert |Set[Int]()| == 0 }
+method card_nonneg(s: Set[Int]) { assert |s| >= 0 }
+method card_zero_is_empty(s: Set[Int])
+  requires |s| == 0
+{
+  assert s == Set[Int]()
+}
+method singleton(x: Int, y: Int) {
+  assert x in Set(x)
+  assert |Set(x)| == 1
+  assert y in Set(x) ==> y == x
+}
+method union_contains(a: Set[Int], b: Set[Int], x: Int) {
+  assert x in (a union b) <==> (x in a || x in b)
+}
+method intersection_contains(a: Set[Int], b: Set[Int], x: Int) {
+  assert x in (a intersection b) <==> (x in a && x in b)
+}
+method difference_contains(a: Set[Int], b: Set[Int], x: Int) {
+  assert x in (a setminus b) <==> (x in a && !(x in b))
+}
+method subset_member(a: Set[Int], b: Set[Int], x: Int)
+  requires a subset b
+  requires x in a
+{
+  assert x in b
+}
+method bool_elements(b: Bool) {
+  assert b in Set(b, !b)
+  assert |Set(b, !b)| == 2
+}
+method nested_elements(s: Set[Int]) {
+  assert s in Set(s)
+  assert |Set(s, s)| == 1
+}
+method extensional(a: Set[Int], b: Set[Int])
+  requires forall x: Int :: { x in a } { x in b } x in a <==> x in b
+{
+  assert a == b
+}

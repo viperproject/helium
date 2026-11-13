@@ -13,6 +13,7 @@ mod interplay;
 mod permissions;
 mod predicates;
 mod sequences;
+mod sets;
 mod wildcards;
 
 use std::sync::Arc;

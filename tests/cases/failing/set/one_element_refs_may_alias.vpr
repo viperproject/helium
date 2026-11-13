@@ -1,0 +1,6 @@
+// Set: |Set(x, y)| == 1 means x == y, not x != y.
+method one_element_refs_may_alias(x: Ref, y: Ref)
+  requires |Set(x, y)| == 1
+{
+  assert x != y
+}

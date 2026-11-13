@@ -1,0 +1,4 @@
+// Set: {1, 2} has two elements.
+method card_literal_wrong() {
+  assert |Set(1, 2)| == 1
+}

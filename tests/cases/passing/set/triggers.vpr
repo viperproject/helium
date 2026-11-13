@@ -1,0 +1,22 @@
+// Set: quantifiers triggered on set membership.
+
+method all_positive(s: Set[Int], x: Int)
+  requires forall y: Int :: { y in s } y in s ==> y > 0
+  requires x in s
+{
+  assert x > 0
+}
+
+method all_positive_union(a: Set[Int], b: Set[Int], x: Int)
+  requires forall y: Int :: { y in a } y in a ==> y > 0
+  requires forall y: Int :: { y in b } y in b ==> y > 0
+  requires x in a union b
+{
+  assert x > 0
+}
+
+method subset_by_quantifier(a: Set[Int], b: Set[Int])
+  requires forall y: Int :: { y in a } y in a ==> y in b
+{
+  assert a subset b
+}

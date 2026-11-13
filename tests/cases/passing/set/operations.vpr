@@ -1,0 +1,80 @@
+// Set: union, intersection, setminus and subset, and their algebra.
+
+method union_commutative(a: Set[Int], b: Set[Int]) {
+  assert a union b == b union a
+}
+
+method intersection_commutative(a: Set[Int], b: Set[Int]) {
+  assert a intersection b == b intersection a
+}
+
+method union_idempotent(a: Set[Int], b: Set[Int]) {
+  assert (a union b) union b == a union b
+  assert a union (a union b) == a union b
+}
+
+method intersection_idempotent(a: Set[Int], b: Set[Int]) {
+  assert (a intersection b) intersection b == a intersection b
+  assert a intersection (a intersection b) == a intersection b
+}
+
+method union_with_empty(a: Set[Int]) {
+  assert a union Set[Int]() == a
+}
+
+method intersection_with_empty(a: Set[Int]) {
+  assert a intersection Set[Int]() == Set[Int]()
+}
+
+method difference_removes(a: Set[Int], b: Set[Int], x: Int)
+  requires x in b
+{
+  assert !(x in (a setminus b))
+}
+
+method difference_keeps(a: Set[Int], b: Set[Int], x: Int)
+  requires x in a && !(x in b)
+{
+  assert x in (a setminus b)
+}
+
+method subset_of_union(a: Set[Int], b: Set[Int]) {
+  assert a subset (a union b)
+  assert b subset (a union b)
+}
+
+method intersection_is_subset(a: Set[Int], b: Set[Int]) {
+  assert (a intersection b) subset a
+  assert (a intersection b) subset b
+}
+
+method difference_is_subset(a: Set[Int], b: Set[Int]) {
+  assert (a setminus b) subset a
+}
+
+method subset_reflexive(a: Set[Int]) {
+  assert a subset a
+}
+
+method empty_is_subset(a: Set[Int]) {
+  assert Set[Int]() subset a
+}
+
+method subset_transitive(a: Set[Int], b: Set[Int], c: Set[Int])
+  requires a subset b && b subset c
+{
+  assert a subset c
+}
+
+method subset_antisymmetric(a: Set[Int], b: Set[Int])
+  requires a subset b && b subset a
+{
+  assert a == b
+}
+
+method literal_operations() {
+  assert Set(1, 2) union Set(2, 3) == Set(1, 2, 3)
+  assert Set(1, 2) intersection Set(2, 3) == Set(2)
+  assert Set(1, 2) setminus Set(2, 3) == Set(1)
+  assert Set(1) subset Set(1, 2)
+}

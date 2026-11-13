@@ -1,0 +1,62 @@
+// Set: sets as program state — locals, loops, method contracts, functions and
+// fields, and sets built from sequences.
+
+field elems: Set[Int]
+
+function add(s: Set[Int], x: Int): Set[Int]
+  ensures x in result
+  ensures s subset result
+{
+  s union Set(x)
+}
+
+method insert(s: Set[Int], x: Int) returns (r: Set[Int])
+  ensures x in r
+  ensures forall y: Int :: { y in s } y in s ==> y in r
+  ensures |r| <= |s| + 1
+{
+  r := s union Set(x)
+}
+
+method client(x: Int) {
+  var s: Set[Int] := Set[Int]()
+  s := insert(s, x)
+  assert x in s
+  s := insert(s, x + 1)
+  assert x in s && x + 1 in s
+}
+
+method elements_of(xs: Seq[Int]) returns (r: Set[Int])
+  ensures forall i: Int :: { xs[i] } 0 <= i && i < |xs| ==> xs[i] in r
+{
+  r := Set[Int]()
+  var k: Int := 0
+  while (k < |xs|)
+    invariant 0 <= k && k <= |xs|
+    invariant forall i: Int :: { xs[i] } 0 <= i && i < k ==> xs[i] in r
+  {
+    r := r union Set(xs[k])
+    k := k + 1
+  }
+}
+
+method use_function(s: Set[Int]) {
+  assert 5 in add(s, 5)
+  assert s subset add(s, 5)
+}
+
+method heap_set(o: Ref, x: Int)
+  requires acc(o.elems)
+  ensures acc(o.elems) && x in o.elems
+  ensures old(o.elems) subset o.elems
+{
+  o.elems := o.elems union Set(x)
+}
+
+method heap_set_client(o: Ref)
+  requires acc(o.elems) && o.elems == Set[Int]()
+  ensures acc(o.elems)
+{
+  heap_set(o, 3)
+  assert 3 in o.elems
+}

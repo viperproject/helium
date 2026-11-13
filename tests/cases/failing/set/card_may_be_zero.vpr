@@ -1,0 +1,4 @@
+// Set: an arbitrary set may be empty.
+method card_may_be_zero(s: Set[Int]) {
+  assert |s| > 0
+}

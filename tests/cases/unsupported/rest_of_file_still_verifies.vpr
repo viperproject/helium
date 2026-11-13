@@ -2,7 +2,7 @@
 // verified, and the method that calls the rejected one must not be.
 field f: Int
 
-method uses_set(xs: Set[Int])
+method uses_multiset(xs: Multiset[Int])
 {
   assert true
 }
@@ -15,7 +15,7 @@ method fine(x: Ref)
   assert x.f == 1
 }
 
-method calls_rejected(xs: Set[Int])
+method calls_rejected(xs: Multiset[Int])
 {
-  uses_set(xs)
+  uses_multiset(xs)
 }

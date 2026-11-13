@@ -6,7 +6,7 @@ use crate::verify::func_registry::{BUILTIN_OPTION_HEAD, FuncKind};
 use crate::verify::quant::RecipeTable;
 use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 use crate::verify::stats;
-use crate::vmir::{BinOp, Literal, MemberId, Polarity, SeqOp, Type, Val};
+use crate::vmir::{BinOp, CollKind, CollOp, Literal, MemberId, Polarity, Type, Val};
 use crate::{HashMap, vmir};
 use egg::Id;
 use std::borrow::Cow;
@@ -22,18 +22,19 @@ pub(crate) struct Z3Translation {
     adts: HashMap<Type, DatatypeSort>,
     class_types: HashMap<Id, Type>,
     func_cache: HashMap<FuncId, HashMap<Box<[Type]>, FuncDecl>>,
-    /// The sequence functions declared so far, by element type (see `seq_apply`).
-    seq_funcs: HashMap<(SeqFn, Type), FuncDecl>,
+    /// The collection functions declared so far, by element type (see
+    /// `coll_apply`).
+    coll_funcs: HashMap<(CollFn, Type), FuncDecl>,
     max_node_id: usize,
     max_merges_is: usize,
     /// The program's `Forall` nodes, by node index. Never asserted for good: a
     /// query the solver fails without them is retried once with them, in a
     /// solver scope of its own ([`assert_program_foralls`]).
     program_foralls: Vec<usize>,
-    /// The built-in sequence axioms' `Forall` nodes, by node index, and the
-    /// instances of them asserted so far ([`instantiate_seq_axioms`]).
-    seq_axiom_nodes: Vec<usize>,
-    seq_axiom_instances: crate::dhash::HashSet<(usize, Box<[Type]>)>,
+    /// The built-in collection axioms' `Forall` nodes, by node index, and the
+    /// instances of them asserted so far ([`instantiate_coll_axioms`]).
+    coll_axiom_nodes: Vec<usize>,
+    coll_axiom_instances: crate::dhash::HashSet<(usize, Box<[Type]>)>,
     pub(crate) solver: Solver,
 }
 
@@ -44,12 +45,12 @@ impl Default for Z3Translation {
             adts: HashMap::default(),
             class_types: HashMap::default(),
             func_cache: HashMap::default(),
-            seq_funcs: HashMap::default(),
+            coll_funcs: HashMap::default(),
             max_node_id: 0,
             max_merges_is: 0,
             program_foralls: vec![],
-            seq_axiom_nodes: vec![],
-            seq_axiom_instances: Default::default(),
+            coll_axiom_nodes: vec![],
+            coll_axiom_instances: Default::default(),
             solver: new_solver(),
         }
     }
@@ -144,8 +145,8 @@ pub(crate) struct ScratchScope {
     max_merges_is: usize,
     class_types: HashMap<Id, Type>,
     program_foralls: Vec<usize>,
-    seq_axiom_nodes: Vec<usize>,
-    seq_axiom_instances: crate::dhash::HashSet<(usize, Box<[Type]>)>,
+    coll_axiom_nodes: Vec<usize>,
+    coll_axiom_instances: crate::dhash::HashSet<(usize, Box<[Type]>)>,
 }
 
 /// Open a solver scope before the live graph is swapped for a throwaway clone.
@@ -160,8 +161,8 @@ pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
         max_merges_is: tr.max_merges_is,
         class_types: tr.class_types.clone(),
         program_foralls: tr.program_foralls.clone(),
-        seq_axiom_nodes: tr.seq_axiom_nodes.clone(),
-        seq_axiom_instances: tr.seq_axiom_instances.clone(),
+        coll_axiom_nodes: tr.coll_axiom_nodes.clone(),
+        coll_axiom_instances: tr.coll_axiom_instances.clone(),
     }
 }
 
@@ -180,8 +181,8 @@ pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     tr.max_merges_is = scope.max_merges_is;
     tr.class_types = scope.class_types;
     tr.program_foralls = scope.program_foralls;
-    tr.seq_axiom_nodes = scope.seq_axiom_nodes;
-    tr.seq_axiom_instances = scope.seq_axiom_instances;
+    tr.coll_axiom_nodes = scope.coll_axiom_nodes;
+    tr.coll_axiom_instances = scope.coll_axiom_instances;
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
@@ -316,20 +317,21 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
             FuncKind::IsVariant { .. } => Some(Type::Bool),
             FuncKind::Skolem(i) => Some(ctxt.alloc.skolem_signature(i, tys).1),
         },
-        Symbolic::SeqLit(elem_ty, _) => Some(Type::Seq(elem_ty.clone())),
-        Symbolic::Seq(elem_ty, op, _) => Some(op.result_type(elem_ty)),
+        Symbolic::CollLit(kind, elem_ty, _) => Some(Type::Coll(*kind, elem_ty.clone())),
+        Symbolic::Coll(elem_ty, op, _) => Some(op.result_type(elem_ty)),
     }
 }
 
-/// The weight of a sequence axiom's Z3 quantifier: an instance costs this
+/// The weight of a collection axiom's Z3 quantifier: an instance costs this
 /// much more than its generation, so Z3 stops instantiating sooner along a
 /// chain. Z3 has no generation bound like the e-graph's, and the
 /// concatenation-index axioms build an index term the next one matches
 /// (`t[i - |s|]`, then `(s ++ t)[n + |s|]`, ...); each new index on a sorted
 /// sequence then pairs with every other one in a `{s[i], s[j]}` trigger. At
 /// weight 0 `insert_sorted` runs out of resources after 18k instances; at 10
-/// it is proved with 2.5k.
-const SEQ_AXIOM_WEIGHT: u32 = 10;
+/// it is proved with 2.5k. The set axioms get the same weight: their
+/// membership axioms feed each other new `x in s` terms the same way.
+const COLL_AXIOM_WEIGHT: u32 = 10;
 
 /// One equation `c_{class} == ⟦node⟧` per e-node (translation.typ, "The e-graph").
 /// An equation that needs a sort we cannot determine is dropped with a warning:
@@ -343,17 +345,17 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
         // so the node list cannot stay borrowed across the call.
         let node = ctxt.egraph.id_to_node(id).clone();
         // A quantifier is asserted per instance, after the ground facts: a
-        // sequence axiom for good, a program's only on a retry.
+        // collection axiom for good, a program's only on a retry.
         if let Symbolic::Forall(rid, ..) = node {
-            let seq_axiom = ctxt
+            let coll_axiom = ctxt
                 .alloc
                 .quant_table()
                 .read()
                 .expect("recipe table lock")
-                .is_seq_axiom(rid);
+                .is_coll_axiom(rid);
             let tr = &mut ctxt.z3translator;
-            if seq_axiom {
-                tr.seq_axiom_nodes.push(i);
+            if coll_axiom {
+                tr.coll_axiom_nodes.push(i);
             } else {
                 tr.program_foralls.push(i);
             }
@@ -384,25 +386,25 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
         }
     }
     ctxt.z3translator.max_merges_is = end;
-    instantiate_seq_axioms(ctxt);
+    instantiate_coll_axioms(ctxt);
 }
 
-/// Assert each sequence axiom at every type it has not been asserted at yet
+/// Assert each collection axiom at every type it has not been asserted at yet
 /// among those [`forall_type_args`] finds. The axioms are all Z3 knows about
-/// sequences (see `seq_apply`), so they are asserted for good, unlike a
+/// collections (see `coll_apply`), so they are asserted for good, unlike a
 /// program's quantifiers. A new element type shows up as the translation
 /// meets it, so every sync looks again.
-fn instantiate_seq_axioms(ctxt: &mut VerifyContext) {
-    for i in ctxt.z3translator.seq_axiom_nodes.clone() {
+fn instantiate_coll_axioms(ctxt: &mut VerifyContext) {
+    for i in ctxt.z3translator.coll_axiom_nodes.clone() {
         for tys in forall_type_args(ctxt, i) {
             let key = (i, tys);
-            if ctxt.z3translator.seq_axiom_instances.contains(&key) {
+            if ctxt.z3translator.coll_axiom_instances.contains(&key) {
                 continue;
             }
             if let Some(fact) = forall_fact(ctxt, i, &key.1) {
                 assert_fact(&ctxt.z3translator.solver, &fact);
             }
-            ctxt.z3translator.seq_axiom_instances.insert(key);
+            ctxt.z3translator.coll_axiom_instances.insert(key);
         }
     }
 }
@@ -449,7 +451,7 @@ fn forall_fact(ctxt: &mut VerifyContext, i: usize, tys: &[Type]) -> Option<Bool>
 /// at: its own payload when that is ground, and otherwise every completion of
 /// it under which one of the quantifier's type patterns names a type the
 /// translation has met, which are the only types Z3 could ever match its
-/// triggers at. The patterns are its binder types and the sequence types its
+/// triggers at. The patterns are its binder types and the collection types its
 /// trigger heads apply to (matched against the declared sorts), and the type
 /// arguments of its function heads (matched against the declared
 /// instantiations). A bare type parameter is no pattern: it would match every
@@ -520,8 +522,8 @@ fn forall_type_args(ctxt: &VerifyContext, i: usize) -> Vec<Box<[Type]>> {
     out
 }
 
-/// The type patterns of a trigger term (see [`forall_type_args`]): the sequence
-/// type each sequence head applies to, and each function head's type
+/// The type patterns of a trigger term (see [`forall_type_args`]): the
+/// collection type each collection head applies to, and each function head's type
 /// arguments.
 fn collect_trigger_patterns(
     term: &PreparedTerm,
@@ -533,8 +535,9 @@ fn collect_trigger_patterns(
     };
     match head {
         TermHead::Func { func, type_args } => funcs.push((*func, type_args.clone())),
-        TermHead::Seq(elem_ty, _) | TermHead::SeqLit(elem_ty) => {
-            sorts.push(Type::Seq(Box::new(elem_ty.clone())))
+        TermHead::Coll(elem_ty, op) => sorts.push(Type::Coll(op.kind(), Box::new(elem_ty.clone()))),
+        TermHead::CollLit(kind, elem_ty) => {
+            sorts.push(Type::Coll(*kind, Box::new(elem_ty.clone())))
         }
     }
     for arg in args {
@@ -623,8 +626,10 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
             Sort::uninterpreted(format!("addr@[{}] {value}", ctxt.groups.resolve(group)).into())
         }
         Type::Generic(_) => unreachable!("generics are currently not supported"),
-        // Uninterpreted, as are its operations (see `seq_apply`).
-        Type::Seq(elem_ty) => Sort::uninterpreted(format!("Seq<{elem_ty}>").into()),
+        // Uninterpreted, as are its operations (see `coll_apply`).
+        Type::Coll(kind, elem_ty) => {
+            Sort::uninterpreted(format!("{}<{elem_ty}>", kind.name()).into())
+        }
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -693,7 +698,7 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
         Symbolic::Forall(..) => {
             unreachable!("a quantifier is asserted per instance (`forall_fact`)")
         }
-        Symbolic::Seq(elem_ty, op, args) => {
+        Symbolic::Coll(elem_ty, op, args) => {
             // Each operand read at the sort the operation takes it at.
             let params = op.operand_types(elem_ty);
             let args: Vec<Dynamic> = args
@@ -704,12 +709,12 @@ fn symbol_to_z3(ctxt: &mut VerifyContext, symbol: &Symbolic) -> Option<Dynamic> 
                     class_const_given_sort(ctxt, *arg, &s)
                 })
                 .collect();
-            seq_to_z3(ctxt, elem_ty, *op, &args)
+            coll_to_z3(ctxt, elem_ty, *op, &args)
         }
-        Symbolic::SeqLit(elem_ty, elem) => {
+        Symbolic::CollLit(kind, elem_ty, elem) => {
             let s = sort(ctxt, elem_ty);
             let elem = class_const_given_sort(ctxt, *elem, &s);
-            seq_apply(ctxt, SeqFn::Unit, elem_ty, &[&elem])
+            coll_apply(ctxt, CollFn::Unit(*kind), elem_ty, &[&elem])
         }
     })
 }
@@ -723,76 +728,85 @@ fn literal_to_z3(ctxt: &mut VerifyContext, literal: &Literal) -> Dynamic {
     }
 }
 
-/// A sequence function of the Z3 encoding (see [`seq_apply`]): an operation, or
-/// the singleton constructor of a literal.
+/// A collection function of the Z3 encoding (see [`coll_apply`]): an
+/// operation, or the singleton constructor of a literal.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum SeqFn {
-    Op(SeqOp),
-    Unit,
+enum CollFn {
+    Op(CollOp),
+    Unit(CollKind),
 }
 
 /// `f(args)` at element type `elem_ty`, its operands already at `f`'s parameter
-/// sorts. Like Silicon, Helium does not hand sequences to Z3's sequence theory:
-/// Z3 rewrites its `seq.nth`, so a trigger on an index would never match. A
-/// sequence is a value of an uninterpreted sort, each operation an
-/// uninterpreted function per element type, declared on first use, and what Z3
-/// knows about them is what the sequence axioms (`verify::seq_axioms`) say.
-fn seq_apply(ctxt: &mut VerifyContext, f: SeqFn, elem_ty: &Type, args: &[&dyn Ast]) -> Dynamic {
+/// sorts. Like Silicon, Helium does not hand collections to Z3's sequence or
+/// array theories: Z3 rewrites its `seq.nth`, so a trigger on an index would
+/// never match. A collection is a value of an uninterpreted sort, each
+/// operation an uninterpreted function per element type, declared on first
+/// use, and what Z3 knows about them is what the collection axioms
+/// (`verify::coll_axioms`) say.
+fn coll_apply(ctxt: &mut VerifyContext, f: CollFn, elem_ty: &Type, args: &[&dyn Ast]) -> Dynamic {
     let key = (f, elem_ty.clone());
-    if !ctxt.z3translator.seq_funcs.contains_key(&key) {
+    if !ctxt.z3translator.coll_funcs.contains_key(&key) {
         let (token, params, ret) = match f {
-            SeqFn::Op(op) => (
+            CollFn::Op(op) => (
                 op.token(),
                 op.operand_types(elem_ty),
                 op.result_type(elem_ty),
             ),
-            SeqFn::Unit => (
-                "seq.unit",
+            CollFn::Unit(kind) => (
+                match kind {
+                    CollKind::Seq => "seq.unit",
+                    CollKind::Set => "set.unit",
+                },
                 vec![elem_ty.clone()],
-                Type::Seq(Box::new(elem_ty.clone())),
+                Type::Coll(kind, Box::new(elem_ty.clone())),
             ),
         };
         let domain: Vec<Sort> = params.iter().map(|t| sort(ctxt, t)).collect();
         let domain_refs: Vec<&Sort> = domain.iter().collect();
         let range = sort(ctxt, &ret);
         let decl = FuncDecl::new(format!("{token}<{elem_ty}>"), &domain_refs, &range);
-        ctxt.z3translator.seq_funcs.insert(key.clone(), decl);
+        ctxt.z3translator.coll_funcs.insert(key.clone(), decl);
     }
-    ctxt.z3translator.seq_funcs[&key].apply(args)
+    ctxt.z3translator.coll_funcs[&key].apply(args)
 }
 
-/// `⟦op(args)⟧`, its operands already at the sorts [`SeqOp::operand_types`]
-/// gives: an application of `op`'s function (see [`seq_apply`]). That holds
-/// for `SeqOp::Eq` too, the term the extensionality axioms trigger on: an
+/// `⟦op(args)⟧`, its operands already at the sorts [`CollOp::operand_types`]
+/// gives: an application of `op`'s function (see [`coll_apply`]). That holds
+/// for a typed equality too, the term the extensionality axioms trigger on: an
 /// e-class holding one also holds the untyped `l == r`, which reaches Z3 as
 /// Z3's own equality, and a quantifier body reads it as that equality (see
 /// [`translate_axiom_pure`]).
-fn seq_to_z3(ctxt: &mut VerifyContext, elem_ty: &Type, op: SeqOp, args: &[Dynamic]) -> Dynamic {
+fn coll_to_z3(ctxt: &mut VerifyContext, elem_ty: &Type, op: CollOp, args: &[Dynamic]) -> Dynamic {
     let refs: Vec<&dyn Ast> = args.iter().map(|a| a as &dyn Ast).collect();
-    seq_apply(ctxt, SeqFn::Op(op), elem_ty, &refs)
+    coll_apply(ctxt, CollFn::Op(op), elem_ty, &refs)
 }
 
-/// [`seq_to_z3`] for operands built inside a quantifier body, whose sorts come
-/// from the terms themselves: `None` when one does not fit the operation.
-fn seq_to_z3_checked(
+/// [`coll_to_z3`] for operands built inside a quantifier body, whose sorts
+/// come from the terms themselves: `None` when one does not fit the operation.
+fn coll_to_z3_checked(
     ctxt: &mut VerifyContext,
     elem_ty: &Type,
-    op: SeqOp,
+    op: CollOp,
     args: &[Dynamic],
 ) -> Option<Dynamic> {
     let params = op.operand_types(elem_ty);
-    sorts_fit(ctxt, &params, args).then(|| seq_to_z3(ctxt, elem_ty, op, args))
+    sorts_fit(ctxt, &params, args).then(|| coll_to_z3(ctxt, elem_ty, op, args))
 }
 
-/// The singleton sequence `Seq(elem)`, `None` when `elem` is not of sort
-/// `elem_ty`.
-fn seq_unit_checked(ctxt: &mut VerifyContext, elem_ty: &Type, elem: &Dynamic) -> Option<Dynamic> {
+/// The singleton collection `Seq(elem)` or `Set(elem)`, `None` when `elem` is
+/// not of sort `elem_ty`.
+fn coll_unit_checked(
+    ctxt: &mut VerifyContext,
+    kind: CollKind,
+    elem_ty: &Type,
+    elem: &Dynamic,
+) -> Option<Dynamic> {
     sorts_fit(
         ctxt,
         std::slice::from_ref(elem_ty),
         std::slice::from_ref(elem),
     )
-    .then(|| seq_apply(ctxt, SeqFn::Unit, elem_ty, &[elem]))
+    .then(|| coll_apply(ctxt, CollFn::Unit(kind), elem_ty, &[elem]))
 }
 
 /// Whether `args` has exactly the sorts of `params`.
@@ -887,22 +901,22 @@ fn translate_axiom_pure(
             let type_args: Vec<Type> = type_args.iter().map(ty).collect();
             apply_function_checked(ctxt, func, &type_args, &args)
         }
-        // A body reads a sequence equality as Z3's own (see `seq_to_z3`).
-        AxiomPure::Seq {
-            op: SeqOp::Eq,
-            args,
-            ..
-        } => {
+        // A body reads a collection equality as Z3's own (see `coll_to_z3`).
+        AxiomPure::Coll { op, args, .. } if op.is_eq() => {
             let (l, r) = (val(&args[0]), val(&args[1]));
             (l.get_sort() == r.get_sort()).then(|| l.eq(&r).into())
         }
-        AxiomPure::Seq { elem_ty, op, args } => {
+        AxiomPure::Coll { elem_ty, op, args } => {
             let args: Vec<Dynamic> = args.iter().map(val).collect();
-            seq_to_z3_checked(ctxt, &ty(elem_ty), *op, &args)
+            coll_to_z3_checked(ctxt, &ty(elem_ty), *op, &args)
         }
-        AxiomPure::SeqLit { elem_ty, elem } => {
+        AxiomPure::CollLit {
+            kind,
+            elem_ty,
+            elem,
+        } => {
             let elem = val(elem);
-            seq_unit_checked(ctxt, &ty(elem_ty), &elem)
+            coll_unit_checked(ctxt, *kind, &ty(elem_ty), &elem)
         }
     }
 }
@@ -997,8 +1011,8 @@ fn translate_for_all(
     }
     let pattern_refs: Vec<&z3::Pattern> = patterns.iter().collect();
     let bound_refs: Vec<&dyn Ast> = bounds.iter().map(|b| b as &dyn Ast).collect();
-    let weight = if table.is_seq_axiom(rid) {
-        SEQ_AXIOM_WEIGHT
+    let weight = if table.is_coll_axiom(rid) {
+        COLL_AXIOM_WEIGHT
     } else {
         0
     };
@@ -1046,9 +1060,9 @@ fn trigger_to_z3(
                     let type_args: Vec<Type> = type_args.iter().map(ty).collect();
                     apply_function_checked(ctxt, func, &type_args, &args)
                 }
-                TermHead::Seq(elem_ty, op) => seq_to_z3_checked(ctxt, &ty(elem_ty), *op, &args),
-                TermHead::SeqLit(elem_ty) => match &args[..] {
-                    [elem] => seq_unit_checked(ctxt, &ty(elem_ty), elem),
+                TermHead::Coll(elem_ty, op) => coll_to_z3_checked(ctxt, &ty(elem_ty), *op, &args),
+                TermHead::CollLit(kind, elem_ty) => match &args[..] {
+                    [elem] => coll_unit_checked(ctxt, *kind, &ty(elem_ty), elem),
                     _ => None,
                 },
             }

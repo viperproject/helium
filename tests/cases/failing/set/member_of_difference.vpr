@@ -1,0 +1,6 @@
+// Set: x may also be in b.
+method member_of_difference(a: Set[Int], b: Set[Int], x: Int)
+  requires x in a
+{
+  assert x in (a setminus b)
+}

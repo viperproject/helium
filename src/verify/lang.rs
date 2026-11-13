@@ -1,6 +1,6 @@
 use crate::vmir::Literal;
 use crate::vmir::Type;
-use crate::vmir::{BinOp, SeqOp};
+use crate::vmir::{BinOp, CollKind, CollOp};
 use egg::*;
 use std::fmt::{Display, Formatter};
 
@@ -65,11 +65,13 @@ pub enum Symbolic {
     /// not a child, and not in the discriminant.
     Forall(RecipeId, Box<[Type]>, Box<[Id]>),
 
-    Seq(Box<Type>, SeqOp, Box<[Id]>),
+    /// A collection operation on a collection of this element type (`Int` for
+    /// a `Range`), operands in `PureInst::Coll` order.
+    Coll(Box<Type>, CollOp, Box<[Id]>),
 
-    /// The singleton sequence of one element, of this element type. A longer
-    /// literal is a concatenation of these (`PureInst::SeqLit`).
-    SeqLit(Box<Type>, Id),
+    /// The singleton collection of one element, of this kind and element type
+    /// (`PureInst::CollLit`).
+    CollLit(CollKind, Box<Type>, Id),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -91,8 +93,8 @@ pub enum Discriminant {
     /// bought nothing — and it made the searcher enumerate every recipe in the
     /// program, including the quantifiers of methods this unit will never touch.
     Forall,
-    Seq(SeqOp),
-    SeqLit,
+    Coll(CollOp),
+    CollLit(CollKind),
 }
 
 impl Language for Symbolic {
@@ -109,8 +111,8 @@ impl Language for Symbolic {
             S::FuncApp(id, _, _) => D::FuncApp(*id),
             S::RealCast(_) => D::RealCast,
             S::Forall(..) => D::Forall,
-            S::Seq(_, op, _) => D::Seq(*op),
-            S::SeqLit(..) => D::SeqLit,
+            S::Coll(_, op, _) => D::Coll(*op),
+            S::CollLit(kind, ..) => D::CollLit(*kind),
         }
     }
 
@@ -129,8 +131,8 @@ impl Language for Symbolic {
                 id1 == id2 && args1.len() == args2.len()
             }
             (Forall(r1, _, caps1), Forall(r2, _, caps2)) => r1 == r2 && caps1.len() == caps2.len(),
-            (Seq(_, op1, _), Seq(_, op2, _)) => op1 == op2,
-            (SeqLit(..), SeqLit(..)) => true,
+            (Coll(_, op1, _), Coll(_, op2, _)) => op1 == op2,
+            (CollLit(k1, ..), CollLit(k2, ..)) => k1 == k2,
             _ => false,
         }
     }
@@ -146,8 +148,8 @@ impl Language for Symbolic {
             FuncApp(_, _, ids) => ids,
             // The recipe and types are payload; the captures are the children.
             Forall(_, _, caps) => caps,
-            Seq(_, _, ids) => ids,
-            SeqLit(_, id) => std::slice::from_ref(id),
+            Coll(_, _, ids) => ids,
+            CollLit(_, _, id) => std::slice::from_ref(id),
         }
     }
 
@@ -160,8 +162,8 @@ impl Language for Symbolic {
             RealCast(id) => std::slice::from_mut(id),
             FuncApp(_, _, ids) => ids,
             Forall(_, _, caps) => caps,
-            Seq(_, _, ids) => ids,
-            SeqLit(_, id) => std::slice::from_mut(id),
+            Coll(_, _, ids) => ids,
+            CollLit(_, _, id) => std::slice::from_mut(id),
         }
     }
 }
@@ -197,8 +199,8 @@ impl Display for Symbolic {
                     write!(f, "forall#{}<{}>", r.0, args.join(", "))
                 }
             }
-            Symbolic::Seq(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
-            Symbolic::SeqLit(ty, _) => write!(f, "Seq<{ty}>"),
+            Symbolic::Coll(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
+            Symbolic::CollLit(kind, ty, _) => write!(f, "{}<{ty}>", kind.name()),
         }
     }
 }
@@ -266,9 +268,126 @@ impl FromOp for Symbolic {
                     Err(FromOpError(format!("unknown leaf `{lit}`")))
                 }
             }
-            // `Symbolic::Seq` is deliberately absent: an operator name alone has no
+            // `Symbolic::Coll` is deliberately absent: an operator name alone has no
             // element type, and a placeholder would build a wrong node.
             _ => Err(FromOpError(format!("unknown op `{op}`/{}", children.len()))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dhash::HashMap;
+    use crate::verify::analysis::ConstFold;
+    use crate::verify::types::infer_type;
+    use crate::vmir::{SeqOp, SetOp};
+
+    type Graph = EGraph<Symbolic, ConstFold>;
+
+    fn coll(g: &mut Graph, elem: Type, op: impl Into<CollOp>, args: &[Id]) -> Id {
+        g.add(Symbolic::Coll(Box::new(elem), op.into(), args.into()))
+    }
+
+    fn ty_of(g: &Graph, id: Id) -> Option<Type> {
+        infer_type(
+            g,
+            &HashMap::default(),
+            &HashMap::default(),
+            id,
+            &mut HashMap::default(),
+        )
+    }
+
+    /// The same operands under a sequence and a set operation, or in a
+    /// sequence and a set literal, are different terms: the kind is part of
+    /// the node, so congruence never merges them.
+    #[test]
+    fn seq_and_set_nodes_of_one_shape_stay_apart() {
+        let mut g = Graph::default();
+        let (s, x) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let seq_in = coll(&mut g, Type::Int, SeqOp::Contains, &[s, x]);
+        let set_in = coll(&mut g, Type::Int, SetOp::Contains, &[s, x]);
+        let seq_lit = g.add(Symbolic::CollLit(CollKind::Seq, Box::new(Type::Int), x));
+        let set_lit = g.add(Symbolic::CollLit(CollKind::Set, Box::new(Type::Int), x));
+        g.rebuild();
+        assert_ne!(g.find(seq_in), g.find(set_in));
+        assert_ne!(g.find(seq_lit), g.find(set_lit));
+        // The discriminant keeps them in different `classes_by_op` buckets.
+        assert_ne!(
+            g.id_to_node(seq_in).discriminant(),
+            g.id_to_node(set_in).discriminant()
+        );
+    }
+
+    /// Set operations are ordinary congruent nodes: equal operands make equal
+    /// unions.
+    #[test]
+    fn set_operations_are_congruent() {
+        let mut g = Graph::default();
+        let (a, a2, b) = (
+            g.add(Symbolic::Fresh(0)),
+            g.add(Symbolic::Fresh(1)),
+            g.add(Symbolic::Fresh(2)),
+        );
+        let u1 = coll(&mut g, Type::Int, SetOp::Union, &[a, b]);
+        let u2 = coll(&mut g, Type::Int, SetOp::Union, &[a2, b]);
+        let i1 = coll(&mut g, Type::Int, SetOp::Intersection, &[a, b]);
+        g.rebuild();
+        assert_ne!(g.find(u1), g.find(u2));
+        g.union(a, a2);
+        g.rebuild();
+        assert_eq!(g.find(u1), g.find(u2));
+        assert_ne!(g.find(u1), g.find(i1), "union is not intersection");
+    }
+
+    /// Each set node's type is recovered from the node alone.
+    #[test]
+    fn set_node_types_are_inferred() {
+        let mut g = Graph::default();
+        let (a, b, x) = (
+            g.add(Symbolic::Fresh(0)),
+            g.add(Symbolic::Fresh(1)),
+            g.add(Symbolic::Fresh(2)),
+        );
+        let set_int = Type::set(Type::Int);
+        let cases = [
+            (coll(&mut g, Type::Int, SetOp::Empty, &[]), set_int.clone()),
+            (coll(&mut g, Type::Int, SetOp::Card, &[a]), Type::Int),
+            (
+                coll(&mut g, Type::Int, SetOp::Contains, &[a, x]),
+                Type::Bool,
+            ),
+            (
+                coll(&mut g, Type::Int, SetOp::Union, &[a, b]),
+                set_int.clone(),
+            ),
+            (
+                coll(&mut g, Type::Int, SetOp::Intersection, &[a, b]),
+                set_int.clone(),
+            ),
+            (
+                coll(&mut g, Type::Int, SetOp::Difference, &[a, b]),
+                set_int.clone(),
+            ),
+            (coll(&mut g, Type::Int, SetOp::Subset, &[a, b]), Type::Bool),
+            (
+                coll(&mut g, Type::Int, SetOp::Add, &[a, x]),
+                set_int.clone(),
+            ),
+            (coll(&mut g, Type::Int, SetOp::Eq, &[a, b]), Type::Bool),
+            (
+                g.add(Symbolic::CollLit(CollKind::Set, Box::new(Type::Int), x)),
+                set_int.clone(),
+            ),
+            (
+                coll(&mut g, Type::set(Type::Bool), SetOp::Union, &[a, b]),
+                Type::set(Type::set(Type::Bool)),
+            ),
+        ];
+        g.rebuild();
+        for (id, want) in cases {
+            assert_eq!(ty_of(&g, id), Some(want), "{}", g.id_to_node(id));
         }
     }
 }

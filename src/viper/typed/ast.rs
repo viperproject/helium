@@ -52,6 +52,7 @@ impl From<&crate::viper::parsed::ast::Type> for Type {
                 Type::Domain(Ident(id.id()), args.iter().map(Self::from).collect())
             }
             A::Seq(ty) => Type::Collection(BuiltinCollection::Seq(Box::new(Self::from(&**ty)))),
+            A::Set(ty) => Type::Collection(BuiltinCollection::Set(Box::new(Self::from(&**ty)))),
         }
     }
 }
@@ -147,6 +148,9 @@ pub enum PureExpKind<Ext> {
     /// `Seq(e1, ..., en)`; empty for `Seq[T]()`. The element type is the
     /// node's own `Seq[T]`.
     SeqLit(Vec<TypedPureExp<Ext>>),
+    /// `Set(e1, ..., en)`; empty for `Set[T]()`. The element type is the
+    /// node's own `Set[T]`.
+    SetLit(Vec<TypedPureExp<Ext>>),
     /// `s[..]`: an index, a take, a drop, a slice, or an update of `s`.
     SeqIndex(TypedPureExp<Ext>, SeqIndexOp<Ext>),
     /// The context-specific extension — heap nodes (`Ext::Heap`), `old`, `perm`,

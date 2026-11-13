@@ -61,7 +61,7 @@ pub(crate) struct QuantRecipe {
     pub(crate) insts: Vec<AxiomInst>,
     pub(crate) res: Val,
     /// The condition an instance waits for (see [`Guard`]). Only the built-in
-    /// sequence axioms (`verify::seq_axioms`) have one today; a program's
+    /// collection axioms (`verify::coll_axioms`) have one today; a program's
     /// quantifier is instantiated at every match.
     pub(crate) guard: Option<Guard>,
 }
@@ -118,9 +118,9 @@ pub(crate) struct RecipeTable {
     /// space). A `vmir::Forall` is `Hash + Eq`, so no id bookkeeping is needed on
     /// the IR, and caching the free list keeps a re-walked body from rescanning.
     by_forall: HashMap<vmir::Forall, (RecipeId, Arc<[usize]>)>,
-    /// The built-in sequence axioms' recipes (`verify::seq_axioms`), compiled
-    /// on first use.
-    seq_axioms: Option<Vec<RecipeId>>,
+    /// The built-in collection axioms' recipes (`verify::coll_axioms`), by
+    /// `CollKind` (`Seq` first), each compiled on first use.
+    coll_axioms: [Option<Vec<RecipeId>>; 2],
 }
 
 impl RecipeTable {
@@ -128,29 +128,32 @@ impl RecipeTable {
         &self.recipes[id]
     }
 
-    /// The recipes of the built-in sequence axioms, compiled into the table on
-    /// the first call, their witnesses applications of `skolems`. Each is a
-    /// closed quantifier (no captures) whose element type is open
-    /// (`Generic(0)`), or `Int` for an axiom only about ranges.
-    pub(crate) fn seq_axioms(
+    /// The recipes of the built-in axioms of the collection `kind`, compiled
+    /// into the table on the first call, their witnesses applications of
+    /// `skolems`. Each is a closed quantifier (no captures) whose element type
+    /// is open (`Generic(0)`), or `Int` for an axiom only about ranges.
+    pub(crate) fn coll_axioms(
         &mut self,
-        skolems: &crate::verify::seq_axioms::SeqSkolems,
+        kind: crate::vmir::CollKind,
+        skolems: &crate::verify::coll_axioms::Skolems,
     ) -> Vec<RecipeId> {
-        if self.seq_axioms.is_none() {
-            let ids = crate::verify::seq_axioms::recipes(skolems)
+        let slot = &mut self.coll_axioms[kind as usize];
+        if slot.is_none() {
+            let ids = crate::verify::coll_axioms::recipes(kind, skolems)
                 .into_iter()
                 .map(|r| self.recipes.push_and_get_key(r))
                 .collect();
-            self.seq_axioms = Some(ids);
+            *slot = Some(ids);
         }
-        self.seq_axioms.clone().expect("just compiled")
+        slot.clone().expect("just compiled")
     }
 
-    /// Whether `id` is one of the built-in sequence axioms' recipes.
-    pub(crate) fn is_seq_axiom(&self, id: RecipeId) -> bool {
-        self.seq_axioms
-            .as_ref()
-            .is_some_and(|ids| ids.contains(&id))
+    /// Whether `id` is one of the built-in collection axioms' recipes.
+    pub(crate) fn is_coll_axiom(&self, id: RecipeId) -> bool {
+        self.coll_axioms
+            .iter()
+            .flatten()
+            .any(|ids| ids.contains(&id))
     }
 
     /// How many recipes have been compiled so far — i.e. how many distinct
@@ -335,7 +338,9 @@ fn forall_generics(q: &vmir::Forall, deep: bool, out: &mut crate::dhash::HashSet
             | PureInst::AdtIs { type_args, .. } => {
                 type_args.iter().for_each(|t| t.collect_generics(out))
             }
-            PureInst::Seq { elem_ty, .. } => elem_ty.collect_generics(out),
+            PureInst::Coll { elem_ty, .. } | PureInst::CollLit { elem_ty, .. } => {
+                elem_ty.collect_generics(out)
+            }
             PureInst::Forall(inner) if deep => forall_generics(inner, deep, out),
             _ => {}
         }

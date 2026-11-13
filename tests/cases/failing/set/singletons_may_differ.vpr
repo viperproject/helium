@@ -1,0 +1,4 @@
+// Set: x and y may differ.
+method singletons_may_differ(x: Int, y: Int) {
+  assert Set(x) == Set(y)
+}

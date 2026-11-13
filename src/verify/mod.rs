@@ -7,6 +7,7 @@ mod expr;
 
 mod analysis;
 mod cert;
+mod coll_axioms;
 mod context;
 mod declaration;
 mod error;
@@ -15,7 +16,6 @@ mod heap;
 pub mod lang;
 mod quant;
 mod rewrite;
-mod seq_axioms;
 mod stats;
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -76,8 +76,9 @@ fn check_type(
                 Some(GlobalSignature::Domain(d)) => d.type_arity,
                 Some(GlobalSignature::Adt(a)) => a.type_arity,
                 // The collection types: parsed so `scan_unsupported` can name
-                // them, rejected there. A well-formed `Seq[T]` is `P::Seq`; `Seq`
-                // only lands here with the wrong number of type arguments.
+                // them, rejected there. A well-formed `Seq[T]`/`Set[T]` is
+                // `P::Seq`/`P::Set`; they only land here with the wrong number
+                // of type arguments.
                 _ => match interner.resolve(&name) {
                     "Seq" | "Set" | "Multiset" => 1,
                     "Map" => 2,
@@ -94,7 +95,7 @@ fn check_type(
             args.iter()
                 .try_for_each(|a| check_type(a, globals, interner, is_param))
         }
-        P::Seq(ty) => check_type(ty, globals, interner, is_param),
+        P::Seq(ty) | P::Set(ty) => check_type(ty, globals, interner, is_param),
     }
 }
 
@@ -615,12 +616,8 @@ fn collect_generics(ty: &Type, acc: &mut Vec<Spur>) {
                 collect_generics(a, acc);
             }
         }
-        Type::Collection(BuiltinCollection::Seq(ty)) => {
-            if let Type::Generic(generic) = **ty
-                && !acc.contains(&generic.0)
-            {
-                acc.push(generic.0);
-            }
+        Type::Collection(BuiltinCollection::Seq(ty) | BuiltinCollection::Set(ty)) => {
+            collect_generics(ty, acc)
         }
         _ => {}
     }
@@ -668,6 +665,13 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
         let key = self.tc.new_term_key();
         exp.ty = viper::InferenceType::Infer(key);
+        // Which collection a literal builds, read before `exp.kind` is
+        // borrowed mutably below.
+        let literal_kind = match exp.kind.as_ref() {
+            ExpKind::SeqLit(..) => Some(ViperTcType::Seq),
+            ExpKind::SetLit(..) => Some(ViperTcType::Set),
+            _ => None,
+        };
 
         match exp.kind.as_mut() {
             ExpKind::Const(c) => {
@@ -850,8 +854,10 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
             }
 
-            ExpKind::SeqLit(ty, elems) => {
-                self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
+            ExpKind::SeqLit(ty, elems) | ExpKind::SetLit(ty, elems) => {
+                self.tc.impose(key.concretizes_explicit(
+                    literal_kind.expect("a collection literal was matched, so its kind was read"),
+                ))?;
                 let elem = self.tc.get_child_key(key, 0)?;
                 if let Some(t) = ty {
                     self.check_binder_type(t)?;
@@ -1008,10 +1014,11 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Real))?;
             }
+            // `|c|`: a sequence's length or a set's cardinality.
             viper::UnOp::Cardinality => {
                 let inner_key = self.constrain_pure(inner)?;
                 self.tc
-                    .impose(inner_key.concretizes_explicit(ViperTcType::Seq))?;
+                    .impose(inner_key.concretizes_explicit(ViperTcType::Collection))?;
                 self.tc.impose(key.concretizes_explicit(ViperTcType::Int))?;
             }
         }
@@ -1078,11 +1085,26 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc.impose(key.equate_with(lk))?;
             }
-            // `x in s`: `x` has the element type of `s`.
+            // `x in c`: `x` has the element type of the sequence or set `c`.
             SBinOp::In => {
-                self.tc.impose(rk.concretizes_explicit(ViperTcType::Seq))?;
+                self.tc
+                    .impose(rk.concretizes_explicit(ViperTcType::Collection))?;
                 let elem = self.tc.get_child_key(rk, 0)?;
                 self.tc.impose(lk.equate_with(elem))?;
+                self.tc
+                    .impose(key.concretizes_explicit(ViperTcType::Bool))?;
+            }
+            // `a union b`, `a intersection b`, `a setminus b`: both sides and
+            // the result are one set type.
+            SBinOp::Union | SBinOp::Intersection | SBinOp::SetMinus => {
+                self.tc.impose(lk.concretizes_explicit(ViperTcType::Set))?;
+                self.tc.impose(rk.equate_with(lk))?;
+                self.tc.impose(key.equate_with(lk))?;
+            }
+            // `a subset b`: two sets of one type.
+            SBinOp::Subset => {
+                self.tc.impose(lk.concretizes_explicit(ViperTcType::Set))?;
+                self.tc.impose(rk.equate_with(lk))?;
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
             }
@@ -1150,6 +1172,12 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             // `Seq[T]`: the key is a `Seq`, its one child the element type.
             Type::Collection(BuiltinCollection::Seq(elem)) => {
                 self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
+                let child = self.tc.get_child_key(key, 0)?;
+                self.impose_type(child, elem, subst)?;
+            }
+            // `Set[T]`: likewise.
+            Type::Collection(BuiltinCollection::Set(elem)) => {
+                self.tc.impose(key.concretizes_explicit(ViperTcType::Set))?;
                 let child = self.tc.get_child_key(key, 0)?;
                 self.impose_type(child, elem, subst)?;
             }
@@ -1501,6 +1529,13 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
             // The element type is not stored: it is the resolved `Seq[T]` of
             // this node, which `lower_pure` attaches.
             ExpKind::SeqLit(_, elems) => Ok(PureExpKind::SeqLit(
+                elems
+                    .iter()
+                    .map(|e| self.lower_pure::<Ext>(e))
+                    .collect::<Result<_, _>>()?,
+            )),
+            // Likewise for a set literal and its `Set[T]`.
+            ExpKind::SetLit(_, elems) => Ok(PureExpKind::SetLit(
                 elems
                     .iter()
                     .map(|e| self.lower_pure::<Ext>(e))
@@ -2112,6 +2147,10 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
             t,
             type_params,
         )))),
+        P::Set(t) => Type::Collection(BuiltinCollection::Set(Box::new(type_with_generics(
+            t,
+            type_params,
+        )))),
     }
 }
 
@@ -2393,25 +2432,36 @@ fn is_trigger_application(term: &TypedPureExp<typed::AxiomExt>) -> bool {
             | P::AdtDestructor(..)
             | P::AdtDiscriminator(..)
             | P::Ext(typed::AxiomExt::FunctionCall(_))
-    ) || seq_trigger_operands(term).is_some()
+    ) || coll_trigger_operands(term).is_some()
 }
 
-/// The operands of a sequence operation that Silicon accepts as a trigger
+/// The operands of a collection operation that Silicon accepts as a trigger
 /// term (`s[i]`, `|s|`, `s ++ t`, `x in s`, `Seq(..)`, take/drop/slice/update,
-/// `[a..b)`), or `None` if `term` is not one.
-fn seq_trigger_operands(
+/// `[a..b)`; `Set(..)`, `union`, `intersection`, `setminus`, `subset`), or
+/// `None` if `term` is not one.
+fn coll_trigger_operands(
     term: &TypedPureExp<typed::AxiomExt>,
 ) -> Option<Vec<&TypedPureExp<typed::AxiomExt>>> {
     use PureExpKind as P;
     match term.exp.as_ref() {
-        P::SeqLit(elems) => Some(elems.iter().collect()),
+        P::SeqLit(elems) | P::SetLit(elems) => Some(elems.iter().collect()),
         P::SeqIndex(base, op) => {
             let mut v = vec![base];
             v.extend(op.operands());
             Some(v)
         }
         P::Unary(UnOp::Cardinality, e) => Some(vec![e]),
-        P::Binary(BinOp::Concat | BinOp::In | BinOp::Range, l, r) => Some(vec![l, r]),
+        P::Binary(
+            BinOp::Concat
+            | BinOp::In
+            | BinOp::Range
+            | BinOp::Union
+            | BinOp::Intersection
+            | BinOp::SetMinus
+            | BinOp::Subset,
+            l,
+            r,
+        ) => Some(vec![l, r]),
         _ => None,
     }
 }
@@ -2430,7 +2480,7 @@ fn check_trigger_subterms(
             Ok(())
         }
         P::Const(_) => Ok(()),
-        _ if let Some(operands) = seq_trigger_operands(term) => {
+        _ if let Some(operands) = coll_trigger_operands(term) => {
             for e in operands {
                 check_trigger_subterms(e, seen)?;
             }
@@ -2450,6 +2500,7 @@ fn check_trigger_subterms(
         | P::Ternary { .. }
         | P::LetIn { .. }
         | P::SeqLit(_)
+        | P::SetLit(_)
         | P::SeqIndex(..)
         | P::Ext(typed::AxiomExt::Forall(_)) => Err(TypeError::TriggerBadSubterm),
     }
@@ -2489,7 +2540,7 @@ fn check_axiom_function_calls(
             check_axiom_function_calls(exp, fns_with_precond, interner)
         }
         P::DomainFunctionCall(call) | P::AdtConstructor(call) => check_call(call),
-        P::SeqLit(elems) => elems
+        P::SeqLit(elems) | P::SetLit(elems) => elems
             .iter()
             .try_for_each(|e| check_axiom_function_calls(e, fns_with_precond, interner)),
         P::SeqIndex(base, op) => {
@@ -3646,6 +3697,70 @@ function TryFromBytes_impl(Self$0_trait: Type): Bool
         assert_rejected("method m() { assert |Seq()| == 0 }", |e| {
             matches!(e, TypeError::CannotInferType)
         });
+    }
+
+    #[test]
+    fn set_with_wrong_type_argument_count_rejected() {
+        for decl in ["method m(x: Set)", "method m(x: Set[Int, Int])"] {
+            assert_rejected(
+                decl,
+                |e| matches!(e, TypeError::WrongTypeArgCount { name, expected: 1, .. } if name == "Set"),
+            );
+        }
+    }
+
+    #[test]
+    fn uninferable_empty_set_rejected() {
+        assert_rejected("method m() { assert |Set()| == 0 }", |e| {
+            matches!(e, TypeError::CannotInferType)
+        });
+    }
+
+    /// `|c|` and `x in c` take either collection; the set operators take sets
+    /// only, of one element type.
+    #[test]
+    fn set_operations_accepted() {
+        let result = run_pipeline(
+            r#"
+method m(s: Set[Int], q: Seq[Int], x: Int, b: Bool) returns (r: Set[Int])
+{
+  r := (s union Set(x)) intersection (s setminus Set[Int]())
+  assert |s| >= 0 && |q| >= 0
+  assert (x in s) == (x in q)
+  assert s subset r || b
+  var n: Set[Set[Bool]] := Set(Set(b), Set())
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn set_operator_on_sequences_rejected() {
+        for exp in [
+            "q union q",
+            "q intersection q",
+            "q setminus q",
+            "q subset q",
+            "s union q",
+        ] {
+            let src = format!("method m(s: Set[Int], q: Seq[Int]) {{ assert |{exp}| >= 0 }}");
+            let ok = run_pipeline(&src);
+            assert!(ok.is_err(), "`{exp}` must not typecheck");
+            assert_rejected(&src, |e| matches!(e, TypeError::Mismatch(..)));
+        }
+    }
+
+    #[test]
+    fn set_element_type_mismatch_rejected() {
+        for src in [
+            "method m(s: Set[Int]) { assert true in s }",
+            "method m(s: Set[Int]) { assert s subset Set(true) }",
+            "method m(s: Set[Int]) { assert Set(1, true) == s }",
+            "method m() { assert |5| == 1 }",
+        ] {
+            assert_rejected(src, |e| matches!(e, TypeError::Mismatch(..)));
+        }
     }
 
     #[test]

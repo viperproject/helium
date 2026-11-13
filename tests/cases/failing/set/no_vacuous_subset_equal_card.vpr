@@ -1,0 +1,7 @@
+// Set: a subset of equal cardinality is consistent (a = b); the axioms must not
+// make it contradictory.
+method no_vacuous_subset_equal_card(a: Set[Int], b: Set[Int])
+  requires a subset b && |a| == |b|
+{
+  assert false
+}

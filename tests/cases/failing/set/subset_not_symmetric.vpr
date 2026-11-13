@@ -1,0 +1,6 @@
+// Set: a = {}, b = {1}.
+method subset_not_symmetric(a: Set[Int], b: Set[Int])
+  requires a subset b
+{
+  assert b subset a
+}

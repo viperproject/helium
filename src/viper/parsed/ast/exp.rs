@@ -84,6 +84,9 @@ pub enum ExpKind {
     /// `Seq[T](e1, ..., en)`. The element type is `Some` only when written;
     /// an empty literal without one gets its type from inference.
     SeqLit(Option<Type>, Vec<Exp>),
+    /// A set literal: `Set[T]()`, `Set()`, `Set(e1, ..., en)` or
+    /// `Set[T](e1, ..., en)`, element type as for [`ExpKind::SeqLit`].
+    SetLit(Option<Type>, Vec<Exp>),
 
     /// A construct the verifier does not implement, parsed only so that the
     /// declaration containing it can be reported as unsupported instead of

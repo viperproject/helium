@@ -1,0 +1,47 @@
+// Set: cardinality `|s|`.
+
+method union_card(a: Set[Int], b: Set[Int]) {
+  assert |a union b| + |a intersection b| == |a| + |b|
+}
+
+method union_card_bound(a: Set[Int], b: Set[Int]) {
+  assert |a union b| <= |a| + |b|
+}
+
+// The bound follows from `Set_diff_card`, which only fires once a term
+// `|a setminus b|` exists.
+method intersection_card_bound(a: Set[Int], b: Set[Int]) {
+  assert |a setminus b| >= 0
+  assert |a intersection b| <= |a|
+}
+
+method difference_card(a: Set[Int], b: Set[Int]) {
+  assert |a setminus b| == |a| - |a intersection b|
+}
+
+method nonempty_is_not_empty(s: Set[Int])
+  requires |s| > 0
+{
+  assert s != Set[Int]()
+}
+
+method member_means_nonempty(s: Set[Int], x: Int)
+  requires x in s
+{
+  assert |s| > 0
+}
+
+method add_new_element(s: Set[Int], x: Int)
+  requires !(x in s)
+{
+  assert |s union Set(x)| == |s| + 1
+}
+
+// The cardinality needs the equality first: the axioms only reason
+// extensionally about a set equality the program writes.
+method add_existing_element(s: Set[Int], x: Int)
+  requires x in s
+{
+  assert s union Set(x) == s
+  assert |s union Set(x)| == |s|
+}
