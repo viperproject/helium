@@ -52,8 +52,8 @@ use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm, TermHead};
 use crate::vmir::{BinOp, CollKind, CollOp, Literal, Type, Val};
 
 /// What a bound variable of an axiom ranges over, given the collection's type
-/// arguments: the element type `E` of a `Seq` or `Set`, the key and value
-/// types `K`, `V` of a `Map`.
+/// arguments: the element type `E` of a `Seq`, `Set` or `Multiset`, the key
+/// and value types `K`, `V` of a `Map`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VarSort {
     /// A collection of the table's kind.
@@ -667,8 +667,8 @@ fn conj(ts: &[STerm]) -> STerm {
     }
 }
 
-/// The element type of the singleton collection of `kind`, a `Seq` or `Set`
-/// of type arguments `tys`.
+/// The element type of the singleton collection of `kind`, a `Seq`, `Set` or
+/// `Multiset` of type arguments `tys`.
 fn unit_elem(kind: CollKind, tys: &[Type]) -> Type {
     assert!(
         kind.has_unit(),

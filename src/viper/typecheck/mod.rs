@@ -4080,14 +4080,14 @@ method m(a: Map[Ref, Int], k: Ref, b: Bool) returns (r: Map[Ref, Int])
             // `domain` is a set of keys, `range` of values.
             "method m(a: Map[Int, Bool]) { assert true in domain(a) }",
             "method m(a: Map[Int, Bool]) { assert 1 in range(a) }",
-            // Neither applies to a sequence or a set.
+            // Neither applies to a sequence, a set or a multiset.
             "method m(q: Seq[Int]) { assert 1 in domain(q) }",
             "method m(s: Set[Int]) { assert 1 in range(s) }",
             // A set has no index; a map has no take, drop or slice.
             "method m(s: Set[Int]) { assert s[0] == 0 }",
             "method m(a: Map[Int, Int]) { assert a[..1] == a }",
             "method m(a: Map[Int, Int]) { assert a[1..] == a }",
-            // A map is not a sequence or a set.
+            // A map is not a sequence, a set or a multiset.
             "method m(a: Map[Int, Int]) { assert a ++ a == a }",
             "method m(a: Map[Int, Int]) { assert a union a == a }",
         ] {

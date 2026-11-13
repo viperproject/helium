@@ -230,7 +230,8 @@ pub(crate) fn lower<Ext: PureExt>(
                     ty.clone(),
                     PureInst::Binary(vmir::BinOp::sub(&ty), zero_literal(&ty), v),
                 )),
-                // A sequence's length, a set's or a map's cardinality.
+                // A sequence's length, a set's, a map's or a multiset's
+                // cardinality.
                 typed::UnOp::Cardinality => {
                     let (kind, tys) = coll_tys(b, &x.ty);
                     Ok(sink.emit_pure(ty, PureInst::coll(tys, CollOp::size(kind), vec![v])))

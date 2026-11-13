@@ -940,7 +940,8 @@ fn coll_to_z3_checked(
     sorts_fit(ctxt, &params, args).then(|| coll_to_z3(ctxt, tys, op, args))
 }
 
-/// The singleton collection `Seq(elem)` or `Set(elem)`, `None` when `elem` is
+/// The singleton collection `Seq(elem)`, `Set(elem)` or `Multiset(elem)`,
+/// `None` when `elem` is
 /// not of sort `elem_ty`.
 fn coll_unit_checked(
     ctxt: &mut VerifyContext,

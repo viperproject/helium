@@ -424,8 +424,8 @@ impl FuncRegistry {
     // ---- Builtin `Option` resolution -------------------------------------
     // `Option[T]` is a builtin parametric type (`vmir::Type::Option`). These are
     // the dedicated way to request its monomorphic instance, rather than open-
-    // coding `cons`/`proj`. (`Seq`/`Set`/`Map` are `Type::Coll`, axiomatized in
-    // `verify::coll_axioms`.)
+    // coding `cons`/`proj`. (`Seq`/`Set`/`Map`/`Multiset` are `Type::Coll`,
+    // axiomatized in `verify::coll_axioms`.)
 
     /// `Option[elem]` as a vmir type (the builtin parametric `Type::Option`).
     pub fn option_type(&self, elem: Type) -> Type {
