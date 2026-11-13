@@ -63,11 +63,6 @@ impl<'a> AstWalker<'a> for Scan {
             ExpKind::MagicWand(..) => self.hit("magic wand `--*`"),
             ExpKind::ForPerm(..) => self.hit("forperm"),
             ExpKind::Quantifier(QuantifierKind::Exists, ..) => self.hit("exists"),
-            // `forall x: Ref :: acc(x.f)` — a quantified permission. The
-            // quantifier's body has to stay heap-free.
-            ExpKind::Quantifier(QuantifierKind::Forall, _, _, body) if mentions_acc(body) => {
-                self.hit("quantified permission")
-            }
             ExpKind::HeapUpdate(HeapUpdateOp::Fold, ..) => self.hit("folding"),
             ExpKind::HeapUpdate(HeapUpdateOp::Apply, ..) => self.hit("applying"),
             ExpKind::HeapUpdate(HeapUpdateOp::Package, ..) => self.hit("packaging"),
