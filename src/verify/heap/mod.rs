@@ -582,20 +582,84 @@ impl Chunk {
 /// chunk per address (the same-address merge happens in `declaration.rs`); the vec
 /// shape is a prerequisite for the lazy Σ-ite permission model.
 ///
-/// A chunk's reachability is carried by its own [`Chunk::guard`] (a flat cube),
-/// not by a heap-level path condition — the join merge appends the branch literal
-/// per chunk, and the consume sites gate against `guard ∧` the instruction pc.
+/// Where a chunk is held is two cubes deep: the heap's [`Region`] (the path the
+/// heap exists on at all) and, relative to it, the chunk's own [`Chunk::guard`]
+/// (the join merge appends the branch literal per chunk; the consume sites gate
+/// against `guard ∧` the instruction pc). A fact the algebra derives from a heap's
+/// contents holds only on `region ∧ guard`.
 #[derive(Debug, Clone)]
 pub struct Heap {
     /// Unseeded hasher: iteration order (and so the order join/consume code mints
     /// terms in) must be a function of the heap alone, not of the process.
     groups: im::HashMap<LocationKind, Rc<[Chunk]>, rustc_hash::FxBuildHasher>,
+    /// The path this heap exists on. Every heap has one: there is no constructor
+    /// without it, and every derived heap ([`Heap::with_chunk`],
+    /// [`Heap::without_chunk`]) keeps its source's.
+    region: Region,
+}
+
+/// The path a [`Heap`] exists on: an **absolute** cube of live literals.
+///
+/// It is the *block cube* of the phase the heap is used in, never an instruction's
+/// pc. An `Inst.pc` is a delta over an ambient cube that a join phase does not
+/// have, and a branch literal inside a phase gates the permission *amount*
+/// (`b ? p : 0`) rather than the heap, so neither is "where the heap exists".
+/// Reading the ambient cube instead was the `join_merge_ambient_cube`
+/// unsoundness: a join is walked with no ambient cube, so a merged heap's
+/// location axioms were stated on every path.
+///
+/// The heap algebra reads a heap's region and nothing else. It is set at the one
+/// place a heap enters an instruction (`fetch_heap` in `declaration.rs`), which
+/// re-homes the heap to the phase it is used in.
+#[derive(Debug, Clone)]
+pub struct Region(HeapPc);
+
+impl Region {
+    /// The region of the block cube `cube`: the full, absolute cube of a method
+    /// block (either phase), or the empty cube of a CFG-less body (function,
+    /// resource), which exists on every path. Never an instruction's delta pc.
+    pub(crate) fn of_cube(cube: Vec<(egg::Id, Polarity)>) -> Self {
+        Self(cube.into())
+    }
+
+    /// The cube's literals.
+    pub(crate) fn lits(&self) -> &[(egg::Id, Polarity)] {
+        &self.0
+    }
+
+    /// Whether `self` and `other` are the same cube, literal by literal, up to
+    /// e-class equality.
+    pub(crate) fn same(&self, ctx: &VerifyContext<'_>, other: &Region) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(other.0.iter())
+                .all(|(a, b)| a.1 == b.1 && ctx.egraph.find(a.0) == ctx.egraph.find(b.0))
+    }
 }
 
 impl Heap {
-    pub fn empty() -> Self {
+    /// A heap holding nothing, existing on `region`.
+    pub fn empty(region: Region) -> Self {
         Self {
             groups: im::HashMap::default(),
+            region,
+        }
+    }
+
+    /// The path this heap exists on.
+    pub(crate) fn region(&self) -> &Region {
+        &self.region
+    }
+
+    /// The same contents, used on `region`. A heap flowing into an instruction is
+    /// re-homed to that instruction's phase: dataflow guarantees the heap *is* the
+    /// state there, so facts drawn from it hold on that phase's cube.
+    pub(crate) fn at(&self, region: Region) -> Self {
+        Self {
+            groups: self.groups.clone(),
+            region,
         }
     }
 
@@ -623,6 +687,7 @@ impl Heap {
         }
         Self {
             groups: self.groups.update(kind.clone(), v.into()),
+            region: self.region.clone(),
         }
     }
 
@@ -637,7 +702,10 @@ impl Heap {
         } else {
             self.groups.update(kind.clone(), v.into())
         };
-        Self { groups }
+        Self {
+            groups,
+            region: self.region.clone(),
+        }
     }
 
     /// Every chunk in the heap, paired with its location kind.
@@ -686,7 +754,7 @@ mod tests {
             })
             .collect();
         let build = || {
-            kinds.iter().enumerate().fold(Heap::empty(), |h, (i, k)| {
+            kinds.iter().enumerate().fold(Heap::empty(Region::of_cube(Vec::new())), |h, (i, k)| {
                 let id = egg::Id::from(i);
                 h.with_chunk(k, Chunk::new(id, id, id))
             })

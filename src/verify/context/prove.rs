@@ -148,8 +148,16 @@ impl<'a> VerifyContext<'a> {
         self.in_block
     }
 
-    /// The current block's control cube, as live ids. Empty outside a block body.
-    pub(crate) fn current_cube(&self) -> &[(egg::Id, Polarity)] {
+    /// The current block's control cube, as live ids. Empty outside a block body
+    /// — and so empty in a join phase, although its heaps exist only on the
+    /// block's cube.
+    ///
+    /// Private to the context on purpose: it is the proof context of a body walk,
+    /// not "the path a heap exists on". Reading it as the latter is what made a
+    /// join's merge state its location axioms unguarded. Outside code asks for
+    /// [`Self::effective_pc`] (an instruction's pc) or reads a heap's
+    /// [`Region`](crate::verify::heap::Region).
+    pub(super) fn current_cube(&self) -> &[(egg::Id, Polarity)] {
         &self.current_cube
     }
 
@@ -195,6 +203,27 @@ impl<'a> VerifyContext<'a> {
         sc.map.insert(key, s);
         sc.dirty = true;
         sc.dirty_reduce = true;
+    }
+
+    /// The **effective** path condition of an instruction whose own pc lowers
+    /// to `delta`:
+    ///
+    /// ```text
+    /// effective_pc(inst) = ambient_cube(phase) ++ inst.pc
+    /// ```
+    ///
+    /// `Inst.pc` is a delta (see [`Sink::ambient`](crate::translate::sink)). The
+    /// ambient is set by `begin_block` before a block's body walk and cleared by
+    /// `end_block` before its join walk, which is exactly the phase split the
+    /// delta rule names: a join materializes its own cube literals, so there the
+    /// ambient is empty and the delta is the whole pc.
+    pub(crate) fn effective_pc(
+        &self,
+        delta: Vec<(egg::Id, Polarity)>,
+    ) -> Vec<(egg::Id, Polarity)> {
+        let mut lits = self.current_cube.clone();
+        lits.extend(delta);
+        lits
     }
 
     /// Prove `pc ⇒ goal` against the live e-graph, escalating through named

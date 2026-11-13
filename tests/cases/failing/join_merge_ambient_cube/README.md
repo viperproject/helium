@@ -24,7 +24,16 @@ method m(a: Ref, b: Ref, c: Bool, d: Bool)
 }
 ```
 
-**What a structural fix looks like.** The heap algebra reads no ambient cube. A heap
-carries the region it exists on, set when the phase creates it, and every assumption the
-algebra makes is gated by that region. A path condition is one typed, absolute `Region`,
-never a raw literal slice that may be a delta or empty. See §4.1, §4.2, §4.6.
+**How it was fixed.** The heap algebra reads no ambient cube. Every `Heap` carries a
+`heap::Region`: the absolute block cube it exists on, a typed value and never a delta pc.
+No constructor omits it, and every derived heap keeps its source's. A heap enters an
+instruction only through `fetch_heap` (`declaration.rs`), which homes it at the cube of
+the phase being walked. That is the block's `cube` in the join phase as well as the body
+phase. `assume_location_axioms` gates by the heap's region; `merge_heaps` and
+`union_heaps` assert that their operands share one. `VerifyContext::current_cube` is
+private to `context/`. Code outside it asks for `effective_pc` (an instruction's pc), so
+the heap code cannot read the walker's ambient state again.
+
+Cases: the three `join_merge_*` cases (row 3: the `Merge` at a join), and
+`loop_head_nonaliasing_leak` (row 5: the loop head's re-inhale of the invariant, also
+a join-phase `heap_union`).

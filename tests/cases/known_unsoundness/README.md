@@ -21,7 +21,8 @@ the call sites these programs reach, not the root cause.
 
 | directory | root cause | design class | cases | source |
 |---|---|---|---|---|
-| `scratch_drops_guards/` | a guarded assumption reaches the block scratch without the guards the scratch has not assumed | B | 20 | #48, #39, #49 (bug 1) |
 | `value_from_chunk_without_permission/` | a consume or read takes a value from a chunk that holds no permission on the path | D | 8 | #30, #49 (bug 2) |
-| `join_merge_ambient_cube/` | a join's heap merge gates location axioms by the ambient block cube, which is empty in a join | A | 3 | #49 (bug 3) |
 | `refute_on_failed_proof/` | a `refute` passes because its proof attempt was cut by a termination bound | §4.4 / §9.1 | 1 | #55 |
+
+Closed classes, now under `tests/cases/failing/`: `scratch_drops_guards/` (B, 20 cases)
+and `join_merge_ambient_cube/` (A, 4 cases).
