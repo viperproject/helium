@@ -1,0 +1,20 @@
+// REGRESSION (soundness). join_merge_nonaliasing_leak.vpr two levels deep: the
+// merge of `if (e) {}` runs under `d && c`, and its axiom must not reach the
+// `!c` arm.
+//
+// Must FAIL.
+field f: Int
+
+method m(a: Ref, b: Ref, c: Bool, d: Bool, e: Bool)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+{
+  if (d) {
+    if (c) {
+      inhale acc(a.f, 1/2)
+      if (e) {}
+    } else {
+      assume a == b
+      assert false
+    }
+  }
+}

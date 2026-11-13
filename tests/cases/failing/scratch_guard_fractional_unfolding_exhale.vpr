@@ -1,0 +1,15 @@
+// REGRESSION (soundness). A fractional `unfolding` under an implication in an
+// exhale.
+// The leading `exhale c ==> acc(x.f)` is a pc-alias consume, which warms the block
+// scratch.
+//
+// Must FAIL.
+field f: Int
+predicate Q(r: Ref, v: Int) { acc(r.f) && v == 5 }
+
+method scratch_guard_fractional_unfolding_exhale(x: Ref, y: Ref, v: Int, b: Bool, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2) && (c ==> x == y)
+  requires b ==> Q(y, v)
+{ exhale c ==> acc(x.f)
+  exhale b ==> (acc(Q(y, v), 1/2) && unfolding acc(Q(y, v), 1/2) in true)
+  assert v == 5 }

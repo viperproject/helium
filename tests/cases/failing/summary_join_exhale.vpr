@@ -1,0 +1,14 @@
+// REGRESSION (soundness). A plain exhale through the group summary after a join:
+// each chunk agrees with the consumed value only where its address equals `z`.
+//
+// Must FAIL.
+field f: Int
+
+method summary_join_exhale(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4 && acc(y.f) && y.f == 5
+{
+  var z: Ref := x
+  if (b) { z := y }
+  exhale acc(z.f)
+  assert false
+}
