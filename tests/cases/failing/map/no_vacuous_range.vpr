@@ -1,0 +1,6 @@
+// Map: a value whose key is unknown is consistent.
+method no_vacuous_range(m: Map[Int, Int])
+  requires 1 in range(m) && !(0 in m) && |m| == 1
+{
+  assert false
+}

@@ -1,0 +1,24 @@
+// Maps, sets and sequences in one program: all three axiom families at once.
+
+method seq_index_map(s: Seq[Int], m: Map[Int, Int])
+  requires forall i: Int :: { s[i] } 0 <= i && i < |s| ==> s[i] in m
+  requires |s| > 1
+{
+  assert s[1] in m
+  assert m[s[0]] in range(m)
+}
+
+method keys_from_set(s: Set[Int], m: Map[Int, Bool])
+  requires domain(m) == s
+  requires 3 in s
+{
+  assert 3 in m
+  assert |m| == |s|
+}
+
+method map_of_seq_lengths(m: Map[Int, Seq[Int]], k: Int)
+  requires k in m && m[k] == Seq(1, 2)
+{
+  assert |m[k]| == 2
+  assert 2 in m[k]
+}

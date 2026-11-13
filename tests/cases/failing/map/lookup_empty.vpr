@@ -1,0 +1,4 @@
+// Map well-definedness: the empty map has no key to look up.
+method lookup_empty() {
+  var v: Int := Map[Int, Int]()[0]
+}

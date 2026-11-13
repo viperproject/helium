@@ -1,0 +1,4 @@
+// Map: values may repeat, so the range may be smaller than the map.
+method range_card_not_card(m: Map[Int, Int]) {
+  assert |range(m)| == |m|
+}

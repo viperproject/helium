@@ -1,0 +1,6 @@
+// Map: equal ranges do not make equal maps; the keys may differ.
+method same_range_not_equal(a: Map[Int, Int], b: Map[Int, Int])
+  requires range(a) == range(b)
+{
+  assert a == b
+}

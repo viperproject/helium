@@ -1,0 +1,4 @@
+// Map well-definedness: a literal has only the keys it lists.
+method lookup_literal_missing_key() {
+  var v: Int := Map(1 := 2)[2]
+}

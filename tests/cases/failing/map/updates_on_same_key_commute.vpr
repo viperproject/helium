@@ -1,0 +1,4 @@
+// Map: two updates of one key do not commute; the last one wins.
+method updates_on_same_key_commute(m: Map[Int, Int], k: Int) {
+  assert m[k := 1][k := 2] == m[k := 2][k := 1]
+}

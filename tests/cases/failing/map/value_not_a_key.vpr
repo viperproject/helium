@@ -1,0 +1,6 @@
+// Map: a value is not a key.
+method value_not_a_key(m: Map[Int, Int], k: Int)
+  requires k in m
+{
+  assert m[k] in m
+}

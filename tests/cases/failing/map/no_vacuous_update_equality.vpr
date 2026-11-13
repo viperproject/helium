@@ -1,0 +1,6 @@
+// Map: an update that changes nothing is consistent.
+method no_vacuous_update_equality(m: Map[Int, Int], k: Int)
+  requires m[k := 0] == m
+{
+  assert false
+}

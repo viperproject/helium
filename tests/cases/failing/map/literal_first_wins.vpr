@@ -1,0 +1,4 @@
+// Map: a repeated key in a literal keeps its last value, not its first.
+method literal_first_wins() {
+  assert Map(1 := 10, 1 := 20)[1] == 10
+}

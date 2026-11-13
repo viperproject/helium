@@ -1,0 +1,6 @@
+// Map well-definedness: updating `j` adds only `j`, not `k`.
+method lookup_after_update_of_other_key(m: Map[Int, Int], j: Int, k: Int)
+  requires j != k
+{
+  var v: Int := m[j := 0][k]
+}

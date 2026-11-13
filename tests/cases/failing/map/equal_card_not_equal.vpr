@@ -1,0 +1,6 @@
+// Map: maps of one size need not be equal.
+method equal_card_not_equal(a: Map[Int, Int], b: Map[Int, Int])
+  requires |a| == |b|
+{
+  assert domain(a) == domain(b)
+}

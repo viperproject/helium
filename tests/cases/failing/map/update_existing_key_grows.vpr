@@ -1,0 +1,6 @@
+// Map: updating a key already present keeps the size.
+method update_existing_key_grows(m: Map[Int, Int], k: Int, v: Int)
+  requires k in m
+{
+  assert |m[k := v]| == |m| + 1
+}

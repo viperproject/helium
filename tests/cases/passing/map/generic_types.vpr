@@ -1,0 +1,53 @@
+// Map: key and value types other than Int — Bool, Ref, Seq, Set, a nested
+// Map, and a domain type.
+
+domain Color {
+  function red(): Color
+  function green(): Color
+  axiom red_ne_green { red() != green() }
+}
+
+method bool_keys(m: Map[Bool, Int])
+  requires true in m && false in m
+{
+  assert true in domain(m) && false in domain(m)
+  assert |m| > 0
+}
+
+method ref_keys(m: Map[Ref, Int], x: Ref, y: Ref)
+  requires x in m && x == y
+{
+  assert y in m
+  assert m[x] == m[y]
+}
+
+method seq_values(m: Map[Int, Seq[Int]], k: Int)
+  requires k in m && |m[k]| > 0
+{
+  assert |m[k := m[k] ++ Seq(1)][k]| > 1
+}
+
+method set_keys(s: Set[Int]) {
+  var m: Map[Set[Int], Int] := Map(s := 1, Set[Int]() := 2)
+  assert s in m
+  assert Set[Int]() in m
+}
+
+method nested_map() {
+  var m: Map[Int, Map[Int, Bool]] := Map(1 := Map(2 := true))
+  assert 1 in m
+  assert 2 in m[1]
+  assert m[1][2]
+}
+
+method domain_type_keys() {
+  var m: Map[Color, Int] := Map(red() := 1, green() := 2)
+  assert |m| == 2
+  assert m[red()] != m[green()]
+  assert range(m) == Set(1, 2)
+}
+
+method domain_type_values() {
+  var m: Map[Int, Color] := Map(1 := red())
+  assert !(green() in range(m))
+}

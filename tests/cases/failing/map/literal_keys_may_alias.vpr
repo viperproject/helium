@@ -1,0 +1,4 @@
+// Map: two keys that may be equal may be one entry.
+method literal_keys_may_alias(j: Int, k: Int) {
+  assert |Map(j := 0, k := 0)| == 2
+}

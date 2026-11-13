@@ -1,0 +1,6 @@
+// Map: a key with a known value is consistent.
+method no_vacuous_lookup(m: Map[Int, Int], k: Int)
+  requires k in m && m[k] == 3
+{
+  assert false
+}

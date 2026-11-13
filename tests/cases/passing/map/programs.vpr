@@ -1,0 +1,69 @@
+// Map: maps as program state — locals, loops, method contracts, functions
+// and fields.
+
+field table: Map[Int, Int]
+
+function put(m: Map[Int, Int], k: Int, v: Int): Map[Int, Int]
+  ensures k in result && result[k] == v
+  ensures domain(m) subset domain(result)
+{
+  m[k := v]
+}
+
+function get_or(m: Map[Int, Int], k: Int, d: Int): Int
+{
+  k in m ? m[k] : d
+}
+
+method insert(m: Map[Int, Int], k: Int, v: Int) returns (r: Map[Int, Int])
+  ensures k in r && r[k] == v
+  ensures forall j: Int :: { j in m } j in m && j != k ==> j in r && r[j] == m[j]
+  ensures |r| <= |m| + 1
+{
+  r := m[k := v]
+}
+
+method client() {
+  var m: Map[Int, Int] := Map[Int, Int]()
+  m := insert(m, 1, 10)
+  assert m[1] == 10
+  m := insert(m, 2, 20)
+  assert m[1] == 10 && m[2] == 20
+}
+
+method squares(n: Int) returns (r: Map[Int, Int])
+  requires n >= 0
+  ensures forall i: Int :: { i in r } 0 <= i && i < n ==> i in r
+{
+  r := Map[Int, Int]()
+  var k: Int := 0
+  while (k < n)
+    invariant 0 <= k && k <= n
+    invariant forall i: Int :: { i in r } 0 <= i && i < k ==> i in r
+  {
+    r := r[k := k * k]
+    k := k + 1
+  }
+}
+
+method use_functions(m: Map[Int, Int]) {
+  assert put(m, 5, 6)[5] == 6
+  assert get_or(Map(1 := 2), 1, 0) == 2
+  assert get_or(Map(1 := 2), 3, 0) == 0
+}
+
+method heap_map(o: Ref, k: Int, v: Int)
+  requires acc(o.table)
+  ensures acc(o.table) && k in o.table && o.table[k] == v
+  ensures domain(old(o.table)) subset domain(o.table)
+{
+  o.table := o.table[k := v]
+}
+
+method heap_map_client(o: Ref)
+  requires acc(o.table) && o.table == Map[Int, Int]()
+  ensures acc(o.table)
+{
+  heap_map(o, 3, 4)
+  assert o.table[3] == 4
+}
