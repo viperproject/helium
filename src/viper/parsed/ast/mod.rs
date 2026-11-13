@@ -151,6 +151,8 @@ pub enum Type {
     Domain(Ident, Vec<Type>),
     Seq(Box<Type>),
     Set(Box<Type>),
+    /// `Map[K, V]`, key type first.
+    Map(Box<Type>, Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

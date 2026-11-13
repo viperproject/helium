@@ -8,8 +8,8 @@ use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
 use crate::vmir::{
-    self, CollKind, CollOp, FALSE, HeapInst, HeapVal, Literal, Polarity, PureInst, ResourceCall,
-    SeqOp, SetOp, TRUE, Val,
+    self, CollKind, CollOp, FALSE, HeapInst, HeapVal, Literal, MapOp, Polarity, PureInst,
+    ResourceCall, SeqOp, SetOp, TRUE, Val,
 };
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
@@ -230,10 +230,10 @@ pub(crate) fn lower<Ext: PureExt>(
                     ty.clone(),
                     PureInst::Binary(vmir::BinOp::sub(&ty), zero_literal(&ty), v),
                 )),
-                // A sequence's length or a set's cardinality.
+                // A sequence's length, a set's or a map's cardinality.
                 typed::UnOp::Cardinality => {
-                    let (kind, elem_ty) = coll_elem(b, &x.ty);
-                    Ok(sink.emit_pure(ty, PureInst::coll([elem_ty], CollOp::size(kind), vec![v])))
+                    let (kind, tys) = coll_tys(b, &x.ty);
+                    Ok(sink.emit_pure(ty, PureInst::coll(tys, CollOp::size(kind), vec![v])))
                 }
             }
         }
@@ -428,6 +428,56 @@ pub(crate) fn lower<Ext: PureExt>(
                     Ok(sink.emit_pure(ty, PureInst::coll([elem_ty], SeqOp::Drop, vec![taken, a])))
                 }
             }
+        }
+        // As Silicon does: `Map(k1 := v1, k2 := v2)` is `Map()[k1 := v1][k2 := v2]`,
+        // so a repeated key keeps its last value.
+        P::MapLit(entries) => {
+            let (_, tys) = coll_tys(b, &exp.ty);
+            let entries = entries
+                .iter()
+                .map(|(k, v)| Ok((lower(b, env, sink, hctx, k)?, lower(b, env, sink, hctx, v)?)))
+                .collect::<Result<Vec<_>, TranslationError>>()?;
+            let empty = sink.emit_pure(
+                ty.clone(),
+                PureInst::coll(tys.clone(), MapOp::Empty, vec![]),
+            );
+            Ok(entries.into_iter().fold(empty, |m, (k, v)| {
+                sink.emit_pure(
+                    ty.clone(),
+                    PureInst::coll(tys.clone(), MapOp::Update, vec![m, k, v]),
+                )
+            }))
+        }
+        P::MapIndex(map, op) => {
+            use typed::MapIndexOp as I;
+            let (_, tys) = coll_tys(b, &map.ty);
+            let m = lower(b, env, sink, hctx, map)?;
+            match op {
+                // `m[k]` needs `k in m`, checked like a divisor in the current
+                // value heap.
+                I::Lookup(k) => {
+                    let k = lower(b, env, sink, hctx, k)?;
+                    Ok(sink.with_heap(hctx.value, |sink| {
+                        sink.emit_pure_guarded(ty, PureInst::coll(tys, MapOp::Lookup, vec![m, k]))
+                    }))
+                }
+                // Total: an update adds the key if it is new.
+                I::Update(k, v) => {
+                    let k = lower(b, env, sink, hctx, k)?;
+                    let v = lower(b, env, sink, hctx, v)?;
+                    Ok(sink.emit_pure(ty, PureInst::coll(tys, MapOp::Update, vec![m, k, v])))
+                }
+            }
+        }
+        P::MapDomain(map) | P::MapRange(map) => {
+            let op = if matches!(&*exp.exp, P::MapDomain(_)) {
+                MapOp::Domain
+            } else {
+                MapOp::Range
+            };
+            let (_, tys) = coll_tys(b, &map.ty);
+            let m = lower(b, env, sink, hctx, map)?;
+            Ok(sink.emit_pure(ty, PureInst::coll(tys, op, vec![m])))
         }
         P::AdtDiscriminator(base, variant) => {
             // `e.is<Ctor>` ⇒ the `Bool` tester `AdtIs{adt, variant}(e)`. The
@@ -656,15 +706,15 @@ fn lower_binary<Ext: PureExt>(
         ),
         // `x in c` is `Contains(c, x)`: the collection comes first.
         B::In => {
-            let (kind, elem_ty) = coll_elem(b, &r.ty);
+            let (kind, tys) = coll_tys(b, &r.ty);
             sink.emit_pure(
                 ty,
-                PureInst::coll([elem_ty], CollOp::contains(kind), vec![rv, lv]),
+                PureInst::coll(tys, CollOp::contains(kind), vec![rv, lv]),
             )
         }
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
-            let (_, elem_ty) = coll_elem(b, &l.ty);
-            sink.emit_pure(ty, PureInst::coll([elem_ty], set_op(op), vec![lv, rv]))
+            let (_, tys) = coll_tys(b, &l.ty);
+            sink.emit_pure(ty, PureInst::coll(tys, set_op(op), vec![lv, rv]))
         }
     })
 }
@@ -1072,19 +1122,46 @@ fn lower_trig_term(
         // A set literal, in the body's shape: a singleton with each further
         // element added, or `SetOp::Empty`.
         P::SetLit(elems) => {
-            let (_, elem_ty) = coll_elem(b, &term.ty);
+            let (_, tys) = coll_tys(b, &term.ty);
             let mut elems = lower_args(elems)?.into_iter();
             let Some(first) = elems.next() else {
-                return Ok(coll_trig(&elem_ty, SetOp::Empty, []));
+                return Ok(coll_trig(&tys, SetOp::Empty, []));
             };
             let unit = vmir::TrigTerm::App {
                 head: vmir::TrigHead::CollLit(CollKind::Set),
-                type_args: vec![elem_ty.clone()],
+                type_args: tys.to_vec(),
                 args: Box::new([first]),
             };
-            Ok(elems.fold(unit, |set, elem| {
-                coll_trig(&elem_ty, SetOp::Add, [set, elem])
-            }))
+            Ok(elems.fold(unit, |set, elem| coll_trig(&tys, SetOp::Add, [set, elem])))
+        }
+        // A map literal, in the body's shape: updates on `MapOp::Empty`.
+        P::MapLit(entries) => {
+            let (_, tys) = coll_tys(b, &term.ty);
+            let mut map = coll_trig(&tys, MapOp::Empty, []);
+            for (k, v) in entries {
+                let (k, v) = (lower_trig_term(b, k, env)?, lower_trig_term(b, v, env)?);
+                map = coll_trig(&tys, MapOp::Update, [map, k, v]);
+            }
+            Ok(map)
+        }
+        P::MapIndex(base, op) => {
+            use typed::MapIndexOp as I;
+            let (_, tys) = coll_tys(b, &base.ty);
+            let m = lower_trig_term(b, base, env)?;
+            let t = |e| lower_trig_term(b, e, env);
+            Ok(match op {
+                I::Lookup(k) => coll_trig(&tys, MapOp::Lookup, [m, t(k)?]),
+                I::Update(k, v) => coll_trig(&tys, MapOp::Update, [m, t(k)?, t(v)?]),
+            })
+        }
+        P::MapDomain(m) | P::MapRange(m) => {
+            let op = if matches!(term.exp.as_ref(), P::MapDomain(_)) {
+                MapOp::Domain
+            } else {
+                MapOp::Range
+            };
+            let (_, tys) = coll_tys(b, &m.ty);
+            Ok(coll_trig(&tys, op, [lower_trig_term(b, m, env)?]))
         }
         P::SeqIndex(base, op) => {
             use typed::SeqIndexOp as I;
@@ -1104,9 +1181,9 @@ fn lower_trig_term(
             })
         }
         P::Unary(typed::UnOp::Cardinality, s) => {
-            let (kind, elem_ty) = coll_elem(b, &s.ty);
+            let (kind, tys) = coll_tys(b, &s.ty);
             Ok(coll_trig(
-                &elem_ty,
+                &tys,
                 CollOp::size(kind),
                 [lower_trig_term(b, s, env)?],
             ))
@@ -1130,10 +1207,10 @@ fn lower_trig_term(
                 typed::BinOp::Range => seq_trig(&vmir::Type::Int, vmir::SeqOp::Range, [l, r]),
                 // `x in c` is `Contains(c, x)`: the collection comes first.
                 typed::BinOp::In => {
-                    let (kind, elem_ty) = coll_elem(b, r_ty);
-                    coll_trig(&elem_ty, CollOp::contains(kind), [r, l])
+                    let (kind, tys) = coll_tys(b, r_ty);
+                    coll_trig(&tys, CollOp::contains(kind), [r, l])
                 }
-                set => coll_trig(&coll_elem(b, l_ty).1, set_op(set), [l, r]),
+                set => coll_trig(&coll_tys(b, l_ty).1, set_op(set), [l, r]),
             })
         }
         P::Unary(..)
@@ -1153,21 +1230,27 @@ fn seq_trig<const N: usize>(
     op: vmir::SeqOp,
     args: [vmir::TrigTerm; N],
 ) -> vmir::TrigTerm {
-    coll_trig(elem_ty, op, args)
+    coll_trig(std::slice::from_ref(elem_ty), op, args)
 }
 
-/// A trigger application of the collection operation `op`, checking its
-/// arity as `PureInst::coll` does.
+/// A trigger application of the collection operation `op` on a collection of
+/// type arguments `tys`, checking its arity as `PureInst::coll` does.
 fn coll_trig<const N: usize>(
-    elem_ty: &vmir::Type,
+    tys: &[vmir::Type],
     op: impl Into<CollOp>,
     args: [vmir::TrigTerm; N],
 ) -> vmir::TrigTerm {
     let op = op.into();
     assert_eq!(N, op.arity(), "`{op:?}` takes {} operands", op.arity());
+    assert_eq!(
+        tys.len(),
+        op.kind().arity(),
+        "`{op:?}` takes {} type arguments",
+        op.kind().arity()
+    );
     vmir::TrigTerm::App {
         head: vmir::TrigHead::Coll(op),
-        type_args: vec![elem_ty.clone()],
+        type_args: tys.to_vec(),
         args: Box::new(args),
     }
 }
@@ -1183,17 +1266,12 @@ fn set_op(op: &typed::BinOp) -> SetOp {
     }
 }
 
-/// The kind and element type of an expression that typecheck has given a
-/// sequence or set type.
-fn coll_elem(b: &TranslationContext<'_>, ty: &typed::Type) -> (CollKind, vmir::Type) {
-    match ty {
-        typed::Type::Collection(typed::BuiltinCollection::Seq(t)) => {
-            (CollKind::Seq, b.lower_type(t))
-        }
-        typed::Type::Collection(typed::BuiltinCollection::Set(t)) => {
-            (CollKind::Set, b.lower_type(t))
-        }
-        other => panic!("a collection operation on a value of type {other:?}"),
+/// The kind and type arguments of an expression that typecheck has given a
+/// sequence, set or map type.
+fn coll_tys(b: &TranslationContext<'_>, ty: &typed::Type) -> (CollKind, Box<[vmir::Type]>) {
+    match b.lower_type(ty) {
+        vmir::Type::Coll(kind, tys) => (kind, tys),
+        other => panic!("a collection operation on a value of type {other}"),
     }
 }
 

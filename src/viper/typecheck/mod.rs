@@ -8,9 +8,9 @@ use crate::viper::{
     globals::{DtorInfo, GlobalSignature, Globals},
     interner::Interner,
     typed::{
-        self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MethodBodyExt, MethodEnsuresExt,
-        PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp, SpatialExp,
-        SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
+        self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MapIndexOp, MethodBodyExt,
+        MethodEnsuresExt, PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp,
+        SpatialExp, SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
     },
 };
 
@@ -19,7 +19,7 @@ mod lattice;
 
 use crate::viper::typed::BuiltinCollection;
 pub use error::TypeError;
-use lattice::{ViperTcType, type_to_tc};
+use lattice::{ELEMENT, INDEX, MEMBER, ViperTcType, type_to_tc};
 // ==========================================
 // 3. Context types
 // ==========================================
@@ -96,6 +96,10 @@ fn check_type(
                 .try_for_each(|a| check_type(a, globals, interner, is_param))
         }
         P::Seq(ty) | P::Set(ty) => check_type(ty, globals, interner, is_param),
+        P::Map(k, v) => {
+            check_type(k, globals, interner, is_param)?;
+            check_type(v, globals, interner, is_param)
+        }
     }
 }
 
@@ -619,6 +623,10 @@ fn collect_generics(ty: &Type, acc: &mut Vec<Spur>) {
         Type::Collection(BuiltinCollection::Seq(ty) | BuiltinCollection::Set(ty)) => {
             collect_generics(ty, acc)
         }
+        Type::Collection(BuiltinCollection::Map(k, v)) => {
+            collect_generics(k, acc);
+            collect_generics(v, acc);
+        }
         _ => {}
     }
 }
@@ -665,13 +673,9 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
         let key = self.tc.new_term_key();
         exp.ty = viper::InferenceType::Infer(key);
-        // Which collection a literal builds, read before `exp.kind` is
-        // borrowed mutably below.
-        let literal_kind = match exp.kind.as_ref() {
-            ExpKind::SeqLit(..) => Some(ViperTcType::Seq),
-            ExpKind::SetLit(..) => Some(ViperTcType::Set),
-            _ => None,
-        };
+        // Whether a collection literal builds a sequence (else a set), read
+        // before `exp.kind` is borrowed mutably below.
+        let seq_literal = matches!(exp.kind.as_ref(), ExpKind::SeqLit(..));
 
         match exp.kind.as_mut() {
             ExpKind::Const(c) => {
@@ -855,10 +859,11 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
 
             ExpKind::SeqLit(ty, elems) | ExpKind::SetLit(ty, elems) => {
-                self.tc.impose(key.concretizes_explicit(
-                    literal_kind.expect("a collection literal was matched, so its kind was read"),
-                ))?;
-                let elem = self.tc.get_child_key(key, 0)?;
+                let elem = if seq_literal {
+                    self.seq_key(key)?
+                } else {
+                    self.set_key(key)?
+                };
                 if let Some(t) = ty {
                     self.check_binder_type(t)?;
                     let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
@@ -872,38 +877,72 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
             ExpKind::Index(base, op) => {
                 let base_key = self.constrain_pure(base)?;
-                self.tc
-                    .impose(base_key.concretizes_explicit(ViperTcType::Seq))?;
-                let elem = self.tc.get_child_key(base_key, 0)?;
                 let int = |this: &mut Self, e: &mut viper::Exp| -> Result<(), TypeError> {
                     let k = this.constrain_pure(e)?;
                     this.tc.impose(k.concretizes_explicit(ViperTcType::Int))?;
                     Ok(())
                 };
                 match op {
-                    // `s[i]` is an element.
+                    // `c[i]`, a sequence index or a map lookup: `i` is the
+                    // index (an `Int`, or a key), the result an element (or a
+                    // value). Which one is not known yet, so the base is only
+                    // `Indexable` (see `lattice::MEMBER`).
                     viper::IndexOp::Index(i) => {
-                        int(self, i)?;
+                        let (index, elem) = self.indexable_key(base_key)?;
+                        let i_key = self.constrain_pure(i)?;
+                        self.tc.impose(i_key.equate_with(index))?;
                         self.tc.impose(key.equate_with(elem))?;
                     }
-                    // Take, drop and slice keep the sequence type.
-                    viper::IndexOp::UpperBound(n) | viper::IndexOp::LowerBound(n) => {
-                        int(self, n)?;
-                        self.tc.impose(key.equate_with(base_key))?;
-                    }
-                    viper::IndexOp::Range(a, b) => {
-                        int(self, a)?;
-                        int(self, b)?;
-                        self.tc.impose(key.equate_with(base_key))?;
-                    }
-                    // `s[i := v]`: `v` is an element, the result a sequence.
+                    // `c[i := v]`, a sequence or map update: the result is `c`'s type.
                     viper::IndexOp::Assign(i, v) => {
-                        int(self, i)?;
+                        let (index, elem) = self.indexable_key(base_key)?;
+                        let i_key = self.constrain_pure(i)?;
+                        self.tc.impose(i_key.equate_with(index))?;
                         let v_key = self.constrain_pure(v)?;
                         self.tc.impose(v_key.equate_with(elem))?;
                         self.tc.impose(key.equate_with(base_key))?;
                     }
+                    // Take, drop and slice are sequence-only and keep its type.
+                    viper::IndexOp::UpperBound(n) | viper::IndexOp::LowerBound(n) => {
+                        self.seq_key(base_key)?;
+                        int(self, n)?;
+                        self.tc.impose(key.equate_with(base_key))?;
+                    }
+                    viper::IndexOp::Range(a, b) => {
+                        self.seq_key(base_key)?;
+                        int(self, a)?;
+                        int(self, b)?;
+                        self.tc.impose(key.equate_with(base_key))?;
+                    }
                 }
+            }
+            ExpKind::MapLit(ty, entries) => {
+                let (k, v) = self.map_key(key)?;
+                if let Some(t) = ty {
+                    self.check_binder_type(t)?;
+                    let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+                    let written = type_with_generics(t, &rigid);
+                    self.impose_type(key, &written, &HashMap::default())?;
+                }
+                for entry in entries {
+                    let kk = self.constrain_pure(&mut entry.key)?;
+                    self.tc.impose(kk.equate_with(k))?;
+                    let vk = self.constrain_pure(&mut entry.value)?;
+                    self.tc.impose(vk.equate_with(v))?;
+                }
+            }
+            // `domain(m)` is a set of keys, `range(m)` a set of values.
+            ExpKind::MapDomain(m) => {
+                let m_key = self.constrain_pure(m)?;
+                let (k, _) = self.map_key(m_key)?;
+                let elem = self.set_key(key)?;
+                self.tc.impose(elem.equate_with(k))?;
+            }
+            ExpKind::MapRange(m) => {
+                let m_key = self.constrain_pure(m)?;
+                let (_, v) = self.map_key(m_key)?;
+                let elem = self.set_key(key)?;
+                self.tc.impose(elem.equate_with(v))?;
             }
             ExpKind::Acc(_)
             | ExpKind::ForPerm(_, _, _)
@@ -983,6 +1022,48 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
     /// [`check_type`] for a type written inside an expression; in an axiom
     /// the owning domain's parameters are in scope.
+    /// Make `key` a `Seq`, its children `[E, Int, E]` (see `lattice::MEMBER`),
+    /// and return its element key `E`. Every key made a `Seq` goes through
+    /// here, so whatever is later equated with it shares that layout.
+    fn seq_key(&mut self, key: TcKey) -> Result<TcKey, TypeError> {
+        self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
+        let elem = self.tc.get_child_key(key, MEMBER)?;
+        let index = self.tc.get_child_key(key, INDEX)?;
+        self.tc
+            .impose(index.concretizes_explicit(ViperTcType::Int))?;
+        let element = self.tc.get_child_key(key, ELEMENT)?;
+        self.tc.impose(element.equate_with(elem))?;
+        Ok(elem)
+    }
+
+    /// Make `key` a `Set` and return its element key.
+    fn set_key(&mut self, key: TcKey) -> Result<TcKey, TypeError> {
+        self.tc.impose(key.concretizes_explicit(ViperTcType::Set))?;
+        Ok(self.tc.get_child_key(key, MEMBER)?)
+    }
+
+    /// Make `key` a `Map`, its children `[K, K, V]` (see `lattice::MEMBER`),
+    /// and return its key and value keys `K`, `V`.
+    fn map_key(&mut self, key: TcKey) -> Result<(TcKey, TcKey), TypeError> {
+        self.tc.impose(key.concretizes_explicit(ViperTcType::Map))?;
+        let k = self.tc.get_child_key(key, MEMBER)?;
+        let index = self.tc.get_child_key(key, INDEX)?;
+        self.tc.impose(index.equate_with(k))?;
+        let v = self.tc.get_child_key(key, ELEMENT)?;
+        Ok((k, v))
+    }
+
+    /// Make `key` a `Seq` or a `Map`, not yet known which, and return what
+    /// indexing it takes and yields: an `Int` and an element, or a key and a
+    /// value.
+    fn indexable_key(&mut self, key: TcKey) -> Result<(TcKey, TcKey), TypeError> {
+        self.tc
+            .impose(key.concretizes_explicit(ViperTcType::Indexable))?;
+        let index = self.tc.get_child_key(key, INDEX)?;
+        let elem = self.tc.get_child_key(key, ELEMENT)?;
+        Ok((index, elem))
+    }
+
     fn check_binder_type(&self, ty: &viper::Type) -> Result<(), TypeError> {
         check_type(ty, self.env.globals, self.env.interner, &|p| {
             self.rigid_generics.contains(&p)
@@ -1014,7 +1095,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Real))?;
             }
-            // `|c|`: a sequence's length or a set's cardinality.
+            // `|c|`: a sequence's length, a set's or a map's cardinality.
             viper::UnOp::Cardinality => {
                 let inner_key = self.constrain_pure(inner)?;
                 self.tc
@@ -1081,15 +1162,16 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
             // `a ++ b`: both sides and the result are one sequence type.
             SBinOp::Concat => {
-                self.tc.impose(lk.concretizes_explicit(ViperTcType::Seq))?;
+                self.seq_key(lk)?;
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc.impose(key.equate_with(lk))?;
             }
-            // `x in c`: `x` has the element type of the sequence or set `c`.
+            // `x in c`: `x` has the element type of the sequence or set `c`,
+            // or the key type of the map `c`.
             SBinOp::In => {
                 self.tc
                     .impose(rk.concretizes_explicit(ViperTcType::Collection))?;
-                let elem = self.tc.get_child_key(rk, 0)?;
+                let elem = self.tc.get_child_key(rk, MEMBER)?;
                 self.tc.impose(lk.equate_with(elem))?;
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
@@ -1097,13 +1179,13 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             // `a union b`, `a intersection b`, `a setminus b`: both sides and
             // the result are one set type.
             SBinOp::Union | SBinOp::Intersection | SBinOp::SetMinus => {
-                self.tc.impose(lk.concretizes_explicit(ViperTcType::Set))?;
+                self.set_key(lk)?;
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc.impose(key.equate_with(lk))?;
             }
             // `a subset b`: two sets of one type.
             SBinOp::Subset => {
-                self.tc.impose(lk.concretizes_explicit(ViperTcType::Set))?;
+                self.set_key(lk)?;
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
@@ -1112,8 +1194,7 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             SBinOp::Range => {
                 self.tc.impose(lk.concretizes_explicit(ViperTcType::Int))?;
                 self.tc.impose(rk.concretizes_explicit(ViperTcType::Int))?;
-                self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
-                let elem = self.tc.get_child_key(key, 0)?;
+                let elem = self.seq_key(key)?;
                 self.tc
                     .impose(elem.concretizes_explicit(ViperTcType::Int))?;
             }
@@ -1169,19 +1250,23 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     self.impose_type(child, arg, subst)?;
                 }
             }
-            // `Seq[T]`: the key is a `Seq`, its one child the element type.
+            // `Seq[T]`: the key is a `Seq`, its element child `T`.
             Type::Collection(BuiltinCollection::Seq(elem)) => {
-                self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
-                let child = self.tc.get_child_key(key, 0)?;
+                let child = self.seq_key(key)?;
                 self.impose_type(child, elem, subst)?;
             }
             // `Set[T]`: likewise.
             Type::Collection(BuiltinCollection::Set(elem)) => {
-                self.tc.impose(key.concretizes_explicit(ViperTcType::Set))?;
-                let child = self.tc.get_child_key(key, 0)?;
+                let child = self.set_key(key)?;
                 self.impose_type(child, elem, subst)?;
             }
-            Type::Collection(_) => {}
+            // `Map[K, V]`: its key and value children.
+            Type::Collection(BuiltinCollection::Map(k, v)) => {
+                let (k_key, v_key) = self.map_key(key)?;
+                self.impose_type(k_key, k, subst)?;
+                self.impose_type(v_key, v, subst)?;
+            }
+            Type::Collection(BuiltinCollection::MultiSet(_)) => {}
         }
         Ok(())
     }
@@ -1513,6 +1598,18 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
 
             ExpKind::Index(base, op) => {
                 let base = self.lower_pure::<Ext>(base)?;
+                // A map lookup or update: typecheck made the base a `Map`.
+                if matches!(base.ty, Type::Collection(BuiltinCollection::Map(..))) {
+                    let op = match op {
+                        viper::IndexOp::Index(k) => MapIndexOp::Lookup(self.lower_pure::<Ext>(k)?),
+                        viper::IndexOp::Assign(k, v) => MapIndexOp::Update(
+                            self.lower_pure::<Ext>(k)?,
+                            self.lower_pure::<Ext>(v)?,
+                        ),
+                        other => unreachable!("typecheck made `{other:?}`'s base a sequence"),
+                    };
+                    return Ok(PureExpKind::MapIndex(base, op));
+                }
                 let op = match op {
                     viper::IndexOp::Index(i) => SeqIndexOp::Index(self.lower_pure::<Ext>(i)?),
                     viper::IndexOp::UpperBound(n) => SeqIndexOp::Take(self.lower_pure::<Ext>(n)?),
@@ -1541,6 +1638,20 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     .map(|e| self.lower_pure::<Ext>(e))
                     .collect::<Result<_, _>>()?,
             )),
+            // And for a map literal and its `Map[K, V]`.
+            ExpKind::MapLit(_, entries) => Ok(PureExpKind::MapLit(
+                entries
+                    .iter()
+                    .map(|e| {
+                        Ok((
+                            self.lower_pure::<Ext>(&e.key)?,
+                            self.lower_pure::<Ext>(&e.value)?,
+                        ))
+                    })
+                    .collect::<Result<_, TypeError>>()?,
+            )),
+            ExpKind::MapDomain(m) => Ok(PureExpKind::MapDomain(self.lower_pure::<Ext>(m)?)),
+            ExpKind::MapRange(m) => Ok(PureExpKind::MapRange(self.lower_pure::<Ext>(m)?)),
 
             // Everything that has no pure lowering. `scan_declaration` names
             // most of these before typechecking runs; this is the backstop, and
@@ -2151,6 +2262,10 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
             t,
             type_params,
         )))),
+        P::Map(k, v) => Type::Collection(BuiltinCollection::Map(
+            Box::new(type_with_generics(k, type_params)),
+            Box::new(type_with_generics(v, type_params)),
+        )),
     }
 }
 
@@ -2437,8 +2552,9 @@ fn is_trigger_application(term: &TypedPureExp<typed::AxiomExt>) -> bool {
 
 /// The operands of a collection operation that Silicon accepts as a trigger
 /// term (`s[i]`, `|s|`, `s ++ t`, `x in s`, `Seq(..)`, take/drop/slice/update,
-/// `[a..b)`; `Set(..)`, `union`, `intersection`, `setminus`, `subset`), or
-/// `None` if `term` is not one.
+/// `[a..b)`; `Set(..)`, `union`, `intersection`, `setminus`, `subset`;
+/// `Map(..)`, `m[k]`, `m[k := v]`, `domain(m)`, `range(m)`), or `None` if
+/// `term` is not one.
 fn coll_trigger_operands(
     term: &TypedPureExp<typed::AxiomExt>,
 ) -> Option<Vec<&TypedPureExp<typed::AxiomExt>>> {
@@ -2450,6 +2566,13 @@ fn coll_trigger_operands(
             v.extend(op.operands());
             Some(v)
         }
+        P::MapLit(entries) => Some(entries.iter().flat_map(|(k, v)| [k, v]).collect()),
+        P::MapIndex(base, op) => {
+            let mut v = vec![base];
+            v.extend(op.operands());
+            Some(v)
+        }
+        P::MapDomain(m) | P::MapRange(m) => Some(vec![m]),
         P::Unary(UnOp::Cardinality, e) => Some(vec![e]),
         P::Binary(
             BinOp::Concat
@@ -2502,6 +2625,10 @@ fn check_trigger_subterms(
         | P::SeqLit(_)
         | P::SetLit(_)
         | P::SeqIndex(..)
+        | P::MapLit(_)
+        | P::MapIndex(..)
+        | P::MapDomain(_)
+        | P::MapRange(_)
         | P::Ext(typed::AxiomExt::Forall(_)) => Err(TypeError::TriggerBadSubterm),
     }
 }
@@ -2548,6 +2675,19 @@ fn check_axiom_function_calls(
             op.operands()
                 .into_iter()
                 .try_for_each(|e| check_axiom_function_calls(e, fns_with_precond, interner))
+        }
+        P::MapLit(entries) => entries.iter().try_for_each(|(k, v)| {
+            check_axiom_function_calls(k, fns_with_precond, interner)?;
+            check_axiom_function_calls(v, fns_with_precond, interner)
+        }),
+        P::MapIndex(base, op) => {
+            check_axiom_function_calls(base, fns_with_precond, interner)?;
+            op.operands()
+                .into_iter()
+                .try_for_each(|e| check_axiom_function_calls(e, fns_with_precond, interner))
+        }
+        P::MapDomain(m) | P::MapRange(m) => {
+            check_axiom_function_calls(m, fns_with_precond, interner)
         }
         P::Ext(typed::AxiomExt::FunctionCall(call)) => {
             if fns_with_precond.contains(&call.name.0) {
@@ -3761,6 +3901,119 @@ method m(s: Set[Int], q: Seq[Int], x: Int, b: Bool) returns (r: Set[Int])
         ] {
             assert_rejected(src, |e| matches!(e, TypeError::Mismatch(..)));
         }
+    }
+
+    #[test]
+    fn map_with_wrong_type_argument_count_rejected() {
+        assert_rejected(
+            "method m(x: Map[Int])",
+            |e| matches!(e, TypeError::WrongTypeArgCount { name, expected: 2, .. } if name == "Map"),
+        );
+    }
+
+    #[test]
+    fn uninferable_empty_map_rejected() {
+        assert_rejected("method m() { assert |Map()| == 0 }", |e| {
+            matches!(e, TypeError::CannotInferType)
+        });
+    }
+
+    /// `m[k]` is a map lookup or a sequence index by the type of `m`, decided
+    /// only once inference is done: the key and value types come from the
+    /// map, the index type from the sequence. Each expression has exactly the
+    /// written type, and not another one.
+    #[test]
+    fn index_resolves_to_lookup_or_seq_index() {
+        let params = "a: Map[Int, Bool], mm: Map[Int, Map[Int, Bool]], q: Seq[Ref], r: Int";
+        for (exp, ty, wrong) in [
+            ("a[r]", "Bool", "Int"),
+            ("a[r := true]", "Map[Int, Bool]", "Seq[Bool]"),
+            ("q[0]", "Ref", "Int"),
+            ("q[0 := null]", "Seq[Ref]", "Map[Int, Ref]"),
+            ("domain(a)", "Set[Int]", "Set[Bool]"),
+            ("range(a)", "Set[Bool]", "Set[Int]"),
+            ("Map(r := true)", "Map[Int, Bool]", "Map[Bool, Int]"),
+            ("Map[Int, Bool]()", "Map[Int, Bool]", "Map[Int, Int]"),
+            // A map of maps, indexed twice.
+            ("mm[r][r]", "Bool", "Int"),
+            // A literal indexed directly.
+            ("Map(1 := q)[r]", "Seq[Ref]", "Ref"),
+        ] {
+            let src = |t: &str| format!("method m({params}) {{ var x: {t} := {exp} }}");
+            let ok = run_pipeline(&src(ty));
+            assert!(ok.is_ok(), "`{exp}`: {ty}: {ok:?}");
+            assert_rejected(&src(wrong), |e| matches!(e, TypeError::Mismatch(..)));
+        }
+    }
+
+    /// The map operations, and the overloaded ones on a map: `|m|`, `k in m`,
+    /// `==`, a literal whose types come from the context.
+    #[test]
+    fn map_operations_accepted() {
+        let result = run_pipeline(
+            r#"
+method m(a: Map[Ref, Int], k: Ref, b: Bool) returns (r: Map[Ref, Int])
+  requires k in a
+{
+  r := a[k := a[k] + 1]
+  assert |a| >= 0 && (k in r)
+  assert domain(a) subset domain(r)
+  assert a[k] in range(a) || b
+  var e: Map[Ref, Set[Int]] := Map()
+  var lit: Map[Int, Bool] := Map(1 := b, 2 := !b)
+  assert a == r || a != r
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn map_type_mismatch_rejected() {
+        for src in [
+            // A key of the wrong type, in a lookup, an update, `in` and a literal.
+            "method m(a: Map[Int, Bool]) { assert a[true] }",
+            "method m(a: Map[Int, Bool]) { assert a[true := true] == a }",
+            "method m(a: Map[Int, Bool]) { assert true in a }",
+            "method m(a: Map[Int, Bool]) { assert Map(1 := true, false := true) == a }",
+            // A value of the wrong type.
+            "method m(a: Map[Int, Bool]) { assert a[1 := 2] == a }",
+            "method m(a: Map[Int, Bool]) { assert a[1] == 2 }",
+            // `domain` is a set of keys, `range` of values.
+            "method m(a: Map[Int, Bool]) { assert true in domain(a) }",
+            "method m(a: Map[Int, Bool]) { assert 1 in range(a) }",
+            // Neither applies to a sequence or a set.
+            "method m(q: Seq[Int]) { assert 1 in domain(q) }",
+            "method m(s: Set[Int]) { assert 1 in range(s) }",
+            // A set has no index; a map has no take, drop or slice.
+            "method m(s: Set[Int]) { assert s[0] == 0 }",
+            "method m(a: Map[Int, Int]) { assert a[..1] == a }",
+            "method m(a: Map[Int, Int]) { assert a[1..] == a }",
+            // A map is not a sequence or a set.
+            "method m(a: Map[Int, Int]) { assert a ++ a == a }",
+            "method m(a: Map[Int, Int]) { assert a union a == a }",
+        ] {
+            assert_rejected(src, |e| matches!(e, TypeError::Mismatch(..)));
+        }
+    }
+
+    /// The map terms Silicon accepts in a trigger are accepted here too.
+    #[test]
+    fn map_triggers_accepted() {
+        let result = run_pipeline(
+            r#"
+domain D {
+  function f(m: Map[Int, Int]): Bool
+  axiom look { forall m: Map[Int, Int], k: Int :: { m[k] } f(m) }
+  axiom upd { forall m: Map[Int, Int], k: Int, v: Int :: { m[k := v] } f(m) }
+  axiom dom { forall m: Map[Int, Int] :: { domain(m) } f(m) }
+  axiom ran { forall m: Map[Int, Int] :: { range(m) } f(m) }
+  axiom card { forall m: Map[Int, Int] :: { |m| } f(m) }
+  axiom mem { forall m: Map[Int, Int], k: Int :: { k in m } f(m) }
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
     #[test]

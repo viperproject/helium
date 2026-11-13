@@ -223,6 +223,9 @@ impl<'a> Display for Show<'a, &'a Type> {
             Type::Generic(id) => write!(f, "{}", self.name(*id)),
             Type::Collection(BuiltinCollection::Seq(t)) => write!(f, "Seq[{}]", self.with(&**t)),
             Type::Collection(BuiltinCollection::Set(t)) => write!(f, "Set[{}]", self.with(&**t)),
+            Type::Collection(BuiltinCollection::Map(k, v)) => {
+                write!(f, "Map[{}, {}]", self.with(&**k), self.with(&**v))
+            }
             Type::Collection(_) => write!(f, "<collection>"),
             Type::Domain(id, args) => {
                 write!(f, "{}", self.name(*id))?;
@@ -616,6 +619,27 @@ fn fmt_pure_kind<'a, Ext: ShowExt>(
                 }
             }
         }
+        PureExpKind::MapLit(entries) => {
+            write!(f, "Map(")?;
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{} := {}", show.with(k), show.with(v))?;
+            }
+            write!(f, ")")
+        }
+        PureExpKind::MapIndex(base, op) => {
+            let m = show.with(base);
+            match op {
+                crate::viper::typed::MapIndexOp::Lookup(k) => write!(f, "{m}[{}]", show.with(k)),
+                crate::viper::typed::MapIndexOp::Update(k, v) => {
+                    write!(f, "{m}[{} := {}]", show.with(k), show.with(v))
+                }
+            }
+        }
+        PureExpKind::MapDomain(m) => write!(f, "domain({})", show.with(m)),
+        PureExpKind::MapRange(m) => write!(f, "range({})", show.with(m)),
         PureExpKind::Ext(ext) => ext.fmt_ext(f, show.interner),
     }
 }
