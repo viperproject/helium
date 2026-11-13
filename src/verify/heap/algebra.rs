@@ -471,7 +471,7 @@ pub(crate) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
     // means the chunk is unreachable here, so it states nothing.
     let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> = chunks
         .iter()
-        .map(|c| cube_meet(ctx, &h.region.0, &c.guard))
+        .map(|c| cube_meet(ctx, h.region().lits(), &c.guard))
         .collect();
 
     // Bound: perm ≤ b at each bounded location — assumed **per leaf** of the
@@ -1751,7 +1751,13 @@ pub(crate) fn merge_heaps(
     h_then: &Heap,
     h_els: &Heap,
 ) -> Heap {
-    let mut out = Heap::empty(h_then.region.clone());
+    // Both arms are fetched by the one `Merge`, so they share the join's region;
+    // the arms' own paths live on in the per-chunk guards appended below.
+    assert!(
+        h_then.region().same(ctx, h_els.region()),
+        "merge_heaps: the two arms are not homed at the same region"
+    );
+    let mut out = Heap::empty(h_then.region().clone());
     let mut kinds: Vec<LocationKind> = h_then.kinds().cloned().collect();
     for k in h_els.kinds() {
         if !kinds.contains(k) {
@@ -2017,6 +2023,11 @@ pub(crate) fn union_heaps(
     b: &Heap,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Heap {
+    // A sum is of two heaps held at once, so on one path.
+    assert!(
+        a.region().same(ctx, b.region()),
+        "union_heaps: the two summands are not homed at the same region"
+    );
     let mut out = a.clone();
     for (kind, cb) in b.entries() {
         let existing = a
