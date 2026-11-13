@@ -483,6 +483,7 @@ macro_rules! impl_spatial_display {
                         write!(f, "acc({}, {})", self.with(res), self.with(perm))
                     }
                     SpatialExpKind::Pure(e) => write!(f, "{}", self.with(e)),
+                    SpatialExpKind::Forall(q) => todo!("implement QPs"),
                 }
             }
         }

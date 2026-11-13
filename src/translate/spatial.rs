@@ -96,6 +96,7 @@ pub(crate) fn spatial_contains_acc<Ext>(exp: &typed::SpatialExp<Ext>) -> bool {
         S::Conj(l, r) => spatial_contains_acc(l) || spatial_contains_acc(r),
         S::Implies(_, r) => spatial_contains_acc(r),
         S::Ternary { then, else_, .. } => spatial_contains_acc(then) || spatial_contains_acc(else_),
+        S::Forall(_) => todo!("Implement QPs"),
     }
 }
 
@@ -295,6 +296,7 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
             let v = pure_exp::lower(b, env, sink, hctx, p)?;
             Ok((acc_heap, Some(v)))
         }
+        S::Forall(_) => todo!("implement QPs")
     }
 }
 
@@ -401,5 +403,6 @@ pub(crate) fn lower_assertion_bool<Ext: PureExt>(
             })
         }
         S::Pure(p) => Ok(Some(pure_exp::lower(b, env, sink, hctx, p)?)),
+        S::Forall(_) => todo!("Implement QPs"),
     }
 }
