@@ -20,7 +20,7 @@ pub enum Type {
     /// the verifier mints its constructor/projection ids on demand (see
     /// `verify::func_registry`). No `@snap` declaration is emitted — this is derived.
     Snap(MemberId),
-    /// `Option[T]` — a builtin parametric type (like `Seq[T]`/`Set[T]` later): a
+    /// `Option[T]` — a builtin parametric type (like the collections, [`Type::Coll`]): a
     /// domain with axiomatized functions. The verifier resolves it to its `Option`
     /// ADT instance via the mono registry; it is never a user declaration.
     Option(Box<Type>),

@@ -418,7 +418,6 @@ mod tests {
         let cases = [
             (map(&mut g, MapOp::Empty, &[]), ref_to_bool.clone()),
             (map(&mut g, MapOp::Card, &[m]), Type::Int),
-            (map(&mut g, MapOp::Contains, &[m, k]), Type::Bool),
             (map(&mut g, MapOp::Lookup, &[m, k]), Type::Bool),
             (map(&mut g, MapOp::Update, &[m, k, v]), ref_to_bool.clone()),
             (map(&mut g, MapOp::Domain, &[m]), Type::set(Type::Ref)),

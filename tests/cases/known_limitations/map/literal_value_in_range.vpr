@@ -1,6 +1,0 @@
-// KNOWN LIMITATION: a value is in the range by the axiom triggered on a
-// lookup `m[k]`; the assertion names the value `10` but no lookup of the
-// literal, so the axiom never fires.
-method literal_value_in_range() {
-  assert 10 in range(Map(1 := 10, 2 := 20))
-}

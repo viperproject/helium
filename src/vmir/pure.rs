@@ -205,13 +205,13 @@ impl CollOp {
         }
     }
 
-    /// `x in c`: operands `[c, x]`, the collection first. For a map, `x` is a
-    /// key.
+    /// `x in c`: operands `[c, x]`, the collection first. Panics for a map,
+    /// whose `k in m` is `k in domain(m)`: a set membership (see [`MapOp`]).
     pub fn contains(kind: CollKind) -> CollOp {
         match kind {
             CollKind::Seq => CollOp::Seq(SeqOp::Contains),
             CollKind::Set => CollOp::Set(SetOp::Contains),
-            CollKind::Map => CollOp::Map(MapOp::Contains),
+            CollKind::Map => panic!("a map's `k in m` is `k in domain(m)`, a set membership"),
         }
     }
 
@@ -402,15 +402,14 @@ impl SeqOp {
 
 /// A map operation (see [`CollOp`]). A map literal `Map(k := v, ..)` has no
 /// node of its own: it is `Update`s on `Empty`, one per entry, in order, so a
-/// repeated key keeps its last value.
+/// repeated key keeps its last value. Nor does `k in m`: as in Silicon, it is
+/// `k in domain(m)`, a `SetOp::Contains` on `Domain`, so a trigger on either
+/// form is the same term.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MapOp {
     /// `|m|` : Int, the number of keys.
     Card,
-    /// `k in m` : Bool, whether `k` is a key. Operands are `[m, k]`: the map
-    /// always comes first.
-    Contains,
-    /// `m[k]` : V. SIDECOND: `k in m`.
+    /// `m[k]` : V. SIDECOND: `k in domain(m)`.
     Lookup,
     /// `m[k := v]` : Map<K, V>. Total: adds `k` if it is not a key yet.
     Update,
@@ -431,7 +430,7 @@ impl MapOp {
         match self {
             MapOp::Empty => 0,
             MapOp::Card | MapOp::Domain | MapOp::Range => 1,
-            MapOp::Contains | MapOp::Lookup | MapOp::Eq => 2,
+            MapOp::Lookup | MapOp::Eq => 2,
             MapOp::Update => 3,
         }
     }
@@ -448,7 +447,7 @@ impl MapOp {
         match self {
             MapOp::Empty => vec![],
             MapOp::Card | MapOp::Domain | MapOp::Range => vec![map()],
-            MapOp::Contains | MapOp::Lookup => vec![map(), k.clone()],
+            MapOp::Lookup => vec![map(), k.clone()],
             MapOp::Update => vec![map(), k.clone(), v.clone()],
             MapOp::Eq => vec![map(), map()],
         }
@@ -458,7 +457,7 @@ impl MapOp {
     pub fn result_type(self, k: &Type, v: &Type) -> Type {
         match self {
             MapOp::Card => Type::Int,
-            MapOp::Contains | MapOp::Eq => Type::Bool,
+            MapOp::Eq => Type::Bool,
             MapOp::Lookup => v.clone(),
             MapOp::Update | MapOp::Empty => Type::map(k.clone(), v.clone()),
             MapOp::Domain => Type::set(k.clone()),
@@ -469,7 +468,6 @@ impl MapOp {
     pub fn token(self) -> &'static str {
         match self {
             MapOp::Card => "map.card",
-            MapOp::Contains => "map.in",
             MapOp::Lookup => "map.at",
             MapOp::Update => "map.upd",
             MapOp::Domain => "map.domain",
@@ -817,10 +815,7 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                     (Seq(SeqOp::Update), [s, i, v]) => write!(f, "{s}[{i} := {v}]"),
                     (Seq(SeqOp::Take), [s, n]) => write!(f, "{s}[..{n}]"),
                     (Seq(SeqOp::Drop), [s, n]) => write!(f, "{s}[{n}..]"),
-                    (
-                        Seq(SeqOp::Contains) | Set(SetOp::Contains) | Map(MapOp::Contains),
-                        [s, x],
-                    ) => {
+                    (Seq(SeqOp::Contains) | Set(SetOp::Contains), [s, x]) => {
                         write!(f, "{x} in {s}")
                     }
                     (Map(MapOp::Lookup), [m, k]) => write!(f, "{m}[{k}]"),
@@ -887,9 +882,8 @@ mod tests {
         PureInst::coll([Type::Int], SetOp::Union, vec![Val::Temp(0)]);
     }
 
-    const MAP_OPS: [MapOp; 8] = [
+    const MAP_OPS: [MapOp; 7] = [
         MapOp::Card,
-        MapOp::Contains,
         MapOp::Lookup,
         MapOp::Update,
         MapOp::Domain,
@@ -912,7 +906,6 @@ mod tests {
             assert!(tokens.insert(c.token()), "{op:?} reuses a token");
         }
         assert_eq!(CollOp::size(CollKind::Map), MapOp::Card.into());
-        assert_eq!(CollOp::contains(CollKind::Map), MapOp::Contains.into());
         assert_eq!(CollOp::empty(CollKind::Map), MapOp::Empty.into());
         assert!(CollOp::eq(CollKind::Map).is_eq());
         assert!(!CollKind::Map.has_unit());

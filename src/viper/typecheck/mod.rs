@@ -75,10 +75,11 @@ fn check_type(
             let expected = match globals.resolve(name).map(|s| s.signature()) {
                 Some(GlobalSignature::Domain(d)) => d.type_arity,
                 Some(GlobalSignature::Adt(a)) => a.type_arity,
-                // The collection types: parsed so `scan_unsupported` can name
-                // them, rejected there. A well-formed `Seq[T]`/`Set[T]` is
-                // `P::Seq`/`P::Set`; they only land here with the wrong number
-                // of type arguments.
+                // The collection types. `Multiset` is parsed as a named type
+                // so `scan_unsupported` can name it, and rejected there. A
+                // well-formed `Seq[T]`/`Set[T]`/`Map[K, V]` is
+                // `P::Seq`/`P::Set`/`P::Map`; they only land here with the
+                // wrong number of type arguments.
                 _ => match interner.resolve(&name) {
                     "Seq" | "Set" | "Multiset" => 1,
                     "Map" => 2,
