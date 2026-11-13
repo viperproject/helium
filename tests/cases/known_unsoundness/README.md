@@ -23,6 +23,5 @@ the call sites these programs reach, not the root cause.
 |---|---|---|---|---|
 | `scratch_drops_guards/` | a guarded assumption reaches the block scratch without the guards the scratch has not assumed | B | 20 | #48, #39, #49 (bug 1) |
 | `value_from_chunk_without_permission/` | a consume or read takes a value from a chunk that holds no permission on the path | D | 8 | #30, #49 (bug 2) |
-| `refute_on_failed_proof/` | a `refute` passes because its proof attempt was cut by a termination bound | §4.4 / §9.1 | 1 | #55 |
 
 Closed classes, now under `tests/cases/failing/`: `join_merge_ambient_cube/` (A, 5 cases).
