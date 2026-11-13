@@ -466,18 +466,12 @@ pub(crate) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
     }
     let true_ = expr!(ctx, true);
 
-    // The cube each chunk is actually present under: the heap's own region (the
-    // path it exists on — see `heap::Region`) meet the chunk's residual merge
-    // guard. A contradiction means the chunk is unreachable here, so it states
-    // nothing.
-    //
-    // The region is read off the heap, never off the walker: a join phase has no
-    // ambient cube, so reading one there stated a merged heap's axioms on every
-    // path (`failing/join_merge_ambient_cube`).
-    let region: Vec<(egg::Id, Polarity)> = h.region().lits().to_vec();
+    // The cube each chunk is actually present under: the heap's region (the path
+    // it exists on) meet the chunk's own residual merge guard. A contradiction
+    // means the chunk is unreachable here, so it states nothing.
     let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> = chunks
         .iter()
-        .map(|c| cube_meet(ctx, &region, &c.guard))
+        .map(|c| cube_meet(ctx, &h.region.0, &c.guard))
         .collect();
 
     // Bound: perm ≤ b at each bounded location — assumed **per leaf** of the
@@ -1757,14 +1751,7 @@ pub(crate) fn merge_heaps(
     h_then: &Heap,
     h_els: &Heap,
 ) -> Heap {
-    // Both arms are fetched for the join, so both are homed at the join's region,
-    // and so is the result: the arms' own paths live on in the per-chunk guards
-    // (the `cond` literal appended below), relative to that region.
-    assert!(
-        h_then.region().same(ctx, h_els.region()),
-        "merge_heaps: the two arms are not homed at the same region"
-    );
-    let mut out = Heap::empty(h_then.region().clone());
+    let mut out = Heap::empty(h_then.region.clone());
     let mut kinds: Vec<LocationKind> = h_then.kinds().cloned().collect();
     for k in h_els.kinds() {
         if !kinds.contains(k) {
@@ -2030,11 +2017,6 @@ pub(crate) fn union_heaps(
     b: &Heap,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Heap {
-    // A sum is of two heaps held at once, so on one path: the result's region.
-    assert!(
-        a.region().same(ctx, b.region()),
-        "union_heaps: the two summands are not homed at the same region"
-    );
     let mut out = a.clone();
     for (kind, cb) in b.entries() {
         let existing = a
@@ -2110,7 +2092,6 @@ pub(crate) fn union_heaps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::verify::heap::Region;
     use crate::verify::test_support::{fresh_ctx, real, test_kind};
     use crate::vmir::Type;
 
@@ -2146,7 +2127,7 @@ mod tests {
         let k = LocationKind::from_addr_type(&addr_ty).unwrap();
         let (v0, v1) = (ctx.add(Symbolic::Fresh(4)), ctx.add(Symbolic::Fresh(5)));
         let (p0, p1) = (real(&mut ctx, 3, 4), real(&mut ctx, 1, 2)); // sum 5/4 > 1
-        let heap = Heap::empty(Region::of_cube(Vec::new()))
+        let heap = Heap::top()
             .with_chunk(&k, Chunk::new(a0, p0, v0))
             .with_chunk(&k, Chunk::new(a1, p1, v1));
 
@@ -2178,7 +2159,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(2));
         let v2 = ctx.add(Symbolic::Fresh(3));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p1, v1));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
         ctx.union(a, b);
         ctx.egraph.rebuild();
 
@@ -2214,7 +2195,7 @@ mod tests {
         let b = ctx.add(Symbolic::Fresh(1));
         let half = real(&mut ctx, 1, 2);
         let (v0, v1) = (ctx.add(Symbolic::Fresh(2)), ctx.add(Symbolic::Fresh(3)));
-        let h = Heap::empty(Region::of_cube(Vec::new()))
+        let h = Heap::top()
             .with_chunk(&test_kind(), Chunk::new(a, half, v0))
             .with_chunk(&test_kind(), Chunk::new(b, half, v1));
         assert_eq!(h.entries().count(), 2);
@@ -2255,7 +2236,7 @@ mod tests {
         let rest = ctx.add(Symbolic::Binary(BinOp::SubR, [one, p]));
         let (v0, v1) = (ctx.add(Symbolic::Fresh(2)), ctx.add(Symbolic::Fresh(3)));
 
-        let h = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, rest, v0));
+        let h = Heap::top().with_chunk(&test_kind(), Chunk::new(a, rest, v0));
         let out = heap_union(&mut ctx, &h, &test_kind(), Chunk::new(a, p, v1), &[]);
         let chunk = out
             .chunk(&test_kind(), ctx.egraph.find(a))
@@ -2279,7 +2260,7 @@ mod tests {
         let v0 = ctx.add(Symbolic::Fresh(1));
         let v1 = ctx.add(Symbolic::Fresh(2));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p0, v0));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p0, v0));
         let merged = heap_union(&mut ctx, &h1, &test_kind(), Chunk::new(a, p1, v1), &[]);
         let chunk = merged
             .chunk(&test_kind(), ctx.egraph.find(a))
@@ -2302,7 +2283,7 @@ mod tests {
         let v0 = ctx.add(Symbolic::Fresh(1));
         let v1 = ctx.add(Symbolic::Fresh(2));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p0, v0));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p0, v0));
         let merged = heap_union(&mut ctx, &h1, &test_kind(), Chunk::new(a, p1, v1), &[]);
         let chunk = merged
             .chunk(&test_kind(), ctx.egraph.find(a))
@@ -2326,7 +2307,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(2));
         let false_lit = ctx.add(Symbolic::Lit(Literal::Bool(false)));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p0, v0));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p0, v0));
         let merged = heap_union(
             &mut ctx,
             &h1,
@@ -2358,7 +2339,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(2));
         let true_lit = ctx.add(Symbolic::Lit(Literal::Bool(true)));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p0, v0));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p0, v0));
         let merged = heap_union(
             &mut ctx,
             &h1,
@@ -2386,7 +2367,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(3));
         let v2 = ctx.add(Symbolic::Fresh(4));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p_have, v1));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p_have, v1));
         // Symbolic perms → `have >= take` not provable by equality saturation.
         let err = heap_subtract(
             &mut ctx,
@@ -2415,7 +2396,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(2));
         let v2 = ctx.add(Symbolic::Fresh(3));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p2, v1));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p2, v1));
         ctx.union(a, b);
         ctx.egraph.rebuild();
 
@@ -2452,7 +2433,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(2));
         let v2 = ctx.add(Symbolic::Fresh(3));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p1, v1));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
         let result = heap_subtract(
             &mut ctx,
             &h1,
@@ -2481,7 +2462,7 @@ mod tests {
         let v1 = ctx.add(Symbolic::Fresh(2));
         let v2 = ctx.add(Symbolic::Fresh(3));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new())).with_chunk(&test_kind(), Chunk::new(a, p1, v1));
+        let h1 = Heap::top().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
         let err = heap_subtract(
             &mut ctx,
             &h1,
@@ -2507,7 +2488,7 @@ mod tests {
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
 
-        let h1 = Heap::empty(Region::of_cube(Vec::new()));
+        let h1 = Heap::top();
         let err = heap_subtract(
             &mut ctx,
             &h1,

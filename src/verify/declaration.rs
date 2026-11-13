@@ -63,14 +63,8 @@ struct EvalState {
     /// For the join block being evaluated: whether its (then, else) predecessor
     /// blocks are dead. The `Merge` reads this; `None` outside a method join.
     join_arms_dead: Option<(bool, bool)>,
-    /// The block cube of the phase being walked: a method block's `cube`, for
-    /// its join *and* its body phase; empty for a CFG-less body (function,
-    /// resource), which exists on every path. It is the [`Region`] every heap
-    /// is homed at when it enters an instruction ([`fetch_heap`]).
-    ///
-    /// Unlike the context's ambient cube, this is set for a join phase too. A
-    /// join materializes its cube's literals *in* the phase (the reach insts come
-    /// first), so it is lowered lazily, at the first heap fetch, after them.
+    /// The block cube of both phases of the method block being walked (empty
+    /// for a CFG-less body): the [`Region`] [`fetch_heap`] homes heaps at.
     phase_cube: PathConds,
 }
 
@@ -221,31 +215,12 @@ fn format_inst(
     .to_string()
 }
 
-/// The [`Region`] of the phase being walked: its block cube, as live ids.
-fn phase_region(ctx: &mut VerifyContext<'_>, state: &EvalState) -> Region {
-    Region::of_cube(pc_lits_raw(ctx, state, &state.phase_cube))
-}
-
-/// The heap `hv` names, as an operand of an instruction in the current phase:
-/// homed at that phase's [`Region`]. This is the one way a heap enters an
-/// instruction, so every heap the algebra sees carries the path it is used on,
-/// and the algebra never has to read the walker's ambient state.
-///
-/// Heap-fetch is monomorphic — `HeapVal` carries no ctx-heap variant.
+/// The one way a heap enters an instruction: homed at the phase's [`Region`].
 fn fetch_heap(ctx: &mut VerifyContext<'_>, state: &EvalState, hv: &HeapVal) -> Heap {
-    let region = phase_region(ctx, state);
+    let region = Region::of_cube(pc_lits_raw(ctx, state, &state.phase_cube));
     match hv {
         HeapVal::Empty => Heap::empty(region),
         HeapVal::Temp(n) => state.heaps[*n].at(region),
-    }
-}
-
-/// The heap `hv` names, as stored (homed where it was produced). For display
-/// only; an instruction operand goes through [`fetch_heap`].
-fn stored_heap(state: &EvalState, hv: &HeapVal) -> Option<Heap> {
-    match hv {
-        HeapVal::Empty => None,
-        HeapVal::Temp(n) => Some(state.heaps[*n].clone()),
     }
 }
 
@@ -261,10 +236,10 @@ fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec
             | HeapInst::Inhale { base, .. }
             | HeapInst::Exhale { base, .. },
         ) => {
-            let mut res: Vec<(String, Heap)> = stored_heap(state, base)
-                .map(|h| (base.to_string(), h))
-                .into_iter()
-                .collect();
+            let mut res = match base {
+                HeapVal::Temp(n) => vec![(base.to_string(), state.heaps[*n].clone())],
+                HeapVal::Empty => vec![],
+            };
             if heaps_before < state.heaps.len() {
                 res.push((
                     format!("h{heaps_before}"),
@@ -296,8 +271,7 @@ fn pc_lits_raw(
         .collect()
 }
 
-/// The **effective** path condition of an instruction with pc `pc` — see
-/// [`VerifyContext::effective_pc`].
+/// See [`VerifyContext::effective_pc`].
 fn collect_pc_lits(
     ctx: &mut VerifyContext<'_>,
     state: &EvalState,
@@ -755,13 +729,7 @@ fn eval_pure_inst(
     })
 }
 
-/// The single chunk `acc(loc, perm)` denotes, with a fresh value, and its kind.
-fn heap_acc(
-    ctx: &mut VerifyContext<'_>,
-    loc: &Val,
-    perm: ChunkPerm,
-    state: &EvalState,
-) -> (LocationKind, Chunk) {
+fn heap_acc(ctx: &mut VerifyContext<'_>, loc: &Val, perm: ChunkPerm, state: &EvalState) -> Heap {
     let addr = state.get_val(ctx, loc);
     // The location kind (group + held value type + bound) comes straight from the
     // address operand's VMIR `Type::Addr` — no e-graph inference.
@@ -769,7 +737,7 @@ fn heap_acc(
         .loc_kind(loc)
         .expect("acc location must be Addr-typed");
     let value = ctx.fresh_symbolic_value(kind.value.clone());
-    (kind, Chunk::new_perm(addr, perm, value))
+    fetch_heap(ctx, state, &HeapVal::Empty).with_chunk(&kind, Chunk::new_perm(addr, perm, value))
 }
 
 /// Resolve a [`vmir::PermVal`] to its e-class id, minting a fresh positive share
@@ -1085,12 +1053,14 @@ fn eval_heap_inst(
             };
             let base_h = fetch_heap(ctx, state, base);
             let cperm = eval_perm_structural(ctx, state, perm);
-            let (kind, mut ch) = heap_acc(ctx, loc, cperm.clone(), state);
+            let chunk = heap_acc(ctx, loc, cperm.clone(), state);
             let pc_lits: Vec<(egg::Id, Polarity)> = pc
                 .conds
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
+            let (kind, ch) = chunk.entries().next().unwrap();
+            let (kind, mut ch) = (kind.clone(), ch.clone());
             if let Some(bind) = bind {
                 {
                     // The bind selects the value source. `Fresh` and `SelfSlot`
@@ -1990,7 +1960,7 @@ fn eval_from_snap(
         None
     };
     let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
-    let empty_here = Heap::empty(phase_region(ctx, state));
+    let empty = fetch_heap(ctx, state, &HeapVal::Empty);
 
     // Reconstruct the precondition heap: produce one chunk per footprint slot
     // valued `unwrap(proj_i(s))` into the empty heap, assuming the resource body
@@ -2001,7 +1971,7 @@ fn eval_from_snap(
         certs,
         *resource,
         &arg_ids,
-        empty_here,
+        empty,
         ValueSource::ProjectSnap(s, s_recipe),
         Direction::Produce,
         None,
@@ -2654,9 +2624,6 @@ pub(crate) fn verify_method(
             )),
             _ => None,
         };
-        // Both phases of the block use heaps on the block's cube. The join
-        // phase has no ambient cube, yet its heaps (the `Merge`, a loop head's
-        // frame) still exist only there.
         state.phase_cube = block.cube.clone();
         walk_body(
             &mut ctx,

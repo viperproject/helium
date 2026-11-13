@@ -29,8 +29,7 @@ method m(a: Ref, b: Ref, c: Bool, d: Bool)
 No constructor omits it, and every derived heap keeps its source's. A heap enters an
 instruction only through `fetch_heap` (`declaration.rs`), which homes it at the cube of
 the phase being walked. That is the block's `cube` in the join phase as well as the body
-phase. `assume_location_axioms` gates by the heap's region; `merge_heaps` and
-`union_heaps` assert that their operands share one. `VerifyContext::current_cube` is
+phase. `assume_location_axioms` gates by the heap's region. `VerifyContext::current_cube` is
 private to `context/`. Code outside it asks for `effective_pc` (an instruction's pc), so
 the heap code cannot read the walker's ambient state again.
 
