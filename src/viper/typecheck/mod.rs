@@ -12,6 +12,7 @@ use crate::viper::{
         MethodEnsuresExt, PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp,
         SpatialExp, SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
     },
+    IdnDeclTyped, QuantifierKind,
 };
 
 mod error;
@@ -649,6 +650,58 @@ fn combine_spatial<Ext: PureExt>(
 // ==========================================
 
 impl<'a, 'g> ConstraintCtx<'a, 'g> {
+    /// Open a quantifier's binder scope: impose each binder's declared type like
+    /// a let-binder, constrain the trigger terms inside that scope, run `body`,
+    /// then restore the previous bindings. Shared by the pure `forall` and the
+    /// quantified permission in `constrain_spatial`.
+    ///
+    /// A binder may not shadow anything in scope, an enclosing binder or one of
+    /// its siblings included.
+    fn with_binders<R>(
+        &mut self,
+        bound_vars: &[IdnDeclTyped],
+        triggers: &mut [viper::Trigger],
+        body: impl FnOnce(&mut Self) -> Result<R, TypeError>,
+    ) -> Result<R, TypeError> {
+        let mut prev_bindings = Vec::with_capacity(bound_vars.len());
+        for bv in bound_vars.iter() {
+            let spur = bv.idn.0.id();
+            // (Siblings already bound are in `let_bindings`.)
+            if self.env.declared(spur) || self.let_bindings.contains_key(&spur) {
+                return Err(TypeError::ShadowedName(
+                    self.env.interner.resolve(&spur).to_string(),
+                ));
+            }
+            self.check_binder_type(&bv.ty)?;
+            let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+            let ty = type_with_generics(&bv.ty, &rigid);
+            let bk = self.tc.new_term_key();
+            self.impose_type(bk, &ty, &HashMap::default())?;
+            let prev = self.let_bindings.insert(bv.idn.0.id(), bk);
+            prev_bindings.push((bv.idn.0.id(), prev));
+        }
+        // Constrain every trigger term inside the binder scope, so each
+        // gets a resolved type for later lowering (a dropped trigger
+        // would panic `resolved_ty`).
+        for trig in triggers.iter_mut() {
+            for e in trig.exp.iter_mut() {
+                self.constrain_pure(e)?;
+            }
+        }
+        let result = body(self);
+        for (spur, prev) in prev_bindings {
+            match prev {
+                Some(p) => {
+                    self.let_bindings.insert(spur, p);
+                }
+                None => {
+                    self.let_bindings.remove(&spur);
+                }
+            }
+        }
+        result
+    }
+
     /// Walk a pure expression, stamp its node with a fresh key, impose its rules, and
     /// return that key so callers can relate it to their own.
     fn constrain_pure(&mut self, exp: &mut viper::Exp) -> Result<TcKey, TypeError> {
@@ -800,46 +853,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
 
             ExpKind::Quantifier(_, bound_vars, triggers, body) => {
-                // Treat quantifier binders like let-binders: impose their declared type,
-                // restore the previous bindings afterwards.
-                // A binder may not shadow anything in scope, an enclosing
-                // binder or one of its siblings included.
-                let mut prev_bindings = Vec::with_capacity(bound_vars.len());
-                for bv in bound_vars.iter() {
-                    let spur = bv.idn.0.id();
-                    // (Siblings already bound are in `let_bindings`.)
-                    if self.env.declared(spur) || self.let_bindings.contains_key(&spur) {
-                        return Err(TypeError::ShadowedName(
-                            self.env.interner.resolve(&spur).to_string(),
-                        ));
-                    }
-                    self.check_binder_type(&bv.ty)?;
-                    let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
-                    let ty = type_with_generics(&bv.ty, &rigid);
-                    let bk = self.tc.new_term_key();
-                    self.impose_type(bk, &ty, &HashMap::default())?;
-                    let prev = self.let_bindings.insert(bv.idn.0.id(), bk);
-                    prev_bindings.push((bv.idn.0.id(), prev));
-                }
-                // Constrain every trigger term inside the binder scope, so each
-                // gets a resolved type for later lowering (a dropped trigger
-                // would panic `resolved_ty`).
-                for trig in triggers.iter_mut() {
-                    for e in trig.exp.iter_mut() {
-                        self.constrain_pure(e)?;
-                    }
-                }
-                let body_key = self.constrain_pure(body)?;
-                for (spur, prev) in prev_bindings {
-                    match prev {
-                        Some(p) => {
-                            self.let_bindings.insert(spur, p);
-                        }
-                        None => {
-                            self.let_bindings.remove(&spur);
-                        }
-                    }
-                }
+                let body_key =
+                    self.with_binders(bound_vars, triggers, |this| this.constrain_pure(body))?;
                 self.tc
                     .impose(body_key.concretizes_explicit(ViperTcType::Bool))?;
                 self.tc
@@ -1474,6 +1489,15 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .impose(cond_key.concretizes_explicit(ViperTcType::Bool))?;
                 self.constrain_spatial(then)?;
                 self.constrain_spatial(else_)
+            }
+            // A quantified permission: the body is spatial (it holds the `acc`),
+            // constrained inside the binder scope. An `acc`-free `forall` is a
+            // pure fact and falls through to `constrain_pure`, which also gives
+            // the quantifier node itself the `Bool` key its lowering reads.
+            ExpKind::Quantifier(QuantifierKind::Forall, bound_vars, triggers, body)
+                if crate::viper::unsupported::mentions_acc(body) =>
+            {
+                self.with_binders(bound_vars, triggers, |this| this.constrain_spatial(body))
             }
             _ => {
                 let pure_key = self.constrain_pure(exp)?;

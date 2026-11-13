@@ -41,7 +41,7 @@ impl Scan {
 
 /// Whether an expression mentions `acc(..)` anywhere — what makes a `forall`
 /// body a quantified permission rather than a pure fact.
-fn mentions_acc(exp: &Exp) -> bool {
+pub(crate) fn mentions_acc(exp: &Exp) -> bool {
     struct FindAcc(bool);
     impl<'a> AstWalker<'a> for FindAcc {
         fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
