@@ -2207,6 +2207,7 @@ fn domain_function_to_typed(
         })
         .collect();
     typed::DomainFunction {
+        unique: df.unique,
         name: Ident(df.signature.name.0.id()),
         params,
         ret: type_with_generics(df.signature.ret[0].ty(), type_params),
@@ -2222,6 +2223,11 @@ fn check_domain_function(
     interner: &Interner,
 ) -> Result<(), TypeError> {
     let is_param = |p| type_params.contains(&p);
+    if df.unique && !df.signature.args.is_empty() {
+        return Err(TypeError::UniqueFunctionWithParams(
+            interner.resolve(&df.signature.name.0.id()).to_string(),
+        ));
+    }
     let mut names = HashSet::default();
     for arg in df.signature.args.iter().chain(&df.signature.ret) {
         check_type(arg.ty(), globals, interner, &is_param)?;
@@ -3421,6 +3427,46 @@ function f(x: Int): Int
                 .as_ref()
                 .is_err_and(|errs| errs.iter().any(|e| matches!(e, TypeError::ShadowedName(_)))),
             "expected ShadowedName, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unique_nullary_domain_function_is_ok() {
+        let result = run_pipeline(
+            r#"
+domain Color {
+  unique function red(): Color
+  function other(): Color
+}
+"#,
+        );
+        let program = result.expect("unique nullary function must typecheck");
+        let fns: Vec<bool> = program
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                typed::Declaration::Domain(d) => Some(d.functions.iter().map(|f| f.unique)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(fns, [true, false], "the flag must survive typechecking");
+    }
+
+    #[test]
+    fn unique_domain_function_with_params_is_error() {
+        let result = run_pipeline(
+            r#"
+domain D {
+  unique function u(x: Int): Int
+}
+"#,
+        );
+        assert!(
+            result.as_ref().is_err_and(|errs| errs
+                .iter()
+                .any(|e| matches!(e, TypeError::UniqueFunctionWithParams(n) if n == "u"))),
+            "expected UniqueFunctionWithParams, got: {result:?}"
         );
     }
 

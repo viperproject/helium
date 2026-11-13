@@ -1,0 +1,13 @@
+// suite: no-z3
+// A unique function whose signature does not mention the domain's type
+// parameter is a single constant shared by every instance (see
+// generic_domains/same_function_across_instances.vpr); it is still distinct
+// from the other unique constants of its type.
+domain Tag[T] {
+  unique function t1(): Int
+  unique function t2(): Int
+}
+
+method m(x: Tag[Int], y: Tag[Bool]) {
+  assert t1() != t2()
+}

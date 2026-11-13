@@ -1,0 +1,15 @@
+// Two unique `Coin` constants fit in `Coin`'s two values, so this must not
+// verify vacuously. Contrast passing/unique/three_in_two_valued_adt.vpr.
+adt Coin {
+  Heads()
+  Tails()
+}
+
+domain Toss {
+  unique function t1(): Coin
+  unique function t2(): Coin
+}
+
+method m() {
+  assert false
+}

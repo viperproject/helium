@@ -382,6 +382,7 @@ mod tests {
             }),
             requires: None,
             ensures: None,
+            unique: false,
         })
     }
 

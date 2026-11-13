@@ -25,6 +25,14 @@ pub(crate) struct Z3Translation {
     /// The collection functions declared so far, by element type (see
     /// `coll_apply`).
     coll_funcs: HashMap<(CollFn, Type), FuncDecl>,
+    /// The enumeration `Unique@T` and tag function `T -> Unique@T` of each
+    /// sort `T` that has unique constants (see [`assert_unique_sort`]).
+    /// Declarations only, so they survive a scratch scope; the facts over them
+    /// do not, which `unique_sorts_asserted` tracks.
+    unique_sorts: HashMap<Type, UniqueSort>,
+    /// The sorts whose unique-constant facts are asserted in the current
+    /// solver scope.
+    unique_sorts_asserted: crate::dhash::HashSet<Type>,
     max_node_id: usize,
     max_merges_is: usize,
     /// The program's `Forall` nodes, by node index. Never asserted for good: a
@@ -46,6 +54,8 @@ impl Default for Z3Translation {
             class_types: HashMap::default(),
             func_cache: HashMap::default(),
             coll_funcs: HashMap::default(),
+            unique_sorts: HashMap::default(),
+            unique_sorts_asserted: Default::default(),
             max_node_id: 0,
             max_merges_is: 0,
             program_foralls: vec![],
@@ -147,6 +157,7 @@ pub(crate) struct ScratchScope {
     program_foralls: Vec<usize>,
     coll_axiom_nodes: Vec<usize>,
     coll_axiom_instances: crate::dhash::HashSet<(usize, Box<[Type]>)>,
+    unique_sorts_asserted: crate::dhash::HashSet<Type>,
 }
 
 /// Open a solver scope before the live graph is swapped for a throwaway clone.
@@ -163,6 +174,7 @@ pub(crate) fn enter_scratch(ctxt: &mut VerifyContext) -> ScratchScope {
         program_foralls: tr.program_foralls.clone(),
         coll_axiom_nodes: tr.coll_axiom_nodes.clone(),
         coll_axiom_instances: tr.coll_axiom_instances.clone(),
+        unique_sorts_asserted: tr.unique_sorts_asserted.clone(),
     }
 }
 
@@ -183,6 +195,7 @@ pub(crate) fn leave_scratch(ctxt: &mut VerifyContext, scope: ScratchScope) {
     tr.program_foralls = scope.program_foralls;
     tr.coll_axiom_nodes = scope.coll_axiom_nodes;
     tr.coll_axiom_instances = scope.coll_axiom_instances;
+    tr.unique_sorts_asserted = scope.unique_sorts_asserted;
 }
 
 /// `solver.assert(fact)`, timed as `z3_timing.assert` and counted as a fact.
@@ -337,6 +350,7 @@ const COLL_AXIOM_WEIGHT: u32 = 10;
 /// An equation that needs a sort we cannot determine is dropped with a warning:
 /// leaving out an assumption only weakens what Z3 knows, so it stays sound.
 pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
+    assert_global_unique_sorts(ctxt);
     let start = ctxt.z3translator.max_node_id;
     let end = ctxt.egraph.nodes().len();
     for i in start..end {
@@ -367,6 +381,16 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
             );
             continue;
         };
+        // A generic unique constant: its sort at this instantiation is met
+        // here first (a non-generic one's is already asserted, see
+        // `assert_global_unique_sorts`).
+        if let Symbolic::FuncApp(f, tys, _) = &node
+            && !tys.is_empty()
+            && ctxt.alloc.is_unique(*f)
+        {
+            let ret = unique_ret_type(ctxt, *f, tys);
+            assert_unique_sort(ctxt, &ret);
+        }
         let class = ctxt.egraph.find(id);
         let Some(c) = class_const(ctxt, class) else {
             eprintln!("[z3] warning: could not create the class_const for {class}");
@@ -387,6 +411,129 @@ pub(crate) fn sync_facts(ctxt: &mut VerifyContext) {
     }
     ctxt.z3translator.max_merges_is = end;
     instantiate_coll_axioms(ctxt);
+}
+
+/// A sort's unique constants in Z3: the enumeration `Unique@T`, one nullary
+/// constructor per unique constant of sort `T`, and the tag function
+/// `unique@T: T -> Unique@T`.
+struct UniqueSort {
+    tag: FuncDecl,
+    enumeration: DatatypeSort,
+    /// The constant behind each constructor, by constructor index.
+    members: Vec<(FuncId, Box<[Type]>)>,
+}
+
+/// The return type of the unique function `f` at `tys`.
+fn unique_ret_type(ctxt: &VerifyContext, f: FuncId, tys: &[Type]) -> Type {
+    let FuncKind::Decl(member) = ctxt.alloc.kind(&f) else {
+        panic!("unique function fn{} is not a declared function", f.0);
+    };
+    let (params, ret) = function_signature(ctxt, member, tys);
+    assert!(
+        params.is_empty(),
+        "unique function fn{} must be nullary",
+        f.0
+    );
+    ret
+}
+
+/// The unique constants of sort `ty`: every unique function whose return type
+/// matches `ty`, at the instantiation that match fixes. A unique function is
+/// nullary, so its return type mentions each of its type parameters and the
+/// match binds them all.
+fn unique_members(ctxt: &VerifyContext, ty: &Type) -> Vec<(FuncId, Box<[Type]>)> {
+    let mut members = Vec::new();
+    for f in ctxt.alloc.unique_fns() {
+        let FuncKind::Decl(member) = ctxt.alloc.kind(&f) else {
+            panic!("unique function fn{} is not a declared function", f.0);
+        };
+        let vmir::Declaration::Function(fun) = &ctxt.decls[member] else {
+            panic!("unique function fn{} is not a `Function` declaration", f.0);
+        };
+        let mut out = vec![None; fun.ty_params.count()];
+        if fun.ret.match_generics(ty, &mut out) {
+            let tys = out
+                .into_iter()
+                .map(|t| t.expect("a nullary function's return type binds every type parameter"))
+                .collect();
+            members.push((f, tys));
+        }
+    }
+    members
+}
+
+/// Every non-generic unique constant's sort, asserted up front: Silicon states
+/// `(distinct …)` per sort as a global background fact, so it holds whether or
+/// not the unit mentions the constants (three unique `Bool` constants make
+/// every unit vacuous). Asserted here, in Z3 only, rather than by adding the
+/// constants to the e-graph.
+fn assert_global_unique_sorts(ctxt: &mut VerifyContext) {
+    for f in ctxt.alloc.unique_fns() {
+        let FuncKind::Decl(member) = ctxt.alloc.kind(&f) else {
+            panic!("unique function fn{} is not a declared function", f.0);
+        };
+        let vmir::Declaration::Function(fun) = &ctxt.decls[member] else {
+            panic!("unique function fn{} is not a `Function` declaration", f.0);
+        };
+        if fun.ty_params.count() == 0 {
+            let ret = fun.ret.clone();
+            assert_unique_sort(ctxt, &ret);
+        }
+    }
+}
+
+/// `unique@T(cᵢ) == Unique@T::cᵢ` for every unique constant `cᵢ` of sort `ty`,
+/// once per solver scope. The enumeration's constructors are pairwise
+/// distinct, so the constants are: Silicon's `(distinct …)` for the sort, one
+/// fact per constant. Only `Unique@T` is finite, never `T`: a value of `T`
+/// need not be a unique constant, and `unique@T` says nothing about one that
+/// is not.
+///
+/// A generic unique function is asserted per instantiation, with all the
+/// constants of that sort, the first time a unit meets the sort.
+fn assert_unique_sort(ctxt: &mut VerifyContext, ty: &Type) {
+    if ctxt.z3translator.unique_sorts_asserted.contains(ty) {
+        return;
+    }
+    if !ctxt.z3translator.unique_sorts.contains_key(ty) {
+        let members = unique_members(ctxt, ty);
+        assert!(!members.is_empty(), "no unique constant has sort {ty}");
+        let mut builder = DatatypeBuilder::new(format!("Unique@{ty}"));
+        for (f, _) in &members {
+            let FuncKind::Decl(member) = ctxt.alloc.kind(f) else {
+                unreachable!("checked by `unique_members`")
+            };
+            let name = ctxt
+                .interner
+                .resolve(&ctxt.decls[member].name())
+                .to_string();
+            builder = builder.variant(&format!("Unique@{ty}::{name}#{}", f.0), vec![]);
+        }
+        let enumeration = create_datatypes(vec![builder])
+            .pop()
+            .expect("one builder, one datatype");
+        let domain = sort(ctxt, ty);
+        let tag = FuncDecl::new(format!("unique@{ty}"), &[&domain], &enumeration.sort);
+        ctxt.z3translator.unique_sorts.insert(
+            ty.clone(),
+            UniqueSort {
+                tag,
+                enumeration,
+                members,
+            },
+        );
+    }
+    let members = ctxt.z3translator.unique_sorts[ty].members.clone();
+    for (i, (f, tys)) in members.iter().enumerate() {
+        let constant = apply_function(ctxt, f, tys, &[]);
+        let unique = &ctxt.z3translator.unique_sorts[ty];
+        let fact = unique
+            .tag
+            .apply(&[&constant])
+            .eq(unique.enumeration.variants[i].constructor.apply(&[]));
+        assert_fact(&ctxt.z3translator.solver, &fact);
+    }
+    ctxt.z3translator.unique_sorts_asserted.insert(ty.clone());
 }
 
 /// Assert each collection axiom at every type it has not been asserted at yet

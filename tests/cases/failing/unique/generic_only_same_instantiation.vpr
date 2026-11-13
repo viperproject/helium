@@ -1,0 +1,10 @@
+// A unique constant says nothing about a value of its type that is not
+// itself a unique constant, at any instantiation.
+domain Opt[T] {
+  unique function empty(): Opt[T]
+  function some(x: T): Opt[T]
+}
+
+method m(x: Int) {
+  assert (empty(): Opt[Int]) != some(x)
+}

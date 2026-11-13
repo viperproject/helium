@@ -507,6 +507,26 @@ fn precedence_test() {
     );
 }
 
+#[test]
+fn unique_domain_function() {
+    let prog = viper_parser::vpr_program(
+        "domain D { unique function u(): D function f(): D unique function w(): Int }",
+    )
+    .unwrap();
+    let unique: Vec<bool> = prog
+        .0
+        .iter()
+        .filter_map(|d| match d {
+            Declaration::DomainElement(DomainElement {
+                kind: DomainElementKind::Function(f),
+                ..
+            }) => Some(f.unique),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unique, [true, false, true]);
+}
+
 #[cfg(test)]
 fn raw_ident(name: &str) -> Exp {
     Exp::unknown(ExpKind::Ident(Ident::Raw(name.to_string())))

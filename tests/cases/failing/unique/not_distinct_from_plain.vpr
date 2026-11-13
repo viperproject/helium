@@ -1,0 +1,10 @@
+// `unique` only separates unique constants from each other: a plain
+// function of the same type may equal one.
+domain Color {
+  unique function red(): Color
+  function other(): Color
+}
+
+method m() {
+  assert red() != other()
+}

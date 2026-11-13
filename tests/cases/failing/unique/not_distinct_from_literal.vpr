@@ -1,0 +1,6 @@
+// A unique `Int` constant may be any integer, including `5`.
+domain K { unique function k(): Int }
+
+method m() {
+  assert k() != 5
+}

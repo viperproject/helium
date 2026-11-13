@@ -1,0 +1,19 @@
+// suite: no-z3
+// Distinctness survives equalities: a value known to be `red()` is not
+// `green()`.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+}
+
+method m(c: Color)
+  requires c == red()
+{
+  assert c != green()
+}
+
+method n(c: Color, d: Color)
+  requires c == red() && d == green()
+{
+  assert c != d
+}

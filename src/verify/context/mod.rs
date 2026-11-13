@@ -182,7 +182,7 @@ impl<'a> VerifyContext<'a> {
                 // Fresh graph, fresh id space: remembered instantiations from
                 // the previous unit are meaningless.
                 rewrite::new_memo_unit();
-                egg::EGraph::new(ConstFold::new(alloc.ctor_table()))
+                egg::EGraph::new(ConstFold::new(alloc.ctor_table(), alloc.unique_table()))
             },
             static_rules: rewrite::rules(),
             static_reduce: rewrite::reduce_rules(),

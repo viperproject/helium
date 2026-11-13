@@ -1,0 +1,17 @@
+// `Coin` has exactly two values, so three pairwise-distinct unique `Coin`
+// constants are contradictory, whether or not the method mentions them: the
+// distinctness is a global fact of the sort (Silicon's `distinct`). Left to Z3.
+adt Coin {
+  Heads()
+  Tails()
+}
+
+domain Toss {
+  unique function t1(): Coin
+  unique function t2(): Coin
+  unique function t3(): Coin
+}
+
+method m() {
+  assert false
+}

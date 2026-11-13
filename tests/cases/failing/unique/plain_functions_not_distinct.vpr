@@ -1,0 +1,11 @@
+// Without `unique`, nullary functions may coincide: the flag must not leak
+// onto plain functions.
+domain D {
+  function a(): Int
+  unique function u(): Int
+  function b(): Int
+}
+
+method m() {
+  assert a() != b()
+}

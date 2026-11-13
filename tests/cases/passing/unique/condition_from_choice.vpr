@@ -1,0 +1,11 @@
+// Picking between two unique constants pins the condition that chose it.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+}
+
+method m(b: Bool) {
+  var c: Color := b ? red() : green()
+  assert c == red() ==> b
+  assert c == green() ==> !b
+}

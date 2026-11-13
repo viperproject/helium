@@ -357,14 +357,17 @@ impl VariantNarrowApplier {
         let ClassData {
             generation,
             has_forall,
+            ref unique,
             ..
         } = egraph[x].data;
+        let unique = unique.clone();
         egraph.set_analysis_data(
             x,
             ClassData {
                 value: data,
                 generation,
                 has_forall,
+                unique,
             },
         );
         changed.push(x);

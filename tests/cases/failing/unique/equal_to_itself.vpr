@@ -1,0 +1,9 @@
+// A unique constant is equal to itself.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+}
+
+method m() {
+  assert red() != red()
+}

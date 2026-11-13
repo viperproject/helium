@@ -165,6 +165,7 @@ impl PredicateTranslator<'_, Metaed> {
                         body: None,
                         requires: None,
                         ensures: None,
+                        unique: false,
                     },
                 );
                 let snap_name = definer.intern_name(&format!("{name_str}#snap"));

@@ -1,0 +1,11 @@
+// Unique constants are consistent: declaring them must not make
+// everything provable.
+domain Color {
+  unique function red(): Color
+  unique function green(): Color
+  unique function blue(): Color
+}
+
+method m() {
+  assert false
+}

@@ -58,6 +58,7 @@ impl Resource {
             body: None,
             requires: None,
             ensures: None,
+            unique: false,
         }
     }
 
