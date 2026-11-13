@@ -1,0 +1,4 @@
+// Map well-definedness: `m[k]` needs `k in m`.
+method lookup_not_in_domain(m: Map[Int, Int], k: Int) {
+  var v: Int := m[k]
+}

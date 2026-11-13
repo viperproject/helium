@@ -1,0 +1,4 @@
+// Map: the empty map has no keys.
+method empty_has_no_key() {
+  assert 0 in Map[Int, Int]()
+}

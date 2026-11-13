@@ -1,0 +1,8 @@
+// KNOWN LIMITATION: `|m| == 2` needs every key to be `true` or `false`, and
+// no axiom turns that case split over `Bool` into an upper bound on the
+// domain's cardinality.
+method bool_keys_card(m: Map[Bool, Int])
+  requires true in m && false in m
+{
+  assert |m| == 2
+}

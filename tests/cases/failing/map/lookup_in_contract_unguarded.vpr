@@ -1,0 +1,8 @@
+// Map well-definedness inside a contract: the postcondition reads `m[k]`
+// without anything guaranteeing `k in m`.
+method get(m: Map[Int, Int], k: Int) returns (v: Int)
+  ensures v == m[k]
+{
+  v := 0
+  assume false
+}

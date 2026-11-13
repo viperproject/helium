@@ -1,0 +1,28 @@
+// Map: quantifiers triggered on lookup and key membership.
+
+method all_values_positive(m: Map[Int, Int], k: Int)
+  requires forall j: Int :: { m[j] } j in m ==> m[j] > 0
+  requires k in m
+{
+  assert m[k] > 0
+}
+
+method all_keys_positive(m: Map[Int, Int], k: Int)
+  requires forall j: Int :: { j in m } j in m ==> j > 0
+  requires k in m
+{
+  assert k > 0
+}
+
+method preserved_by_update(m: Map[Int, Int], k: Int, j: Int)
+  requires forall i: Int :: { m[i] } i in m ==> m[i] > 0
+  requires j in m[k := 1]
+{
+  assert m[k := 1][j] > 0
+}
+
+method domain_by_quantifier(a: Map[Int, Int], b: Map[Int, Int])
+  requires forall k: Int :: { k in a } k in a ==> k in b
+{
+  assert domain(a) subset domain(b)
+}

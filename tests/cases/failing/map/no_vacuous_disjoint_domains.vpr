@@ -1,0 +1,7 @@
+// Map: maps with disjoint nonempty domains are consistent.
+method no_vacuous_disjoint_domains(a: Map[Int, Int], b: Map[Int, Int])
+  requires 1 in a && 2 in b
+  requires domain(a) intersection domain(b) == Set[Int]()
+{
+  assert false
+}

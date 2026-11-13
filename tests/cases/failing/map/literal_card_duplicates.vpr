@@ -1,0 +1,4 @@
+// Map: a literal with a repeated key has fewer entries.
+method literal_card_duplicates() {
+  assert |Map(1 := 10, 1 := 20)| == 2
+}

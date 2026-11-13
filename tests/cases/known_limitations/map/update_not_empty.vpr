@@ -1,0 +1,6 @@
+// KNOWN LIMITATION: telling two maps apart needs a term their axioms
+// disagree on, such as `|m[k := 0]|`; this assertion mentions none, so the
+// update's cardinality axiom never fires.
+method update_not_empty(m: Map[Int, Int], k: Int) {
+  assert m[k := 0] != Map[Int, Int]()
+}

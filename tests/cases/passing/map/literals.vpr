@@ -1,0 +1,50 @@
+// Map: literals `Map(k := v, ..)` and `Map[K,V]()`. A literal is updates on
+// the empty map, so a repeated key keeps its last value.
+
+method literal_lookup() {
+  assert Map(1 := 10, 2 := 20)[1] == 10
+  assert Map(1 := 10, 2 := 20)[2] == 20
+}
+
+method literal_keys() {
+  assert 1 in Map(1 := 10, 2 := 20)
+  assert !(3 in Map(1 := 10, 2 := 20))
+  assert domain(Map(1 := 10, 2 := 20)) == Set(1, 2)
+}
+
+method literal_values() {
+  var m: Map[Int, Int] := Map(1 := 10, 2 := 20)
+  assert m[1] in range(m)
+  assert 10 in range(m)
+}
+
+method literal_cardinality() {
+  assert |Map(1 := true)| == 1
+  assert |Map(1 := true, 2 := false)| == 2
+}
+
+method repeated_key_last_wins() {
+  assert Map(1 := 10, 1 := 20)[1] == 20
+  assert |Map(1 := 10, 1 := 20)| == 1
+  assert Map(1 := 10, 1 := 20) == Map(1 := 20)
+}
+
+method order_of_distinct_keys_is_irrelevant(j: Int, k: Int)
+  requires j != k
+{
+  assert Map(1 := 10, 2 := 20) == Map(2 := 20, 1 := 10)
+  assert Map(j := 1, k := 2) == Map(k := 2, j := 1)
+}
+
+method distinct_keys_count(j: Int, k: Int)
+  requires j != k
+{
+  assert |Map(j := 0, k := 0)| == 2
+}
+
+method empty_literal() {
+  var m: Map[Int, Int] := Map[Int, Int]()
+  assert |m| == 0
+  assert m == Map[Int, Int]()
+  assert domain(m) subset Set(1)
+}

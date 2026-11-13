@@ -1,0 +1,6 @@
+// Map: equal domains do not make equal maps; the values may differ.
+method same_domain_not_equal(a: Map[Int, Int], b: Map[Int, Int])
+  requires domain(a) == domain(b)
+{
+  assert a == b
+}

@@ -1,0 +1,6 @@
+// Map: a key is not a value.
+method key_not_in_range(m: Map[Int, Int], k: Int)
+  requires k in m
+{
+  assert k in range(m)
+}

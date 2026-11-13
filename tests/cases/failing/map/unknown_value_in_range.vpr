@@ -1,0 +1,6 @@
+// Map: nothing says an arbitrary value is in the range.
+method unknown_value_in_range(m: Map[Int, Int])
+  requires |m| > 0
+{
+  assert 5 in range(m)
+}

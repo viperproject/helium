@@ -1,0 +1,4 @@
+// Map: an arbitrary map may be empty.
+method card_may_be_zero(m: Map[Int, Int]) {
+  assert |m| > 0
+}

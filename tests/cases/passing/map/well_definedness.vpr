@@ -1,0 +1,33 @@
+// Map well-definedness: a lookup `m[k]` needs `k in m`, which a guard, a
+// precondition or an update may establish. An update needs nothing.
+
+method guarded_by_implication(m: Map[Int, Int], k: Int)
+  requires k in m ==> m[k] > 0
+{
+  assume k in m
+  assert m[k] > 0
+}
+
+method guarded_by_conditional(m: Map[Int, Int], k: Int) returns (r: Int)
+  ensures r == (k in m ? m[k] : 0)
+{
+  if (k in m) {
+    r := m[k]
+  } else {
+    r := 0
+  }
+}
+
+method after_update(m: Map[Int, Int], k: Int) {
+  var v: Int := m[k := 3][k]
+  assert v == 3
+}
+
+method update_needs_no_key(m: Map[Int, Int], k: Int) {
+  var n: Map[Int, Int] := m[k := 0]
+}
+
+method from_literal() {
+  var v: Int := Map(7 := 8)[7]
+  assert v == 8
+}

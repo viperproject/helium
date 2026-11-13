@@ -1,0 +1,6 @@
+// Map: an update sets only its own key.
+method update_leaks_to_other_key(m: Map[Int, Int], j: Int, k: Int)
+  requires k in m
+{
+  assert m[j := 1][k] == 1
+}
