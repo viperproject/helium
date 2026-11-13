@@ -153,6 +153,7 @@ pub enum Type {
     Set(Box<Type>),
     /// `Map[K, V]`, key type first.
     Map(Box<Type>, Box<Type>),
+    Multiset(Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -63,12 +63,7 @@ peg::parser! {
             / "Seq" _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
             / "Set" _ "[" _ ty:type_() _ "]" { Type::Set(Box::new(ty)) }
             / ty:map_type() { ty }
-            // `Multiset` is parsed but not implemented: it is kept as an
-            // ordinary domain type under its own name so that
-            // `scan_unsupported` can name the construct and reject only the
-            // declaration that mentions one, instead of failing the whole file
-            // with a parse error.
-            / "Multiset" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Multiset".to_string()), vec![ty]) }
+            / "Multiset" _ "[" _ ty:type_() _ "]" { Type::Multiset(Box::new(ty)) }
             / type_constr()
 
         /// `Map[K, V]`.
@@ -132,15 +127,14 @@ peg::parser! {
             = kw(<"domain">) _ "(" _ m:exp() _ ")" { ExpKind::MapDomain(m) }
             / kw(<"range">) _ "(" _ m:exp() _ ")" { ExpKind::MapRange(m) }
 
-        /// The other collection literal, `Multiset(..)`. Parsed into an
-        /// `Unsupported` marker rather than a real expression: the construct is
-        /// named, the declaration around it is rejected, and the rest of the
-        /// file still runs.
-        rule collection_exp() -> ExpKind
-            = "Multiset" _ ("[" _ type_() ** comma() _ "]")? _ "(" _ (exp() ** comma()) _ ")"
-                { ExpKind::Unsupported("Multiset") }
+        /// A multiset literal, written like a sequence literal. `kw` keeps
+        /// `Multisets(..)` a function call.
+        rule multiset_exp() -> ExpKind
+            = kw(<"Multiset">) _ ty:("[" _ ty:type_() _ "]" { ty })? _ "(" _ es:(exp() ** comma()) _ ")"
+                { ExpKind::MultisetLit(ty, es) }
 
-        /// `|s|` — the length of a sequence, the cardinality of a set.
+        /// `|s|` — the length of a sequence, the cardinality of a set, map or
+        /// multiset.
         rule cardinality_exp() -> ExpKind = "|" _ e:exp() _ "|" { ExpKind::UnOp(UnOp::Cardinality, e) }
 
         /// `[a..b)` — the sequence of the integers from `a` (inclusive) to `b`
@@ -193,7 +187,7 @@ peg::parser! {
             / set_exp()
             / map_exp()
             / map_set_exp()
-            / collection_exp()
+            / multiset_exp()
             / cardinality_exp()
             / range_exp()
             / let_in_exp()
@@ -600,8 +594,36 @@ fn set_literals_and_types() {
         parse("Set[Set[Int]]()"),
         ExpKind::SetLit(Some(Type::Set(Box::new(Type::Int))), vec![])
     );
-    // Multiset stays an unsupported construct.
-    assert_eq!(parse("Multiset(1)"), ExpKind::Unsupported("Multiset"));
+}
+
+#[test]
+fn multiset_literals_and_types() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    assert_eq!(
+        parse("Multiset[Int]()"),
+        ExpKind::MultisetLit(Some(Type::Int), vec![])
+    );
+    assert_eq!(parse("Multiset()"), ExpKind::MultisetLit(None, vec![]));
+    assert_eq!(
+        parse("Multiset(1, x, 1)"),
+        ExpKind::MultisetLit(None, vec![int_lit(1), raw_ident("x"), int_lit(1)])
+    );
+    assert_eq!(
+        parse("Multiset[Multiset[Int]]()"),
+        ExpKind::MultisetLit(Some(Type::Multiset(Box::new(Type::Int))), vec![])
+    );
+    assert!(matches!(parse("Multisets(1)"), ExpKind::Call(_)));
+    // A written `Multiset[T]` type, in a binder.
+    let ExpKind::Quantifier(_, vars, ..) = parse("forall m: Multiset[Ref] :: true") else {
+        panic!("expected a quantifier");
+    };
+    assert_eq!(vars[0].ty, Type::Multiset(Box::new(Type::Ref)));
+    // `x in m` and the set operators are the set syntax; typecheck tells a
+    // multiset apart.
+    assert!(matches!(
+        parse("x in Multiset(x)"),
+        ExpKind::BinOp(BinOp::In, ..)
+    ));
 }
 
 #[test]

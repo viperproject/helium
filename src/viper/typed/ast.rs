@@ -57,6 +57,9 @@ impl From<&crate::viper::parsed::ast::Type> for Type {
                 Box::new(Self::from(&**k)),
                 Box::new(Self::from(&**v)),
             )),
+            A::Multiset(ty) => {
+                Type::Collection(BuiltinCollection::MultiSet(Box::new(Self::from(&**ty))))
+            }
         }
     }
 }
@@ -155,6 +158,9 @@ pub enum PureExpKind<Ext> {
     /// `Set(e1, ..., en)`; empty for `Set[T]()`. The element type is the
     /// node's own `Set[T]`.
     SetLit(Vec<TypedPureExp<Ext>>),
+    /// `Multiset(e1, ..., en)`; empty for `Multiset[T]()`. The element type
+    /// is the node's own `Multiset[T]`.
+    MultisetLit(Vec<TypedPureExp<Ext>>),
     /// `s[..]`: an index, a take, a drop, a slice, or an update of `s`.
     SeqIndex(TypedPureExp<Ext>, SeqIndexOp<Ext>),
     /// `Map(k1 := v1, ..., kn := vn)`; empty for `Map[K, V]()`. The key and

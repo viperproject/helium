@@ -8,8 +8,8 @@ use crate::translate::sink::{PcKind, Sink};
 use crate::translate::{TranslationContext, TranslationError};
 use crate::viper::typed;
 use crate::vmir::{
-    self, CollKind, CollOp, FALSE, HeapInst, HeapVal, Literal, MapOp, Polarity, PureInst,
-    ResourceCall, SeqOp, SetOp, TRUE, Val,
+    self, CollKind, CollOp, FALSE, HeapInst, HeapVal, Literal, MapOp, MultisetOp, Polarity,
+    PureInst, ResourceCall, SeqOp, SetOp, TRUE, Val,
 };
 
 /// Earlier heap states an `old(...)` expression can read from, in a method
@@ -352,9 +352,10 @@ pub(crate) fn lower<Ext: PureExt>(
                 sink.emit_pure(ty, PureInst::coll([elem_ty], SeqOp::Empty, vec![]))
             }))
         }
-        P::SetLit(value) => {
-            let Some((CollKind::Set, [elem_ty])) = ty.as_coll() else {
-                panic!("set literal of type {ty}");
+        P::SetLit(value) | P::MultisetLit(value) => {
+            let Some((kind @ (CollKind::Set | CollKind::Multiset), [elem_ty])) = ty.as_coll()
+            else {
+                panic!("set or multiset literal of type {ty}");
             };
             let elem_ty = elem_ty.clone();
             let elems = value
@@ -362,15 +363,18 @@ pub(crate) fn lower<Ext: PureExt>(
                 .map(|v| lower(b, env, sink, hctx, v))
                 .collect::<Result<Vec<_>, _>>()?;
             // As Silicon does: `Set(a, b, c)` is `Set(a)` with `b`, then `c`,
-            // added (`Set_unionone`).
+            // added (`Set_unionone`), and a multiset literal likewise
+            // (`Multiset_unionone`).
             let mut elems = elems.into_iter();
             let Some(first) = elems.next() else {
-                return Ok(sink.emit_pure(ty, PureInst::coll([elem_ty], SetOp::Empty, vec![])));
+                return Ok(
+                    sink.emit_pure(ty, PureInst::coll([elem_ty], CollOp::empty(kind), vec![]))
+                );
             };
             let unit = sink.emit_pure(
                 ty.clone(),
                 PureInst::CollLit {
-                    kind: CollKind::Set,
+                    kind,
                     elem_ty: elem_ty.clone(),
                     elem: first,
                 },
@@ -378,7 +382,7 @@ pub(crate) fn lower<Ext: PureExt>(
             Ok(elems.fold(unit, |set, elem| {
                 sink.emit_pure(
                     ty.clone(),
-                    PureInst::coll([elem_ty.clone()], SetOp::Add, vec![set, elem]),
+                    PureInst::coll([elem_ty.clone()], add_one(kind), vec![set, elem]),
                 )
             }))
         }
@@ -724,8 +728,8 @@ fn lower_binary<Ext: PureExt>(
             ),
         },
         B::Union | B::SetMinus | B::Intersection | B::Subset => {
-            let (_, tys) = coll_tys(b, &l.ty);
-            sink.emit_pure(ty, PureInst::coll(tys, set_op(op), vec![lv, rv]))
+            let (kind, tys) = coll_tys(b, &l.ty);
+            sink.emit_pure(ty, PureInst::coll(tys, set_op(op, kind), vec![lv, rv]))
         }
     })
 }
@@ -1130,20 +1134,22 @@ fn lower_trig_term(
                 .reduce(|tail, head| seq_trig(&elem_ty, vmir::SeqOp::Concat, [head, tail]))
                 .unwrap_or_else(|| seq_trig(&elem_ty, vmir::SeqOp::Empty, [])))
         }
-        // A set literal, in the body's shape: a singleton with each further
-        // element added, or `SetOp::Empty`.
-        P::SetLit(elems) => {
-            let (_, tys) = coll_tys(b, &term.ty);
+        // A set or multiset literal, in the body's shape: a singleton with each
+        // further element added, or the kind's `Empty`.
+        P::SetLit(elems) | P::MultisetLit(elems) => {
+            let (kind, tys) = coll_tys(b, &term.ty);
             let mut elems = lower_args(elems)?.into_iter();
             let Some(first) = elems.next() else {
-                return Ok(coll_trig(&tys, SetOp::Empty, []));
+                return Ok(coll_trig(&tys, CollOp::empty(kind), []));
             };
             let unit = vmir::TrigTerm::App {
-                head: vmir::TrigHead::CollLit(CollKind::Set),
+                head: vmir::TrigHead::CollLit(kind),
                 type_args: tys.to_vec(),
                 args: Box::new([first]),
             };
-            Ok(elems.fold(unit, |set, elem| coll_trig(&tys, SetOp::Add, [set, elem])))
+            Ok(elems.fold(unit, |set, elem| {
+                coll_trig(&tys, add_one(kind), [set, elem])
+            }))
         }
         // A map literal, in the body's shape: updates on `MapOp::Empty`.
         P::MapLit(entries) => {
@@ -1225,7 +1231,10 @@ fn lower_trig_term(
                     }
                     (kind, tys) => coll_trig(&tys, CollOp::contains(kind), [r, l]),
                 },
-                set => coll_trig(&coll_tys(b, l_ty).1, set_op(set), [l, r]),
+                set => {
+                    let (kind, tys) = coll_tys(b, l_ty);
+                    coll_trig(&tys, set_op(set, kind), [l, r])
+                }
             })
         }
         P::Unary(..)
@@ -1270,19 +1279,41 @@ fn coll_trig<const N: usize>(
     }
 }
 
-/// The set operation of a typed set operator.
-fn set_op(op: &typed::BinOp) -> SetOp {
-    match op {
-        typed::BinOp::Union => SetOp::Union,
-        typed::BinOp::Intersection => SetOp::Intersection,
-        typed::BinOp::SetMinus => SetOp::Difference,
-        typed::BinOp::Subset => SetOp::Subset,
-        other => panic!("`{other:?}` is not a set operator"),
+/// The operation of a typed set operator on a set or a multiset, `kind`.
+fn set_op(op: &typed::BinOp, kind: CollKind) -> CollOp {
+    match kind {
+        CollKind::Set => match op {
+            typed::BinOp::Union => SetOp::Union,
+            typed::BinOp::Intersection => SetOp::Intersection,
+            typed::BinOp::SetMinus => SetOp::Difference,
+            typed::BinOp::Subset => SetOp::Subset,
+            other => panic!("`{other:?}` is not a set operator"),
+        }
+        .into(),
+        CollKind::Multiset => match op {
+            typed::BinOp::Union => MultisetOp::Union,
+            typed::BinOp::Intersection => MultisetOp::Intersection,
+            typed::BinOp::SetMinus => MultisetOp::Difference,
+            typed::BinOp::Subset => MultisetOp::Subset,
+            other => panic!("`{other:?}` is not a set operator"),
+        }
+        .into(),
+        other => panic!("a set operator on a {other:?}"),
+    }
+}
+
+/// `s union Kind(x)`, how a literal of the set or multiset `kind` adds each
+/// element after its first.
+fn add_one(kind: CollKind) -> CollOp {
+    match kind {
+        CollKind::Set => SetOp::Add.into(),
+        CollKind::Multiset => MultisetOp::Add.into(),
+        other => panic!("a {other:?} literal adds no element"),
     }
 }
 
 /// The kind and type arguments of an expression that typecheck has given a
-/// sequence, set or map type.
+/// sequence, set, map or multiset type.
 fn coll_tys(b: &TranslationContext<'_>, ty: &typed::Type) -> (CollKind, Box<[vmir::Type]>) {
     match b.lower_type(ty) {
         vmir::Type::Coll(kind, tys) => (kind, tys),

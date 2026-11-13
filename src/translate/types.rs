@@ -56,7 +56,8 @@ pub(crate) fn lower_type(
             lower_type(names, generics, k),
             lower_type(names, generics, v),
         ),
-        // Multiset is rejected by `scan_unsupported` before lowering.
-        typed::Type::Collection(BuiltinCollection::MultiSet(_)) => vmir::Type::Ref,
+        typed::Type::Collection(BuiltinCollection::MultiSet(ty)) => {
+            vmir::Type::multiset(lower_type(names, generics, ty))
+        }
     }
 }

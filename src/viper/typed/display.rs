@@ -226,7 +226,9 @@ impl<'a> Display for Show<'a, &'a Type> {
             Type::Collection(BuiltinCollection::Map(k, v)) => {
                 write!(f, "Map[{}, {}]", self.with(&**k), self.with(&**v))
             }
-            Type::Collection(_) => write!(f, "<collection>"),
+            Type::Collection(BuiltinCollection::MultiSet(t)) => {
+                write!(f, "Multiset[{}]", self.with(&**t))
+            }
             Type::Domain(id, args) => {
                 write!(f, "{}", self.name(*id))?;
                 if !args.is_empty() {
@@ -590,11 +592,13 @@ fn fmt_pure_kind<'a, Ext: ShowExt>(
         PureExpKind::AdtDiscriminator(e, variant) => {
             write!(f, "{}.is{}", show.with(e), show.name(*variant))
         }
-        PureExpKind::SeqLit(elems) | PureExpKind::SetLit(elems) => {
-            let name = if matches!(kind, PureExpKind::SeqLit(_)) {
-                "Seq"
-            } else {
-                "Set"
+        PureExpKind::SeqLit(elems)
+        | PureExpKind::SetLit(elems)
+        | PureExpKind::MultisetLit(elems) => {
+            let name = match kind {
+                PureExpKind::SeqLit(_) => "Seq",
+                PureExpKind::SetLit(_) => "Set",
+                _ => "Multiset",
             };
             write!(f, "{name}(")?;
             for (i, e) in elems.iter().enumerate() {

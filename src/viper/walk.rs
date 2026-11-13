@@ -315,6 +315,7 @@ walk_enum!(
     MagicWand(l, r),
     SeqLit(t, es),
     SetLit(t, es),
+    MultisetLit(t, es),
     MapLit(t, es),
     MapDomain(e),
     MapRange(e),
@@ -528,7 +529,8 @@ walk_enum!(
     Domain(i, ts),
     Seq(t),
     Set(t),
-    Map(k, v)
+    Map(k, v),
+    Multiset(t)
 );
 walk_struct!(
     Predicate,

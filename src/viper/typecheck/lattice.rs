@@ -20,17 +20,23 @@ pub enum ViperTcType {
     /// from an *instantiation* variable (a plain unconstrained key), which any
     /// concrete type may still pin.
     Generic(Ident),
-    /// `Seq[E]`: children `[E, Int, E]` (see [`MEMBER`]).
+    /// `Seq[E]`: children `[E, Bool, Int, E]` (see [`MEMBER`]).
     Seq,
-    /// `Set[E]`: child `[E]`.
+    /// `Set[E]`: children `[E, Bool]`.
     Set,
-    /// `Map[K, V]`: children `[K, K, V]` (see [`MEMBER`]).
+    /// `Map[K, V]`: children `[K, Bool, K, V]` (see [`MEMBER`]).
     Map,
-    /// A `Seq`, a `Set` or a `Map`, not yet known which: what `|c|` and
-    /// `x in c` ask of `c`, `x` being its [`MEMBER`] child. Abstract, like
-    /// `Numeric`, but never defaulted: a key left at `Collection` cannot be
-    /// built.
+    /// `Multiset[E]`: children `[E, Int]`: `x in m` is a count.
+    Multiset,
+    /// A `Seq`, a `Set`, a `Map` or a `Multiset`, not yet known which: what
+    /// `|c|` and `x in c` ask of `c`, `x` being its [`MEMBER`] child and
+    /// `x in c` its [`MEMBERSHIP`] child. Abstract, like `Numeric`, but never
+    /// defaulted: a key left at `Collection` cannot be built.
     Collection,
+    /// A `Set` or a `Multiset`, not yet known which: what `union`,
+    /// `intersection`, `setminus` and `subset` ask of their operands. Abstract
+    /// like `Collection`.
+    AnySet,
     /// A `Seq` or a `Map`, not yet known which: what `c[i]` and `c[i := v]`
     /// ask of `c`, `i` being its [`INDEX`] child and `c[i]` its [`ELEMENT`]
     /// child. Abstract like `Collection`.
@@ -44,21 +50,26 @@ pub enum ViperTcType {
 /// kind it may turn out to be: each kind puts the type its operations share at
 /// the same position, and repeats a type where two positions coincide.
 ///
-/// - [`MEMBER`]: what `x in c` tests, the element of a `Seq` or `Set` and the
-///   key of a `Map`.
+/// - [`MEMBER`]: what `x in c` tests, the element of a `Seq`, `Set` or
+///   `Multiset` and the key of a `Map`.
+/// - [`MEMBERSHIP`]: what `x in c` yields, a `Bool`, except for a `Multiset`,
+///   where it is the `Int` count of `x`.
 /// - [`INDEX`]: what `c[i]` takes, `Int` for a `Seq` and the key of a `Map`.
 /// - [`ELEMENT`]: what `c[i]` yields, the element of a `Seq` and the value of
 ///   a `Map`.
 ///
-/// So a `Seq[E]` is `[E, Int, E]`, a `Set[E]` is `[E]` (it has no index), and
-/// a `Map[K, V]` is `[K, K, V]`. The repeats are constraints, not lattice
-/// facts: whoever makes a key a `Seq` or `Map` equates them (see
-/// `ConstraintCtx::seq_key` and `ConstraintCtx::map_key`).
+/// So a `Seq[E]` is `[E, Bool, Int, E]`, a `Set[E]` is `[E, Bool]` and a
+/// `Multiset[E]` `[E, Int]` (they have no index), and a `Map[K, V]` is
+/// `[K, Bool, K, V]`. The fixed and repeated children are constraints, not
+/// lattice facts: whoever makes a key a collection imposes them (see
+/// `ConstraintCtx::seq_key`, `set_key`, `map_key` and `multiset_key`).
 pub const MEMBER: usize = 0;
 /// See [`MEMBER`].
-pub const INDEX: usize = 1;
+pub const MEMBERSHIP: usize = 1;
 /// See [`MEMBER`].
-pub const ELEMENT: usize = 2;
+pub const INDEX: usize = 2;
+/// See [`MEMBER`].
+pub const ELEMENT: usize = 3;
 
 /// Why a meet or construction failed. Kept structural (not a message) so the
 /// clashing types can be named once an interner is at hand — see
@@ -88,8 +99,11 @@ impl Variant for ViperTcType {
     fn arity(&self) -> Arity {
         match self {
             ViperTcType::Domain(_, n) => Arity::Fixed(*n),
-            ViperTcType::Set | ViperTcType::Collection => Arity::Fixed(1),
-            ViperTcType::Seq | ViperTcType::Map | ViperTcType::Indexable => Arity::Fixed(3),
+            ViperTcType::Set
+            | ViperTcType::Multiset
+            | ViperTcType::Collection
+            | ViperTcType::AnySet => Arity::Fixed(2),
+            ViperTcType::Seq | ViperTcType::Map | ViperTcType::Indexable => Arity::Fixed(4),
             ViperTcType::Bool
             | ViperTcType::Int
             | ViperTcType::Real
@@ -119,10 +133,13 @@ impl Variant for ViperTcType {
             (Seq, Seq) => Seq,
             (Set, Set) => Set,
             (Map, Map) => Map,
+            (Multiset, Multiset) => Multiset,
             (Collection, Collection) => Collection,
+            (AnySet, AnySet) => AnySet,
             (Indexable, Indexable) => Indexable,
-            (Collection, x @ (Seq | Set | Map | Indexable))
-            | (x @ (Seq | Set | Map | Indexable), Collection) => x,
+            (Collection, x @ (Seq | Set | Map | Multiset | AnySet | Indexable))
+            | (x @ (Seq | Set | Map | Multiset | AnySet | Indexable), Collection) => x,
+            (AnySet, x @ (Set | Multiset)) | (x @ (Set | Multiset), AnySet) => x,
             (Indexable, x @ (Seq | Map)) | (x @ (Seq | Map), Indexable) => x,
             (t1, t2) => {
                 return Err(TcTypeErr::Mismatch(t1, t2));
@@ -132,8 +149,8 @@ impl Variant for ViperTcType {
         // every other variant is 0-ary.
         let least_arity = match &variant {
             Domain(_, n) => *n,
-            Set | Collection => 1,
-            Seq | Map | Indexable => 3,
+            Set | Multiset | Collection | AnySet => 2,
+            Seq | Map | Indexable => 4,
             _ => 0,
         };
         Ok(Partial {
@@ -157,7 +174,10 @@ impl Constructable for ViperTcType {
             ViperTcType::Ref => Type::Ref,
             ViperTcType::Domain(id, _) => Type::Domain(*id, children.to_vec()),
             ViperTcType::Generic(id) => Type::Generic(*id),
-            ViperTcType::Top | ViperTcType::Collection | ViperTcType::Indexable => {
+            ViperTcType::Top
+            | ViperTcType::Collection
+            | ViperTcType::AnySet
+            | ViperTcType::Indexable => {
                 return Err(TcTypeErr::Abstract);
             }
             ViperTcType::Seq => Type::Collection(BuiltinCollection::Seq(Box::new(
@@ -170,6 +190,12 @@ impl Constructable for ViperTcType {
                 children
                     .get(MEMBER)
                     .expect("set must have a child type")
+                    .clone(),
+            ))),
+            ViperTcType::Multiset => Type::Collection(BuiltinCollection::MultiSet(Box::new(
+                children
+                    .get(MEMBER)
+                    .expect("multiset must have a child type")
                     .clone(),
             ))),
             ViperTcType::Map => Type::Collection(BuiltinCollection::Map(
@@ -204,6 +230,7 @@ pub fn type_to_tc(ty: &Type) -> ViperTcType {
         Type::Collection(BuiltinCollection::Seq(_)) => ViperTcType::Seq,
         Type::Collection(BuiltinCollection::Set(_)) => ViperTcType::Set,
         Type::Collection(BuiltinCollection::Map(..)) => ViperTcType::Map,
-        Type::Generic(_) | Type::Collection(_) => ViperTcType::Top,
+        Type::Collection(BuiltinCollection::MultiSet(_)) => ViperTcType::Multiset,
+        Type::Generic(_) => ViperTcType::Top,
     }
 }

@@ -19,7 +19,7 @@ mod lattice;
 
 use crate::viper::typed::BuiltinCollection;
 pub use error::TypeError;
-use lattice::{ELEMENT, INDEX, MEMBER, ViperTcType, type_to_tc};
+use lattice::{ELEMENT, INDEX, MEMBER, MEMBERSHIP, ViperTcType, type_to_tc};
 // ==========================================
 // 3. Context types
 // ==========================================
@@ -75,11 +75,10 @@ fn check_type(
             let expected = match globals.resolve(name).map(|s| s.signature()) {
                 Some(GlobalSignature::Domain(d)) => d.type_arity,
                 Some(GlobalSignature::Adt(a)) => a.type_arity,
-                // The collection types. `Multiset` is parsed as a named type
-                // so `scan_unsupported` can name it, and rejected there. A
-                // well-formed `Seq[T]`/`Set[T]`/`Map[K, V]` is
-                // `P::Seq`/`P::Set`/`P::Map`; they only land here with the
-                // wrong number of type arguments.
+                // The collection types. A well-formed `Seq[T]`/`Set[T]`/
+                // `Multiset[T]`/`Map[K, V]` is `P::Seq`/`P::Set`/
+                // `P::Multiset`/`P::Map`; they only land here with the wrong
+                // number of type arguments.
                 _ => match interner.resolve(&name) {
                     "Seq" | "Set" | "Multiset" => 1,
                     "Map" => 2,
@@ -96,7 +95,7 @@ fn check_type(
             args.iter()
                 .try_for_each(|a| check_type(a, globals, interner, is_param))
         }
-        P::Seq(ty) | P::Set(ty) => check_type(ty, globals, interner, is_param),
+        P::Seq(ty) | P::Set(ty) | P::Multiset(ty) => check_type(ty, globals, interner, is_param),
         P::Map(k, v) => {
             check_type(k, globals, interner, is_param)?;
             check_type(v, globals, interner, is_param)
@@ -621,9 +620,11 @@ fn collect_generics(ty: &Type, acc: &mut Vec<Spur>) {
                 collect_generics(a, acc);
             }
         }
-        Type::Collection(BuiltinCollection::Seq(ty) | BuiltinCollection::Set(ty)) => {
-            collect_generics(ty, acc)
-        }
+        Type::Collection(
+            BuiltinCollection::Seq(ty)
+            | BuiltinCollection::Set(ty)
+            | BuiltinCollection::MultiSet(ty),
+        ) => collect_generics(ty, acc),
         Type::Collection(BuiltinCollection::Map(k, v)) => {
             collect_generics(k, acc);
             collect_generics(v, acc);
@@ -674,9 +675,14 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
         let key = self.tc.new_term_key();
         exp.ty = viper::InferenceType::Infer(key);
-        // Whether a collection literal builds a sequence (else a set), read
-        // before `exp.kind` is borrowed mutably below.
-        let seq_literal = matches!(exp.kind.as_ref(), ExpKind::SeqLit(..));
+        // The collection a literal builds, read before `exp.kind` is borrowed
+        // mutably below.
+        let literal_key: fn(&mut Self, TcKey) -> Result<TcKey, TypeError> = match exp.kind.as_ref()
+        {
+            ExpKind::SeqLit(..) => Self::seq_key,
+            ExpKind::MultisetLit(..) => Self::multiset_key,
+            _ => Self::set_key,
+        };
 
         match exp.kind.as_mut() {
             ExpKind::Const(c) => {
@@ -859,12 +865,10 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
             }
 
-            ExpKind::SeqLit(ty, elems) | ExpKind::SetLit(ty, elems) => {
-                let elem = if seq_literal {
-                    self.seq_key(key)?
-                } else {
-                    self.set_key(key)?
-                };
+            ExpKind::SeqLit(ty, elems)
+            | ExpKind::SetLit(ty, elems)
+            | ExpKind::MultisetLit(ty, elems) => {
+                let elem = literal_key(self, key)?;
                 if let Some(t) = ty {
                     self.check_binder_type(t)?;
                     let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
@@ -1023,12 +1027,14 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
 
     /// [`check_type`] for a type written inside an expression; in an axiom
     /// the owning domain's parameters are in scope.
-    /// Make `key` a `Seq`, its children `[E, Int, E]` (see `lattice::MEMBER`),
-    /// and return its element key `E`. Every key made a `Seq` goes through
-    /// here, so whatever is later equated with it shares that layout.
+    /// Make `key` a `Seq`, its children `[E, Bool, Int, E]` (see
+    /// `lattice::MEMBER`), and return its element key `E`. Every key made a
+    /// `Seq` goes through here, so whatever is later equated with it shares
+    /// that layout.
     fn seq_key(&mut self, key: TcKey) -> Result<TcKey, TypeError> {
         self.tc.impose(key.concretizes_explicit(ViperTcType::Seq))?;
         let elem = self.tc.get_child_key(key, MEMBER)?;
+        self.membership(key, ViperTcType::Bool)?;
         let index = self.tc.get_child_key(key, INDEX)?;
         self.tc
             .impose(index.concretizes_explicit(ViperTcType::Int))?;
@@ -1037,17 +1043,45 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         Ok(elem)
     }
 
-    /// Make `key` a `Set` and return its element key.
+    /// Make `key` a `Set`, its children `[E, Bool]`, and return its element
+    /// key.
     fn set_key(&mut self, key: TcKey) -> Result<TcKey, TypeError> {
         self.tc.impose(key.concretizes_explicit(ViperTcType::Set))?;
+        self.membership(key, ViperTcType::Bool)?;
         Ok(self.tc.get_child_key(key, MEMBER)?)
     }
 
-    /// Make `key` a `Map`, its children `[K, K, V]` (see `lattice::MEMBER`),
-    /// and return its key and value keys `K`, `V`.
+    /// Make `key` a `Multiset`, its children `[E, Int]` (`x in m` counts),
+    /// and return its element key.
+    fn multiset_key(&mut self, key: TcKey) -> Result<TcKey, TypeError> {
+        self.tc
+            .impose(key.concretizes_explicit(ViperTcType::Multiset))?;
+        self.membership(key, ViperTcType::Int)?;
+        Ok(self.tc.get_child_key(key, MEMBER)?)
+    }
+
+    /// Make `key` a `Set` or a `Multiset`, not yet known which, and return its
+    /// element key: what the set operators ask of their operands.
+    fn any_set_key(&mut self, key: TcKey) -> Result<TcKey, TypeError> {
+        self.tc
+            .impose(key.concretizes_explicit(ViperTcType::AnySet))?;
+        Ok(self.tc.get_child_key(key, MEMBER)?)
+    }
+
+    /// Fix what `x in c` yields for the collection `key`: its
+    /// `lattice::MEMBERSHIP` child.
+    fn membership(&mut self, key: TcKey, ty: ViperTcType) -> Result<(), TypeError> {
+        let child = self.tc.get_child_key(key, MEMBERSHIP)?;
+        self.tc.impose(child.concretizes_explicit(ty))?;
+        Ok(())
+    }
+
+    /// Make `key` a `Map`, its children `[K, Bool, K, V]` (see
+    /// `lattice::MEMBER`), and return its key and value keys `K`, `V`.
     fn map_key(&mut self, key: TcKey) -> Result<(TcKey, TcKey), TypeError> {
         self.tc.impose(key.concretizes_explicit(ViperTcType::Map))?;
         let k = self.tc.get_child_key(key, MEMBER)?;
+        self.membership(key, ViperTcType::Bool)?;
         let index = self.tc.get_child_key(key, INDEX)?;
         self.tc.impose(index.equate_with(k))?;
         let v = self.tc.get_child_key(key, ELEMENT)?;
@@ -1096,7 +1130,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Real))?;
             }
-            // `|c|`: a sequence's length, a set's or a map's cardinality.
+            // `|c|`: a sequence's length, a set's, a map's or a multiset's
+            // cardinality.
             viper::UnOp::Cardinality => {
                 let inner_key = self.constrain_pure(inner)?;
                 self.tc
@@ -1167,26 +1202,27 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc.impose(key.equate_with(lk))?;
             }
-            // `x in c`: `x` has the element type of the sequence or set `c`,
-            // or the key type of the map `c`.
+            // `x in c`: `x` has the element type of the sequence, set or
+            // multiset `c`, or the key type of the map `c`. The result is a
+            // `Bool`, or for a multiset the `Int` count: `c`'s `MEMBERSHIP`.
             SBinOp::In => {
                 self.tc
                     .impose(rk.concretizes_explicit(ViperTcType::Collection))?;
                 let elem = self.tc.get_child_key(rk, MEMBER)?;
                 self.tc.impose(lk.equate_with(elem))?;
-                self.tc
-                    .impose(key.concretizes_explicit(ViperTcType::Bool))?;
+                let membership = self.tc.get_child_key(rk, MEMBERSHIP)?;
+                self.tc.impose(key.equate_with(membership))?;
             }
             // `a union b`, `a intersection b`, `a setminus b`: both sides and
-            // the result are one set type.
+            // the result are one set or multiset type.
             SBinOp::Union | SBinOp::Intersection | SBinOp::SetMinus => {
-                self.set_key(lk)?;
+                self.any_set_key(lk)?;
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc.impose(key.equate_with(lk))?;
             }
-            // `a subset b`: two sets of one type.
+            // `a subset b`: two sets, or two multisets, of one type.
             SBinOp::Subset => {
-                self.set_key(lk)?;
+                self.any_set_key(lk)?;
                 self.tc.impose(rk.equate_with(lk))?;
                 self.tc
                     .impose(key.concretizes_explicit(ViperTcType::Bool))?;
@@ -1267,7 +1303,11 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.impose_type(k_key, k, subst)?;
                 self.impose_type(v_key, v, subst)?;
             }
-            Type::Collection(BuiltinCollection::MultiSet(_)) => {}
+            // `Multiset[T]`: likewise.
+            Type::Collection(BuiltinCollection::MultiSet(elem)) => {
+                let child = self.multiset_key(key)?;
+                self.impose_type(child, elem, subst)?;
+            }
         }
         Ok(())
     }
@@ -1634,6 +1674,13 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
             )),
             // Likewise for a set literal and its `Set[T]`.
             ExpKind::SetLit(_, elems) => Ok(PureExpKind::SetLit(
+                elems
+                    .iter()
+                    .map(|e| self.lower_pure::<Ext>(e))
+                    .collect::<Result<_, _>>()?,
+            )),
+            // And for a multiset literal and its `Multiset[T]`.
+            ExpKind::MultisetLit(_, elems) => Ok(PureExpKind::MultisetLit(
                 elems
                     .iter()
                     .map(|e| self.lower_pure::<Ext>(e))
@@ -2267,6 +2314,9 @@ fn type_with_generics(ty: &viper::Type, type_params: &[lasso::Spur]) -> Type {
             Box::new(type_with_generics(k, type_params)),
             Box::new(type_with_generics(v, type_params)),
         )),
+        P::Multiset(t) => Type::Collection(BuiltinCollection::MultiSet(Box::new(
+            type_with_generics(t, type_params),
+        ))),
     }
 }
 
@@ -2559,15 +2609,15 @@ fn is_trigger_application(term: &TypedPureExp<typed::AxiomExt>) -> bool {
 
 /// The operands of a collection operation that Silicon accepts as a trigger
 /// term (`s[i]`, `|s|`, `s ++ t`, `x in s`, `Seq(..)`, take/drop/slice/update,
-/// `[a..b)`; `Set(..)`, `union`, `intersection`, `setminus`, `subset`;
-/// `Map(..)`, `m[k]`, `m[k := v]`, `domain(m)`, `range(m)`), or `None` if
-/// `term` is not one.
+/// `[a..b)`; `Set(..)`, `Multiset(..)`, `union`, `intersection`,
+/// `setminus`, `subset`; `Map(..)`, `m[k]`, `m[k := v]`, `domain(m)`,
+/// `range(m)`), or `None` if `term` is not one.
 fn coll_trigger_operands(
     term: &TypedPureExp<typed::AxiomExt>,
 ) -> Option<Vec<&TypedPureExp<typed::AxiomExt>>> {
     use PureExpKind as P;
     match term.exp.as_ref() {
-        P::SeqLit(elems) | P::SetLit(elems) => Some(elems.iter().collect()),
+        P::SeqLit(elems) | P::SetLit(elems) | P::MultisetLit(elems) => Some(elems.iter().collect()),
         P::SeqIndex(base, op) => {
             let mut v = vec![base];
             v.extend(op.operands());
@@ -2631,6 +2681,7 @@ fn check_trigger_subterms(
         | P::LetIn { .. }
         | P::SeqLit(_)
         | P::SetLit(_)
+        | P::MultisetLit(_)
         | P::SeqIndex(..)
         | P::MapLit(_)
         | P::MapIndex(..)
@@ -2674,7 +2725,7 @@ fn check_axiom_function_calls(
             check_axiom_function_calls(exp, fns_with_precond, interner)
         }
         P::DomainFunctionCall(call) | P::AdtConstructor(call) => check_call(call),
-        P::SeqLit(elems) | P::SetLit(elems) => elems
+        P::SeqLit(elems) | P::SetLit(elems) | P::MultisetLit(elems) => elems
             .iter()
             .try_for_each(|e| check_axiom_function_calls(e, fns_with_precond, interner)),
         P::SeqIndex(base, op) => {
@@ -4042,6 +4093,122 @@ method m(a: Map[Ref, Int], k: Ref, b: Bool) returns (r: Map[Ref, Int])
         ] {
             assert_rejected(src, |e| matches!(e, TypeError::Mismatch(..)));
         }
+    }
+
+    #[test]
+    fn multiset_with_wrong_type_argument_count_rejected() {
+        for decl in ["method m(x: Multiset)", "method m(x: Multiset[Int, Int])"] {
+            assert_rejected(
+                decl,
+                |e| matches!(e, TypeError::WrongTypeArgCount { name, expected: 1, .. } if name == "Multiset"),
+            );
+        }
+    }
+
+    #[test]
+    fn uninferable_empty_multiset_rejected() {
+        assert_rejected("method m() { assert |Multiset()| == 0 }", |e| {
+            matches!(e, TypeError::CannotInferType)
+        });
+    }
+
+    /// The multiset operations, and the ones it shares with sets and the other
+    /// collections: `|m|`, `x in m` (a count), the set operators, `==`, and a
+    /// literal whose type comes from the context.
+    #[test]
+    fn multiset_operations_accepted() {
+        let result = run_pipeline(
+            r#"
+method m(a: Multiset[Int], x: Int, b: Bool) returns (r: Multiset[Int])
+  requires (x in a) > 0
+{
+  r := (a union Multiset(x)) intersection (a setminus Multiset[Int]())
+  assert |a| >= 0 && (x in r) + 1 >= 1
+  assert a subset r || b
+  var e: Multiset[Set[Ref]] := Multiset()
+  var n: Multiset[Multiset[Bool]] := Multiset(Multiset(b, b), Multiset())
+  assert a == r || a != r
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    /// `x in c` is an `Int` count on a multiset and a `Bool` on every other
+    /// collection, decided only once inference is done. Each expression has
+    /// exactly the written type, and not another one.
+    #[test]
+    fn membership_is_a_count_on_a_multiset_only() {
+        let params = "ms: Multiset[Ref], s: Set[Ref], q: Seq[Ref], a: Map[Ref, Int], r: Ref";
+        for (exp, ty, wrong) in [
+            ("r in ms", "Int", "Bool"),
+            ("r in s", "Bool", "Int"),
+            ("r in q", "Bool", "Int"),
+            ("r in a", "Bool", "Int"),
+            ("r in Multiset(r, r)", "Int", "Bool"),
+            ("r in Set(r)", "Bool", "Int"),
+            ("ms union ms", "Multiset[Ref]", "Set[Ref]"),
+            ("s union s", "Set[Ref]", "Multiset[Ref]"),
+            ("ms subset ms", "Bool", "Int"),
+            ("Multiset(r)", "Multiset[Ref]", "Set[Ref]"),
+            ("Multiset[Int]()", "Multiset[Int]", "Multiset[Ref]"),
+            // A multiset of multisets, tested twice.
+            (
+                "(Multiset(ms) union Multiset(ms)) intersection Multiset(ms)",
+                "Multiset[Multiset[Ref]]",
+                "Multiset[Ref]",
+            ),
+        ] {
+            let src = |t: &str| format!("method m({params}) {{ var x: {t} := {exp} }}");
+            let ok = run_pipeline(&src(ty));
+            assert!(ok.is_ok(), "`{exp}`: {ty}: {ok:?}");
+            assert_rejected(&src(wrong), |e| matches!(e, TypeError::Mismatch(..)));
+        }
+    }
+
+    #[test]
+    fn multiset_type_mismatch_rejected() {
+        for src in [
+            // `x in m` is a count, not a condition.
+            "method m(a: Multiset[Int]) { assert 1 in a }",
+            "method m(a: Multiset[Int]) { assert (1 in a) && true }",
+            // An element of the wrong type, in `in`, a literal and an operator.
+            "method m(a: Multiset[Int]) { assert (true in a) == 0 }",
+            "method m(a: Multiset[Int]) { assert Multiset(1, true) == a }",
+            "method m(a: Multiset[Int]) { assert a subset Multiset(true) }",
+            // A set and a multiset do not mix.
+            "method m(a: Multiset[Int], s: Set[Int]) { assert a union s == a }",
+            "method m(a: Multiset[Int], s: Set[Int]) { assert s subset a }",
+            "method m(a: Multiset[Int], s: Set[Int]) { assert a == s }",
+            // A multiset has no index, no concatenation, no domain.
+            "method m(a: Multiset[Int]) { assert a[0] == 0 }",
+            "method m(a: Multiset[Int]) { assert a ++ a == a }",
+            "method m(a: Multiset[Int]) { assert 1 in domain(a) }",
+            // The set operators take no sequence or map.
+            "method m(q: Seq[Int]) { assert q union q == q }",
+        ] {
+            assert_rejected(src, |e| matches!(e, TypeError::Mismatch(..)));
+        }
+    }
+
+    /// The multiset terms Silicon accepts in a trigger are accepted here too.
+    #[test]
+    fn multiset_triggers_accepted() {
+        let result = run_pipeline(
+            r#"
+domain D {
+  function f(m: Multiset[Int]): Bool
+  axiom count { forall m: Multiset[Int], x: Int :: { x in m } f(m) }
+  axiom card { forall m: Multiset[Int] :: { |m| } f(m) }
+  axiom union { forall m: Multiset[Int], n: Multiset[Int] :: { m union n } f(m) }
+  axiom inter { forall m: Multiset[Int], n: Multiset[Int] :: { m intersection n } f(m) }
+  axiom diff { forall m: Multiset[Int], n: Multiset[Int] :: { m setminus n } f(m) }
+  axiom sub { forall m: Multiset[Int], n: Multiset[Int] :: { m subset n } f(m) }
+  axiom lit { forall x: Int :: { Multiset(x) } f(Multiset(x)) }
+}
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
 
     /// The map terms Silicon accepts in a trigger are accepted here too.

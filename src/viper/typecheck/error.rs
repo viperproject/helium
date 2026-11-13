@@ -165,7 +165,11 @@ fn viper_name(ty: &ViperTcType, interner: &Interner) -> String {
         ViperTcType::Seq => "`Seq[_]`".to_string(),
         ViperTcType::Set => "`Set[_]`".to_string(),
         ViperTcType::Map => "`Map[_, _]`".to_string(),
-        ViperTcType::Collection => "a collection (`Seq[_]`, `Set[_]` or `Map[_, _]`)".to_string(),
+        ViperTcType::Multiset => "`Multiset[_]`".to_string(),
+        ViperTcType::Collection => {
+            "a collection (`Seq[_]`, `Set[_]`, `Map[_, _]` or `Multiset[_]`)".to_string()
+        }
+        ViperTcType::AnySet => "a set or multiset (`Set[_]` or `Multiset[_]`)".to_string(),
         ViperTcType::Indexable => "an indexable collection (`Seq[_]` or `Map[_, _]`)".to_string(),
     }
 }

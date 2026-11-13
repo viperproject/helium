@@ -87,6 +87,10 @@ pub enum ExpKind {
     /// A set literal: `Set[T]()`, `Set()`, `Set(e1, ..., en)` or
     /// `Set[T](e1, ..., en)`, element type as for [`ExpKind::SeqLit`].
     SetLit(Option<Type>, Vec<Exp>),
+    /// A multiset literal: `Multiset[T]()`, `Multiset()`,
+    /// `Multiset(e1, ..., en)` or `Multiset[T](e1, ..., en)`, element type as
+    /// for [`ExpKind::SeqLit`].
+    MultisetLit(Option<Type>, Vec<Exp>),
     /// A map literal: `Map[K, V]()`, `Map()`, `Map(k1 := v1, ..., kn := vn)`
     /// or `Map[K, V](k1 := v1, ...)`. The type is the written `Map[K, V]`
     /// ([`Type::Map`]), `Some` only when written.

@@ -2036,3 +2036,141 @@ domain D {
     };
     assert_eq!(args, &[unit, TrigTerm::Var(1)]);
 }
+
+#[test]
+fn multiset_literal_lowers_to_a_singleton_with_elements_added() {
+    use vmir::{CollKind, CollOp, MultisetOp, PureInst};
+    // A repeated element is added again: it counts twice.
+    let steps =
+        coll_steps("method m(a: Int, b: Int) { var s: Multiset[Int] := Multiset(a, b, a) }");
+    let [
+        PureInst::CollLit {
+            kind: CollKind::Multiset,
+            elem: first,
+            ..
+        },
+        PureInst::Coll {
+            op: CollOp::Multiset(MultisetOp::Add),
+            ..
+        },
+        PureInst::Coll {
+            op: CollOp::Multiset(MultisetOp::Add),
+            args: outer,
+            ..
+        },
+    ] = &steps[..]
+    else {
+        panic!("expected a singleton and two additions, got {steps:?}");
+    };
+    assert_eq!(outer[1], *first, "the last element is the first one again");
+
+    let steps = coll_steps("method m() { var s: Multiset[Bool] := Multiset[Bool]() }");
+    let [
+        PureInst::Coll {
+            tys,
+            op: CollOp::Multiset(MultisetOp::Empty),
+            args,
+        },
+    ] = &steps[..]
+    else {
+        panic!("expected one empty multiset, got {steps:?}");
+    };
+    assert_eq!(tys[..], [vmir::Type::Bool]);
+    assert!(args.is_empty());
+}
+
+/// The set operators and `in` follow their operand's kind: on a multiset,
+/// they are the multiset operations, and `x in m` is the count.
+#[test]
+fn multiset_operators_lower_to_multiset_ops() {
+    use vmir::{CollOp, MultisetOp, PureInst, SetOp, Val};
+    let ops = |input: &str| -> Vec<(CollOp, Vec<Val>)> {
+        coll_steps(input)
+            .into_iter()
+            .filter_map(|pi| match pi {
+                PureInst::Coll { op, args, .. } => Some((op, args)),
+                _ => None,
+            })
+            .collect()
+    };
+    let src = |exp: &str| {
+        format!(
+            "method m(a: Multiset[Int], b: Multiset[Int], s: Set[Int], x: Int) {{ var r: Bool := {exp} }}"
+        )
+    };
+    for (exp, want) in [
+        (
+            "|a union b| == 0",
+            vec![MultisetOp::Union.into(), MultisetOp::Card.into()],
+        ),
+        (
+            "|a intersection b| == 0",
+            vec![MultisetOp::Intersection.into(), MultisetOp::Card.into()],
+        ),
+        (
+            "|a setminus b| == 0",
+            vec![MultisetOp::Difference.into(), MultisetOp::Card.into()],
+        ),
+        ("a subset b", vec![MultisetOp::Subset.into()]),
+        ("a == b", vec![MultisetOp::Eq.into()]),
+        ("(x in a) == 1", vec![MultisetOp::Count.into()]),
+        ("x in s", vec![CollOp::Set(SetOp::Contains)]),
+        ("s subset s", vec![CollOp::Set(SetOp::Subset)]),
+    ] {
+        let got: Vec<CollOp> = ops(&src(exp)).into_iter().map(|(op, _)| op).collect();
+        assert_eq!(got, want, "`{exp}`");
+    }
+    // `x in a` puts the multiset first, like `x in s` for a set.
+    let only = |exp: &str| -> Vec<Val> {
+        let [(_, args)] = &ops(&src(exp))[..] else {
+            panic!("expected one operation for `{exp}`");
+        };
+        args.clone()
+    };
+    let (sub, count) = (only("a subset b"), only("(x in a) == 1"));
+    assert_eq!(count[0], sub[0], "the multiset comes first");
+}
+
+#[test]
+fn multiset_trigger_lowers_to_multiset_heads() {
+    let input = r#"
+domain D {
+    function f(s: Multiset[Int]): Bool
+    axiom card { forall s: Multiset[Int] :: {|s|} f(s) }
+    axiom count { forall s: Multiset[Int], x: Int :: {x in s} f(s) }
+    axiom uni { forall s: Multiset[Int], t: Multiset[Int] :: {s union t} f(s) }
+    axiom sub { forall s: Multiset[Int], t: Multiset[Int] :: {s subset t} f(s) }
+    axiom lit { forall x: Int, y: Int :: {Multiset(x, y)} f(Multiset(x, y)) }
+}
+"#;
+    let p = run(input);
+    use vmir::{CollKind, CollOp, MultisetOp, TrigHead, TrigTerm};
+    let ms = |op: MultisetOp| TrigHead::Coll(CollOp::Multiset(op));
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "card")));
+    assert_eq!(*head, ms(MultisetOp::Card));
+    assert_eq!(args, &[TrigTerm::Var(0)]);
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "count")));
+    assert_eq!(*head, ms(MultisetOp::Count));
+    assert_eq!(
+        args,
+        &[TrigTerm::Var(0), TrigTerm::Var(1)],
+        "multiset first"
+    );
+
+    let (head, _) = only_app(only_group(axiom_forall(&p, "uni")));
+    assert_eq!(*head, ms(MultisetOp::Union));
+    let (head, _) = only_app(only_group(axiom_forall(&p, "sub")));
+    assert_eq!(*head, ms(MultisetOp::Subset));
+
+    // `Multiset(x, y)` is `Multiset(x)` with `y` added, as in a body.
+    let (head, args) = only_app(only_group(axiom_forall(&p, "lit")));
+    assert_eq!(*head, ms(MultisetOp::Add));
+    let unit = TrigTerm::App {
+        head: TrigHead::CollLit(CollKind::Multiset),
+        type_args: vec![vmir::Type::Int],
+        args: Box::new([TrigTerm::Var(0)]),
+    };
+    assert_eq!(args, &[unit, TrigTerm::Var(1)]);
+}
