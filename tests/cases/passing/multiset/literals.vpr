@@ -1,0 +1,38 @@
+// Multiset: literals `Multiset(..)` and `Multiset[T]()`. Order does not
+// matter, but duplicates do: each occurrence counts.
+
+method literal_count() {
+  assert (1 in Multiset(1, 2, 3)) == 1
+  assert (3 in Multiset(1, 2, 3)) == 1
+  assert (4 in Multiset(1, 2, 3)) == 0
+}
+
+method literal_cardinality() {
+  assert |Multiset(1)| == 1
+  assert |Multiset(1, 2)| == 2
+  assert |Multiset(1, 2, 3)| == 3
+}
+
+method duplicates_count(x: Int) {
+  assert |Multiset(x, x)| == 2
+  assert (x in Multiset(x, x)) == 2
+  assert (1 in Multiset(1, 2, 1)) == 2
+}
+
+method order_is_irrelevant(x: Int, y: Int) {
+  assert Multiset(1, 2) == Multiset(2, 1)
+  assert Multiset(x, y) == Multiset(y, x)
+  assert Multiset(1, 2, 1) == Multiset(1, 1, 2)
+}
+
+method duplicates_do_not_collapse(x: Int) {
+  assert Multiset(x, x) != Multiset(x)
+}
+
+method empty_literal() {
+  var s: Multiset[Int] := Multiset[Int]()
+  assert |s| == 0
+  assert s == Multiset[Int]()
+  assert s subset Multiset(1)
+  assert (1 in s) == 0
+}

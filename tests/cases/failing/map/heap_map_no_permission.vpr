@@ -1,0 +1,6 @@
+// Map: reading a map-valued field needs permission.
+field table: Map[Int, Int]
+
+method heap_map_no_permission(o: Ref) {
+  assert |o.table| >= 0
+}

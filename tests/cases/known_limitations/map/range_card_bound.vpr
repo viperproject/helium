@@ -1,0 +1,5 @@
+// KNOWN LIMITATION: no map axiom relates `|range(m)|` to `|m|`, so the
+// bound (true: every value comes from at least one key) does not follow.
+method range_card_bound(m: Map[Int, Int]) {
+  assert |range(m)| <= |m|
+}

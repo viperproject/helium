@@ -1,0 +1,25 @@
+// Multiset: together with sequences, sets and maps in one program, so the
+// collection axioms of every kind are active at once.
+
+method multiset_and_set(m: Multiset[Int], s: Set[Int], x: Int)
+  requires (x in m) > 0
+  requires x in s
+{
+  assert (x in (m union Multiset(x))) >= 2
+  assert x in (s union Set(x))
+  assert |Set(x) union Set(x)| == 1
+  assert |Multiset(x) union Multiset(x)| == 2
+}
+
+method multiset_of_seq_elements(xs: Seq[Int])
+  requires |xs| == 2
+{
+  assert |Multiset(xs[0], xs[1])| == 2
+}
+
+method multiset_values(m: Map[Int, Multiset[Int]], k: Int)
+  requires k in m
+  requires m[k] == Multiset(1, 1)
+{
+  assert (1 in m[k]) == 2
+}

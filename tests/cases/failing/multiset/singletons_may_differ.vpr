@@ -1,0 +1,4 @@
+// Multiset: two singletons are equal only when their elements are.
+method singletons_may_differ(x: Int, y: Int) {
+  assert Multiset(x) == Multiset(y)
+}

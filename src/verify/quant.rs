@@ -119,8 +119,8 @@ pub(crate) struct RecipeTable {
     /// the IR, and caching the free list keeps a re-walked body from rescanning.
     by_forall: HashMap<vmir::Forall, (RecipeId, Arc<[usize]>)>,
     /// The built-in collection axioms' recipes (`verify::coll_axioms`), by
-    /// `CollKind` (`Seq` first), each compiled on first use.
-    coll_axioms: [Option<Vec<RecipeId>>; 2],
+    /// `CollKind` (`CollKind::ALL` order), each compiled on first use.
+    coll_axioms: [Option<Vec<RecipeId>>; 4],
 }
 
 impl RecipeTable {
@@ -130,8 +130,9 @@ impl RecipeTable {
 
     /// The recipes of the built-in axioms of the collection `kind`, compiled
     /// into the table on the first call, their witnesses applications of
-    /// `skolems`. Each is a closed quantifier (no captures) whose element type
-    /// is open (`Generic(0)`), or `Int` for an axiom only about ranges.
+    /// `skolems`. Each is a closed quantifier (no captures) whose collection
+    /// type arguments are open (`Generic(0)`, and `Generic(1)` for a map's
+    /// value type), or `Int` for an axiom only about ranges.
     pub(crate) fn coll_axioms(
         &mut self,
         kind: crate::vmir::CollKind,
@@ -338,9 +339,8 @@ fn forall_generics(q: &vmir::Forall, deep: bool, out: &mut crate::dhash::HashSet
             | PureInst::AdtIs { type_args, .. } => {
                 type_args.iter().for_each(|t| t.collect_generics(out))
             }
-            PureInst::Coll { elem_ty, .. } | PureInst::CollLit { elem_ty, .. } => {
-                elem_ty.collect_generics(out)
-            }
+            PureInst::Coll { tys, .. } => tys.iter().for_each(|t| t.collect_generics(out)),
+            PureInst::CollLit { elem_ty, .. } => elem_ty.collect_generics(out),
             PureInst::Forall(inner) if deep => forall_generics(inner, deep, out),
             _ => {}
         }

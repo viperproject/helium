@@ -1,0 +1,15 @@
+// Map: the loop fills every key below `n`, but the last one is claimed missing.
+method fill(n: Int) returns (r: Map[Int, Int])
+  requires n > 0
+  ensures !(n - 1 in r)
+{
+  r := Map[Int, Int]()
+  var k: Int := 0
+  while (k < n)
+    invariant 0 <= k && k <= n
+    invariant forall i: Int :: { i in r } 0 <= i && i < k ==> i in r
+  {
+    r := r[k := k]
+    k := k + 1
+  }
+}

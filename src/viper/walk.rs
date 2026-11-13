@@ -44,6 +44,7 @@ pub trait AstWalker<'a>: Sized {
     walk_children!(walk_bin_op, 'a, BinOp);
     walk_children!(walk_un_op, 'a, UnOp);
     walk_children!(walk_trigger, 'a, Trigger);
+    walk_children!(walk_map_entry, 'a, MapEntry);
     walk_children!(walk_res_access, 'a, ResAccess);
     walk_children!(walk_block, 'a, StmtBlock);
     walk_children!(walk_statement, 'a, Statement);
@@ -111,6 +112,7 @@ pub trait AstWalkerMut<'a>: Sized {
     walk_mut_children!(walk_mut_bin_op, 'a, BinOp);
     walk_mut_children!(walk_mut_un_op, 'a, UnOp);
     walk_mut_children!(walk_mut_trigger, 'a, Trigger);
+    walk_mut_children!(walk_mut_map_entry, 'a, MapEntry);
     walk_mut_children!(walk_mut_res_access, 'a, ResAccess);
     walk_mut_children!(walk_mut_block, 'a, StmtBlock);
     walk_mut_children!(walk_mut_statement, 'a, Statement);
@@ -313,6 +315,10 @@ walk_enum!(
     MagicWand(l, r),
     SeqLit(t, es),
     SetLit(t, es),
+    MultisetLit(t, es),
+    MapLit(t, es),
+    MapDomain(e),
+    MapRange(e),
     Unsupported(what)
 );
 walk_enum!(
@@ -408,6 +414,7 @@ walk_enum!(
     Cardinality
 );
 walk_struct!(Trigger, walk_trigger, walk_mut_trigger, exp);
+walk_struct!(MapEntry, walk_map_entry, walk_mut_map_entry, key, value);
 walk_enum!(
     ResAccess,
     walk_res_access,
@@ -521,7 +528,9 @@ walk_enum!(
     Generic(g),
     Domain(i, ts),
     Seq(t),
-    Set(t)
+    Set(t),
+    Map(k, v),
+    Multiset(t)
 );
 walk_struct!(
     Predicate,

@@ -1,0 +1,6 @@
+// Multiset: inserting `x` adds one occurrence, not two.
+method insert_wrong_postcondition(s: Multiset[Int], x: Int) returns (r: Multiset[Int])
+  ensures (x in r) == (x in s) + 2
+{
+  r := s union Multiset(x)
+}

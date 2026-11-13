@@ -10,6 +10,8 @@ mod branching;
 mod functions;
 mod generations;
 mod interplay;
+mod maps;
+mod multisets;
 mod permissions;
 mod predicates;
 mod sequences;

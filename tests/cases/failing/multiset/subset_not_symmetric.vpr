@@ -1,0 +1,6 @@
+// Multiset: `a subset b` does not give `b subset a`.
+method subset_not_symmetric(a: Multiset[Int], b: Multiset[Int])
+  requires a subset b
+{
+  assert b subset a
+}

@@ -1,0 +1,4 @@
+// Multiset: `x` and `y` may be the same element, which then occurs twice.
+method literal_elements_may_alias(x: Int, y: Int) {
+  assert (x in Multiset(x, y)) == 1
+}

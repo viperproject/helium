@@ -1,0 +1,15 @@
+// Multiset: the loop adds one element per iteration, but the postcondition
+// claims one too few.
+method count_elements(xs: Seq[Int]) returns (r: Multiset[Int])
+  ensures |r| == |xs| - 1
+{
+  r := Multiset[Int]()
+  var k: Int := 0
+  while (k < |xs|)
+    invariant 0 <= k && k <= |xs|
+    invariant |r| == k
+  {
+    r := r union Multiset(xs[k])
+    k := k + 1
+  }
+}

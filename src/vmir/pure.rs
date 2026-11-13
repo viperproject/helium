@@ -115,21 +115,53 @@ pub fn write() -> Val {
     Val::Literal(Literal::Real(num::BigInt::from(1).into()))
 }
 
-/// Which built-in collection a [`Type::Coll`] is. Both are values of an
-/// element type `E`, axiomatized rather than modelled (see
-/// `verify::coll_axioms`).
+/// Which built-in collection a [`Type::Coll`] is. Each is a value over its
+/// type arguments (an element type `E`, or a key and value type `K`, `V`),
+/// axiomatized rather than modelled (see `verify::coll_axioms`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CollKind {
     Seq,
     Set,
+    Map,
+    Multiset,
 }
 
 impl CollKind {
-    /// The Viper name of the collection type, `Seq` or `Set`.
+    /// Every collection kind, in `CollKind as usize` order.
+    pub const ALL: [CollKind; 4] = [
+        CollKind::Seq,
+        CollKind::Set,
+        CollKind::Map,
+        CollKind::Multiset,
+    ];
+
+    /// The Viper name of the collection type, `Seq`, `Set`, `Map` or
+    /// `Multiset`.
     pub fn name(self) -> &'static str {
         match self {
             CollKind::Seq => "Seq",
             CollKind::Set => "Set",
+            CollKind::Map => "Map",
+            CollKind::Multiset => "Multiset",
+        }
+    }
+
+    /// How many type arguments the collection type takes: `Seq[E]`, `Set[E]`
+    /// and `Multiset[E]` one, `Map[K, V]` two.
+    pub fn arity(self) -> usize {
+        match self {
+            CollKind::Seq | CollKind::Set | CollKind::Multiset => 1,
+            CollKind::Map => 2,
+        }
+    }
+
+    /// Whether the kind has a one-element literal, `Seq(e)`, `Set(e)` or
+    /// `Multiset(e)` ([`PureInst::CollLit`]). A map literal is updates on the
+    /// empty map.
+    pub fn has_unit(self) -> bool {
+        match self {
+            CollKind::Seq | CollKind::Set | CollKind::Multiset => true,
+            CollKind::Map => false,
         }
     }
 }
@@ -142,6 +174,8 @@ impl CollKind {
 pub enum CollOp {
     Seq(SeqOp),
     Set(SetOp),
+    Map(MapOp),
+    Multiset(MultisetOp),
 }
 
 impl CollOp {
@@ -150,6 +184,8 @@ impl CollOp {
         match self {
             CollOp::Seq(_) => CollKind::Seq,
             CollOp::Set(_) => CollKind::Set,
+            CollOp::Map(_) => CollKind::Map,
+            CollOp::Multiset(_) => CollKind::Multiset,
         }
     }
 
@@ -158,6 +194,8 @@ impl CollOp {
         match kind {
             CollKind::Seq => CollOp::Seq(SeqOp::Empty),
             CollKind::Set => CollOp::Set(SetOp::Empty),
+            CollKind::Map => CollOp::Map(MapOp::Empty),
+            CollKind::Multiset => CollOp::Multiset(MultisetOp::Empty),
         }
     }
 
@@ -166,37 +204,53 @@ impl CollOp {
         match kind {
             CollKind::Seq => CollOp::Seq(SeqOp::Eq),
             CollKind::Set => CollOp::Set(SetOp::Eq),
+            CollKind::Map => CollOp::Map(MapOp::Eq),
+            CollKind::Multiset => CollOp::Multiset(MultisetOp::Eq),
         }
     }
 
-    /// `|c|`: a sequence's length or a set's cardinality.
+    /// `|c|`: a sequence's length, a set's, a map's or a multiset's
+    /// cardinality (a multiset counts every occurrence).
     pub fn size(kind: CollKind) -> CollOp {
         match kind {
             CollKind::Seq => CollOp::Seq(SeqOp::Len),
             CollKind::Set => CollOp::Set(SetOp::Card),
+            CollKind::Map => CollOp::Map(MapOp::Card),
+            CollKind::Multiset => CollOp::Multiset(MultisetOp::Card),
         }
     }
 
-    /// `x in c`: operands `[c, x]`, the collection first.
+    /// `x in c`: operands `[c, x]`, the collection first. A `Bool`, except on
+    /// a multiset, where it is the `Int` count of `x` ([`MultisetOp::Count`]).
+    /// Panics for a map, whose `k in m` is `k in domain(m)`: a set membership
+    /// (see [`MapOp`]).
     pub fn contains(kind: CollKind) -> CollOp {
         match kind {
             CollKind::Seq => CollOp::Seq(SeqOp::Contains),
             CollKind::Set => CollOp::Set(SetOp::Contains),
+            CollKind::Multiset => CollOp::Multiset(MultisetOp::Count),
+            CollKind::Map => panic!("a map's `k in m` is `k in domain(m)`, a set membership"),
         }
     }
 
     /// Whether this is the typed equality of its kind, which the verifier keeps
     /// in one e-class with the untyped `==` (see [`SeqOp::Eq`]).
     pub fn is_eq(self) -> bool {
-        matches!(self, CollOp::Seq(SeqOp::Eq) | CollOp::Set(SetOp::Eq))
+        matches!(
+            self,
+            CollOp::Seq(SeqOp::Eq)
+                | CollOp::Set(SetOp::Eq)
+                | CollOp::Map(MapOp::Eq)
+                | CollOp::Multiset(MultisetOp::Eq)
+        )
     }
 
-    /// The element type of the collection this operation works on, given the
-    /// element type written on the node: a `Range` is always on `Seq<Int>`.
-    pub fn elem_ty(self, elem_ty: &Type) -> Type {
+    /// The type arguments of the collection this operation works on, given
+    /// the ones written on the node: a `Range` is always on `Seq<Int>`.
+    pub fn coll_tys(self, tys: &[Type]) -> Box<[Type]> {
         match self {
-            CollOp::Seq(SeqOp::Range) => Type::Int,
-            _ => elem_ty.clone(),
+            CollOp::Seq(SeqOp::Range) => Box::new([Type::Int]),
+            _ => tys.into(),
         }
     }
 
@@ -205,29 +259,46 @@ impl CollOp {
         match self {
             CollOp::Seq(op) => op.arity(),
             CollOp::Set(op) => op.arity(),
+            CollOp::Map(op) => op.arity(),
+            CollOp::Multiset(op) => op.arity(),
         }
     }
 
-    /// Whether this op has the in-range side condition, so `emit_pure_guarded`
-    /// must check it (the counterpart of `BinOp::is_div_or_mod`).
-    pub fn has_bound_check(self) -> bool {
-        matches!(self, CollOp::Seq(op) if op.has_bound_check())
-    }
-
-    /// The operand types, in operand order, for a collection of element type
-    /// `elem_ty`.
-    pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
+    /// Whether this op has a side condition on its operands (a sequence index
+    /// in range, a map key present), so `emit_pure_guarded` must check it (the
+    /// counterpart of `BinOp::is_div_or_mod`).
+    pub fn has_side_condition(self) -> bool {
         match self {
-            CollOp::Seq(op) => op.operand_types(elem_ty),
-            CollOp::Set(op) => op.operand_types(elem_ty),
+            CollOp::Seq(op) => op.has_bound_check(),
+            CollOp::Set(_) | CollOp::Multiset(_) => false,
+            CollOp::Map(op) => op.has_key_check(),
         }
     }
 
-    /// The result type, for a collection of element type `elem_ty`.
-    pub fn result_type(self, elem_ty: &Type) -> Type {
+    /// The operand types, in operand order, for a collection of type
+    /// arguments `tys`.
+    pub fn operand_types(self, tys: &[Type]) -> Vec<Type> {
         match self {
-            CollOp::Seq(op) => op.result_type(elem_ty),
-            CollOp::Set(op) => op.result_type(elem_ty),
+            CollOp::Seq(op) => op.operand_types(elem_of(self, tys)),
+            CollOp::Set(op) => op.operand_types(elem_of(self, tys)),
+            CollOp::Multiset(op) => op.operand_types(elem_of(self, tys)),
+            CollOp::Map(op) => {
+                let (k, v) = key_value_of(tys);
+                op.operand_types(k, v)
+            }
+        }
+    }
+
+    /// The result type, for a collection of type arguments `tys`.
+    pub fn result_type(self, tys: &[Type]) -> Type {
+        match self {
+            CollOp::Seq(op) => op.result_type(elem_of(self, tys)),
+            CollOp::Set(op) => op.result_type(elem_of(self, tys)),
+            CollOp::Multiset(op) => op.result_type(elem_of(self, tys)),
+            CollOp::Map(op) => {
+                let (k, v) = key_value_of(tys);
+                op.result_type(k, v)
+            }
         }
     }
 
@@ -235,7 +306,26 @@ impl CollOp {
         match self {
             CollOp::Seq(op) => op.token(),
             CollOp::Set(op) => op.token(),
+            CollOp::Map(op) => op.token(),
+            CollOp::Multiset(op) => op.token(),
         }
+    }
+}
+
+/// The element type of a `Seq`, `Set` or `Multiset` operation's type
+/// arguments.
+fn elem_of(op: CollOp, tys: &[Type]) -> &Type {
+    match tys {
+        [elem] => elem,
+        _ => panic!("`{op:?}` works on one element type, got {tys:?}"),
+    }
+}
+
+/// The key and value types of a `Map` operation's type arguments.
+fn key_value_of(tys: &[Type]) -> (&Type, &Type) {
+    match tys {
+        [k, v] => (k, v),
+        _ => panic!("a map operation works on a key and a value type, got {tys:?}"),
     }
 }
 
@@ -336,6 +426,84 @@ impl SeqOp {
     }
 }
 
+/// A map operation (see [`CollOp`]). A map literal `Map(k := v, ..)` has no
+/// node of its own: it is `Update`s on `Empty`, one per entry, in order, so a
+/// repeated key keeps its last value. Nor does `k in m`: as in Silicon, it is
+/// `k in domain(m)`, a `SetOp::Contains` on `Domain`, so a trigger on either
+/// form is the same term.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MapOp {
+    /// `|m|` : Int, the number of keys.
+    Card,
+    /// `m[k]` : V. SIDECOND: `k in domain(m)`.
+    Lookup,
+    /// `m[k := v]` : Map<K, V>. Total: adds `k` if it is not a key yet.
+    Update,
+    /// `domain(m)` : Set<K>
+    Domain,
+    /// `range(m)` : Set<V>
+    Range,
+    /// `Map[K, V]()` : Map<K, V>. Takes no operands, so the node's type
+    /// arguments are all that name `K` and `V`.
+    Empty,
+    /// `m == n` : Bool, a program's equality of two maps (see [`SeqOp::Eq`]).
+    Eq,
+}
+
+impl MapOp {
+    /// How many operands `PureInst::Coll` of this operation takes.
+    pub fn arity(self) -> usize {
+        match self {
+            MapOp::Empty => 0,
+            MapOp::Card | MapOp::Domain | MapOp::Range => 1,
+            MapOp::Lookup | MapOp::Eq => 2,
+            MapOp::Update => 3,
+        }
+    }
+
+    /// Whether this op needs its key in the map, so `emit_pure_guarded` must
+    /// check it.
+    pub fn has_key_check(self) -> bool {
+        matches!(self, MapOp::Lookup)
+    }
+
+    /// The operand types, in operand order, for a map from `k` to `v`.
+    pub fn operand_types(self, k: &Type, v: &Type) -> Vec<Type> {
+        let map = || Type::map(k.clone(), v.clone());
+        match self {
+            MapOp::Empty => vec![],
+            MapOp::Card | MapOp::Domain | MapOp::Range => vec![map()],
+            MapOp::Lookup => vec![map(), k.clone()],
+            MapOp::Update => vec![map(), k.clone(), v.clone()],
+            MapOp::Eq => vec![map(), map()],
+        }
+    }
+
+    /// The result type, for a map from `k` to `v`.
+    pub fn result_type(self, k: &Type, v: &Type) -> Type {
+        match self {
+            MapOp::Card => Type::Int,
+            MapOp::Eq => Type::Bool,
+            MapOp::Lookup => v.clone(),
+            MapOp::Update | MapOp::Empty => Type::map(k.clone(), v.clone()),
+            MapOp::Domain => Type::set(k.clone()),
+            MapOp::Range => Type::set(v.clone()),
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            MapOp::Card => "map.card",
+            MapOp::Lookup => "map.at",
+            MapOp::Update => "map.upd",
+            MapOp::Domain => "map.domain",
+            MapOp::Range => "map.range",
+            MapOp::Empty => "map.empty",
+            MapOp::Eq => "map.eq",
+        }
+    }
+}
+
 /// A set operation (see [`CollOp`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SetOp {
@@ -416,6 +584,98 @@ impl SetOp {
     }
 }
 
+/// A multiset operation (see [`CollOp`]). The operators are the set ones, on
+/// counts: a union adds them, an intersection takes the smaller, a difference
+/// subtracts down to zero, and `x in m` is not a `Bool` but the `Int` count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MultisetOp {
+    /// `|m|` : Int, every occurrence counted.
+    Card,
+    /// `x in m` : Int, how often `x` occurs in `m` (Silicon's
+    /// `Multiset_count`). Operands are `[m, x]`: the multiset always comes
+    /// first.
+    Count,
+    /// `m union n` : Multiset<T>, the counts added.
+    Union,
+    /// `m intersection n` : Multiset<T>, the smaller count.
+    Intersection,
+    /// `m setminus n` : Multiset<T>, the count of `m` less that of `n`, at
+    /// least zero.
+    Difference,
+    /// `m subset n` : Bool, every count of `m` at most that of `n`.
+    Subset,
+    /// `m union Multiset(x)` : Multiset<T>, Silicon's `Multiset_unionone`. No
+    /// surface syntax: a literal `Multiset(a, b, c)` is `Multiset(a)` with `b`,
+    /// then `c`, added (as for [`SetOp::Add`]).
+    Add,
+    /// `Multiset[T]()` : Multiset<T>. Takes no operands, so `elem_ty` is all
+    /// that names `T`.
+    Empty,
+    /// `m == n` : Bool, a program's equality of two multisets (see
+    /// [`SeqOp::Eq`]).
+    Eq,
+}
+
+impl MultisetOp {
+    /// How many operands `PureInst::Coll` of this operation takes.
+    pub fn arity(self) -> usize {
+        match self {
+            MultisetOp::Empty => 0,
+            MultisetOp::Card => 1,
+            MultisetOp::Count
+            | MultisetOp::Union
+            | MultisetOp::Intersection
+            | MultisetOp::Difference
+            | MultisetOp::Subset
+            | MultisetOp::Add
+            | MultisetOp::Eq => 2,
+        }
+    }
+
+    /// The operand types, in operand order, for a multiset of element type
+    /// `elem_ty`.
+    pub fn operand_types(self, elem_ty: &Type) -> Vec<Type> {
+        let ms = || Type::multiset(elem_ty.clone());
+        match self {
+            MultisetOp::Empty => vec![],
+            MultisetOp::Card => vec![ms()],
+            MultisetOp::Count | MultisetOp::Add => vec![ms(), elem_ty.clone()],
+            MultisetOp::Union
+            | MultisetOp::Intersection
+            | MultisetOp::Difference
+            | MultisetOp::Subset
+            | MultisetOp::Eq => vec![ms(), ms()],
+        }
+    }
+
+    /// The result type, for a multiset of element type `elem_ty`.
+    pub fn result_type(self, elem_ty: &Type) -> Type {
+        match self {
+            MultisetOp::Card | MultisetOp::Count => Type::Int,
+            MultisetOp::Subset | MultisetOp::Eq => Type::Bool,
+            MultisetOp::Union
+            | MultisetOp::Intersection
+            | MultisetOp::Difference
+            | MultisetOp::Add
+            | MultisetOp::Empty => Type::multiset(elem_ty.clone()),
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            MultisetOp::Card => "mset.card",
+            MultisetOp::Count => "mset.count",
+            MultisetOp::Union => "mset.union",
+            MultisetOp::Intersection => "mset.inter",
+            MultisetOp::Difference => "mset.diff",
+            MultisetOp::Subset => "mset.subset",
+            MultisetOp::Add => "mset.add",
+            MultisetOp::Empty => "mset.empty",
+            MultisetOp::Eq => "mset.eq",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PureInst {
     Fresh,
@@ -475,20 +735,22 @@ pub enum PureInst {
         base: Val,
     },
 
-    /// The singleton collection `Seq(elem)` or `Set(elem)`. A longer sequence
-    /// literal is a right-nested concatenation of these, `Seq(a, b, c)` being
-    /// `Seq(a) ++ (Seq(b) ++ Seq(c))`; a longer set literal adds each further
-    /// element (`SetOp::Add`); an empty one is the kind's `Empty`.
+    /// The singleton collection `Seq(elem)`, `Set(elem)` or `Multiset(elem)`.
+    /// A longer sequence literal is a right-nested concatenation of these,
+    /// `Seq(a, b, c)` being `Seq(a) ++ (Seq(b) ++ Seq(c))`; a longer set or
+    /// multiset literal adds each further element (`SetOp::Add`,
+    /// `MultisetOp::Add`); an empty one is the kind's `Empty`. Never a `Map`
+    /// (see [`CollKind::has_unit`]).
     CollLit {
         kind: CollKind,
         elem_ty: Type,
         elem: Val,
     },
     /// A collection operation. Build it with `PureInst::coll`, which checks the
-    /// arity. `elem_ty` is the element type of the collection it works on (`Int`
-    /// for `Range`): the result does not always say, as `|s|` shows.
+    /// arity. `tys` are the type arguments of the collection it works on
+    /// (`[Int]` for `Range`): the result does not always say, as `|s|` shows.
     Coll {
-        elem_ty: Type,
+        tys: Box<[Type]>,
         op: CollOp,
         args: Vec<Val>,
     },
@@ -528,15 +790,38 @@ impl PureInst {
             PureInst::Coll { args, .. } => args.iter().for_each(&mut *f),
         }
     }
-    pub fn coll(elem_ty: Type, op: impl Into<CollOp>, args: Vec<Val>) -> PureInst {
+    /// The collection operation `op` on a collection of type arguments `tys`.
+    /// Panics if `args` or `tys` do not have the lengths `op` takes.
+    pub fn coll(tys: impl Into<Box<[Type]>>, op: impl Into<CollOp>, args: Vec<Val>) -> PureInst {
         let op = op.into();
+        let tys = tys.into();
         assert_eq!(
             args.len(),
             op.arity(),
             "`{op:?}` takes {} operands, got {args:?}",
             op.arity()
         );
-        PureInst::Coll { elem_ty, op, args }
+        assert_eq!(
+            tys.len(),
+            op.kind().arity(),
+            "`{op:?}` takes {} type arguments, got {tys:?}",
+            op.kind().arity()
+        );
+        PureInst::Coll { tys, op, args }
+    }
+
+    /// The singleton `kind(elem)`. Panics for a kind without one (a `Map`).
+    pub fn coll_lit(kind: CollKind, elem_ty: Type, elem: Val) -> PureInst {
+        assert!(
+            kind.has_unit(),
+            "`{}` has no one-element literal",
+            kind.name()
+        );
+        PureInst::CollLit {
+            kind,
+            elem_ty,
+            elem,
+        }
     }
 }
 
@@ -633,21 +918,38 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
             } => {
                 write!(f, "{}<{}>({elem})", kind.name(), self.with(elem_ty))
             }
-            PureInst::Coll { elem_ty, op, args } => {
-                use CollOp::{Seq, Set};
+            PureInst::Coll { tys, op, args } => {
+                use CollOp::{Map, Multiset, Seq, Set};
+                use MultisetOp as Ms;
                 match (op, args.as_slice()) {
-                    (Seq(SeqOp::Empty) | Set(SetOp::Empty), []) => {
-                        write!(f, "{}<{}>()", op.kind().name(), self.with(elem_ty))
+                    (
+                        Seq(SeqOp::Empty) | Set(SetOp::Empty) | Map(MapOp::Empty)
+                        | Multiset(Ms::Empty),
+                        [],
+                    ) => {
+                        let tys: Vec<String> =
+                            tys.iter().map(|t| self.with(t).to_string()).collect();
+                        write!(f, "{}<{}>()", op.kind().name(), tys.join(", "))
                     }
-                    (Seq(SeqOp::Len) | Set(SetOp::Card), [s]) => write!(f, "|{s}|"),
+                    (
+                        Seq(SeqOp::Len) | Set(SetOp::Card) | Map(MapOp::Card) | Multiset(Ms::Card),
+                        [s],
+                    ) => {
+                        write!(f, "|{s}|")
+                    }
                     (Seq(SeqOp::Concat), [s, t]) => write!(f, "{s} ++ {t}"),
                     (Seq(SeqOp::Index), [s, i]) => write!(f, "{s}[{i}]"),
                     (Seq(SeqOp::Update), [s, i, v]) => write!(f, "{s}[{i} := {v}]"),
                     (Seq(SeqOp::Take), [s, n]) => write!(f, "{s}[..{n}]"),
                     (Seq(SeqOp::Drop), [s, n]) => write!(f, "{s}[{n}..]"),
-                    (Seq(SeqOp::Contains) | Set(SetOp::Contains), [s, x]) => {
+                    (Seq(SeqOp::Contains) | Set(SetOp::Contains) | Multiset(Ms::Count), [s, x]) => {
                         write!(f, "{x} in {s}")
                     }
+                    (Map(MapOp::Lookup), [m, k]) => write!(f, "{m}[{k}]"),
+                    (Map(MapOp::Update), [m, k, v]) => write!(f, "{m}[{k} := {v}]"),
+                    (Map(MapOp::Domain), [m]) => write!(f, "domain({m})"),
+                    (Map(MapOp::Range), [m]) => write!(f, "range({m})"),
+                    (Map(MapOp::Eq), [m, n]) => write!(f, "{m} ==map {n}"),
                     (Seq(SeqOp::Range), [a, b]) => write!(f, "[{a}..{b})"),
                     (Seq(SeqOp::Eq), [s, t]) => write!(f, "{s} ==seq {t}"),
                     (Set(SetOp::Union), [s, t]) => write!(f, "{s} union {t}"),
@@ -656,6 +958,12 @@ impl<'a> Display for VmirDisplay<'a, &'a PureInst> {
                     (Set(SetOp::Subset), [s, t]) => write!(f, "{s} subset {t}"),
                     (Set(SetOp::Add), [s, x]) => write!(f, "{s} add {x}"),
                     (Set(SetOp::Eq), [s, t]) => write!(f, "{s} ==set {t}"),
+                    (Multiset(Ms::Union), [s, t]) => write!(f, "{s} union {t}"),
+                    (Multiset(Ms::Intersection), [s, t]) => write!(f, "{s} intersection {t}"),
+                    (Multiset(Ms::Difference), [s, t]) => write!(f, "{s} setminus {t}"),
+                    (Multiset(Ms::Subset), [s, t]) => write!(f, "{s} subset {t}"),
+                    (Multiset(Ms::Add), [s, x]) => write!(f, "{s} add {x}"),
+                    (Multiset(Ms::Eq), [s, t]) => write!(f, "{s} ==mset {t}"),
                     (op, args) => unreachable!(
                         "`{op:?}` with {} operands; `PureInst::coll` checks arity",
                         args.len()
@@ -690,8 +998,8 @@ mod tests {
         for op in SET_OPS {
             let c = CollOp::from(op);
             assert_eq!(c.kind(), CollKind::Set);
-            assert_eq!(c.operand_types(&Type::Int).len(), c.arity(), "{op:?}");
-            assert!(!c.has_bound_check(), "{op:?}");
+            assert_eq!(c.operand_types(&[Type::Int]).len(), c.arity(), "{op:?}");
+            assert!(!c.has_side_condition(), "{op:?}");
             assert!(tokens.insert(c.token()), "{op:?} reuses a token");
         }
         assert_eq!(CollOp::size(CollKind::Set), SetOp::Card.into());
@@ -704,6 +1012,113 @@ mod tests {
     #[test]
     #[should_panic(expected = "takes 2 operands")]
     fn coll_checks_set_arity() {
-        PureInst::coll(Type::Int, SetOp::Union, vec![Val::Temp(0)]);
+        PureInst::coll([Type::Int], SetOp::Union, vec![Val::Temp(0)]);
+    }
+
+    const MAP_OPS: [MapOp; 7] = [
+        MapOp::Card,
+        MapOp::Lookup,
+        MapOp::Update,
+        MapOp::Domain,
+        MapOp::Range,
+        MapOp::Empty,
+        MapOp::Eq,
+    ];
+
+    /// Every map operation's operand types agree with its arity, it works on a
+    /// map, and its token is its own; only a lookup has a side condition.
+    #[test]
+    fn map_op_tables_agree() {
+        let tys = [Type::Ref, Type::Bool];
+        let mut tokens = std::collections::HashSet::new();
+        for op in MAP_OPS {
+            let c = CollOp::from(op);
+            assert_eq!(c.kind(), CollKind::Map);
+            assert_eq!(c.operand_types(&tys).len(), c.arity(), "{op:?}");
+            assert_eq!(c.has_side_condition(), op == MapOp::Lookup, "{op:?}");
+            assert!(tokens.insert(c.token()), "{op:?} reuses a token");
+        }
+        assert_eq!(CollOp::size(CollKind::Map), MapOp::Card.into());
+        assert_eq!(CollOp::empty(CollKind::Map), MapOp::Empty.into());
+        assert!(CollOp::eq(CollKind::Map).is_eq());
+        assert!(!CollKind::Map.has_unit());
+    }
+
+    /// A lookup yields a value, `domain` a set of keys, `range` a set of
+    /// values, and an update takes a key and a value in that order.
+    #[test]
+    fn map_op_types() {
+        let tys = [Type::Ref, Type::Bool];
+        let c = |op: MapOp| CollOp::from(op);
+        assert_eq!(c(MapOp::Lookup).result_type(&tys), Type::Bool);
+        assert_eq!(c(MapOp::Domain).result_type(&tys), Type::set(Type::Ref));
+        assert_eq!(c(MapOp::Range).result_type(&tys), Type::set(Type::Bool));
+        assert_eq!(
+            c(MapOp::Update).operand_types(&tys),
+            [Type::map(Type::Ref, Type::Bool), Type::Ref, Type::Bool]
+        );
+        assert_eq!(c(MapOp::Card).result_type(&tys), Type::Int);
+    }
+
+    #[test]
+    #[should_panic(expected = "takes 2 type arguments")]
+    fn coll_checks_map_type_arity() {
+        PureInst::coll([Type::Int], MapOp::Card, vec![Val::Temp(0)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "has no one-element literal")]
+    fn map_has_no_unit() {
+        PureInst::coll_lit(CollKind::Map, Type::Int, Val::Temp(0));
+    }
+
+    const MULTISET_OPS: [MultisetOp; 9] = [
+        MultisetOp::Card,
+        MultisetOp::Count,
+        MultisetOp::Union,
+        MultisetOp::Intersection,
+        MultisetOp::Difference,
+        MultisetOp::Subset,
+        MultisetOp::Add,
+        MultisetOp::Empty,
+        MultisetOp::Eq,
+    ];
+
+    /// Every multiset operation's operand types agree with its arity, it works
+    /// on a multiset, and its token is its own, distinct from the set ones.
+    #[test]
+    fn multiset_op_tables_agree() {
+        let mut tokens: std::collections::HashSet<_> =
+            SET_OPS.iter().map(|op| CollOp::from(*op).token()).collect();
+        for op in MULTISET_OPS {
+            let c = CollOp::from(op);
+            assert_eq!(c.kind(), CollKind::Multiset);
+            assert_eq!(c.operand_types(&[Type::Int]).len(), c.arity(), "{op:?}");
+            assert!(!c.has_side_condition(), "{op:?}");
+            assert!(tokens.insert(c.token()), "{op:?} reuses a token");
+        }
+        assert_eq!(CollOp::size(CollKind::Multiset), MultisetOp::Card.into());
+        assert_eq!(
+            CollOp::contains(CollKind::Multiset),
+            MultisetOp::Count.into()
+        );
+        assert_eq!(CollOp::empty(CollKind::Multiset), MultisetOp::Empty.into());
+        assert!(CollOp::eq(CollKind::Multiset).is_eq());
+        assert!(CollKind::Multiset.has_unit());
+    }
+
+    /// `x in m` on a multiset is the `Int` count, not a `Bool`.
+    #[test]
+    fn multiset_count_is_an_int() {
+        let c = CollOp::from(MultisetOp::Count);
+        assert_eq!(c.result_type(&[Type::Ref]), Type::Int);
+        assert_eq!(
+            c.operand_types(&[Type::Ref]),
+            [Type::multiset(Type::Ref), Type::Ref]
+        );
+        assert_eq!(
+            CollOp::from(MultisetOp::Union).result_type(&[Type::Ref]),
+            Type::multiset(Type::Ref)
+        );
     }
 }

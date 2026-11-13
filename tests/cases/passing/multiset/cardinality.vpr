@@ -1,0 +1,34 @@
+// Multiset: cardinality counts every occurrence, so the cardinality of a
+// union is the sum of the cardinalities of both sides.
+
+method card_nonneg(a: Multiset[Int]) {
+  assert |a| >= 0
+}
+
+method card_of_union(a: Multiset[Int], b: Multiset[Int]) {
+  assert |a union b| == |a| + |b|
+}
+
+method card_of_difference(a: Multiset[Int], b: Multiset[Int]) {
+  assert |a setminus b| == |a| - |a intersection b|
+}
+
+method card_zero_is_empty(a: Multiset[Int])
+  requires |a| == 0
+{
+  assert a == Multiset[Int]()
+}
+
+method nonempty_has_member(a: Multiset[Int], x: Int)
+  requires (x in a) > 0
+{
+  assert |a| > 0
+}
+
+method adding_grows(a: Multiset[Int], x: Int) {
+  assert |a union Multiset(x)| == |a| + 1
+}
+
+method literal_with_repeats(x: Int, y: Int) {
+  assert |Multiset(x, y, x)| == 3
+}

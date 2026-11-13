@@ -1,0 +1,4 @@
+// Multiset: an arbitrary multiset may be empty.
+method card_may_be_zero(a: Multiset[Int]) {
+  assert |a| > 0
+}

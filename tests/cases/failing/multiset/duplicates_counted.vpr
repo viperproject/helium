@@ -1,0 +1,4 @@
+// Multiset: unlike a set, a repeated element counts twice.
+method duplicates_counted(x: Int) {
+  assert |Multiset(x, x)| == 1
+}

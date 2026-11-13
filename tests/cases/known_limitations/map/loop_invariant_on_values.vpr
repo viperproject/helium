@@ -1,0 +1,18 @@
+// KNOWN LIMITATION: preserving the invariant needs the old value `r[i]` for
+// each `i < k`, but the update's lookup axiom yields it only once `i in r` is
+// known, which in turn comes from the old invariant: the instantiations
+// depend on each other and never start.
+method squares(n: Int) returns (r: Map[Int, Int])
+  requires n >= 0
+  ensures forall i: Int :: { r[i] } 0 <= i && i < n ==> i in r && r[i] == i * i
+{
+  r := Map[Int, Int]()
+  var k: Int := 0
+  while (k < n)
+    invariant 0 <= k && k <= n
+    invariant forall i: Int :: { r[i] } 0 <= i && i < k ==> i in r && r[i] == i * i
+  {
+    r := r[k := k * k]
+    k := k + 1
+  }
+}

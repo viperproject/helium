@@ -1,0 +1,94 @@
+// Multiset: union, intersection, setminus and subset, and their algebra.
+// Union adds the counts, intersection takes the smaller one, setminus
+// subtracts down to zero, and subset compares the counts.
+
+method union_adds_counts(a: Multiset[Int], b: Multiset[Int], x: Int) {
+  assert (x in (a union b)) == (x in a) + (x in b)
+}
+
+method union_commutative(a: Multiset[Int], b: Multiset[Int]) {
+  assert a union b == b union a
+}
+
+method intersection_commutative(a: Multiset[Int], b: Multiset[Int]) {
+  assert a intersection b == b intersection a
+}
+
+method intersection_takes_minimum(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in a) <= (x in b)
+{
+  assert (x in (a intersection b)) == (x in a)
+}
+
+method intersection_idempotent(a: Multiset[Int], b: Multiset[Int]) {
+  assert (a intersection b) intersection b == a intersection b
+  assert a intersection (a intersection b) == a intersection b
+}
+
+method union_with_empty(a: Multiset[Int]) {
+  assert a union Multiset[Int]() == a
+}
+
+method intersection_with_empty(a: Multiset[Int]) {
+  assert a intersection Multiset[Int]() == Multiset[Int]()
+}
+
+method difference_subtracts(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in b) <= (x in a)
+{
+  assert (x in (a setminus b)) == (x in a) - (x in b)
+}
+
+method difference_clips_at_zero(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in a) <= (x in b)
+{
+  assert (x in (a setminus b)) == 0
+}
+
+method subset_of_union(a: Multiset[Int], b: Multiset[Int]) {
+  assert a subset (a union b)
+  assert b subset (a union b)
+}
+
+method intersection_is_subset(a: Multiset[Int], b: Multiset[Int]) {
+  assert (a intersection b) subset a
+  assert (a intersection b) subset b
+}
+
+method difference_is_subset(a: Multiset[Int], b: Multiset[Int]) {
+  assert (a setminus b) subset a
+}
+
+method subset_reflexive(a: Multiset[Int]) {
+  assert a subset a
+}
+
+method empty_is_subset(a: Multiset[Int]) {
+  assert Multiset[Int]() subset a
+}
+
+method subset_counts(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires a subset b
+{
+  assert (x in a) <= (x in b)
+}
+
+method subset_transitive(a: Multiset[Int], b: Multiset[Int], c: Multiset[Int])
+  requires a subset b && b subset c
+{
+  assert a subset c
+}
+
+method subset_antisymmetric(a: Multiset[Int], b: Multiset[Int])
+  requires a subset b && b subset a
+{
+  assert a == b
+}
+
+method literal_operations() {
+  assert Multiset(1, 2) union Multiset(2, 3) == Multiset(1, 2, 2, 3)
+  assert Multiset(1, 2, 2) intersection Multiset(2, 3) == Multiset(2)
+  assert Multiset(1, 2, 2) setminus Multiset(2, 3) == Multiset(1, 2)
+  assert Multiset(1) subset Multiset(1, 2)
+  assert !(Multiset(1, 1) subset Multiset(1, 2))
+}

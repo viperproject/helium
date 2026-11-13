@@ -1,0 +1,6 @@
+// Multiset: a union adds the counts, it does not take the larger one.
+method union_count_not_max(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in a) == 1 && (x in b) == 1
+{
+  assert (x in (a union b)) == 1
+}

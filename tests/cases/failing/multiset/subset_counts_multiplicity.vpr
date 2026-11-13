@@ -1,0 +1,4 @@
+// Multiset: two `x` are not included in one `x`.
+method subset_counts_multiplicity(x: Int) {
+  assert Multiset(x, x) subset Multiset(x)
+}

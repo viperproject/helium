@@ -1,0 +1,14 @@
+// Map: a callee holding the field may change the map.
+field table: Map[Int, Int]
+
+method callee(o: Ref)
+  requires acc(o.table)
+  ensures acc(o.table)
+
+method heap_map_havoc_on_call(o: Ref)
+  requires acc(o.table) && 1 in o.table
+  ensures acc(o.table)
+{
+  callee(o)
+  assert 1 in o.table
+}

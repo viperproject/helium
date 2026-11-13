@@ -1,0 +1,6 @@
+// Multiset: a literal equal to a variable says nothing about other elements.
+method no_vacuous_literal_equality(a: Multiset[Int], y: Int)
+  requires a == Multiset(1, 2)
+{
+  assert (y in a) > 0
+}

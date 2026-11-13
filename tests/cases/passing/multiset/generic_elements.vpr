@@ -1,0 +1,40 @@
+// Multiset: element types other than `Int`, including multisets of other
+// collections and of domain types.
+
+domain Pair[A, B] {
+  function pair(a: A, b: B): Pair[A, B]
+  function fst(p: Pair[A, B]): A
+  axiom fst_pair { forall a: A, b: B :: { pair(a, b) } fst(pair(a, b)) == a }
+}
+
+method ref_elements(x: Ref, y: Ref)
+  requires x != y
+{
+  assert (x in Multiset(x, y, x)) == 2
+  assert (y in Multiset(x, y, x)) == 1
+}
+
+method seq_elements(s: Seq[Int]) {
+  assert (s in Multiset(s, Seq(1))) >= 1
+  assert |Multiset(s, s)| == 2
+}
+
+method set_elements(s: Set[Int]) {
+  assert (s in Multiset(s)) == 1
+}
+
+method nested_multisets(m: Multiset[Int]) {
+  assert (m in Multiset(m, m)) == 2
+  assert (Multiset[Int]() in Multiset(Multiset[Int]())) == 1
+}
+
+method domain_elements(p: Pair[Int, Bool]) {
+  assert (p in Multiset(p)) == 1
+  assert fst(pair(1, true)) == 1
+}
+
+function count_in(m: Multiset[Ref], r: Ref): Int
+  ensures result >= 0
+{
+  r in m
+}

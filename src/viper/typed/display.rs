@@ -223,7 +223,12 @@ impl<'a> Display for Show<'a, &'a Type> {
             Type::Generic(id) => write!(f, "{}", self.name(*id)),
             Type::Collection(BuiltinCollection::Seq(t)) => write!(f, "Seq[{}]", self.with(&**t)),
             Type::Collection(BuiltinCollection::Set(t)) => write!(f, "Set[{}]", self.with(&**t)),
-            Type::Collection(_) => write!(f, "<collection>"),
+            Type::Collection(BuiltinCollection::Map(k, v)) => {
+                write!(f, "Map[{}, {}]", self.with(&**k), self.with(&**v))
+            }
+            Type::Collection(BuiltinCollection::MultiSet(t)) => {
+                write!(f, "Multiset[{}]", self.with(&**t))
+            }
             Type::Domain(id, args) => {
                 write!(f, "{}", self.name(*id))?;
                 if !args.is_empty() {
@@ -587,11 +592,13 @@ fn fmt_pure_kind<'a, Ext: ShowExt>(
         PureExpKind::AdtDiscriminator(e, variant) => {
             write!(f, "{}.is{}", show.with(e), show.name(*variant))
         }
-        PureExpKind::SeqLit(elems) | PureExpKind::SetLit(elems) => {
-            let name = if matches!(kind, PureExpKind::SeqLit(_)) {
-                "Seq"
-            } else {
-                "Set"
+        PureExpKind::SeqLit(elems)
+        | PureExpKind::SetLit(elems)
+        | PureExpKind::MultisetLit(elems) => {
+            let name = match kind {
+                PureExpKind::SeqLit(_) => "Seq",
+                PureExpKind::SetLit(_) => "Set",
+                _ => "Multiset",
             };
             write!(f, "{name}(")?;
             for (i, e) in elems.iter().enumerate() {
@@ -616,6 +623,27 @@ fn fmt_pure_kind<'a, Ext: ShowExt>(
                 }
             }
         }
+        PureExpKind::MapLit(entries) => {
+            write!(f, "Map(")?;
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{} := {}", show.with(k), show.with(v))?;
+            }
+            write!(f, ")")
+        }
+        PureExpKind::MapIndex(base, op) => {
+            let m = show.with(base);
+            match op {
+                crate::viper::typed::MapIndexOp::Lookup(k) => write!(f, "{m}[{}]", show.with(k)),
+                crate::viper::typed::MapIndexOp::Update(k, v) => {
+                    write!(f, "{m}[{} := {}]", show.with(k), show.with(v))
+                }
+            }
+        }
+        PureExpKind::MapDomain(m) => write!(f, "domain({})", show.with(m)),
+        PureExpKind::MapRange(m) => write!(f, "range({})", show.with(m)),
         PureExpKind::Ext(ext) => ext.fmt_ext(f, show.interner),
     }
 }

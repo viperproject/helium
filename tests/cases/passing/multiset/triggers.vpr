@@ -1,0 +1,28 @@
+// Multiset: quantifiers triggered on the count `x in m`.
+
+method all_positive(m: Multiset[Int], k: Int)
+  requires forall j: Int :: { j in m } (j in m) > 0 ==> j > 0
+  requires (k in m) > 0
+{
+  assert k > 0
+}
+
+method at_most_once(m: Multiset[Int], k: Int)
+  requires forall j: Int :: { j in m } (j in m) <= 1
+{
+  assert (k in m) <= 1
+}
+
+method preserved_by_union(a: Multiset[Int], b: Multiset[Int], k: Int)
+  requires forall j: Int :: { j in a } (j in a) > 0 ==> j > 0
+  requires forall j: Int :: { j in b } (j in b) > 0 ==> j > 0
+  requires (k in (a union b)) > 0
+{
+  assert k > 0
+}
+
+method subset_by_quantifier(a: Multiset[Int], b: Multiset[Int])
+  requires forall k: Int :: { k in a } { k in b } (k in a) <= (k in b)
+{
+  assert a subset b
+}

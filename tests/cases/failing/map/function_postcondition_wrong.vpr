@@ -1,0 +1,7 @@
+// Map: a function's postcondition claims the old value survives the update.
+function put(m: Map[Int, Int], k: Int, v: Int): Map[Int, Int]
+  requires k in m
+  ensures result[k] == m[k]
+{
+  m[k := v]
+}

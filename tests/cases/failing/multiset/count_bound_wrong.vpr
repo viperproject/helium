@@ -1,0 +1,6 @@
+// Multiset: a count is bounded by the cardinality, not below it.
+method count_bound_wrong(a: Multiset[Int], x: Int)
+  requires |a| == 3
+{
+  assert (x in a) < 3
+}

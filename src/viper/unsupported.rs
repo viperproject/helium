@@ -56,11 +56,6 @@ fn mentions_acc(exp: &Exp) -> bool {
     find.0
 }
 
-/// The collection types other than `Seq` and `Set`, which are parsed as plain
-/// named types so that a declaration mentioning one can be reported rather than
-/// failing the parse. (`Seq` and `Set` have their own `Type::Seq`/`Type::Set`.)
-const COLLECTION_TYPES: [&str; 2] = ["Multiset", "Map"];
-
 impl<'a> AstWalker<'a> for Scan {
     fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
         match exp {
@@ -120,16 +115,6 @@ impl<'a> AstWalker<'a> for Scan {
             self.hit("inhale-exhale expression `[A, B]`");
         }
         op.walk_children(self);
-    }
-
-    fn walk_type(&mut self, ty: &'a Type) {
-        if let Type::Domain(name, _) = ty
-            && let Ident::Raw(name) = name
-            && let Some(collection) = COLLECTION_TYPES.iter().find(|c| *c == name)
-        {
-            self.hit(collection);
-        }
-        ty.walk_children(self);
     }
 
     fn walk_import(&mut self, import: &'a Import) {

@@ -1,0 +1,4 @@
+// Multiset: `1` occurs twice in the literal.
+method literal_count_wrong() {
+  assert (1 in Multiset(1, 2, 1)) == 1
+}

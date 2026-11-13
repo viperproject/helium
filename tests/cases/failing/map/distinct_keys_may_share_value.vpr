@@ -1,0 +1,6 @@
+// Map: a map need not be injective.
+method distinct_keys_may_share_value(m: Map[Int, Int], j: Int, k: Int)
+  requires j in m && k in m && j != k
+{
+  assert m[j] != m[k]
+}

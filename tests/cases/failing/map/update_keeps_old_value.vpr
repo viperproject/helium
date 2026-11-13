@@ -1,0 +1,6 @@
+// Map: an update replaces the old value.
+method update_keeps_old_value(m: Map[Int, Int], k: Int)
+  requires k in m
+{
+  assert m[k := m[k] + 1][k] == m[k]
+}

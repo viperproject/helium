@@ -1,0 +1,4 @@
+// Multiset: only the empty multiset is included in the empty multiset.
+method subset_of_empty(a: Multiset[Int]) {
+  assert a subset Multiset[Int]()
+}

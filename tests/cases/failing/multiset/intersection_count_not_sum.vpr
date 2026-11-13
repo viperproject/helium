@@ -1,0 +1,6 @@
+// Multiset: an intersection takes the smaller count.
+method intersection_count_not_sum(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in a) == 1 && (x in b) == 2
+{
+  assert (x in (a intersection b)) == 2
+}

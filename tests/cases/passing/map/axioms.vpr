@@ -1,0 +1,54 @@
+// The map axioms, at more than one key and value type: one generic recipe
+// per axiom serves every `Map[K,V]`.
+method empty_has_no_key(k: Int) { assert !(k in Map[Int, Int]()) }
+method empty_card() { assert |Map[Int, Bool]()| == 0 }
+method empty_domain() { assert domain(Map[Int, Bool]()) == Set[Int]() }
+method empty_range() { assert range(Map[Int, Bool]()) == Set[Bool]() }
+method card_nonneg(m: Map[Int, Int]) { assert |m| >= 0 }
+method card_is_domain_card(m: Map[Int, Int]) { assert |m| == |domain(m)| }
+method card_zero_is_empty(m: Map[Int, Int])
+  requires |m| == 0
+{
+  assert m == Map[Int, Int]()
+}
+method in_is_in_domain(m: Map[Int, Int], k: Int) {
+  assert k in m <==> k in domain(m)
+}
+method update_lookup(m: Map[Int, Int], k: Int, v: Int) {
+  assert k in m[k := v]
+  assert m[k := v][k] == v
+}
+method update_keeps_other_keys(m: Map[Int, Int], j: Int, k: Int, v: Int)
+  requires j != k && j in m
+{
+  assert j in m[k := v]
+  assert m[k := v][j] == m[j]
+}
+method update_domain(m: Map[Int, Int], k: Int, v: Int) {
+  assert domain(m[k := v]) == domain(m) union Set(k)
+}
+method update_card_new_key(m: Map[Int, Int], k: Int, v: Int)
+  requires !(k in m)
+{
+  assert |m[k := v]| == |m| + 1
+}
+method update_card_existing_key(m: Map[Int, Int], k: Int, v: Int)
+  requires k in m
+{
+  assert |m[k := v]| == |m|
+}
+method value_in_range(m: Map[Int, Int], k: Int)
+  requires k in m
+{
+  assert m[k] in range(m)
+}
+method ref_to_bool(m: Map[Ref, Bool], r: Ref) {
+  assert m[r := true][r]
+  assert r in domain(m[r := false])
+}
+method extensional(a: Map[Int, Int], b: Map[Int, Int])
+  requires domain(a) == domain(b)
+  requires forall k: Int :: { a[k] } { b[k] } k in a ==> a[k] == b[k]
+{
+  assert a == b
+}

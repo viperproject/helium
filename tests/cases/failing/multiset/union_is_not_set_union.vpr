@@ -1,0 +1,5 @@
+// Multiset: a union adds the counts, so `a union a` is not `a` unless `a`
+// is empty.
+method union_is_not_set_union(a: Multiset[Int]) {
+  assert a union a == a
+}
