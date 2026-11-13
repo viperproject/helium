@@ -26,9 +26,10 @@ method m(a: Ref, b: Ref, c: Bool, d: Bool)
 
 **How it was fixed.** The heap algebra reads no ambient cube. Every `Heap` carries a
 `heap::Region`, the absolute block cube it exists on; no `Heap` constructor omits it, and
-every derived heap keeps its source's. By convention only `fetch_heap` (`declaration.rs`)
-builds a region, from the block's `cube`, and every heap enters an instruction through
-it. That covers the join phase as well as the body phase. An n-ary join's synthetic
+every derived heap keeps its source's. By convention `fetch_heap` (`declaration.rs`) is
+the only builder of a region that the algebra sees: it builds it from the block's `cube`,
+and every heap enters an instruction through it. The viz display and tests build an
+empty one as well. That covers the join phase as well as the body phase. An n-ary join's synthetic
 blocks get the reach of the edges they merge as their cube, not the whole join's.
 `Heap` and `Region` live in `heap/store.rs`, so the algebra reaches the region only
 through `Heap::region`. `assume_location_axioms` gates by it. `merge_heaps` and
