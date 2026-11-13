@@ -209,7 +209,8 @@ fn generics_in_order(ty: &vmir::Type, out: &mut Vec<usize>) {
     match ty {
         vmir::Type::Generic(i) if !out.contains(i) => out.push(*i),
         vmir::Type::Domain(_, args) => args.iter().for_each(|a| generics_in_order(a, out)),
-        vmir::Type::Option(t) | vmir::Type::Coll(_, t) => generics_in_order(t, out),
+        vmir::Type::Option(t) => generics_in_order(t, out),
+        vmir::Type::Coll(_, tys) => tys.iter().for_each(|t| generics_in_order(t, out)),
         vmir::Type::Addr { value, .. } => generics_in_order(value, out),
         _ => {}
     }
@@ -238,9 +239,10 @@ fn check_typed(body: &vmir::FunctionBody, fixed: &HashSet<usize>) -> bool {
             | vmir::PureInst::AdtIs { type_args, .. } => type_args
                 .iter()
                 .for_each(|t| t.collect_generics(&mut mentioned)),
-            vmir::PureInst::Coll { elem_ty, .. } | vmir::PureInst::CollLit { elem_ty, .. } => {
-                elem_ty.collect_generics(&mut mentioned)
+            vmir::PureInst::Coll { tys, .. } => {
+                tys.iter().for_each(|t| t.collect_generics(&mut mentioned))
             }
+            vmir::PureInst::CollLit { elem_ty, .. } => elem_ty.collect_generics(&mut mentioned),
             vmir::PureInst::Forall(q) => {
                 let mut own = HashSet::default();
                 q.bound.iter().for_each(|t| t.collect_generics(&mut own));

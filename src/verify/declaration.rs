@@ -2,7 +2,7 @@ use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{CollKind, SeqOp};
+use crate::vmir::{CollKind, CollOp, MapOp, SeqOp};
 use crate::{
     verify::{
         cert::{FunctionDefinition, ResourceDefinition},
@@ -685,7 +685,7 @@ fn eval_pure_inst(
             };
             (id, recipe)
         }
-        PureInst::Coll { elem_ty, op, args } => {
+        PureInst::Coll { tys, op, args } => {
             let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
             let recipe = if ctx.recipe.is_some() {
                 let args: Vec<Val> = args
@@ -694,14 +694,14 @@ fn eval_pure_inst(
                     .collect::<Result<_, _>>()?;
                 let rb = ctx.recipe.as_mut().unwrap();
                 Some(rb.emit(AxiomPure::Coll {
-                    elem_ty: elem_ty.clone(),
+                    tys: tys.clone(),
                     op: *op,
                     args,
                 }))
             } else {
                 None
             };
-            let id = ctx.add(Symbolic::Coll(Box::new(elem_ty.clone()), *op, ids.clone()));
+            let id = ctx.add(Symbolic::Coll(tys.clone(), *op, ids.clone()));
             // A collection equality (`CollOp::is_eq`) shares its class with the
             // untyped `l == r`, which the rest of equality reasoning reads.
             if op.is_eq() {
@@ -1999,7 +1999,7 @@ fn decls_use_coll(
 ) -> bool {
     fn mentions(ty: &Type, kind: CollKind) -> bool {
         match ty {
-            Type::Coll(k, elem) => *k == kind || mentions(elem, kind),
+            Type::Coll(k, tys) => *k == kind || tys.iter().any(|t| mentions(t, kind)),
             Type::Domain(_, args) => args.iter().any(|a| mentions(a, kind)),
             Type::Option(t) => mentions(t, kind),
             Type::Addr { value, .. } => mentions(value, kind),
@@ -2011,8 +2011,8 @@ fn decls_use_coll(
             InstKind::Pure(ty, pi) => {
                 mentions(ty, kind)
                     || match pi {
-                        PureInst::Coll { op, elem_ty, .. } => {
-                            op.kind() == kind || mentions(elem_ty, kind)
+                        PureInst::Coll { op, tys, .. } => {
+                            op.kind() == kind || tys.iter().any(|t| mentions(t, kind))
                         }
                         PureInst::CollLit {
                             kind: k, elem_ty, ..
@@ -2103,7 +2103,7 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
     // `forall` node, true, whose element type stays open for its trigger
     // matches to fix. Only a program that has collections of a kind gets that
     // kind's axioms, so others pay nothing.
-    for kind in [CollKind::Seq, CollKind::Set] {
+    for kind in CollKind::ALL {
         if !decls_use_coll(&program.decls, kind) {
             continue;
         }
@@ -2216,10 +2216,12 @@ pub(crate) fn prepare_trig_term(
                 } => func(alloc.proj(*adt, *variant, *field)),
                 vmir::TrigHead::AdtIs { adt, variant } => func(alloc.adt_is(*adt, *variant)),
                 vmir::TrigHead::Coll(op) => {
-                    let [elem_ty] = &type_args[..] else {
-                        panic!("a `{op:?}` trigger names its element type: {type_args:?}");
-                    };
-                    TermHead::Coll(elem_ty.clone(), *op)
+                    assert_eq!(
+                        type_args.len(),
+                        op.kind().arity(),
+                        "a `{op:?}` trigger names its collection's type arguments: {type_args:?}"
+                    );
+                    TermHead::Coll(type_args.iter().cloned().collect(), *op)
                 }
                 vmir::TrigHead::CollLit(kind) => {
                     let [elem_ty] = &type_args[..] else {
@@ -2338,8 +2340,8 @@ pub(crate) fn prepare_body(
                 | PureInst::Forall(_) => {
                     return Err(VerifyError::Unimplemented("impure inst in axiom body"));
                 }
-                PureInst::Coll { elem_ty, op, args } => AxiomPure::Coll {
-                    elem_ty: elem_ty.clone(),
+                PureInst::Coll { tys, op, args } => AxiomPure::Coll {
+                    tys: tys.clone(),
                     op: *op,
                     args: args.clone(),
                 },
@@ -3143,19 +3145,40 @@ fn inst_obligations(
             vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
         }
 
+        // A map lookup `m[k]` needs `k in m`.
         InstKind::Pure(
             _,
             PureInst::Coll {
-                elem_ty,
-                op,
+                tys,
+                op: CollOp::Map(MapOp::Lookup),
                 args: val,
             },
-        ) if op.has_bound_check() => {
+        ) => {
+            let m = state.get_val(ctx, &val[0]);
+            let k = state.get_val(ctx, &val[1]);
+            let present = ctx.add(Symbolic::Coll(
+                tys.clone(),
+                MapOp::Contains.into(),
+                Box::new([m, k]),
+            ));
+            vec![(
+                present,
+                VerifyError::SideCondition("map may not contain the key"),
+            )]
+        }
+        InstKind::Pure(
+            _,
+            PureInst::Coll {
+                tys,
+                op: op @ CollOp::Seq(_),
+                args: val,
+            },
+        ) if op.has_side_condition() => {
             // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
             let s = state.get_val(ctx, &val[0]);
             let i = state.get_val(ctx, &val[1]);
             let len = ctx.add(Symbolic::Coll(
-                Box::new(elem_ty.clone()),
+                tys.clone(),
                 SeqOp::Len.into(),
                 Box::new([s]),
             ));

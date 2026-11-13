@@ -42,8 +42,10 @@ pub enum Type {
     /// Substituted by the type arguments at monomorphization.
     Generic(usize),
 
-    /// A built-in collection, `Seq[E]` or `Set[E]`, of element type `E`.
-    Coll(CollKind, Box<Type>),
+    /// A built-in collection and its type arguments: `Seq[E]` and `Set[E]` have
+    /// one, the element type `E`; `Map[K, V]` has two, the key and value types
+    /// (see [`CollKind::arity`]).
+    Coll(CollKind, Box<[Type]>),
 }
 
 /// Permission bound of a heap location (cap on total permission per cell).
@@ -70,20 +72,39 @@ impl Type {
         }
     }
 
+    /// The collection type `kind[tys]`. Panics if `tys` is not as long as
+    /// `kind` takes.
+    pub fn coll(kind: CollKind, tys: impl Into<Box<[Type]>>) -> Self {
+        let tys = tys.into();
+        assert_eq!(
+            tys.len(),
+            kind.arity(),
+            "`{}` takes {} type arguments, got {tys:?}",
+            kind.name(),
+            kind.arity()
+        );
+        Type::Coll(kind, tys)
+    }
+
     /// `Seq[elem]`.
     pub fn seq(elem: Type) -> Self {
-        Type::Coll(CollKind::Seq, Box::new(elem))
+        Type::coll(CollKind::Seq, [elem])
     }
 
     /// `Set[elem]`.
     pub fn set(elem: Type) -> Self {
-        Type::Coll(CollKind::Set, Box::new(elem))
+        Type::coll(CollKind::Set, [elem])
     }
 
-    /// The kind and element type of a collection type, else `None`.
-    pub fn as_coll(&self) -> Option<(CollKind, &Type)> {
+    /// `Map[key, value]`.
+    pub fn map(key: Type, value: Type) -> Self {
+        Type::coll(CollKind::Map, [key, value])
+    }
+
+    /// The kind and type arguments of a collection type, else `None`.
+    pub fn as_coll(&self) -> Option<(CollKind, &[Type])> {
         match self {
-            Type::Coll(kind, elem) => Some((*kind, elem)),
+            Type::Coll(kind, tys) => Some((*kind, tys)),
             _ => None,
         }
     }
@@ -118,7 +139,11 @@ impl Type {
             Type::Option(t) => t.collect_generics(out),
             Type::Addr { value, .. } => value.collect_generics(out),
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => {}
-            Type::Coll(_, t) => t.collect_generics(out),
+            Type::Coll(_, tys) => {
+                for t in tys {
+                    t.collect_generics(out);
+                }
+            }
         }
     }
 
@@ -140,7 +165,9 @@ impl Type {
                 bound: bound.clone(),
             },
             Type::Int | Type::Bool | Type::Real | Type::Ref | Type::Snap(_) => self.clone(),
-            Type::Coll(kind, t) => Type::Coll(*kind, Box::new(t.subst_generics(args))),
+            Type::Coll(kind, tys) => {
+                Type::Coll(*kind, tys.iter().map(|t| t.subst_generics(args)).collect())
+            }
         }
     }
 
@@ -165,7 +192,14 @@ impl Type {
                         .all(|(x, y)| x.match_generics(y, out))
             }
             (Type::Option(x), Type::Option(y)) => x.match_generics(y, out),
-            (Type::Coll(k1, x), Type::Coll(k2, y)) => k1 == k2 && x.match_generics(y, out),
+            (Type::Coll(k1, xs), Type::Coll(k2, ys)) => {
+                k1 == k2
+                    && xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(x, y)| x.match_generics(y, out))
+            }
             (
                 Type::Addr {
                     group: g1,
@@ -202,7 +236,10 @@ impl Display for Type {
                 bound,
             } => write!(f, "&[g{}] {value} @ {bound}", group.into_usize()),
             Type::Generic(i) => write!(f, "?{i}"),
-            Type::Coll(kind, t) => write!(f, "{}<{t}>", kind.name()),
+            Type::Coll(kind, tys) => {
+                write!(f, "{}", kind.name())?;
+                fmt_args(f, tys, |a, f| write!(f, "{a}"))
+            }
         }
     }
 }
@@ -236,7 +273,10 @@ impl<'a> Display for VmirDisplay<'a, &'a Type> {
                 self.groups.resolve(group),
                 self.with(value.as_ref())
             ),
-            Type::Coll(kind, ty) => write!(f, "{}<{}>", kind.name(), self.with(ty.as_ref())),
+            Type::Coll(kind, tys) => {
+                write!(f, "{}", kind.name())?;
+                fmt_args(f, tys, |a, f| write!(f, "{}", self.with(a)))
+            }
             ty => write!(f, "{ty}"),
         }
     }
@@ -284,7 +324,36 @@ mod tests {
         assert_eq!(Type::set(Type::Int).to_string(), "Set<Int>");
         assert_eq!(
             Type::set(Type::Int).as_coll(),
-            Some((CollKind::Set, &Type::Int))
+            Some((CollKind::Set, &[Type::Int][..]))
         );
+    }
+
+    /// A map type binds its key and value types, each against its own
+    /// argument, and prints both.
+    #[test]
+    fn map_generics_bind_key_and_value() {
+        let pat = Type::map(Type::Generic(0), Type::set(Type::Generic(1)));
+        let mut out = [None, None];
+        assert!(pat.match_generics(&Type::map(Type::Ref, Type::set(Type::Bool)), &mut out));
+        assert_eq!(out, [Some(Type::Ref), Some(Type::Bool)]);
+        let mut out = [None, None];
+        assert!(!pat.match_generics(&Type::set(Type::Ref), &mut out));
+        assert_eq!(
+            pat.subst_generics(&[Type::Int, Type::Int]),
+            Type::map(Type::Int, Type::set(Type::Int))
+        );
+        assert_eq!(
+            Type::map(Type::Int, Type::Bool).to_string(),
+            "Map<Int, Bool>"
+        );
+        let mut gens = crate::dhash::HashSet::default();
+        pat.collect_generics(&mut gens);
+        assert_eq!(gens.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "takes 2 type arguments")]
+    fn map_needs_two_type_arguments() {
+        Type::coll(CollKind::Map, [Type::Int]);
     }
 }

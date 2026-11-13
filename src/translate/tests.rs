@@ -1697,7 +1697,7 @@ fn seq_literal_lowers_to_concatenated_singletons() {
     let steps = seq_steps("method m() { var s: Seq[Int] := Seq[Int]() }");
     let [
         PureInst::Coll {
-            elem_ty: vmir::Type::Int,
+            tys,
             op: CollOp::Seq(SeqOp::Empty),
             args,
         },
@@ -1705,6 +1705,7 @@ fn seq_literal_lowers_to_concatenated_singletons() {
     else {
         panic!("expected one empty sequence, got {steps:?}");
     };
+    assert_eq!(tys[..], [vmir::Type::Int]);
     assert!(args.is_empty());
 }
 
@@ -1762,7 +1763,7 @@ fn set_literal_lowers_to_a_singleton_with_elements_added() {
     let steps = coll_steps("method m() { var s: Set[Bool] := Set[Bool]() }");
     let [
         PureInst::Coll {
-            elem_ty: vmir::Type::Bool,
+            tys,
             op: CollOp::Set(SetOp::Empty),
             args,
         },
@@ -1770,6 +1771,7 @@ fn set_literal_lowers_to_a_singleton_with_elements_added() {
     else {
         panic!("expected one empty set, got {steps:?}");
     };
+    assert_eq!(tys[..], [vmir::Type::Bool]);
     assert!(args.is_empty());
 }
 

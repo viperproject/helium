@@ -65,9 +65,10 @@ pub enum Symbolic {
     /// not a child, and not in the discriminant.
     Forall(RecipeId, Box<[Type]>, Box<[Id]>),
 
-    /// A collection operation on a collection of this element type (`Int` for
-    /// a `Range`), operands in `PureInst::Coll` order.
-    Coll(Box<Type>, CollOp, Box<[Id]>),
+    /// A collection operation on a collection of these type arguments (`[Int]`
+    /// for a `Range`), operands in `PureInst::Coll` order. Like `FuncApp`'s,
+    /// the types are payload, not children, and not in the discriminant.
+    Coll(Box<[Type]>, CollOp, Box<[Id]>),
 
     /// The singleton collection of one element, of this kind and element type
     /// (`PureInst::CollLit`).
@@ -199,7 +200,10 @@ impl Display for Symbolic {
                     write!(f, "forall#{}<{}>", r.0, args.join(", "))
                 }
             }
-            Symbolic::Coll(elem_ty, op, _) => write!(f, "{}<{elem_ty}>", op.token()),
+            Symbolic::Coll(tys, op, _) => {
+                let tys: Vec<String> = tys.iter().map(|t| t.to_string()).collect();
+                write!(f, "{}<{}>", op.token(), tys.join(", "))
+            }
             Symbolic::CollLit(kind, ty, _) => write!(f, "{}<{ty}>", kind.name()),
         }
     }
@@ -281,12 +285,12 @@ mod tests {
     use crate::dhash::HashMap;
     use crate::verify::analysis::ConstFold;
     use crate::verify::types::infer_type;
-    use crate::vmir::{SeqOp, SetOp};
+    use crate::vmir::{MapOp, SeqOp, SetOp};
 
     type Graph = EGraph<Symbolic, ConstFold>;
 
     fn coll(g: &mut Graph, elem: Type, op: impl Into<CollOp>, args: &[Id]) -> Id {
-        g.add(Symbolic::Coll(Box::new(elem), op.into(), args.into()))
+        g.add(Symbolic::Coll(Box::new([elem]), op.into(), args.into()))
     }
 
     fn ty_of(g: &Graph, id: Id) -> Option<Type> {
@@ -389,5 +393,61 @@ mod tests {
         for (id, want) in cases {
             assert_eq!(ty_of(&g, id), Some(want), "{}", g.id_to_node(id));
         }
+    }
+
+    /// Each map node's type is recovered from the node and its key and value
+    /// types: a lookup is a value, `domain` a set of keys, `range` a set of
+    /// values.
+    #[test]
+    fn map_node_types_are_inferred() {
+        let mut g = Graph::default();
+        let (m, n, k, v) = (
+            g.add(Symbolic::Fresh(0)),
+            g.add(Symbolic::Fresh(1)),
+            g.add(Symbolic::Fresh(2)),
+            g.add(Symbolic::Fresh(3)),
+        );
+        let map = |g: &mut Graph, op: MapOp, args: &[Id]| {
+            g.add(Symbolic::Coll(
+                Box::new([Type::Ref, Type::Bool]),
+                op.into(),
+                args.into(),
+            ))
+        };
+        let ref_to_bool = Type::map(Type::Ref, Type::Bool);
+        let cases = [
+            (map(&mut g, MapOp::Empty, &[]), ref_to_bool.clone()),
+            (map(&mut g, MapOp::Card, &[m]), Type::Int),
+            (map(&mut g, MapOp::Contains, &[m, k]), Type::Bool),
+            (map(&mut g, MapOp::Lookup, &[m, k]), Type::Bool),
+            (map(&mut g, MapOp::Update, &[m, k, v]), ref_to_bool.clone()),
+            (map(&mut g, MapOp::Domain, &[m]), Type::set(Type::Ref)),
+            (map(&mut g, MapOp::Range, &[m]), Type::set(Type::Bool)),
+            (map(&mut g, MapOp::Eq, &[m, n]), Type::Bool),
+        ];
+        g.rebuild();
+        for (id, want) in cases {
+            assert_eq!(ty_of(&g, id), Some(want), "{}", g.id_to_node(id));
+        }
+    }
+
+    /// One map operation at two instantiations is two terms: the type
+    /// arguments are part of the node.
+    #[test]
+    fn map_instantiations_stay_apart() {
+        let mut g = Graph::default();
+        let (m, k) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let at = |g: &mut Graph, v: Type| {
+            g.add(Symbolic::Coll(
+                Box::new([Type::Int, v]),
+                MapOp::Lookup.into(),
+                Box::new([m, k]),
+            ))
+        };
+        let int_val = at(&mut g, Type::Int);
+        let bool_val = at(&mut g, Type::Bool);
+        g.rebuild();
+        assert_ne!(g.find(int_val), g.find(bool_val));
+        assert_eq!(g.id_to_node(int_val).to_string(), "map.at<Int, Int>");
     }
 }

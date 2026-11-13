@@ -29,7 +29,7 @@ pub(crate) enum AxiomPure {
         args: Vec<Val>,
     },
     Coll {
-        elem_ty: Type,
+        tys: Box<[Type]>,
         op: CollOp,
         args: Vec<Val>,
     },
@@ -95,9 +95,9 @@ pub(crate) fn subst_types(insts: &[AxiomInst], tys: &[Type]) -> Vec<AxiomInst> {
                 type_args: subst(type_args),
                 args: args.clone(),
             }),
-            AxiomInst::Val(AxiomPure::Coll { elem_ty, op, args }) => {
+            AxiomInst::Val(AxiomPure::Coll { tys: ts, op, args }) => {
                 AxiomInst::Val(AxiomPure::Coll {
-                    elem_ty: elem_ty.subst_generics(tys),
+                    tys: ts.iter().map(|t| t.subst_generics(tys)).collect(),
                     op: *op,
                     args: args.clone(),
                 })
@@ -367,13 +367,9 @@ pub(super) fn build_instance_vals_impl(
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
                         egraph.add(Symbolic::FuncApp(*func, tys, args))
                     }
-                    AxiomPure::Coll { elem_ty, op, args } => {
+                    AxiomPure::Coll { tys, op, args } => {
                         let args: Box<[Id]> = args.iter().map(|v| get(egraph, &vals, v)).collect();
-                        let id = egraph.add(Symbolic::Coll(
-                            Box::new(elem_ty.clone()),
-                            *op,
-                            args.clone(),
-                        ));
+                        let id = egraph.add(Symbolic::Coll(tys.clone(), *op, args.clone()));
                         // A collection equality shares its class with the untyped one.
                         if op.is_eq() {
                             let eq = egraph.add(Symbolic::Binary(BinOp::Eq, [args[0], args[1]]));
