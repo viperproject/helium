@@ -84,6 +84,11 @@ pub(crate) struct PostRecipe {
     /// postcondition holds. That is [`PostRecipe::res`], released beside it.
     /// `None` only for a declaration whose `ensures` link has no member.
     pub(crate) token: Option<Val>,
+    /// The postcondition is the literal `false` (`ensures false`, Prusti's
+    /// `s_T_unreachable()`). No call can then be reached with the precondition
+    /// holding, so the unfold rule refutes every call's `f%pre` token outright
+    /// instead of leaving `token ⟹ false` for a case split to discover.
+    pub(crate) unsatisfiable: bool,
 }
 
 /// One propagated precondition token: a nested callee's `g%pre(gargs)` step plus

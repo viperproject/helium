@@ -1,0 +1,19 @@
+// Soundness canary for `passing/ctor_ite_unreachable_bottom_arm.vpr`: a pin
+// derived from a fact assumed under a path (`b ==> tower(d, k) == c2()`) holds
+// only on that path and must not escape it.
+
+adt E { c0() c1(x: Int) c2() }
+
+function unreachable(): E
+  ensures false
+
+function tower(d: Int, k: Int): E
+{
+  d == 2 ? c2() : (d == 1 ? c1(k) : (d == 0 ? c0() : unreachable()))
+}
+
+method guarded_pin_does_not_escape(d: Int, k: Int, b: Bool)
+{
+  assume b ==> tower(d, k) == c2()
+  assert d == 2
+}

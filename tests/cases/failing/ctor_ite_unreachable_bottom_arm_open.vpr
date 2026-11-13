@@ -1,0 +1,18 @@
+// Soundness canary for `passing/ctor_ite_unreachable_bottom_arm.vpr`: a bottom
+// arm whose callee *can* be reached (no `ensures false`) may be any value,
+// including `c2()`, so the top arm's guard stays open.
+
+adt E { c0() c1(x: Int) c2() }
+
+function other(d: Int): E
+
+function tower(d: Int, k: Int): E
+{
+  d == 2 ? c2() : (d == 1 ? c1(k) : (d == 0 ? c0() : other(d)))
+}
+
+method top_arm_not_pinned(d: Int, k: Int)
+{
+  assume tower(d, k) == c2()
+  assert d == 2
+}

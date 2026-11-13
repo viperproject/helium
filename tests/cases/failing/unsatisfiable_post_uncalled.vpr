@@ -1,0 +1,17 @@
+// Soundness canary: a function whose postcondition is `false` refutes only the
+// paths that reach a call of it. Calling it on another path leaves this one
+// live.
+
+adt E { c0() c1() }
+
+function unreachable(): E
+  ensures false
+
+method call_elsewhere(b: Bool)
+{
+  var e: E
+  if (b) {
+    e := unreachable()
+  }
+  assert b
+}
