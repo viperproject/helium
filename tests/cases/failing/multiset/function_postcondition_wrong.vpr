@@ -1,0 +1,6 @@
+// Multiset: the function adds `x` once, so its cardinality grows by one.
+function add(s: Multiset[Int], x: Int): Multiset[Int]
+  ensures |result| == |s|
+{
+  s union Multiset(x)
+}

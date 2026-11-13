@@ -1,0 +1,8 @@
+// Multiset: two multisets with no common element still have their own
+// members; the claim must not hold vacuously.
+method no_vacuous_disjoint(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires a intersection b == Multiset[Int]()
+  requires (x in a) > 0
+{
+  assert (x in b) > 0
+}

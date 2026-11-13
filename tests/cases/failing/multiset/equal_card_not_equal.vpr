@@ -1,0 +1,6 @@
+// Multiset: two multisets of one size need not be equal.
+method equal_card_not_equal(a: Multiset[Int], b: Multiset[Int])
+  requires |a| == |b|
+{
+  assert a == b
+}

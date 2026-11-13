@@ -1,0 +1,8 @@
+// Multiset: a subset of equal cardinality is equal, so the other way round
+// must still fail.
+method no_vacuous_subset_equal_card(a: Multiset[Int], b: Multiset[Int])
+  requires a subset b
+  requires |a| == |b|
+{
+  assert a != b
+}

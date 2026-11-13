@@ -1,0 +1,6 @@
+// Multiset: reading a multiset field needs permission.
+field bag: Multiset[Int]
+
+method heap_multiset_no_permission(o: Ref) {
+  assert |o.bag| >= 0
+}

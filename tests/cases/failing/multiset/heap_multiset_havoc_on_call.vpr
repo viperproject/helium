@@ -1,0 +1,14 @@
+// Multiset: a callee holding the field may change the multiset.
+field bag: Multiset[Int]
+
+method callee(o: Ref)
+  requires acc(o.bag)
+  ensures acc(o.bag)
+
+method heap_multiset_havoc_on_call(o: Ref)
+  requires acc(o.bag) && (1 in o.bag) == 1
+  ensures acc(o.bag)
+{
+  callee(o)
+  assert (1 in o.bag) == 1
+}

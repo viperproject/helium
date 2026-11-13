@@ -2,7 +2,8 @@
 // verified, and the method that calls the rejected one must not be.
 field f: Int
 
-method uses_multiset(xs: Multiset[Int])
+method uses_exists(n: Int)
+  requires exists i: Int :: i == n
 {
   assert true
 }
@@ -15,7 +16,7 @@ method fine(x: Ref)
   assert x.f == 1
 }
 
-method calls_rejected(xs: Multiset[Int])
+method calls_rejected(n: Int)
 {
-  uses_multiset(xs)
+  uses_exists(n)
 }

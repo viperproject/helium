@@ -1,0 +1,4 @@
+// Multiset: an arbitrary element may not occur at all.
+method count_may_be_zero(a: Multiset[Int], x: Int) {
+  assert (x in a) > 0
+}

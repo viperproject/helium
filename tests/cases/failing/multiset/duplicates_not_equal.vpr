@@ -1,0 +1,4 @@
+// Multiset: `Multiset(x, x)` has `x` twice, `Multiset(x)` once.
+method duplicates_not_equal(x: Int) {
+  assert Multiset(x, x) == Multiset(x)
+}

@@ -1,0 +1,6 @@
+// Multiset: setminus never goes below zero, so the count is not `1 - 3`.
+method difference_not_negative(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in a) == 1 && (x in b) == 3
+{
+  assert (x in (a setminus b)) == -2
+}

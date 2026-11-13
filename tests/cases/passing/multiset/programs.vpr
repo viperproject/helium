@@ -1,0 +1,66 @@
+// Multiset: multisets as program state — locals, loops, method contracts,
+// functions and fields.
+
+field bag: Multiset[Int]
+
+function add(s: Multiset[Int], x: Int): Multiset[Int]
+  ensures (x in result) == (x in s) + 1
+  ensures s subset result
+  ensures |result| == |s| + 1
+{
+  s union Multiset(x)
+}
+
+method insert(s: Multiset[Int], x: Int) returns (r: Multiset[Int])
+  ensures (x in r) == (x in s) + 1
+  ensures forall y: Int :: { y in r } y != x ==> (y in r) == (y in s)
+  ensures |r| == |s| + 1
+{
+  r := s union Multiset(x)
+}
+
+method client(x: Int) {
+  var s: Multiset[Int] := Multiset[Int]()
+  s := insert(s, x)
+  assert (x in s) == 1
+  s := insert(s, x)
+  assert (x in s) == 2
+  assert |s| == 2
+}
+
+method count_elements(xs: Seq[Int]) returns (r: Multiset[Int])
+  ensures |r| == |xs|
+{
+  r := Multiset[Int]()
+  var k: Int := 0
+  while (k < |xs|)
+    invariant 0 <= k && k <= |xs|
+    invariant |r| == k
+  {
+    r := r union Multiset(xs[k])
+    k := k + 1
+  }
+}
+
+method use_function(s: Multiset[Int]) {
+  assert (5 in add(s, 5)) > 0
+  assert s subset add(s, 5)
+}
+
+method heap_bag(o: Ref, x: Int)
+  requires acc(o.bag)
+  ensures acc(o.bag) && (x in o.bag) == (x in old(o.bag)) + 1
+  ensures old(o.bag) subset o.bag
+{
+  o.bag := o.bag union Multiset(x)
+}
+
+method heap_bag_client(o: Ref)
+  requires acc(o.bag) && o.bag == Multiset[Int]()
+  ensures acc(o.bag)
+{
+  heap_bag(o, 3)
+  assert (3 in o.bag) == 1
+  heap_bag(o, 3)
+  assert (3 in o.bag) == 2
+}

@@ -1,0 +1,4 @@
+// Multiset: nothing occurs in the empty multiset.
+method empty_has_no_member(x: Int) {
+  assert (x in Multiset[Int]()) == 1
+}

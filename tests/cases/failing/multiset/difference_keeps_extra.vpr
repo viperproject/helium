@@ -1,0 +1,6 @@
+// Multiset: removing one `x` from two leaves one.
+method difference_keeps_extra(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires (x in a) == 2 && (x in b) == 1
+{
+  assert (x in (a setminus b)) == 0
+}

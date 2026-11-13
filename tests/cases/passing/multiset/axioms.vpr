@@ -1,0 +1,48 @@
+// The multiset axioms, at more than one element type: one generic recipe per
+// axiom serves every `Multiset[T]`.
+method empty_count(x: Int) { assert (x in Multiset[Int]()) == 0 }
+method empty_card() { assert |Multiset[Int]()| == 0 }
+method count_nonneg(s: Multiset[Int], x: Int) { assert (x in s) >= 0 }
+method card_nonneg(s: Multiset[Int]) { assert |s| >= 0 }
+method card_zero_is_empty(s: Multiset[Int])
+  requires |s| == 0
+{
+  assert s == Multiset[Int]()
+}
+method singleton(x: Int, y: Int) {
+  assert (x in Multiset(x)) == 1
+  assert |Multiset(x)| == 1
+  assert y != x ==> (y in Multiset(x)) == 0
+}
+method add_one(s: Multiset[Int], x: Int) {
+  assert (x in (s union Multiset(x))) == (x in s) + 1
+}
+method union_count(a: Multiset[Int], b: Multiset[Int], x: Int) {
+  assert (x in (a union b)) == (x in a) + (x in b)
+}
+method intersection_count(a: Multiset[Int], b: Multiset[Int], x: Int) {
+  assert (x in (a intersection b)) <= (x in a)
+  assert (x in (a intersection b)) <= (x in b)
+}
+method difference_count(a: Multiset[Int], b: Multiset[Int], x: Int) {
+  assert (x in (a setminus b)) >= (x in a) - (x in b)
+}
+method subset_count(a: Multiset[Int], b: Multiset[Int], x: Int)
+  requires a subset b
+  requires (x in a) == 2
+{
+  assert (x in b) >= 2
+}
+method bool_elements(b: Bool) {
+  assert (b in Multiset(b, !b, b)) == 2
+  assert |Multiset(b, !b)| == 2
+}
+method nested_elements(s: Multiset[Int]) {
+  assert (s in Multiset(s)) == 1
+  assert |Multiset(s, s)| == 2
+}
+method extensional(a: Multiset[Int], b: Multiset[Int])
+  requires forall x: Int :: { x in a } { x in b } (x in a) == (x in b)
+{
+  assert a == b
+}

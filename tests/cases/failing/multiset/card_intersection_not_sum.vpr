@@ -1,0 +1,4 @@
+// Multiset: a = b = {1}: the intersection has one element, not two.
+method card_intersection_not_sum(a: Multiset[Int], b: Multiset[Int]) {
+  assert |a intersection b| == |a| + |b|
+}
