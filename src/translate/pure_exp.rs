@@ -1037,7 +1037,7 @@ fn lower_forall(
 /// lowered to the same head the body's `PureInst` would produce, with its
 /// arguments lowered recursively (a trigger may nest arbitrarily). Shapes outside
 /// this grammar were rejected at typecheck (`check_triggers`).
-fn lower_trig_term(
+pub(crate) fn lower_trig_term(
     b: &TranslationContext<'_>,
     term: &typed::TypedPureExp<typed::AxiomExt>,
     env: &HashMap<Spur, Val>,
