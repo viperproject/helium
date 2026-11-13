@@ -1829,6 +1829,164 @@ fn set_operators_lower_to_set_ops() {
     assert_ne!(mem[1], sub[0]);
 }
 
+/// The map operations of method `m`, in order, with their operands.
+fn map_ops(input: &str) -> Vec<(vmir::MapOp, Vec<vmir::Val>)> {
+    coll_steps(input)
+        .into_iter()
+        .filter_map(|pi| match pi {
+            vmir::PureInst::Coll {
+                op: vmir::CollOp::Map(op),
+                args,
+                ..
+            } => Some((op, args)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn map_literal_lowers_to_updates_on_the_empty_map() {
+    use vmir::{MapOp, PureInst, Val};
+    let ops =
+        map_ops("method m(a: Int, b: Bool) { var x: Map[Int, Bool] := Map(a := b, 1 := true) }");
+    let [
+        (MapOp::Empty, empty),
+        (MapOp::Update, first),
+        (MapOp::Update, second),
+    ] = &ops[..]
+    else {
+        panic!("expected an empty map and two updates, got {ops:?}");
+    };
+    assert!(empty.is_empty());
+    // `Map()[a := b][1 := true]`: in source order, each on the previous one.
+    let [Val::Temp(on_empty), _, _] = &first[..] else {
+        panic!("expected the first update on a temp, got {first:?}");
+    };
+    let [Val::Temp(on_first), Val::Literal(_), Val::Literal(_)] = &second[..] else {
+        panic!("expected the second update on a temp with literal entries, got {second:?}");
+    };
+    assert_eq!(
+        *on_first,
+        *on_empty + 1,
+        "the second update extends the first"
+    );
+
+    // The type arguments are the map's key and value types.
+    let steps = coll_steps("method m() { var x: Map[Ref, Seq[Int]] := Map[Ref, Seq[Int]]() }");
+    let [PureInst::Coll { tys, .. }] = &steps[..] else {
+        panic!("expected one empty map, got {steps:?}");
+    };
+    assert_eq!(tys[..], [vmir::Type::Ref, vmir::Type::seq(vmir::Type::Int)]);
+}
+
+#[test]
+fn map_operators_lower_to_map_ops() {
+    use vmir::{CollOp, MapOp, SeqOp};
+    let src = |exp: &str| {
+        format!(
+            "method m(a: Map[Int, Bool], b: Map[Int, Bool], q: Seq[Bool], k: Int) {{ var r: Bool := {exp} }}"
+        )
+    };
+    for (exp, want) in [
+        ("a[k]", vec![CollOp::Map(MapOp::Lookup)]),
+        ("q[k]", vec![CollOp::Seq(SeqOp::Index)]),
+        (
+            "a[k := true] == b",
+            vec![MapOp::Update.into(), MapOp::Eq.into()],
+        ),
+        ("k in a", vec![MapOp::Contains.into()]),
+        ("|a| == 0", vec![MapOp::Card.into()]),
+        (
+            "k in domain(a)",
+            vec![MapOp::Domain.into(), CollOp::Set(vmir::SetOp::Contains)],
+        ),
+        (
+            "true in range(a)",
+            vec![MapOp::Range.into(), CollOp::Set(vmir::SetOp::Contains)],
+        ),
+    ] {
+        let got: Vec<CollOp> = coll_steps(&src(exp))
+            .into_iter()
+            .filter_map(|pi| match pi {
+                vmir::PureInst::Coll { op, .. } => Some(op),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, want, "`{exp}`");
+    }
+    // `k in a` puts the map first, as `m[k]` does.
+    let ops = map_ops(&src("(k in a) && a[k]"));
+    let [(MapOp::Contains, mem), (MapOp::Lookup, look)] = &ops[..] else {
+        panic!("expected a membership test and a lookup, got {ops:?}");
+    };
+    assert_eq!(mem, look, "`k in a` and `a[k]` take `[a, k]`");
+}
+
+/// A lookup is the one map operation with a side condition: it is emitted
+/// with a check-in heap, like a sequence index, so the verifier asks for
+/// `k in m`.
+#[test]
+fn map_lookup_is_checked() {
+    use vmir::{CollOp, InstKind, MapOp, PureInst};
+    let p = run(
+        "method m(a: Map[Int, Int], k: Int) { var x: Int := a[k]; var y: Map[Int, Int] := a[k := 1] }",
+    );
+    let vmir::Declaration::Method(method) = &p.decls[p.id("m").expect("missing m")] else {
+        panic!("m must be a Method");
+    };
+    let checked: Vec<(MapOp, bool)> = method
+        .iter_insts()
+        .filter_map(|inst| match &inst.kind {
+            InstKind::Pure(
+                _,
+                PureInst::Coll {
+                    op: CollOp::Map(op),
+                    ..
+                },
+            ) => Some((*op, inst.heap.is_some())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(checked, [(MapOp::Lookup, true), (MapOp::Update, false)]);
+}
+
+#[test]
+fn map_trigger_lowers_to_map_heads() {
+    let input = r#"
+domain D {
+    function f(m: Map[Int, Bool]): Bool
+    axiom look { forall m: Map[Int, Bool], k: Int :: {m[k]} f(m) }
+    axiom dom { forall m: Map[Int, Bool] :: {domain(m)} f(m) }
+    axiom mem { forall m: Map[Int, Bool], k: Int :: {k in m} f(m) }
+    axiom lit { forall k: Int, v: Bool :: {Map(k := v)} f(Map(k := v)) }
+}
+"#;
+    let p = run(input);
+    use vmir::{CollOp, MapOp, TrigHead, TrigTerm};
+    let map = |op: MapOp| TrigHead::Coll(CollOp::Map(op));
+    let tys = vec![vmir::Type::Int, vmir::Type::Bool];
+
+    let (head, args) = only_app(only_group(axiom_forall(&p, "look")));
+    assert_eq!(*head, map(MapOp::Lookup));
+    assert_eq!(args, &[TrigTerm::Var(0), TrigTerm::Var(1)], "map first");
+
+    let (head, _) = only_app(only_group(axiom_forall(&p, "dom")));
+    assert_eq!(*head, map(MapOp::Domain));
+    let (head, args) = only_app(only_group(axiom_forall(&p, "mem")));
+    assert_eq!(*head, map(MapOp::Contains));
+    assert_eq!(args, &[TrigTerm::Var(0), TrigTerm::Var(1)], "map first");
+
+    // `Map(k := v)` is `Map()[k := v]`, as in a body, at the map's types.
+    let (head, args) = only_app(only_group(axiom_forall(&p, "lit")));
+    assert_eq!(*head, map(MapOp::Update));
+    let empty = TrigTerm::App {
+        head: map(MapOp::Empty),
+        type_args: tys,
+        args: Box::new([]),
+    };
+    assert_eq!(args, &[empty, TrigTerm::Var(0), TrigTerm::Var(1)]);
+}
+
 #[test]
 fn set_trigger_lowers_to_set_heads() {
     let input = r#"

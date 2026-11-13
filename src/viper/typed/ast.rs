@@ -53,6 +53,10 @@ impl From<&crate::viper::parsed::ast::Type> for Type {
             }
             A::Seq(ty) => Type::Collection(BuiltinCollection::Seq(Box::new(Self::from(&**ty)))),
             A::Set(ty) => Type::Collection(BuiltinCollection::Set(Box::new(Self::from(&**ty)))),
+            A::Map(k, v) => Type::Collection(BuiltinCollection::Map(
+                Box::new(Self::from(&**k)),
+                Box::new(Self::from(&**v)),
+            )),
         }
     }
 }
@@ -153,6 +157,15 @@ pub enum PureExpKind<Ext> {
     SetLit(Vec<TypedPureExp<Ext>>),
     /// `s[..]`: an index, a take, a drop, a slice, or an update of `s`.
     SeqIndex(TypedPureExp<Ext>, SeqIndexOp<Ext>),
+    /// `Map(k1 := v1, ..., kn := vn)`; empty for `Map[K, V]()`. The key and
+    /// value types are the node's own `Map[K, V]`.
+    MapLit(Vec<(TypedPureExp<Ext>, TypedPureExp<Ext>)>),
+    /// `m[..]`: a lookup or an update of the map `m`.
+    MapIndex(TypedPureExp<Ext>, MapIndexOp<Ext>),
+    /// `domain(m)`, the keys of `m`: a `Set[K]`.
+    MapDomain(TypedPureExp<Ext>),
+    /// `range(m)`, the values of `m`: a `Set[V]`.
+    MapRange(TypedPureExp<Ext>),
     /// The context-specific extension — heap nodes (`Ext::Heap`), `old`, `perm`,
     /// `result`. Uninhabited (`!`) in a pure context, so none are constructible.
     Ext(Ext),
@@ -454,6 +467,26 @@ pub struct Predicate {
     pub name: Ident,
     pub params: Vec<TypedIdent>,
     pub body: Option<SpatialExp<HeapExt>>,
+}
+
+/// What `m[..]` does to the map `m`. Written like the sequence index and
+/// update; typecheck tells them apart by the type of `m`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapIndexOp<Ext> {
+    /// `m[k]`
+    Lookup(TypedPureExp<Ext>),
+    /// `m[k := v]`
+    Update(TypedPureExp<Ext>, TypedPureExp<Ext>),
+}
+
+impl<Ext> MapIndexOp<Ext> {
+    /// The operands besides the map itself, in source order.
+    pub fn operands(&self) -> Vec<&TypedPureExp<Ext>> {
+        match self {
+            MapIndexOp::Lookup(k) => vec![k],
+            MapIndexOp::Update(k, v) => vec![k, v],
+        }
+    }
 }
 
 impl<Ext> SeqIndexOp<Ext> {

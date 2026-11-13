@@ -60,16 +60,20 @@ peg::parser! {
             / "Perm" { Type::Real }
             / "Ref" { Type::Ref }
             / "Rational"   { Type::Real }
-            // The collection types are parsed but not implemented (expect Seq and Set): they are kept
-            // as ordinary domain types under their own name so that
+            / "Seq" _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
+            / "Set" _ "[" _ ty:type_() _ "]" { Type::Set(Box::new(ty)) }
+            / ty:map_type() { ty }
+            // `Multiset` is parsed but not implemented: it is kept as an
+            // ordinary domain type under its own name so that
             // `scan_unsupported` can name the construct and reject only the
             // declaration that mentions one, instead of failing the whole file
             // with a parse error.
-            / "Seq" _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
-            / "Set" _ "[" _ ty:type_() _ "]" { Type::Set(Box::new(ty)) }
             / "Multiset" _ "[" _ ty:type_() _ "]" { Type::Domain(Ident::Raw("Multiset".to_string()), vec![ty]) }
-            / "Map" _ "[" _ a:type_() _ "," _ b:type_() _ "]" { Type::Domain(Ident::Raw("Map".to_string()), vec![a, b]) }
             / type_constr()
+
+        /// `Map[K, V]`.
+        rule map_type() -> Type
+            = "Map" _ "[" _ k:type_() _ "," _ v:type_() _ "]" { Type::Map(Box::new(k), Box::new(v)) }
 
         rule type_constr() -> Type = nm:ident() _ tys:("[" _ tys:(type_() ** comma()) _ "]" { tys })?
             {   let tys = tys.unwrap_or_default();
@@ -114,14 +118,27 @@ peg::parser! {
             = kw(<"Set">) _ ty:("[" _ ty:type_() _ "]" { ty })? _ "(" _ es:(exp() ** comma()) _ ")"
                 { ExpKind::SetLit(ty, es) }
 
-        /// The other collection literals. Parsed into an `Unsupported` marker
-        /// rather than a real expression: the construct is named, the
-        /// declaration around it is rejected, and the rest of the file still runs.
-        rule collection_exp() -> ExpKind
-            = n:$("Multiset" / "Map") _ ("[" _ type_() ** comma() _ "]")? _ "(" _ collection_elems() _ ")"
-                { ExpKind::Unsupported(collection_name(n)) }
+        /// A map literal: `Map[K, V]()`, `Map()`, `Map(k1 := v1, ...)` or
+        /// `Map[K, V](k1 := v1, ...)`. `kw` keeps `Mapping(..)` a function call.
+        rule map_exp() -> ExpKind
+            = kw(<"Map">) _ ty:("[" _ k:type_() _ "," _ v:type_() _ "]" { Type::Map(Box::new(k), Box::new(v)) })?
+                _ "(" _ es:(map_entry() ** comma()) _ ")"
+                { ExpKind::MapLit(ty, es) }
 
-        rule collection_elems() = (e:exp() _ (":=" _ exp())? {}) ** comma()
+        rule map_entry() -> MapEntry = key:exp() _ ":=" _ value:exp() { MapEntry { key, value } }
+
+        /// `domain(m)` and `range(m)`, the keys and values of a map.
+        rule map_set_exp() -> ExpKind
+            = kw(<"domain">) _ "(" _ m:exp() _ ")" { ExpKind::MapDomain(m) }
+            / kw(<"range">) _ "(" _ m:exp() _ ")" { ExpKind::MapRange(m) }
+
+        /// The other collection literal, `Multiset(..)`. Parsed into an
+        /// `Unsupported` marker rather than a real expression: the construct is
+        /// named, the declaration around it is rejected, and the rest of the
+        /// file still runs.
+        rule collection_exp() -> ExpKind
+            = "Multiset" _ ("[" _ type_() ** comma() _ "]")? _ "(" _ (exp() ** comma()) _ ")"
+                { ExpKind::Unsupported("Multiset") }
 
         /// `|s|` — the length of a sequence, the cardinality of a set.
         rule cardinality_exp() -> ExpKind = "|" _ e:exp() _ "|" { ExpKind::UnOp(UnOp::Cardinality, e) }
@@ -135,14 +152,6 @@ peg::parser! {
         //     / "Set" _ "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: Ident::set(), args: es }) }
         //     / "Multiset" _ "[" _ ty:type_() _ "]" _ "(" _ ")"{ ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::multiset(), args: Vec::new() })), Type::Domain(Ident::multiset(), vec![ty])) }
         //     / "Multiset" _ "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: Ident::multiset(), args: es }) }
-        //
-        // rule map_constructor_exp() -> ExpKind
-        //     = "Map" _ "[" _ a:type_() _ "," _ b:type_() _ "]" _ "(" _ ")" { ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::map(), args: Vec::new() })), Type::Domain(Ident::map(), vec![a, b])) }
-        //     / "Map" _ "(" _ es:((l:exp() _ ":=" _ r:exp() { (l, r)}) ** comma()) _ ")" {
-        //         es.into_iter().fold(ExpKind::Call(Call { kind: None, name: Ident::map(), args: Vec::new() }), |acc, (l, r)| {
-        //             ExpKind::Index(Box::new(acc), IndexOp::Assign(l, r))
-        //         })
-        //     }
 
         rule forperm_exp() -> ExpKind = "forperm" _ args:(formal_arg() ++ comma()) _ "[" _ res:res_access() _ "]" _ "::" _ exp:exp()
             { ExpKind::ForPerm(args, res, exp) }
@@ -182,6 +191,8 @@ peg::parser! {
 
             / seq_exp()
             / set_exp()
+            / map_exp()
+            / map_set_exp()
             / collection_exp()
             / cardinality_exp()
             / range_exp()
@@ -483,15 +494,6 @@ peg::parser! {
     }
 }
 
-/// The construct name reported for a collection literal, as a `&'static str`
-/// (the grammar action only has a borrowed slice of the input).
-fn collection_name(n: &str) -> &'static str {
-    match n {
-        "Multiset" => "Multiset",
-        _ => "Map",
-    }
-}
-
 #[test]
 fn precedence_test() {
     let exp = viper_parser::exp("!r.b").unwrap();
@@ -600,6 +602,71 @@ fn set_literals_and_types() {
     );
     // Multiset stays an unsupported construct.
     assert_eq!(parse("Multiset(1)"), ExpKind::Unsupported("Multiset"));
+}
+
+#[test]
+fn map_literals_and_types() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    let map = |k, v| Type::Map(Box::new(k), Box::new(v));
+    let entry = |key, value| MapEntry { key, value };
+    assert_eq!(
+        parse("Map[Int, Bool]()"),
+        ExpKind::MapLit(Some(map(Type::Int, Type::Bool)), vec![])
+    );
+    assert_eq!(parse("Map()"), ExpKind::MapLit(None, vec![]));
+    assert_eq!(
+        parse("Map(1 := x, 2 := true)"),
+        ExpKind::MapLit(
+            None,
+            vec![
+                entry(int_lit(1), raw_ident("x")),
+                entry(
+                    int_lit(2),
+                    Exp::unknown(ExpKind::Const(ConstKind::Bool(true)))
+                ),
+            ]
+        )
+    );
+    assert_eq!(
+        parse("Map[Seq[Int], Map[Int, Int]]()"),
+        ExpKind::MapLit(
+            Some(map(
+                Type::Seq(Box::new(Type::Int)),
+                map(Type::Int, Type::Int)
+            )),
+            vec![]
+        )
+    );
+    assert!(matches!(parse("Mapping(1)"), ExpKind::Call(_)));
+    // A written `Map[K, V]` type, in a binder.
+    let ExpKind::Quantifier(_, vars, ..) = parse("forall m: Map[Ref, Int] :: true") else {
+        panic!("expected a quantifier");
+    };
+    assert_eq!(vars[0].ty, map(Type::Ref, Type::Int));
+}
+
+#[test]
+fn map_domain_range_lookup_update() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    assert_eq!(parse("domain(m)"), ExpKind::MapDomain(raw_ident("m")));
+    assert_eq!(parse("range(m)"), ExpKind::MapRange(raw_ident("m")));
+    // `domains(m)` and `ranges(m)` stay function calls.
+    assert!(matches!(parse("domains(m)"), ExpKind::Call(_)));
+    assert!(matches!(parse("ranges(m)"), ExpKind::Call(_)));
+    // Lookup and update share the sequence syntax; typecheck tells them apart.
+    assert!(matches!(
+        parse("m[k]"),
+        ExpKind::Index(_, IndexOp::Index(_))
+    ));
+    assert!(matches!(
+        parse("m[k := v]"),
+        ExpKind::Index(_, IndexOp::Assign(..))
+    ));
+    // `k in domain(m)`: `in` takes the whole call.
+    let ExpKind::BinOp(BinOp::In, _, rhs) = parse("k in domain(m)") else {
+        panic!("expected `in` at the root");
+    };
+    assert!(matches!(&*rhs.kind, ExpKind::MapDomain(_)));
 }
 
 #[test]

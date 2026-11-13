@@ -20,14 +20,45 @@ pub enum ViperTcType {
     /// from an *instantiation* variable (a plain unconstrained key), which any
     /// concrete type may still pin.
     Generic(Ident),
+    /// `Seq[E]`: children `[E, Int, E]` (see [`MEMBER`]).
     Seq,
+    /// `Set[E]`: child `[E]`.
     Set,
-    /// A `Seq` or a `Set`, not yet known which: what `|c|` and `x in c` ask
-    /// of `c`. Abstract, like `Numeric`, but never defaulted: a key left at
-    /// `Collection` cannot be built.
+    /// `Map[K, V]`: children `[K, K, V]` (see [`MEMBER`]).
+    Map,
+    /// A `Seq`, a `Set` or a `Map`, not yet known which: what `|c|` and
+    /// `x in c` ask of `c`, `x` being its [`MEMBER`] child. Abstract, like
+    /// `Numeric`, but never defaulted: a key left at `Collection` cannot be
+    /// built.
     Collection,
+    /// A `Seq` or a `Map`, not yet known which: what `c[i]` and `c[i := v]`
+    /// ask of `c`, `i` being its [`INDEX`] child and `c[i]` its [`ELEMENT`]
+    /// child. Abstract like `Collection`.
+    Indexable,
     Top,
 }
+
+/// The child positions of the collection variants. Constraint generation
+/// runs before the kind of an indexed or tested collection is known, and
+/// `rusttyc` relates children by position, so one constraint has to fit every
+/// kind it may turn out to be: each kind puts the type its operations share at
+/// the same position, and repeats a type where two positions coincide.
+///
+/// - [`MEMBER`]: what `x in c` tests, the element of a `Seq` or `Set` and the
+///   key of a `Map`.
+/// - [`INDEX`]: what `c[i]` takes, `Int` for a `Seq` and the key of a `Map`.
+/// - [`ELEMENT`]: what `c[i]` yields, the element of a `Seq` and the value of
+///   a `Map`.
+///
+/// So a `Seq[E]` is `[E, Int, E]`, a `Set[E]` is `[E]` (it has no index), and
+/// a `Map[K, V]` is `[K, K, V]`. The repeats are constraints, not lattice
+/// facts: whoever makes a key a `Seq` or `Map` equates them (see
+/// `ConstraintCtx::seq_key` and `ConstraintCtx::map_key`).
+pub const MEMBER: usize = 0;
+/// See [`MEMBER`].
+pub const INDEX: usize = 1;
+/// See [`MEMBER`].
+pub const ELEMENT: usize = 2;
 
 /// Why a meet or construction failed. Kept structural (not a message) so the
 /// clashing types can be named once an interner is at hand — see
@@ -57,7 +88,8 @@ impl Variant for ViperTcType {
     fn arity(&self) -> Arity {
         match self {
             ViperTcType::Domain(_, n) => Arity::Fixed(*n),
-            ViperTcType::Seq | ViperTcType::Set | ViperTcType::Collection => Arity::Fixed(1),
+            ViperTcType::Set | ViperTcType::Collection => Arity::Fixed(1),
+            ViperTcType::Seq | ViperTcType::Map | ViperTcType::Indexable => Arity::Fixed(3),
             ViperTcType::Bool
             | ViperTcType::Int
             | ViperTcType::Real
@@ -86,8 +118,12 @@ impl Variant for ViperTcType {
             (Generic(a), Generic(b)) if a == b => Generic(a),
             (Seq, Seq) => Seq,
             (Set, Set) => Set,
+            (Map, Map) => Map,
             (Collection, Collection) => Collection,
-            (Collection, x @ (Seq | Set)) | (x @ (Seq | Set), Collection) => x,
+            (Indexable, Indexable) => Indexable,
+            (Collection, x @ (Seq | Set | Map | Indexable))
+            | (x @ (Seq | Set | Map | Indexable), Collection) => x,
+            (Indexable, x @ (Seq | Map)) | (x @ (Seq | Map), Indexable) => x,
             (t1, t2) => {
                 return Err(TcTypeErr::Mismatch(t1, t2));
             }
@@ -96,7 +132,8 @@ impl Variant for ViperTcType {
         // every other variant is 0-ary.
         let least_arity = match &variant {
             Domain(_, n) => *n,
-            Seq | Set | Collection => 1,
+            Set | Collection => 1,
+            Seq | Map | Indexable => 3,
             _ => 0,
         };
         Ok(Partial {
@@ -120,21 +157,35 @@ impl Constructable for ViperTcType {
             ViperTcType::Ref => Type::Ref,
             ViperTcType::Domain(id, _) => Type::Domain(*id, children.to_vec()),
             ViperTcType::Generic(id) => Type::Generic(*id),
-            ViperTcType::Top | ViperTcType::Collection => {
+            ViperTcType::Top | ViperTcType::Collection | ViperTcType::Indexable => {
                 return Err(TcTypeErr::Abstract);
             }
             ViperTcType::Seq => Type::Collection(BuiltinCollection::Seq(Box::new(
                 children
-                    .first()
+                    .get(MEMBER)
                     .expect("sequence must have a child type")
                     .clone(),
             ))),
             ViperTcType::Set => Type::Collection(BuiltinCollection::Set(Box::new(
                 children
-                    .first()
+                    .get(MEMBER)
                     .expect("set must have a child type")
                     .clone(),
             ))),
+            ViperTcType::Map => Type::Collection(BuiltinCollection::Map(
+                Box::new(
+                    children
+                        .get(MEMBER)
+                        .expect("map must have a key type")
+                        .clone(),
+                ),
+                Box::new(
+                    children
+                        .get(ELEMENT)
+                        .expect("map must have a value type")
+                        .clone(),
+                ),
+            )),
         })
     }
 }
@@ -152,6 +203,7 @@ pub fn type_to_tc(ty: &Type) -> ViperTcType {
         Type::Domain(id, args) => ViperTcType::Domain(*id, args.len()),
         Type::Collection(BuiltinCollection::Seq(_)) => ViperTcType::Seq,
         Type::Collection(BuiltinCollection::Set(_)) => ViperTcType::Set,
+        Type::Collection(BuiltinCollection::Map(..)) => ViperTcType::Map,
         Type::Generic(_) | Type::Collection(_) => ViperTcType::Top,
     }
 }

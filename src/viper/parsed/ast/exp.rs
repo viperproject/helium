@@ -87,6 +87,14 @@ pub enum ExpKind {
     /// A set literal: `Set[T]()`, `Set()`, `Set(e1, ..., en)` or
     /// `Set[T](e1, ..., en)`, element type as for [`ExpKind::SeqLit`].
     SetLit(Option<Type>, Vec<Exp>),
+    /// A map literal: `Map[K, V]()`, `Map()`, `Map(k1 := v1, ..., kn := vn)`
+    /// or `Map[K, V](k1 := v1, ...)`. The type is the written `Map[K, V]`
+    /// ([`Type::Map`]), `Some` only when written.
+    MapLit(Option<Type>, Vec<MapEntry>),
+    /// `domain(m)`: the keys of the map `m`, a set.
+    MapDomain(Exp),
+    /// `range(m)`: the values of the map `m`, a set.
+    MapRange(Exp),
 
     /// A construct the verifier does not implement, parsed only so that the
     /// declaration containing it can be reported as unsupported instead of
@@ -187,6 +195,13 @@ pub enum UnOp {
     Perm,
     /// `|e|`: the length of a sequence (the cardinality of a collection).
     Cardinality,
+}
+
+/// One `k := v` of a map literal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapEntry {
+    pub key: Exp,
+    pub value: Exp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
