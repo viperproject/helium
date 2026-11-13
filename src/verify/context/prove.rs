@@ -148,8 +148,9 @@ impl<'a> VerifyContext<'a> {
         self.in_block
     }
 
-    /// The current block's control cube, as live ids. Empty outside a block body.
-    pub(crate) fn current_cube(&self) -> &[(egg::Id, Polarity)] {
+    /// The current block's control cube, as live ids. Empty outside a block body,
+    /// so also in a join phase: private, as it is not where a heap exists.
+    pub(super) fn current_cube(&self) -> &[(egg::Id, Polarity)] {
         &self.current_cube
     }
 
@@ -195,6 +196,14 @@ impl<'a> VerifyContext<'a> {
         sc.map.insert(key, s);
         sc.dirty = true;
         sc.dirty_reduce = true;
+    }
+
+    /// `ambient_cube(phase) ++ delta`, the effective pc of an instruction whose
+    /// `Inst.pc` (a delta, see [`Sink::ambient`](crate::translate::sink)) lowers to
+    /// `delta`. The ambient is set by `begin_block` and cleared by `end_block`: a
+    /// join materializes its own cube literals, so there the delta is the whole pc.
+    pub(crate) fn effective_pc(&self, delta: Vec<(egg::Id, Polarity)>) -> Vec<(egg::Id, Polarity)> {
+        [self.current_cube.as_slice(), &delta].concat()
     }
 
     /// Prove `pc ⇒ goal` against the live e-graph, escalating through named

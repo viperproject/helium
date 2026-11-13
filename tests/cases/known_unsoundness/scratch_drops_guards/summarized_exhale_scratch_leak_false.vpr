@@ -1,0 +1,16 @@
+// An exhale through a join phi is consumed against the Σ-ite summary, which ties the
+// demand's value to each member chunk under that member's address gate
+// (`x == a`, `x == b`). The gates are finer than the block cube, so the agreement
+// must not reach the block scratch unguarded: there it said `a.f == x.f == b.f`
+// outright, and with `a.f == 1`, `b.f == 2` that is `false`.
+
+field f: Int
+
+method m(c: Bool, a: Ref, b: Ref)
+  requires acc(a.f) && acc(b.f) && a.f == 1 && b.f == 2
+{
+  var x: Ref
+  if (c) { x := a } else { x := b }
+  exhale acc(x.f, 1/2)
+  assert false
+}

@@ -1,0 +1,23 @@
+// REGRESSION (soundness). Census row 5: the loop head rebuilds its heap from the
+// invariant in the *join* phase, and that `heap_union` states the location axioms
+// of `acc(a.f) && acc(b.f, 1/2)`, so `a != b`. The loop head only exists under
+// `d`, but a join is walked with no ambient cube, so the axiom was assumed with no
+// guard. On the else arm `a == b` is consistent (1/2 + 1/2), and the leaked
+// `a != b` made it infeasible.
+//
+// Must FAIL.
+field f: Int
+
+method m(a: Ref, b: Ref, d: Bool, e: Bool)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+{
+  if (d) {
+    inhale acc(a.f, 1/2)
+    while (e)
+      invariant acc(a.f) && acc(b.f, 1/2)
+    {}
+  } else {
+    assume a == b
+    assert false
+  }
+}

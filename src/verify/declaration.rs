@@ -9,7 +9,7 @@ use crate::{
         context::VerifyContext,
         error::VerifyError,
         heap::{
-            Chunk, ChunkPerm, Heap, LocationKind,
+            Chunk, ChunkPerm, Heap, LocationKind, Region,
             algebra::{
                 Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
                 merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
@@ -63,6 +63,9 @@ struct EvalState {
     /// For the join block being evaluated: whether its (then, else) predecessor
     /// blocks are dead. The `Merge` reads this; `None` outside a method join.
     join_arms_dead: Option<(bool, bool)>,
+    /// The block cube of both phases of the method block being walked (empty
+    /// for a CFG-less body): the [`Region`] [`fetch_heap`] homes heaps at.
+    phase_cube: PathConds,
 }
 
 impl EvalState {
@@ -76,6 +79,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            phase_cube: PathConds::default(),
         }
     }
 
@@ -92,6 +96,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            phase_cube: PathConds::default(),
         }
     }
 
@@ -154,6 +159,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            phase_cube: PathConds::default(),
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
@@ -209,14 +215,12 @@ fn format_inst(
     .to_string()
 }
 
-/// Heap-fetch is monomorphic — `HeapVal` carries no ctx-heap variant. The
-/// caller-supplied ctx heap of a resource body lives at
-/// `state.heaps[0]` by convention (mirroring how params occupy the
-/// initial `vals` slots).
-fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
+/// The one way a heap enters an instruction: homed at the phase's [`Region`].
+fn fetch_heap(ctx: &mut VerifyContext<'_>, state: &EvalState, hv: &HeapVal) -> Heap {
+    let region = Region::of_cube(pc_lits_raw(ctx, state, &state.phase_cube));
     match hv {
-        HeapVal::Empty => Heap::empty(),
-        HeapVal::Temp(n) => state.heaps[*n].clone(),
+        HeapVal::Empty => Heap::empty(region),
+        HeapVal::Temp(n) => state.heaps[*n].at(region),
     }
 }
 
@@ -232,7 +236,11 @@ fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec
             | HeapInst::Inhale { base, .. }
             | HeapInst::Exhale { base, .. },
         ) => {
-            let mut res = vec![(base.to_string(), get_heap(state, base))];
+            let heap = match base {
+                HeapVal::Temp(n) => state.heaps[*n].clone(),
+                HeapVal::Empty => Heap::empty(Region::of_cube(Vec::new())),
+            };
+            let mut res = vec![(base.to_string(), heap)];
             if heaps_before < state.heaps.len() {
                 res.push((
                     format!("h{heaps_before}"),
@@ -264,27 +272,14 @@ fn pc_lits_raw(
         .collect()
 }
 
-/// The **effective** path condition of an instruction:
-///
-/// ```text
-/// effective_pc(inst) = ambient_cube(phase) ++ inst.pc
-/// ```
-///
-/// `Inst.pc` is a delta (see [`Sink::ambient`](crate::translate::sink)), so the
-/// ambient cube has to be prepended here. `ctx.current_cube()` *is* that ambient:
-/// it is set by `begin_block` before a block's body walk and cleared by
-/// `end_block` before its join walk, which is exactly the phase split the delta
-/// rule names — a join materializes its own cube literals, so there the ambient
-/// is empty and the delta is the whole pc.
+/// See [`VerifyContext::effective_pc`].
 fn collect_pc_lits(
     ctx: &mut VerifyContext<'_>,
     state: &EvalState,
     pc: &PathConds,
 ) -> Vec<(egg::Id, Polarity)> {
-    // Owned first: `state.get_val` needs `&mut ctx`.
-    let mut lits = ctx.current_cube().to_vec();
-    lits.extend(pc_lits_raw(ctx, state, pc));
-    lits
+    let delta = pc_lits_raw(ctx, state, pc);
+    ctx.effective_pc(delta)
 }
 
 /// Error tag for a certificate-walk operand whose recipe is missing — cannot
@@ -363,7 +358,7 @@ fn eval_pure_inst(
             (id, recipe)
         }
         PureInst::Deref(hv, loc) => {
-            let heap = get_heap(state, hv);
+            let heap = fetch_heap(ctx, state, hv);
             let addr = state.get_val(ctx, loc);
             let chunk = state
                 .loc_kind(loc)
@@ -586,7 +581,7 @@ fn eval_pure_inst(
                     "purify: perm in a function or resource body",
                 ));
             }
-            let heap = get_heap(state, hv);
+            let heap = fetch_heap(ctx, state, hv);
             let addr = state.get_val(ctx, loc);
             let id = match state.loc_kind(loc) {
                 Some(k) => {
@@ -743,7 +738,7 @@ fn heap_acc(ctx: &mut VerifyContext<'_>, loc: &Val, perm: ChunkPerm, state: &Eva
         .loc_kind(loc)
         .expect("acc location must be Addr-typed");
     let value = ctx.fresh_symbolic_value(kind.value.clone());
-    Heap::empty().with_chunk(&kind, Chunk::new_perm(addr, perm, value))
+    fetch_heap(ctx, state, &HeapVal::Empty).with_chunk(&kind, Chunk::new_perm(addr, perm, value))
 }
 
 /// Resolve a [`vmir::PermVal`] to its e-class id, minting a fresh positive share
@@ -1012,8 +1007,8 @@ fn eval_heap_inst(
         // location add and values there must agree. Contrast `Merge`, which
         // selects between mutually exclusive predecessor states.
         HeapInst::Union { a, b } => {
-            let ha = get_heap(state, a).clone();
-            let hb = get_heap(state, b).clone();
+            let ha = fetch_heap(ctx, state, a);
+            let hb = fetch_heap(ctx, state, b);
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
@@ -1035,13 +1030,13 @@ fn eval_heap_inst(
             // `bb_unreach` after `inhale false`) is dropped outright — selecting
             // a `0`-leaf against it would need an exhaustiveness case split.
             match state.join_arms_dead.unwrap_or((false, false)) {
-                (false, true) => return Ok(get_heap(state, then_h)),
-                (true, false) => return Ok(get_heap(state, els_h)),
+                (false, true) => return Ok(fetch_heap(ctx, state, then_h)),
+                (true, false) => return Ok(fetch_heap(ctx, state, els_h)),
                 _ => {}
             }
             let cond_id = state.get_val(ctx, cond);
-            let h_then = get_heap(state, then_h);
-            let h_els = get_heap(state, els_h);
+            let h_then = fetch_heap(ctx, state, then_h);
+            let h_els = fetch_heap(ctx, state, els_h);
             Ok(merge_heaps(ctx, cond_id, &h_then, &h_els))
         }
         // `base ± acc loc perm`: build the single chunk, then union (Add) or
@@ -1057,7 +1052,7 @@ fn eval_heap_inst(
                 HeapInst::Add { bind, .. } => Some(bind),
                 _ => None,
             };
-            let base_h = get_heap(state, base);
+            let base_h = fetch_heap(ctx, state, base);
             let cperm = eval_perm_structural(ctx, state, perm);
             let chunk = heap_acc(ctx, loc, cperm.clone(), state);
             let pc_lits: Vec<(egg::Id, Polarity)> = pc
@@ -1135,7 +1130,7 @@ fn eval_heap_inst(
         // Field assignment `loc := val`: requires write permission at `loc`,
         // then updates the chunk's value (permission unchanged).
         HeapInst::Assign(heap, Assign { loc, val }) => {
-            let h = get_heap(state, heap);
+            let h = fetch_heap(ctx, state, heap);
             let addr = state.get_val(ctx, loc);
             let new_val = state.get_val(ctx, val);
             let kind = state
@@ -1675,7 +1670,7 @@ fn eval_sub_yield(
     else {
         unreachable!("eval_sub_yield called on a non-yielding-Sub instruction");
     };
-    let base_h = get_heap(state, base);
+    let base_h = fetch_heap(ctx, state, base);
     let addr = state.get_val(ctx, loc);
     let kind = state
         .loc_kind(loc)
@@ -1795,7 +1790,7 @@ fn eval_resource_op(
             ..
         }
     );
-    let base_h = get_heap(state, base);
+    let base_h = fetch_heap(ctx, state, base);
     let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
     let scale = eval_perm(ctx, state, perm);
     let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
@@ -1966,6 +1961,7 @@ fn eval_from_snap(
         None
     };
     let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
+    let empty = fetch_heap(ctx, state, &HeapVal::Empty);
 
     // Reconstruct the precondition heap: produce one chunk per footprint slot
     // valued `unwrap(proj_i(s))` into the empty heap, assuming the resource body
@@ -1976,7 +1972,7 @@ fn eval_from_snap(
         certs,
         *resource,
         &arg_ids,
-        Heap::empty(),
+        empty,
         ValueSource::ProjectSnap(s, s_recipe),
         Direction::Produce,
         None,
@@ -2629,6 +2625,7 @@ pub(crate) fn verify_method(
             )),
             _ => None,
         };
+        state.phase_cube = block.cube.clone();
         walk_body(
             &mut ctx,
             program,
@@ -3063,7 +3060,7 @@ fn inst_obligations(
         // `y.f` where `x == y` holds here) still frame.
         InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
             let addr = state.get_val(ctx, loc);
-            let held = get_heap(state, heap);
+            let held = fetch_heap(ctx, state, heap);
             let perm = state.loc_kind(loc).and_then(|k| {
                 let c = chunk_under_pc(ctx, held.chunks_of(&k), addr, pc_lits)?.clone();
                 // Frame against the gated perm: a conditionally-held location
