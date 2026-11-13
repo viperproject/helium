@@ -1824,6 +1824,89 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
         ))))
     }
 
+    /// Flatten the body of a quantified permission into its `acc` leaves, each
+    /// paired with the conjunction of the guards on its path:
+    ///
+    /// | body | action |
+    /// |---|---|
+    /// | `c ==> r` | push `c`, recurse into `r` |
+    /// | `c ? t : e` | push `c` for `t`, push `!c` for `e` |
+    /// | `l && r` | recurse into both |
+    /// | `acc(R, p)` / bare `P(..)` | one leaf, `cond = ⋀conds` (`true` if none) |
+    /// | anything else | rejected: pure conjuncts in a QP are not supported yet |
+    ///
+    /// Everything is lowered as [`typed::AxiomExt`], so a heap read in the
+    /// condition, receiver or amount (e.g. `n.next.f`) is rejected here.
+    #[allow(clippy::type_complexity)]
+    fn flatten_qp(
+        &self,
+        exp: &viper::Exp,
+        conds: &mut Vec<TypedPureExp<typed::AxiomExt>>,
+        out: &mut Vec<(
+            TypedPureExp<typed::AxiomExt>,
+            ResourceExp<typed::AxiomExt>,
+            TypedPureExp<typed::AxiomExt>,
+        )>,
+    ) -> Result<(), TypeError> {
+        use viper::ExpKind;
+        type A = typed::AxiomExt;
+        let conj = |conds: &[TypedPureExp<A>]| -> TypedPureExp<A> {
+            conds
+                .iter()
+                .cloned()
+                .reduce(|l, r| TypedPureExp {
+                    ty: Type::Bool,
+                    exp: Box::new(PureExpKind::Binary(BinOp::And, l, r)),
+                })
+                .unwrap_or(TypedPureExp {
+                    ty: Type::Bool,
+                    exp: Box::new(PureExpKind::Const(Literal::Bool(true))),
+                })
+        };
+        if let ExpKind::Call(call) = &*exp.kind
+            && matches!(call.kind, Some(viper::ExpCallKind::Predicate))
+        {
+            let res = self.lower_predicate_resource::<A>(call)?;
+            out.push((conj(conds), res, write_perm()));
+            return Ok(());
+        }
+        match &*exp.kind {
+            ExpKind::Acc(acc_exp) => {
+                let res = self.lower_resource::<A>(&acc_exp.loc)?;
+                let perm = self.lower_pure::<A>(&acc_exp.perm)?;
+                out.push((conj(conds), res, perm));
+                Ok(())
+            }
+            ExpKind::BinOp(viper::BinOp::And, l, r) => {
+                self.flatten_qp(l, conds, out)?;
+                self.flatten_qp(r, conds, out)
+            }
+            ExpKind::BinOp(viper::BinOp::Implies, c, r) => {
+                conds.push(self.lower_pure::<A>(c)?);
+                let res = self.flatten_qp(r, conds, out);
+                conds.pop();
+                res
+            }
+            ExpKind::Ternary(c, then, else_) => {
+                let c = self.lower_pure::<A>(c)?;
+                conds.push(c.clone());
+                let res = self.flatten_qp(then, conds, out);
+                conds.pop();
+                res?;
+                conds.push(TypedPureExp {
+                    ty: Type::Bool,
+                    exp: Box::new(PureExpKind::Unary(UnOp::Not, c)),
+                });
+                let res = self.flatten_qp(else_, conds, out);
+                conds.pop();
+                res
+            }
+            _ => Err(TypeError::Unsupported(
+                "pure conjunct inside a quantified permission",
+            )),
+        }
+    }
+
     fn lower_spatial<Ext: PureExt>(&self, exp: &viper::Exp) -> Result<SpatialExp<Ext>, TypeError> {
         use viper::ExpKind;
 
@@ -1867,6 +1950,50 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     then: then_s,
                     else_: else_s,
                 })))
+            }
+            // A quantified permission. Binders and triggers lower exactly as
+            // for a pure `forall` (innards `AxiomExt`); the body is flattened
+            // into one `QuantPerm` per `acc` (see `flatten_qp`), joined by
+            // `Conj`. Unlike a pure `forall`, an empty trigger list is legal.
+            ExpKind::Quantifier(QuantifierKind::Forall, bound_vars, triggers, body)
+                if crate::viper::unsupported::mentions_acc(body) =>
+            {
+                let bound: Vec<TypedIdent> = bound_vars
+                    .iter()
+                    .map(|bv| TypedIdent {
+                        name: Ident(bv.idn.0.id()),
+                        ty: type_with_generics(&bv.ty, &self.rigid),
+                    })
+                    .collect();
+                let lowered_triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>> = triggers
+                    .iter()
+                    .map(|trig| {
+                        trig.exp
+                            .iter()
+                            .map(|e| self.lower_pure::<typed::AxiomExt>(e))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !lowered_triggers.is_empty() {
+                    check_triggers(&bound, &lowered_triggers, self.env.interner)?;
+                }
+                let mut leaves = Vec::new();
+                self.flatten_qp(body, &mut Vec::new(), &mut leaves)?;
+                leaves
+                    .into_iter()
+                    .map(|(cond, res, perm)| {
+                        SpatialExp(Box::new(SpatialExpKind::Forall(Box::new(typed::QuantPerm {
+                            bound: bound.clone(),
+                            triggers: lowered_triggers.clone(),
+                            cond,
+                            res,
+                            perm,
+                        }))))
+                    })
+                    .tree_reduce(|l, r| SpatialExp(Box::new(SpatialExpKind::Conj(l, r))))
+                    .ok_or(TypeError::Unsupported(
+                        "quantified permission without an `acc`",
+                    ))
             }
 
             _ => {
