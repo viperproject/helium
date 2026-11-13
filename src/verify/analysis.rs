@@ -429,7 +429,8 @@ impl ConstFold {
         // which sees only the operands' `Data`: the unique constant is kept
         // beside it (see `ClassData::unique`). A quantifier-guard probe, which
         // folds through `fold_value` alone, does not see this; that loses
-        // completeness, never soundness.
+        // completeness, never soundness. (It does see the operands' ranges,
+        // which `fold_value` reads.)
         if let (Data::Unknown, Symbolic::Binary(BinOp::Eq, [l, r])) = (&value, enode)
             && let (Some(a), Some(b)) = (&egraph[*l].data.unique, &egraph[*r].data.unique)
             && a != b
