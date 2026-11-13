@@ -42,9 +42,9 @@ pub enum Type {
     /// Substituted by the type arguments at monomorphization.
     Generic(usize),
 
-    /// A built-in collection and its type arguments: `Seq[E]` and `Set[E]` have
-    /// one, the element type `E`; `Map[K, V]` has two, the key and value types
-    /// (see [`CollKind::arity`]).
+    /// A built-in collection and its type arguments: `Seq[E]`, `Set[E]` and
+    /// `Multiset[E]` have one, the element type `E`; `Map[K, V]` has two, the
+    /// key and value types (see [`CollKind::arity`]).
     Coll(CollKind, Box<[Type]>),
 }
 
@@ -94,6 +94,11 @@ impl Type {
     /// `Set[elem]`.
     pub fn set(elem: Type) -> Self {
         Type::coll(CollKind::Set, [elem])
+    }
+
+    /// `Multiset[elem]`.
+    pub fn multiset(elem: Type) -> Self {
+        Type::coll(CollKind::Multiset, [elem])
     }
 
     /// `Map[key, value]`.
@@ -326,6 +331,20 @@ mod tests {
             Type::set(Type::Int).as_coll(),
             Some((CollKind::Set, &[Type::Int][..]))
         );
+    }
+
+    /// A multiset type is a kind of its own: a set pattern does not bind it,
+    /// and it prints under its Viper name.
+    #[test]
+    fn multiset_is_not_a_set() {
+        let mut out = [None];
+        assert!(!Type::set(Type::Generic(0)).match_generics(&Type::multiset(Type::Int), &mut out));
+        let mut out = [None];
+        assert!(
+            Type::multiset(Type::Generic(0)).match_generics(&Type::multiset(Type::Int), &mut out)
+        );
+        assert_eq!(out, [Some(Type::Int)]);
+        assert_eq!(Type::multiset(Type::Ref).to_string(), "Multiset<Ref>");
     }
 
     /// A map type binds its key and value types, each against its own

@@ -129,7 +129,7 @@ pub struct FuncRegistry {
     skolems: Vec<SkolemSig>,
     /// Each collection kind's axiom skolem functions, minted with its
     /// recipes, by `CollKind` (`CollKind::ALL` order).
-    coll_skolems: [Option<crate::verify::coll_axioms::Skolems>; 3],
+    coll_skolems: [Option<crate::verify::coll_axioms::Skolems>; 4],
 }
 
 // Builtin reserved operator ids (starting from the top of the usize space).
@@ -311,7 +311,7 @@ impl FuncRegistry {
             unique_fns: HashSet::default(),
             quant_table: Default::default(),
             skolems: Vec::new(),
-            coll_skolems: [None, None, None],
+            coll_skolems: [None, None, None, None],
         }
     }
 

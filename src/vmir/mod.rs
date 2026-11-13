@@ -16,8 +16,8 @@ pub use ty::Type;
 
 pub use heap::{Assign, Bind, HeapInst, HeapVal, PermInst, PermVal};
 pub use pure::{
-    BinOp, CollKind, CollOp, FALSE, Literal, MapOp, NULL, PureInst, SeqOp, SetOp, TRUE, Val, none,
-    write,
+    BinOp, CollKind, CollOp, FALSE, Literal, MapOp, MultisetOp, NULL, PureInst, SeqOp, SetOp, TRUE,
+    Val, none, write,
 };
 
 pub use adt::TyParams;

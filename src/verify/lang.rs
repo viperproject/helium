@@ -285,7 +285,7 @@ mod tests {
     use crate::dhash::HashMap;
     use crate::verify::analysis::ConstFold;
     use crate::verify::types::infer_type;
-    use crate::vmir::{MapOp, SeqOp, SetOp};
+    use crate::vmir::{MapOp, MultisetOp, SeqOp, SetOp};
 
     type Graph = EGraph<Symbolic, ConstFold>;
 
@@ -448,5 +448,72 @@ mod tests {
         g.rebuild();
         assert_ne!(g.find(int_val), g.find(bool_val));
         assert_eq!(g.id_to_node(int_val).to_string(), "map.at<Int, Int>");
+    }
+
+    /// Each multiset node's type is recovered from the node and its element
+    /// type: `x in m` is an `Int` count, not a `Bool`.
+    #[test]
+    fn multiset_node_types_are_inferred() {
+        let mut g = Graph::default();
+        let (a, b, x) = (
+            g.add(Symbolic::Fresh(0)),
+            g.add(Symbolic::Fresh(1)),
+            g.add(Symbolic::Fresh(2)),
+        );
+        let ms = |g: &mut Graph, op: MultisetOp, args: &[Id]| {
+            g.add(Symbolic::Coll(
+                Box::new([Type::Ref]),
+                op.into(),
+                args.into(),
+            ))
+        };
+        let ms_ref = Type::multiset(Type::Ref);
+        let cases = [
+            (ms(&mut g, MultisetOp::Empty, &[]), ms_ref.clone()),
+            (ms(&mut g, MultisetOp::Card, &[a]), Type::Int),
+            (ms(&mut g, MultisetOp::Count, &[a, x]), Type::Int),
+            (ms(&mut g, MultisetOp::Union, &[a, b]), ms_ref.clone()),
+            (
+                ms(&mut g, MultisetOp::Intersection, &[a, b]),
+                ms_ref.clone(),
+            ),
+            (ms(&mut g, MultisetOp::Difference, &[a, b]), ms_ref.clone()),
+            (ms(&mut g, MultisetOp::Subset, &[a, b]), Type::Bool),
+            (ms(&mut g, MultisetOp::Add, &[a, x]), ms_ref.clone()),
+            (ms(&mut g, MultisetOp::Eq, &[a, b]), Type::Bool),
+            (
+                g.add(Symbolic::CollLit(
+                    CollKind::Multiset,
+                    Box::new(Type::Ref),
+                    x,
+                )),
+                ms_ref,
+            ),
+        ];
+        g.rebuild();
+        for (id, want) in cases {
+            assert_eq!(ty_of(&g, id), Some(want), "{}", g.id_to_node(id));
+        }
+    }
+
+    /// A multiset union and a set union of the same operands are two terms:
+    /// the kind is part of the operation.
+    #[test]
+    fn multiset_and_set_ops_stay_apart() {
+        let mut g = Graph::default();
+        let (a, b) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let set_u = g.add(Symbolic::Coll(
+            Box::new([Type::Int]),
+            SetOp::Union.into(),
+            Box::new([a, b]),
+        ));
+        let ms_u = g.add(Symbolic::Coll(
+            Box::new([Type::Int]),
+            MultisetOp::Union.into(),
+            Box::new([a, b]),
+        ));
+        g.rebuild();
+        assert_ne!(g.find(set_u), g.find(ms_u));
+        assert_eq!(g.id_to_node(ms_u).to_string(), "mset.union<Int>");
     }
 }

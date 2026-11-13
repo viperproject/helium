@@ -120,7 +120,7 @@ pub(crate) struct RecipeTable {
     by_forall: HashMap<vmir::Forall, (RecipeId, Arc<[usize]>)>,
     /// The built-in collection axioms' recipes (`verify::coll_axioms`), by
     /// `CollKind` (`CollKind::ALL` order), each compiled on first use.
-    coll_axioms: [Option<Vec<RecipeId>>; 3],
+    coll_axioms: [Option<Vec<RecipeId>>; 4],
 }
 
 impl RecipeTable {

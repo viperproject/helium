@@ -153,6 +153,7 @@ impl Witness {
             CollKind::Seq => &[Witness::SeqIndexOf, Witness::SeqDiff],
             CollKind::Set => &[Witness::SetDiff, Witness::SetMember, Witness::SetSubset],
             CollKind::Map => &[Witness::MapDiff, Witness::MapMember, Witness::MapRangeKey],
+            CollKind::Multiset => &[],
         }
     }
 
@@ -257,6 +258,8 @@ pub(crate) fn axioms(kind: CollKind) -> &'static [CollAxiom] {
         CollKind::Seq => &SEQ,
         CollKind::Set => &SET,
         CollKind::Map => &MAP,
+        // The multiset axioms are not written yet.
+        CollKind::Multiset => &[],
     }
 }
 

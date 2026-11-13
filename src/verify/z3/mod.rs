@@ -900,6 +900,7 @@ fn coll_apply(ctxt: &mut VerifyContext, f: CollFn, tys: &[Type], args: &[&dyn As
                 match kind {
                     CollKind::Seq => "seq.unit",
                     CollKind::Set => "set.unit",
+                    CollKind::Multiset => "mset.unit",
                     CollKind::Map => unreachable!("a map has no one-element literal"),
                 },
                 tys.to_vec(),
