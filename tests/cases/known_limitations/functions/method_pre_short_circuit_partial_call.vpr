@@ -1,0 +1,16 @@
+// KNOWN LIMITATION: same root cause as method_post_calls_partial_function.vpr,
+// on the precondition side: `valid(x) && !empty(x)` emits a guarded
+// `<valid(x)> assert empty#requires(x)` into the `#requires` resource, which
+// the resource evaluator rejects ("unimplemented: effectful inst in resource
+// body"). Reduced from Gobra's dafny_book/chap08 and chap10.
+function valid(x: Int): Bool
+{ x >= 0 }
+
+function empty(x: Int): Bool
+  requires valid(x)
+{ x == 0 }
+
+method rm(x: Int)
+  requires valid(x) && !empty(x)
+{
+}

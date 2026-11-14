@@ -1,0 +1,35 @@
+// KNOWN LIMITATION: Gobra-style ADT encoding (unique tag constants, an
+// exhaustiveness axiom triggered on `tag(t)`). With three constructors, the
+// precondition `b` of `check(b, y)` is not proven once the other argument `y`
+// has a precondition of its own (`pos(1)`); with `y` a plain value it
+// verifies. Axiom instantiation grows to ~200k facts, and the Z3 rung answers
+// `unknown`. Reduced from Gobra's dafny_book/chap04 (`Eval`, where `y` is a
+// map lookup); not collection-specific.
+domain E {
+  function A(a: Int): E
+  unique function A_tag(): Int
+  function B(b: Int): E
+  unique function B_tag(): Int
+  function C(c: Int): E
+  unique function C_tag(): Int
+  function a_of(t: E): Int
+  function b_of(t: E): Int
+  function c_of(t: E): Int
+  function tag(t: E): Int
+
+  axiom { forall a: Int :: { A(a) } tag(A(a)) == A_tag() && a_of(A(a)) == a }
+  axiom { forall b: Int :: { B(b) } tag(B(b)) == B_tag() && b_of(B(b)) == b }
+  axiom { forall c: Int :: { C(c) } tag(C(c)) == C_tag() && c_of(C(c)) == c }
+  axiom { forall t: E :: { tag(t) } t == A(a_of(t)) || t == B(b_of(t)) || t == C(c_of(t)) }
+}
+
+function check(b: Bool, y: Int): Int
+  requires b
+{ y }
+
+function pos(n: Int): Int
+  requires n > 0
+{ n }
+
+function eval(t: E): Int
+{ check(tag(t) == A_tag() || tag(t) == B_tag() || tag(t) == C_tag(), pos(1)) }
