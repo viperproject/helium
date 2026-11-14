@@ -456,8 +456,7 @@ pub(crate) fn gate_bool_by_cube(
 /// becomes `guard ⇒ perm ≤ b` and non-aliasing fires on `gt ∧ guardᵢ ∧ guardⱼ`.
 /// Both stay valid on *every* path, so the unconditional `union` — and with it
 /// the collapse mechanics both axioms rely on — is unchanged, and no
-/// [`VerifyContext::assume_guarded`] (whose scratch half is unguarded, invariant
-/// 4) is involved. With empty guards this is byte-identical to the pre-gating
+/// [`VerifyContext::assume_guarded`] implication chain is built. With empty guards this is byte-identical to the pre-gating
 /// encoding, so the unconditional hot path pays nothing.
 pub(crate) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
     let chunks = location_chunks(ctx, h);

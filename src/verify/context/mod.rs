@@ -1,9 +1,12 @@
+mod graph_utils;
 pub(crate) mod prove;
+mod scratch;
 
-use prove::BlockScratch;
+use scratch::BlockScratch;
 
 use crate::dhash::HashMap;
 
+use crate::verify::context::graph_utils::{graph_inconsistent, run_rules, saturate_flat};
 use crate::verify::z3::Z3Translation;
 use crate::{
     verify::{
@@ -232,20 +235,14 @@ impl<'a> VerifyContext<'a> {
     /// Union two e-classes in the live graph — the sanctioned mutation path
     /// (invalidates the fixpoint cache). Callers still `rebuild()` after a
     /// batch of unions.
+    /// If a scratch graph exists, then the fact is also added there.
     pub(crate) fn union(&mut self, a: egg::Id, b: egg::Id) -> bool {
         let merged = self.egraph.union(a, b);
         if merged {
             self.clean = None;
         }
-        if self.scratch.is_some() {
-            // Mirror into the block scratch. A same-typed conflict there (the
-            // cube made this union contradictory) folds to `Inconsistent`, not a
-            // panic — that just makes the block's goals vacuously provable.
-            let (ta, tb) = (self.tr(a), self.tr(b));
-            let sc = self.scratch.as_mut().unwrap();
-            sc.egraph.union(ta, tb);
-            sc.dirty = true;
-            sc.dirty_reduce = true;
+        if let Some(sc) = self.scratch.as_mut() {
+            sc.mirror_union(&self.egraph, a, b);
         }
         merged
     }
@@ -361,7 +358,7 @@ impl<'a> VerifyContext<'a> {
         let egraph = std::mem::take(&mut self.egraph);
         let (n0, c0) = (egraph.total_number_of_nodes(), egraph.number_of_classes());
         let it0 = stats::with_stats(|s| s.sat_iterations);
-        self.egraph = self.saturate_flat(egraph);
+        self.egraph = saturate_flat(egraph, self.full_rules());
         if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
             eprintln!(
                 "[ground-sat] {n0}n/{c0}c -> {}n/{}c true={} ({} iters)",
@@ -380,23 +377,20 @@ impl<'a> VerifyContext<'a> {
         self.clean = Some(self.clean_tag(CleanLevel::Full));
     }
 
-    /// One full-rule-set run, shared by [`Self::saturate`], [`Self::run_probe`],
-    /// and the block scratch. Memo scoping is ambient (see `rewrite::Memo`): live
-    /// runs write the persistent base, scratch scopes an overlay.
-    fn saturate_flat(
-        &mut self,
-        egraph: egg::EGraph<Symbolic, ConstFold>,
-    ) -> egg::EGraph<Symbolic, ConstFold> {
-        let (egraph, iterations) = run_rules(
-            egraph,
-            self.static_rules
-                .iter()
-                .chain(self.alloc.rules())
-                .chain(self.axiom_rules.iter()),
-            None,
-        );
-        stats::bump(|s| s.record_run(&iterations));
-        egraph
+    /// The full rule set: the static rules, the ADT reductions minted so far by
+    /// the allocator, and the unit's axiom/function rules. What [`Self::saturate`],
+    /// the block scratch and every probe run.
+    pub(super) fn full_rules(&self) -> impl Iterator<Item = &egg::Rewrite<Symbolic, ConstFold>> {
+        self.static_rules
+            .iter()
+            .chain(self.alloc.rules())
+            .chain(self.axiom_rules.iter())
+    }
+
+    /// The terminating reductions plus the ADT reductions: what [`Self::reduce`]
+    /// and every reduce-only run use.
+    pub(super) fn reduce_rules(&self) -> impl Iterator<Item = &egg::Rewrite<Symbolic, ConstFold>> {
+        self.static_reduce.iter().chain(self.alloc.rules())
     }
 
     /// Run only the terminating structural reductions in place. Used after
@@ -409,11 +403,7 @@ impl<'a> VerifyContext<'a> {
         }
         let t = std::time::Instant::now();
         let egraph = std::mem::take(&mut self.egraph);
-        let (egraph, iterations) = run_rules(
-            egraph,
-            self.static_reduce.iter().chain(self.alloc.rules()),
-            None,
-        );
+        let (egraph, iterations) = run_rules(egraph, self.reduce_rules(), None);
         self.egraph = egraph;
         stats::bump(|s| s.graph_timing.0.ground += t.elapsed().as_secs_f64());
         stats::bump(|s| s.reduces += 1);
@@ -431,17 +421,13 @@ impl<'a> VerifyContext<'a> {
     /// reached versus the scratch size the obligation reasons over, and how far the
     /// scratch had to be run (`reduce` = the cheap reductions sufficed).
     fn trace_probe(&self, g0: (usize, usize, usize), fresh: bool, ran: &str) {
-        let sc = self.scratch.as_ref().expect("scratch live");
-        let st = sc.egraph.find(sc.true_id);
+        let (n, c, tn) = self.scratch.as_ref().expect("scratch live").sizes();
         eprintln!(
-            "[probe] ground {}n/{}c true={} | scratch {}n/{}c true={} | ratio {:.2} | {} | {}",
+            "[probe] ground {}n/{}c true={} | scratch {n}n/{c}c true={tn} | ratio {:.2} | {} | {}",
             g0.0,
             g0.1,
             g0.2,
-            sc.egraph.total_number_of_nodes(),
-            sc.egraph.number_of_classes(),
-            sc.egraph[st].nodes.len(),
-            sc.egraph.total_number_of_nodes() as f64 / g0.0.max(1) as f64,
+            n as f64 / g0.0.max(1) as f64,
             ran,
             if fresh { "built" } else { "warm" },
         );
@@ -456,7 +442,9 @@ impl<'a> VerifyContext<'a> {
             if self.egraph.total_size() != before {
                 self.clean = None;
             }
-            self.mirror_add(id, node);
+            if let Some(sc) = self.scratch.as_mut() {
+                sc.mirror_add(&self.egraph, id, node);
+            }
             id
         } else {
             let id = self.egraph.add(node);
@@ -551,32 +539,26 @@ impl<'a> VerifyContext<'a> {
         let imp = self.implication(fact, guards);
         let true_ = expr!(self, true);
         self.union(imp, true_);
-        // Invariant 4: ground guarded, scratch unguarded.
-        self.scratch_assume_unguarded(fact);
         self.egraph.rebuild();
     }
 
     /// [`Self::assume_guarded`] for a **release key** rather than a fact about
     /// program state: a callee's `f%pre` token, minted at a call site under that
-    /// call's path condition. Records the ground guarded implication exactly like
-    /// [`Self::assume_guarded`], but deliberately **skips** the scratch-unguarded
-    /// half of invariant 4.
+    /// call's path condition. Records the guarded implication exactly like
+    /// [`Self::assume_guarded`]; it is a separate entry point only to name the
+    /// token's role.
     ///
-    /// Why skip it: that invariant's licence is that the block scratch already
-    /// bakes in the block PC — but it bakes in the block **cube**, and this token
-    /// exists to carry the *finer* intra-block path condition (a call under a
-    /// ternary or an implication; the same observation as the invariant-5 note in
-    /// [`Self::prove_under_pc`]). Unioning `tok == true` in the warm scratch would
-    /// make the callee's facts available on sibling intra-block paths there —
-    /// precisely the leak this gating closes.
+    /// The token must stay behind its guards: it carries the *finer* intra-block
+    /// path condition (a call under a ternary or an implication), so a bare
+    /// `tok == true` would release the callee's facts on sibling intra-block paths.
     ///
-    /// Nothing is lost by skipping it: [`Self::union`] already mirrors the guarded
-    /// implication into the scratch, so the cube prefix of the guard chain
-    /// collapses there via `ite-reduce` (cube literals *are* unguarded in the
-    /// scratch), and any residual intra-block guard collapses in the probe clone,
-    /// which assumes the obligation's extra pc literals (see
-    /// [`Self::prove_via_scratch`]). The token therefore ends up true in the
-    /// scratch on exactly the paths an obligation is taken under.
+    /// The block scratch gets the same guarded implication, through the mirror in
+    /// [`Self::union`]. There the cube prefix of the guard chain collapses via
+    /// `ite-reduce` (the scratch has assumed the cube), and any residual
+    /// intra-block guard collapses in the probe clone, which assumes the
+    /// obligation's extra pc literals (see [`Self::prove_via_scratch`]). The token
+    /// therefore ends up true in the scratch on exactly the paths an obligation is
+    /// taken under.
     ///
     /// `guards` are in innermost-first fold order, matching [`Self::implication`].
     pub(crate) fn assume_token_guarded(
@@ -603,123 +585,7 @@ impl<'a> VerifyContext<'a> {
         for fact in facts {
             let imp = self.implication(fact, guards.iter().copied());
             self.union(imp, true_);
-            // Invariant 4: ground guarded, scratch unguarded.
-            self.scratch_assume_unguarded(fact);
         }
         self.egraph.rebuild();
     }
-}
-
-/// One egg run over `rules`. Returns the graph and the iteration log — the
-/// caller records the log into the stats once the rule borrow is released.
-/// [`Context::is_inconsistent`] for a detached graph (a probe, or the block
-/// scratch). `false` when either boolean literal is absent: a graph that never
-/// mentioned one cannot have merged them.
-pub(super) fn graph_inconsistent(egraph: &egg::EGraph<Symbolic, ConstFold>) -> bool {
-    let (Some(t), Some(f)) = (
-        egraph.lookup(Symbolic::Lit(Literal::Bool(true))),
-        egraph.lookup(Symbolic::Lit(Literal::Bool(false))),
-    ) else {
-        return false;
-    };
-    egraph.find(t) == egraph.find(f)
-}
-
-pub(super) fn run_rules<'r>(
-    egraph: egg::EGraph<Symbolic, ConstFold>,
-    rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
-    iter_limit: Option<usize>,
-) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
-    run_rules_until(egraph, rules, iter_limit, None)
-}
-
-/// As [`run_rules`], but stopping as soon as `goal` is settled.
-///
-/// egg checks a `Runner`'s hooks at the start of every iteration and treats an
-/// `Err` as a stop, so this costs one class lookup per iteration and saves every
-/// iteration after the answer exists.
-///
-/// **`goal` is only sound on a throwaway graph.** The returned e-graph is *not*
-/// saturated, so a caller that records it as clean — `VerifyContext::saturate`
-/// (which sets `self.clean`) or `saturate_scratch` (which clears `dirty` on a graph
-/// shared by every obligation in the block) — would make later obligations read a
-/// fixpoint that was never reached. Pass `None` there and `Some` only for a probe
-/// that dies with the call.
-///
-/// The *inconsistency* stop below carries no such condition and so is installed for
-/// every caller: a contradictory graph proves everything, which is exactly why
-/// `run_rules` refuses to start on one, so abandoning its saturation cannot change
-/// a verdict either.
-pub(super) fn run_rules_until<'r>(
-    egraph: egg::EGraph<Symbolic, ConstFold>,
-    rules: impl IntoIterator<Item = &'r egg::Rewrite<Symbolic, ConstFold>>,
-    iter_limit: Option<usize>,
-    goal: Option<egg::Id>,
-) -> (egg::EGraph<Symbolic, ConstFold>, Vec<egg::Iteration<()>>) {
-    // A contradictory graph proves everything, so no rule can change any verdict
-    // it yields — stop running them. This is the single choke point for every
-    // graph (ground saturate/reduce, scratch saturate/reduce, every probe), and
-    // it is per-graph: a deliberately contradictory probe short-circuits without
-    // touching a consistent ground graph.
-    if graph_inconsistent(&egraph) {
-        return (egraph, Vec::new());
-    }
-    // The observation cache describes the graph this run walks; a run on a
-    // different graph must not read it (ground and its clones share ids).
-    crate::verify::rewrite::diseq::new_scan_generation();
-    // Explicit limits: egg's defaults (30 iterations, 10k nodes, **5 seconds**)
-    // are SILENT truncation points — a run that hits one simply stops
-    // mid-saturation and the caller sees an ordinary "not proven", which surfaced
-    // as a false insufficient-permission at ~20 match arms (one tower level
-    // collapses per iteration, so deep-but-terminating collapses need iterations
-    // ∝ depth).
-    //
-    // The time limit is the worst of the three, because it makes a *verdict*
-    // depend on wall clock: `enum_v8_p2::m_e_guarded` was measured failing on a
-    // 119s run and verifying on a 149s one, same binary and input. That also
-    // silently falsifies the premise `perf_regression` rests on ("egg is
-    // deterministic for a fixed rule set + input") for any program whose
-    // saturation approaches it. Disabled outright — the node and iteration limits
-    // are the real backstops, and unlike a clock they are reproducible.
-    let mut runner = egg::Runner::default()
-        .with_scheduler(egg::SimpleScheduler)
-        .with_node_limit(100_000)
-        .with_iter_limit(iter_limit.unwrap_or(100))
-        .with_time_limit(std::time::Duration::MAX)
-        .with_egraph(egraph)
-        // Contradiction reached mid-run: every remaining iteration is spent
-        // elaborating a graph that already proves everything.
-        .with_hook(|r| {
-            if graph_inconsistent(&r.egraph) {
-                stats::bump(|s| s.probe_early_stops += 1);
-                return Err("inconsistent".to_owned());
-            }
-            Ok(())
-        });
-    if let Some(goal) = goal {
-        runner = runner.with_hook(move |r| {
-            // `ConstFold` settles a class without merging it into `true`, so ask
-            // the analysis rather than comparing canonical ids.
-            if matches!(
-                r.egraph[r.egraph.find(goal)].data.known(),
-                Some(Literal::Bool(true))
-            ) {
-                stats::bump(|s| s.probe_early_stops += 1);
-                return Err("goal proven".to_owned());
-            }
-            Ok(())
-        });
-    }
-    let runner = runner.run(rules);
-    // A bound stop is a truncation the verdict cannot see. Counted here rather
-    // than in `record_run`: egg reports the iteration limit only on the runner,
-    // never on its last `Iteration`. Hook stops (`Other`) and fixpoints
-    // (`Saturated`) are not truncations; `TimeLimit` is disabled above.
-    if matches!(
-        runner.stop_reason,
-        Some(egg::StopReason::IterationLimit(_) | egg::StopReason::NodeLimit(_))
-    ) {
-        stats::bump(|s| s.sat_bound_stops += 1);
-    }
-    (runner.egraph, runner.iterations)
 }
