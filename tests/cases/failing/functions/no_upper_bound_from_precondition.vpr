@@ -1,0 +1,17 @@
+// A function's permission amounts are read-only: `acc(x.f) && acc(y.f)` in a function
+// precondition does NOT imply `x != y` (a caller holding a fraction of `x.f` may pass
+// `y == x`). Silicon: "Postcondition of bad might not hold". If this verified,
+// `client` could derive `false`.
+
+field f: Int
+
+function bad(x: Ref, y: Ref): Bool
+    requires acc(x.f, write) && acc(y.f, write)
+    ensures result
+{ x != y }
+
+method client(x: Ref)
+    requires acc(x.f, 1/2)
+{
+    assert !bad(x, x)
+}

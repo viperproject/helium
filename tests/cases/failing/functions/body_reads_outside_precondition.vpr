@@ -1,0 +1,9 @@
+// A function body may read only what its precondition frames, at some positive
+// amount; `acc(x.f, none)` frames nothing. Silicon: "Function might not be
+// well-formed".
+
+field f: Int
+
+function bad(x: Ref): Int
+    requires acc(x.f, none)
+{ x.f }
