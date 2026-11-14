@@ -1,11 +1,14 @@
 use crate::dhash::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use egg::{Analysis, DidMerge, EGraph, Id, Justification, Language};
-use num::BigRational;
+use num::{BigInt, BigRational};
 
+use crate::verify::interval::Interval;
 use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::stats;
 use crate::vmir::{BinOp, Literal, MemberId, Type};
 
 /// What [`Data::Adt`] knows about an ADT value: the variants it may still be.
@@ -81,12 +84,56 @@ pub struct ClassData {
 ///   `Cons(..) == Nil` is a contradiction) — the e-class, and thus the whole
 ///   verification unit, is contradictory. Merging across *different* types is
 ///   instead a verifier panic: a type error, not a fact about the program.
+///
+/// Beside these, `Range(iv, depth)`: an `Int` class whose value lies in `iv` —
+/// bounded on at least one side, and never a single point (that is `Known`).
+/// `depth` is how the bounds were derived (see [`Depth`]); it is not part of
+/// the value, so two ranges compare equal by their intervals alone. See
+/// [`crate::verify::interval`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Data {
     Unknown,
+    Range(Interval, Depth),
     Known(Literal),
     Adt(AdtData),
     Inconsistent,
+}
+
+/// The length of the longest chain of derived steps — an arithmetic node
+/// re-evaluated over its operands' ranges, or a comparison narrowing one operand
+/// by the other's range — behind a range's bounds. A literal is at depth `0`,
+/// so a comparison against one narrows at depth `1`; a union adds no step.
+///
+/// It is what makes narrowing terminate without costing precision where none
+/// is at stake. Narrowing is a descending chain, and on a cyclic e-graph that
+/// chain need not end: in a class holding both `x` and `x - 1` every bound
+/// narrows the next. But a chain of derived steps longer than the number of
+/// e-node ids must pass through some class twice, i.e. it runs round a cycle —
+/// the Bellman-Ford argument for negative cycles. Up to that length a derived
+/// step narrows exactly; beyond it, only the standard narrowing operator
+/// applies (an unbounded side may become bounded, a bounded one stays; see
+/// [`Interval::narrow`]). Over the integers a bound that keeps moving leaves
+/// every value behind, so such a cycle only exists in a class with no value at
+/// all: what stops is the discovery of a contradiction, never a verdict that
+/// does not already follow from one.
+///
+/// Compares equal to every other depth, so a change of depth alone is not a
+/// change of the data (it re-evaluates no parents).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Depth(u32);
+
+impl PartialEq for Depth {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Depth {
+    /// One derived step past the deepest of `inputs`.
+    fn after(inputs: &[&Data]) -> Depth {
+        let deepest = inputs.iter().map(|d| d.depth().0).max().unwrap_or(0);
+        Depth(deepest.saturating_add(1))
+    }
 }
 
 /// What `ConstFold` knows about an e-class's *value*, as a comparison key: what
@@ -206,13 +253,48 @@ impl Data {
                     possible: &adt.possible,
                 })
             }
-            Data::Unknown | Data::Inconsistent => None,
+            Data::Unknown | Data::Range(..) | Data::Inconsistent => None,
         }
     }
 
     /// Whether this e-class merged conflicting same-typed literals.
     pub fn is_inconsistent(&self) -> bool {
         matches!(self, Data::Inconsistent)
+    }
+
+    pub fn known_bool(&self) -> Option<bool> {
+        match self {
+            Data::Known(Literal::Bool(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// The interval of an `Int` class: its range, or the point it folds to.
+    /// `None` for anything else, including `Unknown` — which may be an `Int`
+    /// class not bounded yet, so a caller that knows the sort reads it as
+    /// [`Interval::TOP`].
+    pub fn interval(&self) -> Option<Interval> {
+        match self {
+            Data::Range(iv, _) => Some(*iv),
+            Data::Known(Literal::Int(n)) => Some(Interval::of(n)),
+            _ => None,
+        }
+    }
+
+    fn depth(&self) -> Depth {
+        match self {
+            Data::Range(_, depth) => *depth,
+            _ => Depth(0),
+        }
+    }
+
+    /// The data of an `Int` class known to lie in `iv`.
+    fn of_interval(iv: Interval, depth: Depth) -> Data {
+        match iv.as_point() {
+            Some(v) => Data::Known(Literal::Int(BigInt::from(v))),
+            None if iv.is_top() => Data::Unknown,
+            None => Data::Range(iv, depth),
+        }
     }
 }
 
@@ -269,11 +351,29 @@ pub struct ConstFold {
     uniques: Arc<HashSet<FuncId>>,
     /// While a bucket rule is applied (`rewrite::PerClass`), the classes whose
     /// nodes read differently after each union; see [`Analysis::pre_union`].
-    pub(crate) union_log: std::cell::RefCell<Option<Vec<Id>>>,
+    pub(crate) union_log: RefCell<Option<Vec<Id>>>,
     /// The generation of the quantifier instance whose body is being added, 0
     /// outside one: the least generation a node added now is created at (see
     /// [`ClassData::generation`]).
-    pub(crate) building: std::cell::Cell<u32>,
+    pub(crate) building: Cell<u32>,
+    /// The number of e-node ids minted so far: the longest a chain of derived
+    /// steps can be without running round a cycle (see [`Depth`]). Kept by
+    /// `make`, which sees every new node.
+    ids: Cell<usize>,
+    /// Set by `pre_union`, cleared by the `modify` that ends the union. A union
+    /// meets the two classes' facts exactly; a node re-evaluated inside
+    /// `rebuild` is a derived step (see `merge`).
+    in_union: Cell<bool>,
+    /// Set by `merge` when a re-evaluation inside `rebuild` decides a boolean
+    /// class, so its `modify` queues the comparisons it holds. A union that
+    /// decides one is seen by `pre_union` instead.
+    decided_by_remake: Cell<bool>,
+    /// Comparisons decided since their operands were last narrowed by them:
+    /// `(op, lhs, rhs, holds)`. Drained by [`ConstFold::narrow_decided`].
+    decided: RefCell<Vec<(BinOp, Id, Id, bool)>>,
+    /// Whether `decided` is being drained: narrowing an operand re-enters
+    /// `modify`, which must leave the queue to the loop already draining it.
+    draining: Cell<bool>,
 }
 
 impl ConstFold {
@@ -281,8 +381,7 @@ impl ConstFold {
         Self {
             ctors,
             uniques,
-            union_log: Default::default(),
-            building: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -330,7 +429,8 @@ impl ConstFold {
         // which sees only the operands' `Data`: the unique constant is kept
         // beside it (see `ClassData::unique`). A quantifier-guard probe, which
         // folds through `fold_value` alone, does not see this; that loses
-        // completeness, never soundness.
+        // completeness, never soundness. (It does see the operands' ranges,
+        // which `fold_value` reads.)
         if let (Data::Unknown, Symbolic::Binary(BinOp::Eq, [l, r])) = (&value, enode)
             && let (Some(a), Some(b)) = (&egraph[*l].data.unique, &egraph[*r].data.unique)
             && a != b
@@ -345,7 +445,7 @@ impl ConstFold {
     /// node that is *not* in the e-graph (the quantifier guard check) passes
     /// its own child values instead, under whatever ids it numbered them by.
     pub(crate) fn fold_value<'a>(&self, enode: &Symbolic, value: impl Fn(&Id) -> &'a Data) -> Data {
-        use Data::{Adt, Inconsistent, Known, Unknown};
+        use Data::{Adt, Inconsistent, Known, Range, Unknown};
         match enode {
             Symbolic::Lit(lit) => Known(lit.clone()),
 
@@ -367,7 +467,7 @@ impl ConstFold {
                     unreachable!("RealCast operand must be an integer literal")
                 }
                 Inconsistent => Inconsistent,
-                Unknown => Unknown,
+                Unknown | Range(..) => Unknown,
             },
 
             Symbolic::Binary(op, [l, r]) => match (value(l), value(r)) {
@@ -385,13 +485,15 @@ impl ConstFold {
                     Known(Literal::Bool(false))
                 }
                 (Known(lv), Known(rv)) => eval_binary(*op, lv, rv).map_or(Unknown, Known),
-                _ => Unknown,
+                (ld, rd) => binary_from_ranges(*op, ld, rd),
             },
 
             Symbolic::Ite([c, t, e]) => match value(c) {
                 Known(Literal::Bool(true)) => value(t).clone(),
                 Known(Literal::Bool(false)) => value(e).clone(),
-                Known(_) | Adt(..) => unreachable!("Condition of ITE must be a boolean literal"),
+                Known(_) | Adt(..) | Range(..) => {
+                    unreachable!("Condition of ITE must be a boolean literal")
+                }
                 Inconsistent => Inconsistent,
                 // Undecided condition: the value is one of the two arms, so it
                 // may be any variant either arm may be — the *union* of their
@@ -411,7 +513,14 @@ impl ConstFold {
                             possible: a.possible.union(&b.possible).copied().collect(),
                         })
                     }
-                    _ => Unknown,
+                    // Likewise the hull of the arms' ranges. A class with a
+                    // range has the sort `Int`, and so has its sibling arm.
+                    (tv, ev) => match (tv.interval(), ev.interval()) {
+                        (Some(ti), Some(ei)) => {
+                            Data::of_interval(ti.hull(&ei), Depth::after(&[tv, ev]))
+                        }
+                        _ => Unknown,
+                    },
                 },
             },
             Symbolic::Coll(..) => Unknown,
@@ -419,15 +528,15 @@ impl ConstFold {
         }
     }
 
-    fn merge_value(&self, a: &mut Data, b: Data) -> DidMerge {
-        use Data::{Adt, Inconsistent, Known, Unknown};
-        match (&mut *a, &b) {
-            (Inconsistent, Inconsistent) => DidMerge(false, false),
-            (Inconsistent, _) => DidMerge(false, true),
-            (_, Inconsistent) => {
-                *a = Inconsistent;
-                DidMerge(true, false)
-            }
+    /// The meet of two classes' values: what is known of a class holding both.
+    /// `a` is the class's current value. Unless `exact`, `b` is derived, and
+    /// past the cycle bound of [`Depth`] narrows `a` only by the standard
+    /// narrowing operator.
+    fn meet(&self, a: &Data, b: &Data, exact: bool) -> Data {
+        use Data::{Adt, Inconsistent, Known, Range, Unknown};
+        match (a, b) {
+            (Inconsistent, _) | (_, Inconsistent) => Inconsistent,
+            (Unknown, x) | (x, Unknown) => x.clone(),
             (Adt(a_adt), Adt(b_adt)) => {
                 // Both sides describe one value, so it is a variant both allow:
                 // intersect. Only comparable within one instantiation: the type
@@ -442,47 +551,166 @@ impl ConstFold {
                         a_adt.head, a_adt.tys, b_adt.head, b_adt.tys
                     );
                 }
-                let before = a_adt.possible.len();
-                a_adt.possible.retain(|f| b_adt.possible.contains(f));
-                let after = a_adt.possible.len();
-                if after == 0 {
+                let possible: BTreeSet<FuncId> = a_adt
+                    .possible
+                    .intersection(&b_adt.possible)
+                    .copied()
+                    .collect();
+                if possible.is_empty() {
                     // No variant satisfies both sides: free constructors, contradiction.
-                    *a = Inconsistent;
-                    return DidMerge(true, true);
+                    Inconsistent
+                } else {
+                    Adt(AdtData {
+                        possible,
+                        ..a_adt.clone()
+                    })
                 }
-                // a changed iff it lost a variant; b would change iff the result is
-                // smaller than b (the result is a subset of b, so lengths suffice).
-                DidMerge(after != before, after != b_adt.possible.len())
             }
-            (Adt(..), Known(lit)) => {
+            (Adt(..), Known(lit)) | (Known(lit), Adt(..)) => {
                 panic!("type error: merged an ADT constructor with a literal: {lit:?}")
             }
-            (Known(lit), Adt(..)) => {
-                panic!("type error: merged an ADT constructor with a literal: {lit:?}")
+            (Adt(..), Range(iv, _)) | (Range(iv, _), Adt(..)) => {
+                panic!("type error: merged an ADT constructor with an integer range {iv:?}")
             }
-            (Unknown, Adt(..)) => {
-                *a = b;
-                DidMerge(true, false)
-            }
-            (Adt(..), Unknown) => DidMerge(false, true),
             (Known(x), Known(y)) => {
                 if x == y {
-                    DidMerge(false, false)
+                    a.clone()
                 } else if same_type(x, y) {
                     // Same-typed conflict ⇒ contradiction (not a panic).
-                    *a = Inconsistent;
-                    DidMerge(true, true)
+                    Inconsistent
                 } else {
                     panic!("type error: merged literals of different types: {x:?} vs {y:?}");
                 }
             }
-            (Unknown, Known(y)) => {
-                *a = Known(y.clone());
-                DidMerge(true, false)
+            (Range(iv, _), Known(Literal::Int(n))) | (Known(Literal::Int(n)), Range(iv, _)) => {
+                if iv.contains(n) {
+                    Known(Literal::Int(n.clone()))
+                } else {
+                    Inconsistent
+                }
             }
-            (Known(_), Unknown) => DidMerge(false, true),
-            (Unknown, Unknown) => DidMerge(false, false),
+            (Range(iv, _), Known(lit)) | (Known(lit), Range(iv, _)) => {
+                panic!("type error: merged an integer range {iv:?} with {lit:?}")
+            }
+            (Range(r, rd), Range(q, qd)) => match r.meet(q) {
+                None => Inconsistent,
+                Some(m) => {
+                    let acyclic = (qd.0 as usize) <= self.ids.get();
+                    let m = if exact || acyclic { m } else { r.narrow(&m) };
+                    let depth = if m == *r {
+                        *rd
+                    } else if m == *q {
+                        *qd
+                    } else {
+                        Depth(rd.0.max(qd.0))
+                    };
+                    Data::of_interval(m, depth)
+                }
+            },
         }
+    }
+
+    /// Queue the comparisons of `class`, which now `holds` (or fails), to narrow
+    /// their operands. An `==` that holds is left to the union it implies.
+    fn queue_comparisons(egraph: &EGraph<Symbolic, Self>, class: Id, holds: bool) {
+        let mut queue = egraph.analysis.decided.borrow_mut();
+        for node in &egraph[class].nodes {
+            if let Symbolic::Binary(op, [x, y]) = node
+                && (*op == BinOp::LtI || (*op == BinOp::Eq && !holds))
+            {
+                queue.push((*op, *x, *y, holds));
+            }
+        }
+    }
+
+    /// Narrow the operands of every queued decided comparison. Each narrowing
+    /// re-evaluates the operand's parents, which re-queues the comparisons over
+    /// it (see [`Analysis::remake`]); [`Depth`] makes that chain finite.
+    fn narrow_decided(egraph: &mut EGraph<Symbolic, Self>) {
+        if egraph.analysis.draining.replace(true) {
+            return;
+        }
+        loop {
+            let next = egraph.analysis.decided.borrow_mut().pop();
+            let Some((op, x, y, holds)) = next else {
+                break;
+            };
+            let (x, y) = (egraph.find(x), egraph.find(y));
+            let iv = |egraph: &EGraph<Symbolic, Self>, c: Id| {
+                egraph[c].data.value.interval().unwrap_or(Interval::TOP)
+            };
+            match op {
+                BinOp::LtI => {
+                    let narrowed = iv(egraph, x).below(&iv(egraph, y), holds);
+                    Self::narrow_to(egraph, x, narrowed, y);
+                    let (x, y) = (egraph.find(x), egraph.find(y));
+                    let narrowed = iv(egraph, y).above(&iv(egraph, x), holds);
+                    Self::narrow_to(egraph, y, narrowed, x);
+                }
+                // `x != k` cuts `k` off an endpoint of `x`.
+                BinOp::Eq => {
+                    let point = |egraph: &EGraph<Symbolic, Self>, c: Id| {
+                        egraph[c].data.value.interval().and_then(|i| i.as_point())
+                    };
+                    if let Some(k) = point(egraph, y) {
+                        let narrowed = iv(egraph, x).without(k);
+                        Self::narrow_to(egraph, x, narrowed, y);
+                    }
+                    let (x, y) = (egraph.find(x), egraph.find(y));
+                    if let Some(k) = point(egraph, x) {
+                        let narrowed = iv(egraph, y).without(k);
+                        Self::narrow_to(egraph, y, narrowed, x);
+                    }
+                }
+                _ => {}
+            }
+        }
+        egraph.analysis.draining.set(false);
+    }
+
+    /// Narrow `class` (an `Int` class) to `to` (`None`: no value is left), a
+    /// derived step from the range of `by`.
+    fn narrow_to(egraph: &mut EGraph<Symbolic, Self>, class: Id, to: Option<Interval>, by: Id) {
+        let depth = Depth::after(&[&egraph[by].data.value]);
+        let cur = &egraph[class].data;
+        let to = to.map_or(Data::Inconsistent, |iv| Data::of_interval(iv, depth));
+        let next = egraph.analysis.meet(&cur.value, &to, false);
+        if next != cur.value {
+            stats::bump(|s| s.range_narrowings += 1);
+            let data = ClassData {
+                value: next,
+                ..cur.clone()
+            };
+            egraph.set_analysis_data(class, data);
+        }
+    }
+}
+
+/// The value of an arithmetic or comparison node whose operands are not both
+/// literals, from their ranges. `Unknown` unless one operand has one (an
+/// unbounded `Int` operand is [`Interval::TOP`]).
+fn binary_from_ranges(op: BinOp, l: &Data, r: &Data) -> Data {
+    let (li, ri) = (l.interval(), r.interval());
+    if li.is_none() && ri.is_none() {
+        return Data::Unknown;
+    }
+    let (lv, rv) = (li.unwrap_or(Interval::TOP), ri.unwrap_or(Interval::TOP));
+    let range = |iv| Data::of_interval(iv, Depth::after(&[l, r]));
+    match op {
+        BinOp::AddI => range(lv.add(&rv)),
+        BinOp::SubI => range(lv.sub(&rv)),
+        BinOp::MulI => range(lv.mul(&rv)),
+        BinOp::Mod => lv.euclid_mod(&rv).map_or(Data::Unknown, range),
+        BinOp::DivI => lv.euclid_div(&rv).map_or(Data::Unknown, range),
+        BinOp::LtI => lv
+            .lt(&rv)
+            .map_or(Data::Unknown, |b| Data::Known(Literal::Bool(b))),
+        // Both sides are `Int` only when both have a range; disjoint ranges
+        // cannot hold equal values.
+        BinOp::Eq if li.is_some() && ri.is_some() && lv.meet(&rv).is_none() => {
+            Data::Known(Literal::Bool(false))
+        }
+        _ => Data::Unknown,
     }
 }
 
@@ -490,6 +718,7 @@ impl Analysis<Symbolic> for ConstFold {
     type Data = ClassData;
 
     fn make(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, _id: Id) -> Self::Data {
+        egraph.analysis.ids.set(egraph.nodes().len() + 1);
         // A term is at least as deep as its subterms, whichever rule built it:
         // otherwise a rule that builds new terms out of an instance's terms would
         // hand the next instance generation-0 bindings again.
@@ -509,13 +738,28 @@ impl Analysis<Symbolic> for ConstFold {
     /// A node keeps the generation it was created at: re-making it (a child's
     /// value changed) must not lower it to its children's current ones, so it
     /// reports its class's.
+    ///
+    /// A decided comparison is re-evaluated whenever an operand's data changes;
+    /// that is when the other operand may narrow further.
     fn remake(egraph: &mut EGraph<Symbolic, Self>, enode: &Symbolic, id: Id) -> Self::Data {
-        ClassData {
+        let data = ClassData {
             value: Self::make_value(egraph, enode),
             unique: egraph.analysis.unique_of(enode),
             generation: egraph[id].data.generation,
             has_forall: Self::reaches_forall(egraph, enode),
+        };
+        if let Symbolic::Binary(op, [x, y]) = enode
+            && let Some(holds) = egraph[id].data.value.known_bool()
+            && (*op == BinOp::LtI || (*op == BinOp::Eq && !holds))
+        {
+            egraph
+                .analysis
+                .decided
+                .borrow_mut()
+                .push((*op, *x, *y, holds));
+            Self::narrow_decided(egraph);
         }
+        data
     }
 
     /// The value merges as a lattice; the unique constant too (none, one, or
@@ -524,12 +768,22 @@ impl Analysis<Symbolic> for ConstFold {
     /// `has_forall` change is reported, as a parent reads all three; a
     /// generation change is not: a parent was created at its own generation and
     /// does not depend on its children's later ones.
+    ///
+    /// In a union both values are facts about the class, met exactly; a node
+    /// re-evaluated inside `rebuild` is a derived step, which narrows exactly
+    /// only within the cycle bound of [`Depth`].
     fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
         a.generation = a.generation.min(b.generation);
         // Reported, so the bit reaches the parents.
         let forall = DidMerge(!a.has_forall && b.has_forall, a.has_forall && !b.has_forall);
         a.has_forall |= b.has_forall;
-        let value = self.merge_value(&mut a.value, b.value);
+        let in_union = self.in_union.get();
+        let m = self.meet(&a.value, &b.value, in_union);
+        if !in_union && a.value.known_bool().is_none() && m.known_bool().is_some() {
+            self.decided_by_remake.set(true);
+        }
+        let value = DidMerge(m != a.value, m != b.value);
+        a.value = m;
         let unique = match (&a.unique, b.unique) {
             (_, None) => DidMerge(false, a.unique.is_some()),
             (None, Some(u)) => {
@@ -550,21 +804,33 @@ impl Analysis<Symbolic> for ConstFold {
         value | unique | forall
     }
 
-    /// When `union_log` is on, record the classes whose nodes will read
+    /// Mark the union for `merge`, and queue the comparisons it decides: those
+    /// of an undecided class merging into a decided one.
+    ///
+    /// When `union_log` is on, also record the classes whose nodes will read
     /// differently after this union: the root that survives (it gains nodes),
     /// the parents of the class absorbed (a child's identity changes), and the
     /// parents of the survivor if its data changes. egg keeps the class with more
     /// parents as the root, the first on a tie; were that to change, only which
     /// classes get walked again would, never what a walk may derive.
     fn pre_union(egraph: &EGraph<Symbolic, Self>, id1: Id, id2: Id, _: &Option<Justification>) {
-        let mut log = egraph.analysis.union_log.borrow_mut();
-        let Some(log) = log.as_mut() else {
-            return;
-        };
         let (a, b) = (egraph.find(id1), egraph.find(id2));
         if a == b {
             return;
         }
+        egraph.analysis.in_union.set(true);
+        let (da, db) = (&egraph[a].data.value, &egraph[b].data.value);
+        if !da.is_inconsistent() && !db.is_inconsistent() {
+            match (da.known_bool(), db.known_bool()) {
+                (Some(holds), None) => Self::queue_comparisons(egraph, b, holds),
+                (None, Some(holds)) => Self::queue_comparisons(egraph, a, holds),
+                _ => {}
+            }
+        }
+        let mut log = egraph.analysis.union_log.borrow_mut();
+        let Some(log) = log.as_mut() else {
+            return;
+        };
         let (keep, gone) = if egraph[a].parents().len() < egraph[b].parents().len() {
             (b, a)
         } else {
@@ -587,6 +853,12 @@ impl Analysis<Symbolic> for ConstFold {
     }
 
     fn modify(egraph: &mut EGraph<Symbolic, Self>, id: Id) {
+        egraph.analysis.in_union.set(false);
+        if egraph.analysis.decided_by_remake.replace(false)
+            && let Some(holds) = egraph[id].data.value.known_bool()
+        {
+            Self::queue_comparisons(egraph, id, holds);
+        }
         match egraph[id].data.value.clone() {
             Data::Known(lit) => {
                 // The literal a class folds to is derived from the class's terms,
@@ -607,8 +879,9 @@ impl Analysis<Symbolic> for ConstFold {
                 let f = egraph.add(Symbolic::Lit(Literal::Bool(false)));
                 egraph.union(t, f);
             }
-            Data::Unknown | Data::Adt(..) => {}
+            Data::Unknown | Data::Range(..) | Data::Adt(..) => {}
         }
+        Self::narrow_decided(egraph);
     }
 }
 

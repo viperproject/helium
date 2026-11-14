@@ -328,6 +328,7 @@ impl VariantNarrowApplier {
             // Already contradictory: nothing to narrow.
             Data::Inconsistent => return,
             Data::Known(lit) => panic!("type error: tester applied to literal {lit:?}"),
+            Data::Range(iv, _) => panic!("type error: tester applied to integer range {iv:?}"),
         };
 
         let ctor = self.ctors[variant];

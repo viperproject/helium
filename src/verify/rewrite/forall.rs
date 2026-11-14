@@ -332,7 +332,9 @@ impl Probe {
     /// The probe of `node`, whose child `i` is `ops[i]`: the existing class when
     /// every child has one and the graph already holds the node, else just the
     /// folded value (so `5 > 0` is true at σ = 5 even though the comparison
-    /// has never been built).
+    /// has never been built). Folding reads the operands' integer ranges too
+    /// (`Data::Range`), so `i < n` is decided whenever the ranges of `i` and
+    /// `n` do not overlap, and an arithmetic step yields a range for the next.
     fn of_node(egraph: &EGraph<Symbolic, ConstFold>, node: Symbolic, ops: &[&Probe]) -> Self {
         // `x == x` holds and `x < x` fails whether or not the comparison was
         // ever built.
@@ -364,8 +366,11 @@ impl Probe {
 /// Whether every conjunct of `guard` is already `true` at the seed `vals`
 /// (captures ++ σ) and the types `tys` the match fixed. Evaluates the guard's
 /// steps with lookups only: a step is known when the graph already holds it or
-/// when it constant-folds from known operands, and a conjunct holds when it is
-/// known to be `true`.
+/// when it folds from what is known of its operands — their literals, or, for
+/// integer arithmetic and comparisons, their ranges — and a conjunct holds when
+/// it is known to be `true`. So a sequence axiom's `0 <= i && i < |s|` holds at
+/// an `i` in `[0, 3)` and an `s` with `|s| >= 5` though neither comparison was
+/// ever built.
 fn guard_holds(
     egraph: &EGraph<Symbolic, ConstFold>,
     guard: &Guard,
@@ -811,5 +816,61 @@ mod tests {
         g.rebuild();
         let g = run(g);
         assert!(g_of(&g, deep).is_some());
+    }
+
+    /// The guard `0 <= n && n < len` of a sequence-index axiom, at a σ where
+    /// neither comparison was ever built: the probe decides it from the ranges
+    /// the e-graph holds for `n` and `len`, and only when they decide it.
+    #[test]
+    fn guard_is_decided_by_operand_ranges() {
+        let int = |n: i64| Symbolic::Lit(Literal::Int(n.into()));
+        let lt = |l, r| Symbolic::Binary(BinOp::LtI, [l, r]);
+        let assume = |g: &mut EGraph<Symbolic, ConstFold>, fact| {
+            let t = g.add(Symbolic::Lit(Literal::Bool(true)));
+            g.union(fact, t);
+            g.rebuild();
+        };
+        // Steps over the seed `[n, len]`: temp 2 is `n < 0`, temp 3 is
+        // `!(n < 0)`, i.e. `0 <= n`, temp 4 is `n < len`.
+        let tmp = Val::Temp;
+        let lit = |l| Val::Literal(l);
+        let guard = Guard {
+            insts: vec![
+                AxiomInst::Val(AxiomPure::Binary(
+                    BinOp::LtI,
+                    tmp(0),
+                    lit(Literal::Int(0.into())),
+                )),
+                AxiomInst::Val(AxiomPure::Ternary(
+                    tmp(2),
+                    lit(Literal::Bool(false)),
+                    lit(Literal::Bool(true)),
+                )),
+                AxiomInst::Val(AxiomPure::Binary(BinOp::LtI, tmp(0), tmp(1))),
+            ],
+            conds: vec![tmp(3), tmp(4)],
+        };
+
+        // `n in [0, 3)`, `len >= 5`: the guard holds.
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let (n, len) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let (minus_one, three, four) = (g.add(int(-1)), g.add(int(3)), g.add(int(4)));
+        for fact in [lt(minus_one, n), lt(n, three), lt(four, len)] {
+            let fact = g.add(fact);
+            assume(&mut g, fact);
+        }
+        let zero = g.add(int(0));
+        assert!(g.lookup(lt(n, zero)).is_none() && g.lookup(lt(n, len)).is_none());
+        assert!(guard_holds(&g, &guard, &[n, len], &[]));
+
+        // Without the lower bound on `len`, `n < len` is open: skipped.
+        let mut g = EGraph::<Symbolic, ConstFold>::default();
+        let (n, len) = (g.add(Symbolic::Fresh(0)), g.add(Symbolic::Fresh(1)));
+        let (minus_one, three) = (g.add(int(-1)), g.add(int(3)));
+        for fact in [lt(minus_one, n), lt(n, three)] {
+            let fact = g.add(fact);
+            assume(&mut g, fact);
+        }
+        assert!(!guard_holds(&g, &guard, &[n, len], &[]));
     }
 }

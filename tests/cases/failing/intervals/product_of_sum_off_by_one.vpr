@@ -1,0 +1,7 @@
+// `(a + b) * c` reaches `2000000` at `a = b = c = 1000`. Positive control:
+// `tests/cases/passing/intervals/nonlinear.vpr`.
+method bad_product(a: Int, b: Int, c: Int)
+  requires -1000 <= a && a <= 1000
+  requires -1000 <= b && b <= 1000
+  requires -1000 <= c && c <= 1000
+{ assert (a + b) * c < 2000000 }
