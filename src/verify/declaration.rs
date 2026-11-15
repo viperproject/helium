@@ -215,13 +215,49 @@ fn format_inst(
     .to_string()
 }
 
-/// The one way a heap enters an instruction: homed at the phase's [`Region`].
+/// The way a heap enters an instruction other than a `Merge`: **narrowed** to the
+/// phase's [`Region`]. Narrowing is sound (the heap's axioms are then stated on
+/// fewer paths); widening is not, and only [`fetch_arm`] for a `Merge` may do it,
+/// so a stored heap must exist on a region the phase's lies within.
 fn fetch_heap(ctx: &mut VerifyContext<'_>, state: &EvalState, hv: &HeapVal) -> Heap {
-    let region = Region::of_cube(pc_lits_raw(ctx, state, &state.phase_cube));
+    let region = phase_region(ctx, state);
     match hv {
         HeapVal::Empty => Heap::empty(region),
-        HeapVal::Temp(n) => state.heaps[*n].at(region),
+        HeapVal::Temp(n) => {
+            let h = &state.heaps[*n];
+            assert!(
+                region.within(ctx, h.region()),
+                "fetch_heap: {hv} would widen its region outside a `Merge`"
+            );
+            h.at(region)
+        }
     }
+}
+
+/// A `Merge` arm, at the region it was built on. The arms of a join lie on
+/// different paths; [`merge_heaps`] homes their selection at the join's region.
+/// An `Empty` arm (no heap yet on that path) holds no chunk, so it states
+/// nothing on any region; it takes the join's.
+fn fetch_arm(state: &EvalState, hv: &HeapVal, join: &Region) -> Heap {
+    match hv {
+        HeapVal::Temp(n) => state.heaps[*n].clone(),
+        HeapVal::Empty => Heap::empty(join.clone()),
+    }
+}
+
+/// The phase's block cube, lowered: the [`Region`] its instructions run on.
+fn phase_region(ctx: &mut VerifyContext<'_>, state: &EvalState) -> Region {
+    // In a join phase the cube's values are reach temps defined by that same
+    // phase, so lowering must emit every reach inst before the first heap inst.
+    assert!(
+        state.phase_cube.conds.iter().all(|(v, _)| match v {
+            Val::Temp(n) => *n < state.vals.len(),
+            Val::Literal(_) => true,
+        }),
+        "phase_region: the block cube names a temp not yet defined; a heap inst \
+         precedes the join's reach insts that define the cube"
+    );
+    Region::of_cube(pc_lits_raw(ctx, state, &state.phase_cube))
 }
 
 /// Heaps to visualize for an instruction, labeled as in VMIR (`h0`, `h1`, …).
@@ -1029,15 +1065,18 @@ fn eval_heap_inst(
             // An unreachable predecessor arm (its cube refuted, e.g. the enum
             // `bb_unreach` after `inhale false`) is dropped outright — selecting
             // a `0`-leaf against it would need an exhaustiveness case split.
+            // The join's region is the one place a heap widens: the merge (or
+            // the one live arm) exists wherever the join is reached.
+            let region = phase_region(ctx, state);
             match state.join_arms_dead.unwrap_or((false, false)) {
-                (false, true) => return Ok(fetch_heap(ctx, state, then_h)),
-                (true, false) => return Ok(fetch_heap(ctx, state, els_h)),
+                (false, true) => return Ok(fetch_arm(state, then_h, &region).at(region)),
+                (true, false) => return Ok(fetch_arm(state, els_h, &region).at(region)),
                 _ => {}
             }
             let cond_id = state.get_val(ctx, cond);
-            let h_then = fetch_heap(ctx, state, then_h);
-            let h_els = fetch_heap(ctx, state, els_h);
-            Ok(merge_heaps(ctx, cond_id, &h_then, &h_els))
+            let h_then = fetch_arm(state, then_h, &region);
+            let h_els = fetch_arm(state, els_h, &region);
+            Ok(merge_heaps(ctx, region, cond_id, &h_then, &h_els))
         }
         // `base ± acc loc perm`: build the single chunk, then union (Add) or
         // subtract (Sub) it.

@@ -26,15 +26,17 @@ method m(a: Ref, b: Ref, c: Bool, d: Bool)
 
 **How it was fixed.** The heap algebra reads no ambient cube. Every `Heap` carries a
 `heap::Region`, the absolute block cube it exists on; no `Heap` constructor omits it, and
-every derived heap keeps its source's. By convention `fetch_heap` (`declaration.rs`) is
-the only builder of a region that the algebra sees: it builds it from the block's `cube`,
-and every heap enters an instruction through it. The viz display and tests build an
-empty one as well. That covers the join phase as well as the body phase. An n-ary join's synthetic
-blocks get the reach of the edges they merge as their cube, not the whole join's.
-`Heap` and `Region` live in `heap/store.rs`, so the algebra reaches the region only
-through `Heap::region`. `assume_location_axioms` gates by it. `merge_heaps` and
-`union_heaps` assert, as a precondition of the algebra, that their operands share a
-region. `fetch_heap` satisfies this today, so the assertions guard future callers.
+every derived heap keeps its source's. Regions are built from the block's `cube` in
+`declaration.rs`, for the join phase as well as the body phase, and a stored heap's region
+only ever **narrows**: `fetch_heap` moves a heap onto the phase's region and asserts that
+the phase's region lies within the heap's own (`Region::within`). The one place a heap
+widens is a join: `Merge` fetches its arms at their own regions (`fetch_arm`), and
+`merge_heaps` takes the join's region explicitly; each arm's path lives on in the
+per-chunk guards. The viz display and tests build an empty region as well. An n-ary
+join's synthetic blocks get the reach of the edges they merge as their cube, not the
+whole join's. `Heap` and `Region` live in `heap/store.rs`, so the algebra reaches the
+region only through `Heap::region`. `assume_location_axioms` gates by it, and
+`union_heaps` asserts that its summands share a region.
 `VerifyContext::current_cube` is private to `context/`. Code outside it asks for
 `effective_pc` (an instruction's pc), so the heap code cannot read the walker's ambient
 state again.

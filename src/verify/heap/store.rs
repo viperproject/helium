@@ -45,6 +45,17 @@ impl Region {
     pub(crate) fn same(&self, ctx: &VerifyContext<'_>, other: &Region) -> bool {
         cube_eq(ctx, &self.0, &other.0)
     }
+
+    /// Whether `self` is syntactically within `other`: every literal of `other`
+    /// is one of `self`'s (canonical e-classes), so `self ⇒ other`.
+    pub(crate) fn within(&self, ctx: &VerifyContext<'_>, other: &Region) -> bool {
+        other.0.iter().all(|(io, po)| {
+            let c = ctx.egraph.find(*io);
+            self.0
+                .iter()
+                .any(|(is, ps)| ps == po && ctx.egraph.find(*is) == c)
+        })
+    }
 }
 
 impl Heap {

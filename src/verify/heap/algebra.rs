@@ -15,7 +15,7 @@
 use crate::verify::{
     context::VerifyContext,
     error::VerifyError,
-    heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_meet, cube_push},
+    heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, Region, cube_eq, cube_meet, cube_push},
     lang::Symbolic,
 };
 use crate::vmir::{BinOp, Bound, Literal, Polarity};
@@ -1747,17 +1747,15 @@ pub(crate) fn heap_subtract_summarized(
 /// both arms are live, so an absent side is a genuine conditional footprint.
 pub(crate) fn merge_heaps(
     ctx: &mut VerifyContext<'_>,
+    region: Region,
     cond: egg::Id,
     h_then: &Heap,
     h_els: &Heap,
 ) -> Heap {
-    // Both arms are fetched by the one `Merge`, so they share the join's region;
-    // the arms' own paths live on in the per-chunk guards appended below.
-    assert!(
-        h_then.region().same(ctx, h_els.region()),
-        "merge_heaps: the two arms are not homed at the same region"
-    );
-    let mut out = Heap::empty(h_then.region().clone());
+    // The arms keep the regions of their own predecessors; the selection exists
+    // on the join's `region`, and each arm's path lives on in the per-chunk
+    // guards appended below. This is the one place a heap widens.
+    let mut out = Heap::empty(region);
     let mut kinds: Vec<LocationKind> = h_then.kinds().cloned().collect();
     for k in h_els.kinds() {
         if !kinds.contains(k) {
