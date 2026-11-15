@@ -1,8 +1,10 @@
 # Known unsoundness
 
 Programs that **must be rejected** (Silicon rejects them) but that this verifier currently
-accepts, with the Z3 rung on and off. `tests/suite.rs::known_unsoundness_still_verifies`
-asserts the current, wrong verdict.
+accepts. `tests/suite.rs::known_unsoundness_still_verifies` asserts the current, wrong
+verdict with the Z3 rung on (the default), or off for a case marked `// suite: no-z3`.
+Most cases are also accepted with Z3 off; `value_from_chunk_without_permission/
+summarized_exhale_stale_value.vpr` is not: only the Z3 rung completes its proof.
 
 Each subdirectory is **one bug class**: one root cause, named in its `README.md`, together
 with the root-cause class (A–G) of `plans/verifier-soundness-interfaces.md` §2.1.

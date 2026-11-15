@@ -264,7 +264,13 @@ fn phase_region(ctx: &mut VerifyContext<'_>, state: &EvalState) -> Region {
 /// For a heap `combine` this is the base operand plus the result; for any other
 /// instruction it is the current working heap (if any). Called after the
 /// instruction has been evaluated, so the result heap sits at `heaps_before`.
-fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec<(String, Heap)> {
+/// The base is shown as the instruction sees it, through [`fetch_heap`].
+fn display_heaps(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    kind: &InstKind,
+    heaps_before: usize,
+) -> Vec<(String, Heap)> {
     match kind {
         InstKind::Heap(
             HeapInst::Add { base, .. }
@@ -272,11 +278,7 @@ fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec
             | HeapInst::Inhale { base, .. }
             | HeapInst::Exhale { base, .. },
         ) => {
-            let heap = match base {
-                HeapVal::Temp(n) => state.heaps[*n].clone(),
-                HeapVal::Empty => Heap::empty(Region::of_cube(Vec::new())),
-            };
-            let mut res = vec![(base.to_string(), heap)];
+            let mut res = vec![(base.to_string(), fetch_heap(ctx, state, base))];
             if heaps_before < state.heaps.len() {
                 res.push((
                     format!("h{heaps_before}"),
@@ -2577,7 +2579,7 @@ fn walk_body(
                 }
                 let inst_text = inst_text(program);
                 if snap.enabled() {
-                    let heaps = display_heaps(state, &inst.kind, heaps_before);
+                    let heaps = display_heaps(ctx, state, &inst.kind, heaps_before);
                     snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), Some(goal));
                 }
                 return Err(err.with_inst(inst_text, inst_idx, insts.len()));
@@ -2592,7 +2594,7 @@ fn walk_body(
             if let Err(err) = check_forall_wd(ctx, q, state, &pc_lits) {
                 let inst_text = inst_text(program);
                 if snap.enabled() {
-                    let heaps = display_heaps(state, &inst.kind, heaps_before);
+                    let heaps = display_heaps(ctx, state, &inst.kind, heaps_before);
                     snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), None);
                 }
                 return Err(err.with_inst(inst_text, inst_idx, insts.len()));
@@ -2601,7 +2603,7 @@ fn walk_body(
         if let Err(err) = eval(ctx, program, state, inst, certs) {
             let inst_text = inst_text(program);
             if snap.enabled() {
-                let heaps = display_heaps(state, &inst.kind, heaps_before);
+                let heaps = display_heaps(ctx, state, &inst.kind, heaps_before);
                 snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), None);
             }
             return Err(err.with_inst(inst_text, inst_idx, insts.len()));
@@ -2610,7 +2612,7 @@ fn walk_body(
         if snap.enabled() {
             let highlight =
                 (state.vals.len() > vals_before).then(|| state.vals[state.vals.len() - 1]);
-            let heaps = display_heaps(state, &inst.kind, heaps_before);
+            let heaps = display_heaps(ctx, state, &inst.kind, heaps_before);
             snap.snapshot(ctx, &heaps, &inst_text(program), highlight);
         }
     }

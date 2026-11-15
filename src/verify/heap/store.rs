@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use super::{Chunk, HeapPc, LocationKind, cube_eq};
+use super::{Chunk, HeapPc, LocationKind};
 use crate::verify::context::VerifyContext;
 use crate::vmir::Polarity;
 
@@ -40,10 +40,6 @@ impl Region {
 
     pub(crate) fn lits(&self) -> &[(egg::Id, Polarity)] {
         &self.0
-    }
-
-    pub(crate) fn same(&self, ctx: &VerifyContext<'_>, other: &Region) -> bool {
-        cube_eq(ctx, &self.0, &other.0)
     }
 
     /// Whether `self` is syntactically within `other`: every literal of `other`

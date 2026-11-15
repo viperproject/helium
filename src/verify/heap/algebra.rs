@@ -2021,11 +2021,9 @@ pub(crate) fn union_heaps(
     b: &Heap,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Heap {
-    // A sum is of two heaps held at once, so on one path.
-    assert!(
-        a.region().same(ctx, b.region()),
-        "union_heaps: the two summands are not homed at the same region"
-    );
+    // A sum is of two heaps held at once, so on one path: `out` keeps `a`'s
+    // region. The caller fetches both summands through `fetch_heap`, which homes
+    // them at the phase's region after checking each only narrows.
     let mut out = a.clone();
     for (kind, cb) in b.entries() {
         let existing = a

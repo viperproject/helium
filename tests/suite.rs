@@ -227,7 +227,7 @@ fn known_unsoundness_still_verifies() {
         let mut now_rejected: Vec<&str> = Vec::new();
         for path in &files {
             let name = file_name(path);
-            let still_verifies = match pipeline::run_file(path) {
+            let still_verifies = match run_case(path) {
                 Err(_) => false,
                 Ok(results) => !results.is_empty() && results.iter().all(|(_, r)| r.is_ok()),
             };
