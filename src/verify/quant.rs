@@ -149,6 +149,13 @@ impl RecipeTable {
         slot.clone().expect("just compiled")
     }
 
+    /// Add a recipe built outside [`intern`], bypassing dedup: used for the
+    /// inverse axiom of a quantified permission, which names freshly minted
+    /// inverse functions and so can never equal an existing recipe.
+    pub(crate) fn push_fresh(&mut self, recipe: QuantRecipe) -> RecipeId {
+        self.recipes.push_and_get_key(recipe)
+    }
+
     /// Whether `id` is one of the built-in collection axioms' recipes.
     pub(crate) fn is_coll_axiom(&self, id: RecipeId) -> bool {
         self.coll_axioms
@@ -245,32 +252,18 @@ fn intern(
     }
 
     let free = q.free_temps();
-    let n_caps = free.len();
-    let slot: HashMap<usize, usize> = free.iter().copied().zip(0..).collect();
-    // Canonicalize one operand. Below `binder_base` it is a capture, and its slot
-    // is its position in `free`; at or above, it is a binder or a step, which keep
-    // their order after the captures.
-    let rename = |v: &Val| match v {
-        Val::Temp(k) if *k < q.binder_base => Val::Temp(slot[k]),
-        Val::Temp(k) => Val::Temp(n_caps + (k - q.binder_base)),
-        lit => lit.clone(),
-    };
-
-    let insts: Vec<AxiomInst> = prepare_body(alloc, table, names, &q.body.insts)?
-        .iter()
-        .map(|i| crate::verify::cert::map_operands(i, rename))
-        .collect();
-    let groups: Vec<Vec<PreparedTerm>> = q
-        .triggers
-        .iter()
-        .map(|g| {
-            g.terms
-                .iter()
-                .map(|t| prepare_trig_term(alloc, t, q.binder_base, &slot))
-                .collect::<Result<_, _>>()
-        })
-        .collect::<Result<_, _>>()?;
-    let res = rename(&q.body.res);
+    let c = Canonical::new(
+        alloc,
+        table,
+        names,
+        q.binder_base,
+        q.bound.len(),
+        &free,
+        &q.triggers,
+        &q.body.insts,
+    )?;
+    let res = c.rename(&q.body.res);
+    let (n_caps, insts, groups) = (c.n_caps(), c.insts, c.groups);
     let mut generics = crate::dhash::HashSet::default();
     forall_generics(q, true, &mut generics);
     let n_tys = generics.iter().max().map_or(0, |m| m + 1);
@@ -307,6 +300,86 @@ fn intern(
     };
     table.by_forall.insert(q.clone(), (id, free.into()));
     Ok(id)
+}
+
+/// A quantifier body moved into a recipe's canonical `caps ++ binders ++ steps`
+/// temp space: its steps prepared ([`prepare_body`]) and renamed, its triggers
+/// prepared. What [`intern`] does to a pure `forall`; also the starting point
+/// of a quantified permission's inverse axiom
+/// (`heap::quantified_permissions`), which [`Self::push`]es steps after it.
+pub(crate) struct Canonical {
+    binder_base: usize,
+    /// Enclosing temp -> capture slot.
+    slot: HashMap<usize, usize>,
+    /// The next free temp: one past the binders and every value step so far.
+    next: usize,
+    pub(crate) insts: Vec<AxiomInst>,
+    pub(crate) groups: Vec<Vec<PreparedTerm>>,
+}
+
+impl Canonical {
+    /// `free` is the scope's capture list (enclosing temps, in child order).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        alloc: &mut FuncRegistry,
+        table: &RecipeTable,
+        names: &dyn Fn(vmir::MemberId) -> String,
+        binder_base: usize,
+        n_bound: usize,
+        free: &[usize],
+        triggers: &[vmir::QuantTrigger],
+        insts: &[vmir::Inst],
+    ) -> Result<Self, VerifyError> {
+        let n_vals = insts
+            .iter()
+            .filter(|i| matches!(i.kind, InstKind::Pure(..)))
+            .count();
+        let mut c = Self {
+            binder_base,
+            slot: free.iter().copied().zip(0..).collect(),
+            next: free.len() + n_bound + n_vals,
+            insts: Vec::new(),
+            groups: Vec::new(),
+        };
+        let prepared: Vec<AxiomInst> = prepare_body(alloc, table, names, insts)?
+            .iter()
+            .map(|i| crate::verify::cert::map_operands(i, |v| c.rename(v)))
+            .collect();
+        c.insts = prepared;
+        c.groups = triggers
+            .iter()
+            .map(|g| {
+                g.terms
+                    .iter()
+                    .map(|t| prepare_trig_term(alloc, t, binder_base, &c.slot))
+                    .collect::<Result<_, _>>()
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(c)
+    }
+
+    /// The capture arity.
+    pub(crate) fn n_caps(&self) -> usize {
+        self.slot.len()
+    }
+
+    /// Canonicalize one operand. Below `binder_base` it is a capture, and its
+    /// slot is its position in `free`; at or above, it is a binder or a step,
+    /// which keep their order after the captures.
+    pub(crate) fn rename(&self, v: &Val) -> Val {
+        match v {
+            Val::Temp(k) if *k < self.binder_base => Val::Temp(self.slot[k]),
+            Val::Temp(k) => Val::Temp(self.n_caps() + (k - self.binder_base)),
+            lit => lit.clone(),
+        }
+    }
+
+    /// Append a step (operands already canonical) and return its temp.
+    pub(crate) fn push(&mut self, p: crate::verify::rewrite::AxiomPure) -> Val {
+        self.insts.push(AxiomInst::Val(p));
+        self.next += 1;
+        Val::Temp(self.next - 1)
+    }
 }
 
 /// Every `Generic(i)` index `q` mentions: its binder types, its triggers' type

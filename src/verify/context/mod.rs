@@ -265,6 +265,36 @@ impl<'a> VerifyContext<'a> {
         member_name_in(self.interner, self.decls, m)
     }
 
+    /// Parameter and return types of function declaration `func` at
+    /// instantiation `tys`: ordinary, domain, and field/predicate address
+    /// functions alike.
+    pub(crate) fn function_signature(&self, func: MemberId, tys: &[Type]) -> (Vec<Type>, Type) {
+        match &self.decls[func] {
+            Declaration::Function(fun) => {
+                let params = fun.params.iter().map(|t| t.subst_generics(tys)).collect();
+                (params, fun.ret.subst_generics(tys))
+            }
+            Declaration::Resource(r) => {
+                let params = r.params.iter().map(|t| t.subst_generics(tys)).collect();
+                let group = self
+                    .groups
+                    .get(self.interner.resolve(&r.name))
+                    .expect("predicate group tag");
+                (params, r.derive_location(func, group).ret)
+            }
+            Declaration::Domain(_) => {
+                unreachable!("a domain declaration only holds a name, never a function")
+            }
+            Declaration::Axiom(_) => unreachable!("an axiom declaration is never a function"),
+            Declaration::Method(_) => {
+                unreachable!("methods are lowered to exhale/inhale; a method is never called")
+            }
+            Declaration::Adt(_) => {
+                unreachable!("ADTs are lowered to dedicated pure insts, never a function call")
+            }
+        }
+    }
+
     /// Display name for an e-graph function id: a real declaration index resolves
     /// via the interner; an allocator-minted id via its name table.
     pub(crate) fn func_name(&self, f: FuncId) -> String {

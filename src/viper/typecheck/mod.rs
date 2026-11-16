@@ -1996,6 +1996,8 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     .map(|(cond, res, perm)| {
                         SpatialExp(Box::new(SpatialExpKind::Forall(Box::new(typed::QuantPerm {
                             bound: bound.clone(),
+                            location_trigger: lowered_triggers.is_empty()
+                                && location_can_trigger(&bound, &res),
                             triggers: lowered_triggers.clone(),
                             cond,
                             res,
@@ -2742,6 +2744,21 @@ fn check_triggers(
         }
     }
     Ok(())
+}
+
+/// Whether a quantified permission's location `f(e(xs))` can serve as its
+/// trigger (used when it has none, see `translate::spatial::lower_quant_chunks`):
+/// its arguments are matchable and cover every binder, as a trigger's must.
+/// Not an error when it cannot: e.g. a constant receiver must still reach the
+/// verifier's injectivity check.
+fn location_can_trigger(bound: &[TypedIdent], res: &ResourceExp<typed::AxiomExt>) -> bool {
+    let args = match &*res.0 {
+        ResourceExpKind::Field(e, _) => std::slice::from_ref(e),
+        ResourceExpKind::PredicateCall(c) => &c.args[..],
+    };
+    let mut covered: HashSet<Spur> = HashSet::default();
+    args.iter().all(|a| check_trigger_subterms(a, &mut covered).is_ok())
+        && bound.iter().all(|bv| covered.contains(&bv.name.0))
 }
 
 /// Whether a trigger term's root is an application — the only shape a trigger

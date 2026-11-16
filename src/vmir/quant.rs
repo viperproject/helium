@@ -147,8 +147,9 @@ pub struct QuantChunks {
     pub binder_base: usize,
     /// The binder types.
     pub bound: Box<[Type]>,
-    /// Trigger groups, as alternatives. May be **empty**: unlike a pure
-    /// `forall`, Viper infers a quantified permission's triggers.
+    /// Trigger groups, as alternatives. Without user triggers, translation
+    /// uses the location's address call `f(e(xs))`; empty only when that
+    /// cannot serve as one either (e.g. a constant receiver).
     pub triggers: Box<[QuantTrigger]>,
     pub loc_ty : Type,
     pub body: QuantBody,
@@ -172,6 +173,27 @@ impl QuantChunks {
     /// One past the last temp this scope owns for binders.
     pub fn step_base(&self) -> usize {
         self.binder_base + self.bound.len()
+    }
+
+    /// The address call defining `body.loc`. Value temps number the body's
+    /// `Pure` insts from [`Self::step_base`] (a `Perm` inst defines none).
+    pub fn loc_call(&self) -> &crate::vmir::FunctionCall {
+        let Val::Temp(k) = self.body.loc else {
+            panic!("QP location must be a body temp, got {}", self.body.loc);
+        };
+        let def = self
+            .body
+            .insts
+            .iter()
+            .filter_map(|i| match &i.kind {
+                crate::vmir::InstKind::Pure(_, pi) => Some(pi),
+                _ => None,
+            })
+            .nth(k - self.step_base());
+        match def {
+            Some(crate::vmir::PureInst::FunctionCall(fc)) => fc,
+            other => panic!("QP location must be an address call, defined by {other:?}"),
+        }
     }
 
     /// The enclosing temps this scope mentions (its capture list), triggers
