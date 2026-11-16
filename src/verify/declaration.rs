@@ -1184,22 +1184,9 @@ fn eval_heap_inst(
                 ));
             }
             let base_h = get_heap(state, base);
-
-            let caps: Rc<[(usize, egg::Id)]> = q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
-
-            // The accessed resource must be injective with regards to the quantified variables.
-            check_qp_injectivity(ctx, q, &pc_lits, &mut |ctx, binders| {
-                eval_qp_instance(ctx, &caps, q, binders, &pc_lits)
-            })?;
-            // One binding per location: assume the inverse axiom that names it.
-            let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, &pc_lits)?;
-            Ok(base_h.with_qp_chunk(&kind, QuantChunk { q: Rc::new((**q).clone()), caps, inv, guard: pc_lits.into() }))
+            let chunk = quant_chunk_of(ctx, state, q, pc)?;
+            Ok(base_h.with_qp_chunk(&kind, chunk))
         },
         HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
         // Resource inhale/exhale need the program + certificates; method-only.
@@ -2591,6 +2578,37 @@ fn check_forall_wd_in_scratch(
         }
     }
     Ok(())
+}
+
+/// The chunk set a quantified permission denotes at this program point, shared
+/// by inhale (`AddForall`) and exhale (`SubForall`): its captured temps resolved
+/// in the live state, its receiver injectivity proven under `pc`, and its
+/// inverse axiom (licensed by that proof) assumed.
+fn quant_chunk_of(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    q: &vmir::QuantChunks,
+    pc: &PathConds,
+) -> Result<QuantChunk, VerifyError> {
+    let caps: Rc<[(usize, egg::Id)]> =
+        q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
+    let pc_lits: Vec<(egg::Id, Polarity)> = pc
+        .conds
+        .iter()
+        .map(|(v, p)| (state.get_val(ctx, v), *p))
+        .collect();
+    // Distinct bindings that hold permission must name distinct locations.
+    check_qp_injectivity(ctx, q, &pc_lits, &mut |ctx, binders| {
+        eval_qp_instance(ctx, &caps, q, binders, &pc_lits)
+    })?;
+    // One binding per location: assume the inverse axiom that names it.
+    let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, &pc_lits)?;
+    Ok(QuantChunk {
+        q: Rc::new(q.clone()),
+        caps,
+        inv,
+        guard: pc_lits.into(),
+    })
 }
 
 /// Evaluate a quantified permission's body at `binders`, with its captured
