@@ -2608,6 +2608,7 @@ fn quant_chunk_of(
         caps,
         inv,
         guard: pc_lits.into(),
+        taken: Rc::from([]),
     })
 }
 
@@ -2710,7 +2711,16 @@ fn qp_perm_at(
             perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
         }
     }
-    Ok(Some(ChunkPerm::select(ctx, inst.cond, perm, zero)))
+    let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
+    // What was exhaled from this set, each gated by its exhale's path condition.
+    // A taken set applies the same address function, so it always answers.
+    for taken in chunk.taken.iter() {
+        let p = qp_perm_at(ctx, taken, addr)?
+            .expect("a taken chunk set applies the same address function");
+        let p = crate::verify::heap::gate_perm_by_guard(ctx, &p, &taken.guard);
+        perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
+    }
+    Ok(Some(perm))
 }
 
 /// Whether some quantified chunk set of `heap` holds a permission at `addr`

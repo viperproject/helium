@@ -587,6 +587,10 @@ pub struct QuantChunk {
     pub(crate) inv: Rc<[crate::verify::lang::FuncId]>,
     /// Path-condition cube of the inhale, same role as `Chunk::guard`.
     pub(crate) guard: HeapPc,
+    /// The chunk sets exhaled from this one, each under its own `guard` (the
+    /// exhale's path condition). A lookup subtracts their permission at the
+    /// address from this set's own, so the set's permission is never rebuilt.
+    pub(crate) taken: Rc<[QuantChunk]>,
 }
 // qps: im::HashMap<LocationKind, Rc<[QuantChunk]>, FxBuildHasher>
 
