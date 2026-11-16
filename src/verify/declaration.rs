@@ -1228,7 +1228,26 @@ fn eval_resource_body_inst(
             let p = eval_perm_inst(ctx, state, pi);
             state.push_perm(p, pi.clone());
         }
-        InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {
+        InstKind::Assert(val) => {
+            let id = state.get_val(ctx, val);
+            let pc_lits: Vec<(egg::Id, Polarity)> = inst
+                .pc
+                .conds
+                .iter()
+                .map(|(v, p)| (state.get_val(ctx, v), *p))
+                .collect();
+            if !ctx.prove_under_pc(id, &pc_lits) {
+                if std::env::var_os("SILVER_OXIDE_TRACE_ASSERT").is_some() {
+                    eprintln!(
+                        "[assert-fail] Assert inst, pc={} lits:\n{}",
+                        pc_lits.len(),
+                        crate::verify::viz::dump_term(ctx, id, 40),
+                    );
+                }
+                return Err(VerifyError::AssertionFailed);
+            }
+        }
+        InstKind::Assume(_)  | InstKind::Refute(_) => {
             return Err(VerifyError::Unimplemented(
                 "effectful inst in resource body",
             ));
