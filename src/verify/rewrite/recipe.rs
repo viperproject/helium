@@ -196,10 +196,10 @@ impl Searcher<Symbolic, ConstFold> for AxiomTriggerSearcher {
 /// bound-variable σ for a quantifier, the arguments for a function definition;
 /// empty for a closed axiom). Runs the body's `Assume`s (merging each with
 /// `true`) and returns, in `changed`, each id it merged with `true` (a fact the
-/// caller can mirror elsewhere), together with the body's `res`
-/// e-class id. The caller decides how to discharge `res` (an axiom merges it
-/// with `true`; a quantifier guards it; a function unfold unions it with the
-/// call e-class).
+/// caller can mirror elsewhere) and each collection equality it merged with its
+/// untyped equality (not a fact), together with the body's `res` e-class id.
+/// The caller decides how to discharge `res` (an axiom merges it with `true`; a
+/// quantifier guards it; a function unfold unions it with the call e-class).
 pub(crate) fn build_instance(
     egraph: &mut EGraph<Symbolic, ConstFold>,
     insts: &[AxiomInst],

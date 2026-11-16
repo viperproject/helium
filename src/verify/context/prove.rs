@@ -20,7 +20,7 @@ use crate::{
         rewrite::{self, ScratchScope},
         stats,
     },
-    vmir::{Literal, Polarity},
+    vmir::{BinOp, Literal, Polarity},
 };
 use egg::Language as _;
 use z3::SatResult;
@@ -311,8 +311,19 @@ impl<'a> VerifyContext<'a> {
         // merged `g` into the `true` class.
         let node = self.egraph.id_to_node(g).clone();
         let wnode = self.tr_children(node);
+        // A collection equality shares its class with the untyped equality in
+        // ground wherever it was built, also by a recipe build, which merges the
+        // two past the `union` hook; the import keeps that.
+        let untyped = match &wnode {
+            Symbolic::Coll(_, op, args) if op.is_eq() => Some([args[0], args[1]]),
+            _ => None,
+        };
         let w = self.work.as_mut().unwrap();
         let s = w.egraph.add(wnode);
+        if let Some(args) = untyped {
+            let eq = w.egraph.add(Symbolic::Binary(BinOp::Eq, args));
+            w.egraph.union(s, eq);
+        }
         w.map_insert(g, s);
         w.dirty = true;
         w.dirty_reduce = true;
@@ -436,13 +447,18 @@ impl<'a> VerifyContext<'a> {
     /// ground (a recipe build adds to `ctx.egraph` directly, past the `union`
     /// hook): a fact like any other, so the working graph gets it too, also for a
     /// token the build made the root of ground's `true` class (see
-    /// [`Self::mirror_union`]).
+    /// [`Self::mirror_union`]). A build also reports a collection equality it
+    /// merged with its untyped equality, which is no fact about the equality's
+    /// truth: only what ground holds true is recorded.
     pub(crate) fn note_released(&mut self, released: &[egg::Id]) {
         if self.work.is_none() {
             return;
         }
         let true_ = expr!(self, true);
         for &id in released {
+            if self.egraph.find(id) != self.egraph.find(true_) {
+                continue;
+            }
             self.record_fact(id, true_);
             self.mirror_union(id, true_);
         }

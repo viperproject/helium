@@ -1,0 +1,13 @@
+// A postcondition's collection equality is built when it is exhaled, and
+// building it merges the typed equality with the untyped one. That says nothing
+// about the equality's truth, so the working graph must not learn it as true.
+//
+// Must FAIL (`r` and `s` are unrelated).
+method m(s: Seq[Int], r: Seq[Int], c: Bool, x: Int)
+  requires c ==> x > 0
+  ensures r == s
+{
+  if (c) {
+    assert x > 0
+  }
+}
