@@ -150,6 +150,7 @@ pub struct QuantChunks {
     /// Trigger groups, as alternatives. May be **empty**: unlike a pure
     /// `forall`, Viper infers a quantified permission's triggers.
     pub triggers: Box<[QuantTrigger]>,
+    pub loc_ty : Type,
     pub body: QuantBody,
 }
 

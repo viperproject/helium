@@ -6,7 +6,8 @@ use std::rc::Rc;
 use lasso::Spur;
 
 use crate::verify::context::VerifyContext;
-use crate::verify::lang::Symbolic;
+use crate::verify::lang::{FuncId, Symbolic};
+use crate::vmir;
 use crate::vmir::{Bound, Literal, Polarity, QuantChunks, Type};
 
 /// A path condition in verify space: a single conjunctive cube of e-class
@@ -573,6 +574,18 @@ impl Chunk {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct QuantChunk {
+    /// The body, still in vmir temp space.
+    pub(crate) q: Rc<vmir::QuantChunks>,
+    /// `free_temps()` resolved at inhale: enclosing temp -> its e-class then.
+    pub(crate) caps: Rc<[(usize, egg::Id)]>,
+    /// Path-condition cube of the inhale, same role as `Chunk::guard`.
+    pub(crate) guard: HeapPc,
+}
+// qps: im::HashMap<LocationKind, Rc<[QuantChunk]>, FxBuildHasher>
+
+
 /// Symbolic heap: chunks partitioned by [`LocationKind`]. Each group is an
 /// `Rc<[Chunk]>` so cloning a heap (frequent — one per instruction) shares the
 /// group slices; mutating one group copies just that slice (copy-on-write). The
@@ -592,7 +605,7 @@ pub struct Heap {
     groups: im::HashMap<LocationKind, Rc<[Chunk]>, rustc_hash::FxBuildHasher>,
 
     // Quantified permission parts
-    qps: im::HashMap<LocationKind, Rc<QuantChunks>, rustc_hash::FxBuildHasher>,
+    qps: im::HashMap<LocationKind, Rc<[QuantChunk]>, rustc_hash::FxBuildHasher>,
 }
 
 impl Heap {
@@ -628,6 +641,15 @@ impl Heap {
         Self {
             groups: self.groups.update(kind.clone(), v.into()),
             qps: self.qps.clone(),
+        }
+    }
+
+    pub fn with_qp_chunk(&self, kind: &LocationKind, chunk: QuantChunk) -> Self {
+        let mut v : Vec<QuantChunk> = self.qps.get(kind).map(|r| r.to_vec()).unwrap_or_default();
+        v.push(chunk);
+        Self {
+            groups: self.groups.clone(),
+            qps: self.qps.update(kind.clone(), v.into()),
         }
     }
 
