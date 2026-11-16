@@ -1215,25 +1215,32 @@ fn eval_heap_inst(
             let kind = state
                 .loc_kind(loc)
                 .expect("assign location must be Addr-typed");
-            let held = h.chunk(&kind, addr).cloned();
-            let perm = held
-                .as_ref()
-                .map(|c| c.ungated_perm().clone())
-                .unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1)));
-            let guard = held
-                .as_ref()
-                .map(|c| c.guard_pc())
-                .unwrap_or_else(|| std::rc::Rc::from(Vec::new()));
-            // SIDECOND: prove `not(perm < cap)` (full/write permission, `cap` =
-            // the location's own permission bound, `1/1` for a field) under pc —
-            // per leaf, so a branch-structured held perm never materializes. Under
-            // the guarded-merge path the write obligation is proven against the
-            // guard-gated perm (write required only where the chunk is present).
             let pc_lits: Vec<(egg::Id, Polarity)> = pc
                 .conds
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
+            let Some(held) = h.chunk(&kind, addr).cloned() else {
+                // No single chunk: a quantified chunk set may hold write
+                // permission. The heap is left as is: values at QP locations are
+                // not tracked yet (a read there yields a fresh value), and adding
+                // a single chunk would duplicate the permission the set holds.
+                let writable = qp_proves(ctx, &h, &kind, addr, |ctx, p| {
+                    prove_perm_write(ctx, p, &kind.bound, &pc_lits)
+                });
+                return if writable {
+                    Ok(h)
+                } else {
+                    Err(VerifyError::InsufficientPermission)
+                };
+            };
+            let perm = held.ungated_perm().clone();
+            let guard = held.guard_pc();
+            // SIDECOND: prove `not(perm < cap)` (full/write permission, `cap` =
+            // the location's own permission bound, `1/1` for a field) under pc —
+            // per leaf, so a branch-structured held perm never materializes. Under
+            // the guarded-merge path the write obligation is proven against the
+            // guard-gated perm (write required only where the chunk is present).
             let proof_perm = if !guard.is_empty() {
                 gate_perm_by_guard(ctx, &perm, &guard)
             } else {
@@ -2688,22 +2695,22 @@ fn qp_perm_at(
     Ok(Some(ChunkPerm::select(ctx, inst.cond, perm, zero)))
 }
 
-/// Whether some quantified chunk set of `heap` provably holds a positive
-/// permission at `addr` under `pc_lits`, its inhale guard folded in exactly as
-/// for a [`Chunk`] ([`Chunk::gated_perm`]).
-fn qp_frames(
+/// Whether some quantified chunk set of `heap` holds a permission at `addr`
+/// that satisfies `prove` (enough to read, enough to write), its inhale guard
+/// folded in exactly as for a [`Chunk`] ([`Chunk::gated_perm`]). Each set is
+/// tried on its own: no sum with other chunks yet.
+fn qp_proves(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
-    kind: Option<LocationKind>,
+    kind: &LocationKind,
     addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
+    mut prove: impl FnMut(&mut VerifyContext<'_>, &ChunkPerm) -> bool,
 ) -> bool {
-    let Some(kind) = kind else { return false };
-    heap.qp_chunks_of(&kind).iter().any(|chunk| {
+    heap.qp_chunks_of(kind).iter().any(|chunk| {
         match qp_perm_at(ctx, chunk, addr) {
             Ok(Some(p)) => {
                 let p = crate::verify::heap::gate_perm_by_guard(ctx, &p, &chunk.guard);
-                prove_perm_positive(ctx, &p, pc_lits)
+                prove(ctx, &p)
             }
             Ok(None) => false,
             // The body evaluated once already, at the inhale.
@@ -3309,7 +3316,14 @@ fn inst_obligations(
             match perm {
                 // No single chunk: a quantified chunk set may still frame it.
                 // Each set is tried on its own (no sum with other chunks yet).
-                None if qp_frames(ctx, &held, state.loc_kind(loc), addr, pc_lits) => vec![],
+                None if state.loc_kind(loc).is_some_and(|k| {
+                    qp_proves(ctx, &held, &k, addr, |ctx, p| {
+                        prove_perm_positive(ctx, p, pc_lits)
+                    })
+                }) =>
+                {
+                    vec![]
+                }
                 // A bare (or absent) perm: the goal `0 < leaf` is discharged by
                 // the caller exactly as before (flag-OFF byte-identical).
                 None => {
