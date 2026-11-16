@@ -112,6 +112,58 @@ fn check_in_scratch(
     Ok(())
 }
 
+/// The permission a held chunk set has at an address, its guard folded in, or
+/// `None` when the set cannot name that address. Supplied by the caller, which
+/// owns the lookup (`qp_perm_at`).
+pub(crate) type HeldAt<'s> =
+    dyn FnMut(&mut VerifyContext<'_>, Id) -> Result<Option<ChunkPerm>, VerifyError> + 's;
+
+/// Whether the exhaled quantified permission `q` is covered by a held chunk set
+/// under the exhale's path condition `pc`: every location it names has at least
+/// the amount it wants available there (own permission minus what was already
+/// taken),
+///
+/// ```text
+/// forall ys ::  c'(ys)  ==>  p'(ys) <= perm_held(e'(ys))
+/// ```
+///
+/// Proven by skolemization, as the injectivity check: `ys` are fresh constants
+/// on a scratch graph (nothing leaks into the live one; the certificate recipe
+/// is paused likewise), `c'(ys)` joins the path condition, and the comparison
+/// is discharged per branch by `prove_sufficient_aligned`. This is what makes
+/// recording the exhaled set as taken from the held one sound: no location
+/// goes negative.
+#[allow(dead_code)] // Wired into `SubForall` next.
+pub(crate) fn check_qp_contained(
+    ctx: &mut VerifyContext<'_>,
+    q: &QuantChunks,
+    pc: &[(Id, Polarity)],
+    instantiate: &mut Instantiate<'_>,
+    held_at: &mut HeldAt<'_>,
+) -> Result<bool, VerifyError> {
+    let recipe = ctx.recipe.take();
+    let res = ctx.with_scratch_graph(|ctx| {
+        let ys = fresh_binders(ctx, q);
+        let inst = instantiate(ctx, &ys)?;
+        let call = q.loc_call();
+        let addr = ctx.add(Symbolic::FuncApp(
+            crate::verify::func_registry::func_id_for_member(call.function),
+            call.type_args.clone().into(),
+            inst.loc_args.into(),
+        ));
+        let Some(avail) = held_at(ctx, addr)? else {
+            return Ok(false);
+        };
+        let mut lits = pc.to_vec();
+        lits.push((inst.cond, Polarity::Positive));
+        Ok(crate::verify::heap::algebra::prove_sufficient_aligned(
+            ctx, &avail, &inst.perm, &lits,
+        ))
+    });
+    ctx.recipe = recipe;
+    res
+}
+
 /// One fresh constant per binder of `q`.
 fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
     q.bound
