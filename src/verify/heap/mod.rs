@@ -625,6 +625,9 @@ impl Heap {
     pub fn chunks_of(&self, kind: &LocationKind) -> &[Chunk] {
         self.groups.get(kind).map(|r| &r[..]).unwrap_or(&[])
     }
+    pub(crate) fn qp_chunks_of(&self, kind: &LocationKind) -> &[QuantChunk] {
+        self.qps.get(kind).map_or(&[], |v| &v[..])
+    }
 
     /// The chunk held at `addr` within `kind`'s group (exact e-class match).
     pub fn chunk(&self, kind: &LocationKind, addr: egg::Id) -> Option<&Chunk> {

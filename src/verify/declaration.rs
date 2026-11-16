@@ -151,8 +151,8 @@ impl EvalState {
         self.frame_at(q.binder_base)
     }
 
-    /// [`Self::frame_for`] for any quantified scope whose binders start at
-    /// `binder_base` (a pure `forall` or a quantified permission's body).
+    /// [`Self::frame_for`] at an explicit `binder_base`. A quantified
+    /// permission's body uses [`Self::frame_from_caps`] instead.
     fn frame_at(&self, binder_base: usize) -> Self {
         let mut frame = Self {
             vals: self.vals.clone(),
@@ -172,6 +172,39 @@ impl EvalState {
         frame.val_types.truncate(binder_base);
         frame.recipes.truncate(binder_base);
         frame
+    }
+
+    /// The evaluation state a quantified permission's body starts from, built
+    /// from the captures its chunk stored at the inhale instead of a live state:
+    /// the chunk is a closure, `caps` its environment.
+    ///
+    /// The table is exactly `binder_base` long, so binders and body steps land on
+    /// the temps the body was lowered with. Only the captured slots are filled;
+    /// `caps` is [`vmir::QuantChunks::free_temps`], so no other slot below
+    /// `binder_base` is read. The rest hold an id that is not an e-class, so a
+    /// read of one (a `free_temps` that missed an operand) fails loudly instead
+    /// of silently resolving against an unrelated value.
+    ///
+    /// Types and recipes are placeholders: pure evaluation reads types only to
+    /// classify `Deref`/`Perm` addresses and recipes only in a certificate walk,
+    /// and a quantified permission's body has neither.
+    fn frame_from_caps(binder_base: usize, caps: &[(usize, egg::Id)]) -> Self {
+        const UNCAPTURED: usize = usize::MAX;
+        let mut vals = vec![egg::Id::from(UNCAPTURED); binder_base];
+        for &(k, id) in caps {
+            assert!(k < binder_base, "capture {k} is not below binder_base {binder_base}");
+            vals[k] = id;
+        }
+        Self {
+            vals,
+            val_types: vec![Type::Bool; binder_base],
+            recipes: vec![None; binder_base],
+            heaps: Vec::new(),
+            perms: Vec::new(),
+            perm_defs: Vec::new(),
+            dead_blocks: crate::dhash::HashSet::default(),
+            join_arms_dead: None,
+        }
     }
 
     fn push_val(&mut self, id: egg::Id, ty: Type, recipe: Option<Val>) {
@@ -1162,7 +1195,7 @@ fn eval_heap_inst(
 
             // The accessed resource must be injective with regards to the quantified variables.
             check_qp_injectivity(ctx, q, &pc_lits, &mut |ctx, binders| {
-                eval_qp_instance(ctx, state, q, binders, &pc_lits)
+                eval_qp_instance(ctx, &caps, q, binders, &pc_lits)
             })?;
             // One binding per location: assume the inverse axiom that names it.
             let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, &pc_lits)?;
@@ -2553,23 +2586,24 @@ fn check_forall_wd_in_scratch(
     Ok(())
 }
 
-/// Evaluate a quantified permission's body at `binders`, against the host state
-/// the inhale runs in (capture is implicit, as for a pure `forall`: the body
-/// indexes the host's value table directly). Body permission temps count from
-/// 0, so the frame starts with no permissions.
+/// Evaluate a quantified permission's body at `binders`, with its captured
+/// temps resolved through `caps` (the values fixed at the inhale, see
+/// [`EvalState::frame_from_caps`]), never the live state: a lookup may run in
+/// another temp space or after the captured variables were reassigned. Body
+/// permission temps count from 0, so the frame starts with no permissions.
 ///
 /// The body holds only `Pure` and `Perm` instructions and its location is an
 /// address call (both guaranteed by `lower_quant_chunks`); anything else is a
 /// lowering bug and panics.
 fn eval_qp_instance(
     ctx: &mut VerifyContext<'_>,
-    host: &EvalState,
+    caps: &[(usize, egg::Id)],
     q: &vmir::QuantChunks,
     binders: &[egg::Id],
     host_pc: &[(egg::Id, Polarity)],
 ) -> Result<QpInstance, VerifyError> {
     debug_assert_eq!(binders.len(), q.bound.len());
-    let mut state = host.frame_at(q.binder_base);
+    let mut state = EvalState::frame_from_caps(q.binder_base, caps);
     for (&id, ty) in binders.iter().zip(q.bound.iter()) {
         state.push_val(id, ty.clone(), None);
     }
@@ -2595,6 +2629,63 @@ fn eval_qp_instance(
         loc_args: q.loc_call().args.iter().map(|a| state.get_val(ctx, a)).collect(),
         perm: eval_perm_structural(ctx, &state, &q.body.perm),
     })
+}
+
+/// The permission a quantified chunk set holds at `addr`, or `None` when `addr`
+/// is not an application of the chunk's address function (no binding can name
+/// it). Not yet gated by `chunk.guard`, the inhale's path condition: the caller
+/// gates it exactly as a [`Chunk`]'s guard.
+///
+/// The binding that names `addr = f(as)` is solved per binder `x_j`:
+/// - **projection**: if some address argument is `x_j` itself, `x_j = as_i`;
+/// - otherwise **inversion**: `x_j = inv_j(as)`, with the inverse minted at the
+///   inhale (whose axiom, when assumed, lets the prover reduce it).
+///
+/// The body is evaluated at that binding from the chunk's captures, and its
+/// permission is gated by `c(xs)` and by the rebuilt address arguments being
+/// `as` (Silicon's `e(inv(r)) = r`). That gate is what makes the answer sound
+/// for any solution, even an unconstrained inverse: the permission is returned
+/// only where the instance really names `addr`. Arguments that already coincide
+/// with `as` (every projected one) add no gate.
+fn qp_perm_at(
+    ctx: &mut VerifyContext<'_>,
+    chunk: &QuantChunk,
+    addr: egg::Id,
+) -> Result<Option<ChunkPerm>, VerifyError> {
+    let q = &*chunk.q;
+    let call = q.loc_call();
+    let func = crate::verify::func_registry::func_id_for_member(call.function);
+    let class = ctx.egraph.find(addr);
+    let Some(args) = ctx.egraph[class].nodes.iter().find_map(|n| match n {
+        Symbolic::FuncApp(f, tys, args) if *f == func && **tys == call.type_args[..] => {
+            Some(args.clone())
+        }
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    assert_eq!(args.len(), call.args.iter().count(), "address call arity mismatch");
+
+    let binders: Vec<egg::Id> = (0..q.bound.len())
+        .map(|j| {
+            let me = Val::Temp(q.binder_base + j);
+            match call.args.iter().position(|a| *a == me) {
+                Some(i) => args[i],
+                None => ctx.add(Symbolic::FuncApp(chunk.inv[j], Box::new([]), args.clone())),
+            }
+        })
+        .collect();
+    let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.guard)?;
+
+    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    let mut perm = inst.perm;
+    for (&got, &want) in inst.loc_args.iter().zip(args.iter()).rev() {
+        if ctx.egraph.find(got) != ctx.egraph.find(want) {
+            let eq = expr!(ctx, { got } == { want });
+            perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
+        }
+    }
+    Ok(Some(ChunkPerm::select(ctx, inst.cond, perm, zero)))
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and
