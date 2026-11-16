@@ -1584,14 +1584,15 @@ fn walk_footprint(
                 // group may sit here — under an equality the pc does not mention,
                 // or under its own presence guard, which is the `&mut`-reborrow
                 // shape. Summarize the group at `addr` and ask for positivity per
-                // leaf. Reached only by a check that would otherwise fail, so no
-                // framing check that succeeds outright pays for it.
+                // path through the members' branch structure. Reached only by a
+                // check that would otherwise fail, so no framing check that
+                // succeeds outright pays for it.
                 let suff = suff || {
                     let chunks = heap.chunks_of(&slot.kind).to_vec();
                     let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
                     let mut pc = pc_lits.to_vec();
                     pc.push((guard, Polarity::Positive));
-                    !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
+                    !set.is_empty() && total.prove_positive(ctx, &pc)
                 };
                 if !suff {
                     return Err(VerifyError::InsufficientPermission);

@@ -1,0 +1,14 @@
+saturations=20
+reduces=18
+sat_iterations=148
+egraph_nodes_peak=1253
+egraph_classes_peak=646
+rule_applications=872
+prove_calls=37
+prove_probe=0
+perm_sum_steps=64
+rule.accessor-18446744073709551614=16
+rule.contra-congruence=544
+rule.eq-false-mirror=272
+rule.eq-true-union=17
+rule.ite-reduce=23

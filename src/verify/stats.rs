@@ -136,6 +136,10 @@ pub struct VerifyStats {
     /// Goals discharged by the last tier — non-forking `ite`-goal decomposition
     /// (a constant branch reduces the goal to its other branch, no case split).
     pub prove_ite_decompose: u64,
+    /// Addend amounts visited while deciding an obligation over a summarized
+    /// permission (`PermSum::prove_monotone`; arms that contribute the same amount
+    /// count once): the work of summing the chunks that may sit at one location.
+    pub perm_sum_steps: u64,
     /// Non-deterministic timing (excluded from `Eq` / the gated snapshot).
     pub timing: TimingTrend,
     /// Per-e-graph wall clock (ground vs block scratch vs probes vs clones).
@@ -268,6 +272,7 @@ impl VerifyStats {
         s.push_str(&format!("rule_applications={}\n", self.rule_applications));
         s.push_str(&format!("prove_calls={}\n", self.prove_calls));
         s.push_str(&format!("prove_probe={}\n", self.prove_probe));
+        s.push_str(&format!("perm_sum_steps={}\n", self.perm_sum_steps));
         // `per_rule` is a BTreeMap → already sorted, hence deterministic.
         for (rule, n) in &self.per_rule {
             s.push_str(&format!("rule.{rule}={n}\n"));
@@ -327,6 +332,7 @@ impl VerifyStats {
             prove_saturate,
             prove_probe,
             prove_ite_decompose,
+            perm_sum_steps,
             timing,
             graph_timing,
             z3_timing,
@@ -361,6 +367,7 @@ impl VerifyStats {
             ("prove_saturate", n(prove_saturate)),
             ("prove_probe", n(prove_probe)),
             ("prove_ite_decompose", n(prove_ite_decompose)),
+            ("perm_sum_steps", n(perm_sum_steps)),
             (
                 "per_rule",
                 Json::obj(per_rule.iter().map(|(k, v)| (k.clone(), n(v)))),
