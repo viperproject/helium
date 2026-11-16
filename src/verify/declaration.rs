@@ -2688,6 +2688,30 @@ fn qp_perm_at(
     Ok(Some(ChunkPerm::select(ctx, inst.cond, perm, zero)))
 }
 
+/// Whether some quantified chunk set of `heap` provably holds a positive
+/// permission at `addr` under `pc_lits`, its inhale guard folded in exactly as
+/// for a [`Chunk`] ([`Chunk::gated_perm`]).
+fn qp_frames(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: Option<LocationKind>,
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> bool {
+    let Some(kind) = kind else { return false };
+    heap.qp_chunks_of(&kind).iter().any(|chunk| {
+        match qp_perm_at(ctx, chunk, addr) {
+            Ok(Some(p)) => {
+                let p = crate::verify::heap::gate_perm_by_guard(ctx, &p, &chunk.guard);
+                prove_perm_positive(ctx, &p, pc_lits)
+            }
+            Ok(None) => false,
+            // The body evaluated once already, at the inhale.
+            Err(e) => panic!("quantified chunk body failed to re-evaluate: {e:?}"),
+        }
+    })
+}
+
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and
 /// [`eval_resource_body_inst`], so [`walk_body`] can be parameterized by which
 /// one the body kind uses.
@@ -3283,6 +3307,9 @@ fn inst_obligations(
                 Some(c.gated_perm(ctx))
             });
             match perm {
+                // No single chunk: a quantified chunk set may still frame it.
+                // Each set is tried on its own (no sum with other chunks yet).
+                None if qp_frames(ctx, &held, state.loc_kind(loc), addr, pc_lits) => vec![],
                 // A bare (or absent) perm: the goal `0 < leaf` is discharged by
                 // the caller exactly as before (flag-OFF byte-identical).
                 None => {
