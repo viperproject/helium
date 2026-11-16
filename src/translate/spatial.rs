@@ -8,7 +8,7 @@ use lasso::Spur;
 use crate::translate::pure_exp::{self, HeapCtx, OldHeaps, PureExt};
 use crate::translate::resource::lower_resource_addr;
 use crate::translate::sink::{PcKind, Sink};
-use crate::translate::{TranslationContext, TranslationError};
+use crate::translate::{resource, TranslationContext, TranslationError};
 use crate::viper::typed;
 use crate::vmir::{self, FALSE, HeapInst, HeapVal, PermVal, Polarity, PureInst, TRUE, Type, Val};
 
@@ -388,6 +388,7 @@ fn lower_quant_chunks(
     };
     let cond = pure_exp::lower(b, &inner_env, &mut inner, hctx, &q.cond)?;
     let loc = lower_resource_addr(b, &inner_env, &mut inner, hctx, &q.res)?;
+    let loc_ty = resource::resource_addr_type(b, &q.res)?;
     let mut perm = if is_wildcard(&q.perm) {
         PermVal::Wildcard
     } else {
@@ -411,6 +412,7 @@ fn lower_quant_chunks(
             loc,
             perm,
         },
+        loc_ty
     })
 }
 

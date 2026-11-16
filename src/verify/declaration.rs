@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use crate::dhash::HashMap;
 
 use crate::verify::cert::PermRecipe;
@@ -26,6 +27,7 @@ use crate::{
         Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
+use crate::verify::heap::QuantChunk;
 
 struct EvalState {
     vals: Vec<egg::Id>,
@@ -1128,6 +1130,21 @@ fn eval_heap_inst(
                 heap_subtract(ctx, &base_h, &kind, ch, &pc_lits, demand_of(&cperm))
             }
         }
+        HeapInst::AddForall { base, q, bind } => {
+
+            // TODO: take the bind into account
+            let base_h = get_heap(state, base);
+
+            let caps = q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
+            let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
+            let pc_lits: Vec<(egg::Id, Polarity)> = pc
+                .conds
+                .iter()
+                .map(|(v, p)| (state.get_val(ctx, v), *p))
+                .collect();
+            Ok(base_h.with_qp_chunk(&kind, QuantChunk { q: Rc::new((**q).clone()), caps, guard: pc_lits.into() }))
+        },
+        HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
         // Resource inhale/exhale need the program + certificates; method-only.
         HeapInst::Inhale { .. } | HeapInst::Exhale { .. } => Err(VerifyError::Unimplemented(
             "resource inhale/exhale outside method body",
@@ -1175,8 +1192,7 @@ fn eval_heap_inst(
                 Chunk::new_perm(addr, perm, new_val).with_guard(guard),
             ))
         }
-        HeapInst::AddForall { .. } => Err(VerifyError::Unimplemented("add forall to heap")),
-        HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
+
     }
 }
 
