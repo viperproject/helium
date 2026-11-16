@@ -1,0 +1,8 @@
+// QP injectivity: a constant receiver is fine when the condition admits only
+// one binding (`i == 0`).
+field f: Int
+
+method single_point_domain(r: Ref)
+{
+  inhale forall i: Int :: i == 0 ==> acc(r.f)
+}

@@ -1,0 +1,8 @@
+// QP injectivity: the receiver collides for every `x`, but the amount is
+// non-zero only on the single binding `x == r`.
+field f: Int
+
+method ternary_perm_masks_collision(s: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(r.f, x == r ? write : none)
+}

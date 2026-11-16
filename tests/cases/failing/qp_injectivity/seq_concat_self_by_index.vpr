@@ -1,0 +1,10 @@
+// QP injectivity by index into `xs ++ xs`: every element of a non-empty `xs`
+// occurs twice.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method seq_concat_self_by_index(xs: Seq[Ref])
+{
+  inhale forall i: Int :: 0 <= i && i < |xs ++ xs| ==> acc((xs ++ xs)[i].f)
+}

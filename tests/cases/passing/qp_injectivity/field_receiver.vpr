@@ -1,0 +1,8 @@
+// QP injectivity: the receiver is the binder itself, so distinct bindings name
+// distinct locations. The inhale's injectivity check must succeed.
+field f: Int
+
+method field_receiver(s: Set[Ref])
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+}

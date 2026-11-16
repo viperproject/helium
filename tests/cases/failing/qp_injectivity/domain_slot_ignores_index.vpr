@@ -1,0 +1,14 @@
+// QP injectivity through a domain function with no injectivity axiom: nothing
+// rules out `slot(a, i1) == slot(a, i2)` for `i1 != i2`.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+domain Array {
+  function slot(a: Array, i: Int): Ref
+}
+
+method domain_slot_ignores_index(a: Array, n: Int)
+{
+  inhale forall i: Int :: 0 <= i && i < n ==> acc(slot(a, i).f)
+}
