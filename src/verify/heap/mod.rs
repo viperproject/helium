@@ -7,7 +7,7 @@ use lasso::Spur;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::lang::Symbolic;
-use crate::vmir::{Bound, Literal, Polarity, Type};
+use crate::vmir::{Bound, Literal, Polarity, QuantChunks, Type};
 
 /// A path condition in verify space: a single conjunctive cube of e-class
 /// literals (the analog of a block's `PathConds`, already minimized by
@@ -590,12 +590,16 @@ pub struct Heap {
     /// Unseeded hasher: iteration order (and so the order join/consume code mints
     /// terms in) must be a function of the heap alone, not of the process.
     groups: im::HashMap<LocationKind, Rc<[Chunk]>, rustc_hash::FxBuildHasher>,
+
+    // Quantified permission parts
+    qps: im::HashMap<LocationKind, Rc<QuantChunks>, rustc_hash::FxBuildHasher>,
 }
 
 impl Heap {
     pub fn empty() -> Self {
         Self {
             groups: im::HashMap::default(),
+            qps: im::HashMap::default(),
         }
     }
 
@@ -623,6 +627,7 @@ impl Heap {
         }
         Self {
             groups: self.groups.update(kind.clone(), v.into()),
+            qps: self.qps.clone(),
         }
     }
 
@@ -637,7 +642,7 @@ impl Heap {
         } else {
             self.groups.update(kind.clone(), v.into())
         };
-        Self { groups }
+        Self { groups, qps: self.qps.clone() }
     }
 
     /// Every chunk in the heap, paired with its location kind.
