@@ -1247,7 +1247,7 @@ fn eval_resource_body_inst(
                 return Err(VerifyError::AssertionFailed);
             }
         }
-        InstKind::Assume(_)  | InstKind::Refute(_) => {
+        InstKind::Assume(_) | InstKind::Refute(_) => {
             return Err(VerifyError::Unimplemented(
                 "effectful inst in resource body",
             ));
