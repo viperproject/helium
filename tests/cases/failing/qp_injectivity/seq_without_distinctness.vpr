@@ -1,0 +1,10 @@
+// QP injectivity: `xs[i]` is injective only if `xs` has no duplicates, which
+// nothing here says.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method seq_without_distinctness(xs: Seq[Ref])
+{
+  inhale forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+}

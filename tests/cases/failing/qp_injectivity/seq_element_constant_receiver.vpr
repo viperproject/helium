@@ -1,0 +1,10 @@
+// QP injectivity: ranging over the elements of a sequence does not help when
+// the receiver ignores the binder.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method seq_element_constant_receiver(xs: Seq[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in xs ==> acc(r.f)
+}

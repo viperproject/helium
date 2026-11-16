@@ -1,0 +1,10 @@
+// QP injectivity with two binders: `y` ranges over all of `s` but does not
+// occur in the receiver, so `(x, y1)` and `(x, y2)` name the same location.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method unused_binder(s: Set[Ref])
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in s ==> acc(x.f)
+}

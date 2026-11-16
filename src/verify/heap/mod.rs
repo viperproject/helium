@@ -1,4 +1,5 @@
 pub(crate) mod algebra;
+pub(crate) mod qp_injectivity;
 
 use std::cell::Cell;
 use std::rc::Rc;

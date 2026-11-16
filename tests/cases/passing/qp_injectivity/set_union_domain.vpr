@@ -1,0 +1,8 @@
+// QP injectivity over a set domain: the binder ranges over the elements of
+// `s union t` and is itself the receiver.
+field f: Int
+
+method set_union_domain(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref :: x in (s union t) ==> acc(x.f)
+}

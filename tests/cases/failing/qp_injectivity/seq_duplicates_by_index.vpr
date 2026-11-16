@@ -1,0 +1,12 @@
+// QP injectivity by index into a sequence with a duplicate: positions 0 and 1
+// both hold `a`, so `acc(xs[i].f)` names `a.f` twice. The element-wise
+// contrast is `passing/qp_injectivity/seq_element_domain_duplicates.vpr`.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method seq_duplicates_by_index(xs: Seq[Ref], a: Ref)
+{
+  inhale xs == Seq(a, a)
+  inhale forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+}

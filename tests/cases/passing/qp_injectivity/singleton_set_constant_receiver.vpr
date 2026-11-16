@@ -1,0 +1,8 @@
+// QP injectivity: a constant receiver is fine over a singleton set, since
+// `x in Set(r)` forces `x == r` for every binding.
+field f: Int
+
+method singleton_set_constant_receiver(r: Ref)
+{
+  inhale forall x: Ref :: x in Set(r) ==> acc(r.f)
+}

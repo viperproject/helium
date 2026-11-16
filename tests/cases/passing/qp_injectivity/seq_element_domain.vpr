@@ -1,0 +1,8 @@
+// QP injectivity over the *elements* of a sequence: the binder is the element,
+// so the receiver is injective however often an element occurs in `xs`.
+field f: Int
+
+method seq_element_domain(xs: Seq[Ref])
+{
+  inhale forall x: Ref :: x in xs ==> acc(x.f)
+}

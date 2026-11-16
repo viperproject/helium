@@ -17,6 +17,7 @@ use crate::{
                 summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
+            qp_injectivity::{QpInstance, check_qp_injectivity},
         },
         lang::Symbolic,
         stats,
@@ -146,6 +147,12 @@ impl EvalState {
     /// from inside. Heaps are dropped; a quantifier body is heap-free by
     /// construction.
     fn frame_for(&self, q: &vmir::Forall) -> Self {
+        self.frame_at(q.binder_base)
+    }
+
+    /// [`Self::frame_for`] for any quantified scope whose binders start at
+    /// `binder_base` (a pure `forall` or a quantified permission's body).
+    fn frame_at(&self, binder_base: usize) -> Self {
         let mut frame = Self {
             vals: self.vals.clone(),
             val_types: self.val_types.clone(),
@@ -159,10 +166,10 @@ impl EvalState {
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
-        debug_assert!(frame.vals.len() >= q.binder_base);
-        frame.vals.truncate(q.binder_base);
-        frame.val_types.truncate(q.binder_base);
-        frame.recipes.truncate(q.binder_base);
+        debug_assert!(frame.vals.len() >= binder_base);
+        frame.vals.truncate(binder_base);
+        frame.val_types.truncate(binder_base);
+        frame.recipes.truncate(binder_base);
         frame
     }
 
@@ -1133,15 +1140,28 @@ fn eval_heap_inst(
         HeapInst::AddForall { base, q, bind } => {
 
             // TODO: take the bind into account
+            // A resource body (certificate walk, `with self`) must record the
+            // chunk set as footprint; until it does, an exhale of that resource
+            // would consume nothing, so refuse rather than build an empty
+            // footprint.
+            if ctx.recipe.is_some() {
+                return Err(VerifyError::Unimplemented(
+                    "quantified permission in a resource footprint",
+                ));
+            }
             let base_h = get_heap(state, base);
 
-            let caps = q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
+            let caps: Rc<[(usize, egg::Id)]> = q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
             let pc_lits: Vec<(egg::Id, Polarity)> = pc
                 .conds
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
+
+            check_qp_injectivity(ctx, q, &pc_lits, &mut |ctx, binders| {
+                eval_qp_instance(ctx, state, q, binders, &pc_lits)
+            })?;
             Ok(base_h.with_qp_chunk(&kind, QuantChunk { q: Rc::new((**q).clone()), caps, guard: pc_lits.into() }))
         },
         HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
@@ -2043,7 +2063,10 @@ fn decls_use_coll(
             _ => false,
         }
     }
-    let insts_use = |insts: &[vmir::Inst]| {
+    // Recurses into quantifier bodies (a pure `forall`'s, a quantified
+    // permission's) and their binder types: a collection used only there still
+    // needs its axioms.
+    fn insts_use(insts: &[vmir::Inst], kind: CollKind) -> bool {
         insts.iter().any(|i| match &i.kind {
             InstKind::Pure(ty, pi) => {
                 mentions(ty, kind)
@@ -2054,12 +2077,20 @@ fn decls_use_coll(
                         PureInst::CollLit {
                             kind: k, elem_ty, ..
                         } => *k == kind || mentions(elem_ty, kind),
+                        PureInst::Forall(q) => {
+                            q.bound.iter().any(|t| mentions(t, kind))
+                                || insts_use(&q.body.insts, kind)
+                        }
                         _ => false,
                     }
             }
+            InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
+                q.bound.iter().any(|t| mentions(t, kind)) || insts_use(&q.body.insts, kind)
+            }
             _ => false,
         })
-    };
+    }
+    let insts_use = |insts: &[vmir::Inst]| insts_use(insts, kind);
     decls.iter().any(|d| match d {
         vmir::Declaration::Method(m) => insts_use(&m.flatten()),
         vmir::Declaration::Function(f) => {
@@ -2513,6 +2544,59 @@ fn check_forall_wd_in_scratch(
         }
     }
     Ok(())
+}
+
+/// Evaluate a quantified permission's body at `binders`, against the host state
+/// the inhale runs in (capture is implicit, as for a pure `forall`: the body
+/// indexes the host's value table directly). Body permission temps count from
+/// 0, so the frame starts with no permissions.
+///
+/// The body holds only `Pure` and `Perm` instructions and its location is an
+/// address call (both guaranteed by `lower_quant_chunks`); anything else is a
+/// lowering bug and panics.
+fn eval_qp_instance(
+    ctx: &mut VerifyContext<'_>,
+    host: &EvalState,
+    q: &vmir::QuantChunks,
+    binders: &[egg::Id],
+    host_pc: &[(egg::Id, Polarity)],
+) -> Result<QpInstance, VerifyError> {
+    debug_assert_eq!(binders.len(), q.bound.len());
+    let mut state = host.frame_at(q.binder_base);
+    for (&id, ty) in binders.iter().zip(q.bound.iter()) {
+        state.push_val(id, ty.clone(), None);
+    }
+
+    // The defining call of `loc`, found while walking (a `Perm` inst defines no
+    // `Val`, so a body temp is not an instruction index).
+    let mut loc_call: Option<&vmir::FunctionCall> = None;
+    for inst in &q.body.insts {
+        let mut pc_lits = host_pc.to_vec();
+        pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
+        match &inst.kind {
+            InstKind::Pure(ty, pi) => {
+                if q.body.loc == Val::Temp(state.vals.len())
+                    && let PureInst::FunctionCall(fc) = pi
+                {
+                    loc_call = Some(fc);
+                }
+                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
+                state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Perm(pi) => {
+                let p = eval_perm_inst(ctx, &state, pi);
+                state.push_perm(p, pi.clone());
+            }
+            other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
+        }
+    }
+
+    let fc = loc_call.expect("quantified permission location must be an address call of its body");
+    Ok(QpInstance {
+        cond: state.get_val(ctx, &q.body.cond),
+        loc_args: fc.args.iter().map(|a| state.get_val(ctx, a)).collect(),
+        perm: eval_perm_structural(ctx, &state, &q.body.perm),
+    })
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and

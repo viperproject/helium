@@ -1,0 +1,8 @@
+// QP injectivity with two binders: `y` does not occur in the receiver, but the
+// condition `y == x` pins it to `x`, so equal receivers force equal tuples.
+field f: Int
+
+method second_binder_determined(s: Set[Ref])
+{
+  inhale forall x: Ref, y: Ref :: x in s && y == x ==> acc(x.f)
+}
