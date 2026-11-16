@@ -374,6 +374,15 @@ impl FuncRegistry {
         id
     }
 
+    /// Mint a fresh inverse function of a quantified permission, `params ->
+    /// ret` (see `heap::quantified_permissions`). A skolem like any other, so
+    /// the backends that know skolems need nothing new; fresh per call, since
+    /// one inverse belongs to one inhaled chunk set.
+    pub(crate) fn qp_inverse(&mut self, params: Vec<Type>, ret: Type) -> FuncId {
+        let name = format!("qp_inv#{}", self.skolems.len());
+        self.skolem(&name, SkolemSig { params, ret })
+    }
+
     /// The parameter and return types of the skolem function of kind
     /// `Skolem(index)`, applied at the type arguments `tys`.
     pub fn skolem_signature(&self, index: usize, tys: &[Type]) -> (Vec<Type>, Type) {

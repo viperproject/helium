@@ -1,5 +1,5 @@
 pub(crate) mod algebra;
-pub(crate) mod qp_injectivity;
+pub(crate) mod quantified_permissions;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -581,6 +581,10 @@ pub struct QuantChunk {
     pub(crate) q: Rc<vmir::QuantChunks>,
     /// `free_temps()` resolved at inhale: enclosing temp -> its e-class then.
     pub(crate) caps: Rc<[(usize, egg::Id)]>,
+    /// The inverse functions minted at inhale, one per binder, each from the
+    /// arguments of the location's address call to that binder (see
+    /// `quantified_permissions::mint_and_assume_inverse_axiom`).
+    pub(crate) inv: Rc<[crate::verify::lang::FuncId]>,
     /// Path-condition cube of the inhale, same role as `Chunk::guard`.
     pub(crate) guard: HeapPc,
 }

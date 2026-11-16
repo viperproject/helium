@@ -17,7 +17,7 @@ use crate::{
                 summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
-            qp_injectivity::{QpInstance, check_qp_injectivity},
+            quantified_permissions::{QpInstance, check_qp_injectivity},
         },
         lang::Symbolic,
         stats,
@@ -29,6 +29,7 @@ use crate::{
     },
 };
 use crate::verify::heap::QuantChunk;
+use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
 
 struct EvalState {
     vals: Vec<egg::Id>,
@@ -1159,10 +1160,13 @@ fn eval_heap_inst(
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
 
+            // The accessed resource must be injective with regards to the quantified variables.
             check_qp_injectivity(ctx, q, &pc_lits, &mut |ctx, binders| {
                 eval_qp_instance(ctx, state, q, binders, &pc_lits)
             })?;
-            Ok(base_h.with_qp_chunk(&kind, QuantChunk { q: Rc::new((**q).clone()), caps, guard: pc_lits.into() }))
+            // One binding per location: assume the inverse axiom that names it.
+            let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, &pc_lits)?;
+            Ok(base_h.with_qp_chunk(&kind, QuantChunk { q: Rc::new((**q).clone()), caps, inv, guard: pc_lits.into() }))
         },
         HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
         // Resource inhale/exhale need the program + certificates; method-only.
@@ -2431,6 +2435,9 @@ pub(crate) fn prepare_body(
             InstKind::Assume(v) => AxiomInst::Assume(v.clone()),
             // Never verified; nothing to record.
             InstKind::Assert(_) => continue,
+            // A permission step defines no value (only a quantified permission's
+            // body has them; its inverse axiom reads them itself).
+            InstKind::Perm(_) => continue,
             _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
         };
         out.push(prepared);
@@ -2567,19 +2574,11 @@ fn eval_qp_instance(
         state.push_val(id, ty.clone(), None);
     }
 
-    // The defining call of `loc`, found while walking (a `Perm` inst defines no
-    // `Val`, so a body temp is not an instruction index).
-    let mut loc_call: Option<&vmir::FunctionCall> = None;
     for inst in &q.body.insts {
         let mut pc_lits = host_pc.to_vec();
         pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
         match &inst.kind {
             InstKind::Pure(ty, pi) => {
-                if q.body.loc == Val::Temp(state.vals.len())
-                    && let PureInst::FunctionCall(fc) = pi
-                {
-                    loc_call = Some(fc);
-                }
                 let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
                 state.push_val(id, ty.clone(), None);
             }
@@ -2591,10 +2590,9 @@ fn eval_qp_instance(
         }
     }
 
-    let fc = loc_call.expect("quantified permission location must be an address call of its body");
     Ok(QpInstance {
         cond: state.get_val(ctx, &q.body.cond),
-        loc_args: fc.args.iter().map(|a| state.get_val(ctx, a)).collect(),
+        loc_args: q.loc_call().args.iter().map(|a| state.get_val(ctx, a)).collect(),
         perm: eval_perm_structural(ctx, &state, &q.body.perm),
     })
 }

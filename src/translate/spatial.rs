@@ -373,6 +373,26 @@ fn lower_quant_chunks(
             terms: terms.into(),
         });
     }
+    // Without user triggers, the location `f(e(xs))` is the trigger: the term
+    // every read or write of a member builds. Only when typecheck found it
+    // matchable (`location_can_trigger`); otherwise there is none.
+    if q.location_trigger {
+        let (name, args) = match &*q.res.0 {
+            typed::ResourceExpKind::Field(e, f) => (f.0, std::slice::from_ref(e)),
+            typed::ResourceExpKind::PredicateCall(c) => (c.name.0, &c.args[..]),
+        };
+        let args = args
+            .iter()
+            .map(|a| pure_exp::lower_trig_term(b, a, &inner_env))
+            .collect::<Result<Vec<_>, _>>()?;
+        triggers.push(vmir::QuantTrigger {
+            terms: Box::new([vmir::TrigTerm::App {
+                head: vmir::TrigHead::Func(b.name_map[&name]),
+                type_args: vec![],
+                args: args.into(),
+            }]),
+        });
+    }
 
     // Body permission temps are local to the body, so its counter starts at 0.
     let mut inner = Sink::new(binder_base + n, 0);
