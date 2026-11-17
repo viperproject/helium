@@ -1596,15 +1596,6 @@ struct FootprintResult {
     slot_recipes: Vec<Option<Val>>,
 }
 
-/// A footprint slot's permission as built for the current walk: either the real
-/// `Amount` (drives the heap effect), or, for a wildcard slot at a `Snap`, a
-/// `Presence` indicator `ite(guard, 1, 0)` standing in for the wildcard (drives
-/// only the snapshot member + a "holds a positive share" sufficiency prove).
-enum SlotPerm {
-    Amount(ChunkPerm),
-    Presence(ChunkPerm),
-}
-
 /// The single per-slot footprint loop behind `fold`, `unfold`, `snap` and
 /// `from_snap`. For each footprint slot of `resource(args)`: graft the slot's
 /// `(addr, perm)`, obtain the slot value from `source`, apply the slot's heap
@@ -1648,7 +1639,6 @@ fn walk_footprint(
     // bit — its one `true` caller passes `frame_only` — so it is now that bit.
     frame_only: bool,
 ) -> Result<FootprintResult, VerifyError> {
-    use crate::verify::cert::SeedRef;
     let def = certs.get(&resource).ok_or(VerifyError::DependencyFailed)?;
 
     let mut heap = base;
@@ -1656,182 +1646,41 @@ fn walk_footprint(
     let mut recipes: Vec<Option<Val>> = Vec::with_capacity(def.footprint.len());
     let mut members = Vec::with_capacity(def.footprint.len());
     let mut changed = Vec::new();
+    let walk = SlotWalk {
+        resource,
+        args,
+        source: &source,
+        direction: &direction,
+        scale,
+        scale_wild,
+        pc_lits,
+        frame_only,
+    };
     for (i, slot) in def.footprint.iter().enumerate() {
-        // Rebuild the slot's address and permission from their recipes, resolving
-        // params to `args` and any earlier-slot value refs to `values` (so a
-        // value-dependent inner address like `list(this.next)` resolves).
-        let resolve = |r: &SeedRef| r.resolve(args, &values);
-        // Heap framing is a *syntactic* e-class match (`heap_subtract`,
-        // `ValueSource::ReadHeap`), so a slot address has to be in normal form
-        // before we look it up: an address reaching through a snapshot
-        // (`Pt(f(r, cons(Some(unwrap(proj_0(s))))))`) only becomes e-class-equal to
-        // the held chunk's address once `proj∘cons` / `unwrap∘Some` have fired.
-        //
-        // Reduce only when the rebuild actually introduced something to reduce: the
-        // recipe is add-only, so if `build` added no e-node then every term it named
-        // was already present, hence already normalized. Reducing unconditionally
-        // per slot re-runs the ADT rule set over the whole graph and costs ~3.5x.
-        // A wildcard slot at a frame-only exhale (bare or gated): build its
-        // **presence** indicator rather than the wildcard perm — the same shape with
-        // the wildcard leaf built as full permission `1`, so `ite(guard, 1, 0)`
-        // whose `0 < …` folds to the gating guard.
-        // The slot's permission shape is also the static source for the consume rule
-        // its demand selects, at the `SlotPerm::Amount` consume below -- see
-        // [`Demand`]. Shape-only, so it is the same predicate the IR side asks.
-        let SlotShape::Single {
-            addr: slot_addr,
-            perm: slot_perm,
-        } = &slot.shape
-        else {
-            return Err(VerifyError::Unimplemented(
-                "quantified permission in a resource footprint",
-            ));
-        };
-        let slot_wildcard = slot_perm.has_wildcard();
-        let slot_demand = if slot_wildcard {
-            Demand::Wildcard
-        } else {
-            Demand::Concrete
-        };
-        let wc_slot = frame_only && slot_wildcard;
-        let before = ctx.egraph.total_number_of_nodes();
-        let addr = slot_addr.build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
-        let wildcard_as = if wc_slot {
-            WildcardAs::One
-        } else {
-            WildcardAs::Fresh
-        };
-        let bperm = {
-            let p = build_perm(
+        let SlotOut {
+            value,
+            recipe,
+            member,
+        } = match &slot.shape {
+            SlotShape::Single { addr, perm } => walk_single_slot(
                 ctx,
-                slot_perm,
-                &resolve,
-                pc_lits,
+                &walk,
+                i,
+                &slot.kind,
+                &slot.elem,
+                addr,
+                perm,
+                &values,
+                &mut heap,
                 &mut changed,
-                wildcard_as,
-            );
-            if wc_slot {
-                SlotPerm::Presence(p)
-            } else {
-                SlotPerm::Amount(p)
+            )?,
+            SlotShape::Quant { .. } => {
+                return Err(VerifyError::Unimplemented(
+                    "quantified permission in a resource footprint",
+                ));
             }
         };
-        if ctx.egraph.total_number_of_nodes() != before {
-            ctx.reduce();
-        }
-        let addr = ctx.egraph.find(addr);
-        let elem = slot.elem.clone();
-        let (value, recipe) = match &source {
-            // Values are read from the *original* heap (aliased slots agree);
-            // the hit chunk's recipe provenance rides along.
-            ValueSource::ReadHeap(h) => h
-                .entries()
-                .find_map(|(_, c)| {
-                    (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
-                        .then(|| (c.value, c.recipe.clone()))
-                })
-                .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None)),
-            // `proj_i(s)` recovers the optional member (collapsing to the `cons`
-            // argument when `s` is concrete); `unwrap` peels to the field value.
-            // A certificate walk mirrors the projection into the recipe.
-            ValueSource::ProjectSnap(s, s_recipe) => {
-                let proj_id = ctx.alloc.proj(resource, 0, i);
-                let opt_ty = ctx.alloc.option_type(elem.clone());
-                let opt = ctx.add_func_app_id(proj_id, Box::new([]), opt_ty, Box::new([*s]));
-                let value = ctx.option_unwrap(elem.clone(), opt);
-                let recipe = match (ctx.recipe.is_some(), s_recipe) {
-                    (true, Some(sr)) => {
-                        use crate::verify::rewrite::AxiomPure;
-                        let unwrap_id = ctx.alloc.option_value();
-                        let rb = ctx.recipe.as_mut().unwrap();
-                        let opt = rb.emit(AxiomPure::App {
-                            func: proj_id,
-                            type_args: Vec::new(),
-                            args: vec![sr.clone()],
-                        });
-                        Some(rb.emit(AxiomPure::App {
-                            func: unwrap_id,
-                            type_args: vec![elem.clone()],
-                            args: vec![opt],
-                        }))
-                    }
-                    _ => None,
-                };
-                (value, recipe)
-            }
-            // Inhale: an unconstrained fresh value per slot.
-            ValueSource::Fresh => (ctx.fresh_symbolic_value(elem.clone()), None),
-        };
-        // Snapshot member `present ? Some(v) : None`, plus the slot's heap effect.
-        let present = match bperm {
-            // Normal path: apply the (optionally scaled) permission to the heap
-            // (subtract/union), presence is `0 < perm`.
-            SlotPerm::Amount(bperm) => {
-                let p = match scale {
-                    Some(pm) => scale_perm(ctx, pm, scale_wild, bperm.clone()),
-                    None => bperm.clone(),
-                };
-                let chunk = Chunk::new_perm(addr, p, value).with_recipe(recipe.clone());
-                heap = match direction {
-                    Direction::Consume => {
-                        heap_subtract(ctx, &heap, &slot.kind, chunk, pc_lits, slot_demand)?
-                    }
-                    Direction::Produce => heap_union(ctx, &heap, &slot.kind, chunk, pc_lits),
-                };
-                let bperm_id = bperm.to_id(ctx);
-                expr!(ctx, (0 / 1) < r { bperm_id })
-            }
-            // Wildcard `Snap` slot: no heap effect (Snap frames). Presence is the
-            // gating guard `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when
-            // unconditional). Sufficiency: where the slot is required, the caller
-            // must hold a positive share — prove `guard ⇒ 0 < held` against the
-            // caller's (concrete) held permission; no wildcard is ever built.
-            SlotPerm::Presence(pp) => {
-                let pp = pp.to_id(ctx);
-                let guard = expr!(ctx, (0 / 1) < r { pp });
-                let (_, existing) =
-                    find_chunk_consolidated(ctx, &heap, &slot.kind, addr, pc_lits, true);
-                let suff = match existing {
-                    Some(c) => {
-                        // `guard ⇒ 0 < held`, proven per leaf (never materialize
-                        // the held `Select`): assume `guard` in the pc, prove
-                        // `0 < leaf` on each branch. Gated, so presence is
-                        // respected: a conditionally-held slot frames only where
-                        // its guard holds.
-                        let held = c.gated_perm(ctx);
-                        let mut pc = pc_lits.to_vec();
-                        pc.push((guard, Polarity::Positive));
-                        prove_perm_positive(ctx, &held, &pc)
-                    }
-                    // No chunk held here: sound only if the slot is not required
-                    // on this path (`guard` is false).
-                    None => {
-                        let not_guard = expr!(ctx, not { guard });
-                        ctx.prove_under_pc(not_guard, pc_lits)
-                    }
-                };
-                // Last resort, the framing twin of what `heap_subtract_inner` does
-                // on a miss: no chunk matched this address on ground (or the one
-                // that did could not be shown positive), but another chunk of the
-                // group may sit here — under an equality the pc does not mention,
-                // or under its own presence guard, which is the `&mut`-reborrow
-                // shape. Summarize the group at `addr` and ask for positivity per
-                // leaf. Reached only by a check that would otherwise fail, so no
-                // framing check that succeeds outright pays for it.
-                let suff = suff || {
-                    let chunks = heap.chunks_of(&slot.kind).to_vec();
-                    let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
-                    let mut pc = pc_lits.to_vec();
-                    pc.push((guard, Polarity::Positive));
-                    !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
-                };
-                if !suff {
-                    return Err(VerifyError::InsufficientPermission);
-                }
-                guard
-            }
-        };
-        members.push(ctx.option_member(elem, present, value));
+        members.push(member);
         values.push(value);
         recipes.push(recipe);
     }
@@ -1866,6 +1715,239 @@ fn walk_footprint(
         members,
         slot_recipes: recipes,
     })
+}
+
+/// The call-site inputs shared by every slot of one [`walk_footprint`] (see
+/// its parameters).
+struct SlotWalk<'a> {
+    resource: MemberId,
+    args: &'a [egg::Id],
+    source: &'a ValueSource,
+    direction: &'a Direction,
+    scale: Option<egg::Id>,
+    scale_wild: bool,
+    pc_lits: &'a [(egg::Id, Polarity)],
+    frame_only: bool,
+}
+
+/// What one walked footprint slot contributes: its value (seen by later slots
+/// and the body boolean), that value's recipe (certificate walks only), and its
+/// snapshot member `present ? Some(value) : None`.
+struct SlotOut {
+    value: egg::Id,
+    recipe: Option<Val>,
+    member: egg::Id,
+}
+
+/// Walk footprint slot `i`, a single `acc(addr, perm)`: rebuild its address and
+/// permission from their recipes, take its value from `w.source`, and apply its
+/// effect to `heap` (subtract for `Consume`, union for `Produce`, or only prove
+/// a positive share for a wildcard slot at a frame-only exhale).
+#[allow(clippy::too_many_arguments)]
+fn walk_single_slot(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    i: usize,
+    kind: &LocationKind,
+    elem: &Type,
+    addr_r: &crate::verify::cert::BodyRecipe,
+    perm_r: &PermRecipe,
+    values: &[egg::Id],
+    heap: &mut Heap,
+    changed: &mut Vec<egg::Id>,
+) -> Result<SlotOut, VerifyError> {
+    // Rebuild the slot's address and permission from their recipes, resolving
+    // params to `args` and any earlier-slot value refs to `values` (so a
+    // value-dependent inner address like `list(this.next)` resolves).
+    // Heap framing is a *syntactic* e-class match (`heap_subtract`,
+    // `ValueSource::ReadHeap`), so a slot address has to be in normal form
+    // before we look it up: an address reaching through a snapshot
+    // (`Pt(f(r, cons(Some(unwrap(proj_0(s))))))`) only becomes e-class-equal to
+    // the held chunk's address once `proj∘cons` / `unwrap∘Some` have fired.
+    //
+    // Reduce only when the rebuild actually introduced something to reduce: the
+    // recipe is add-only, so if `build` added no e-node then every term it named
+    // was already present, hence already normalized. Reducing unconditionally
+    // per slot re-runs the ADT rule set over the whole graph and costs ~3.5x.
+    // A wildcard slot at a frame-only exhale (bare or gated): build its
+    // **presence** indicator rather than the wildcard perm — the same shape with
+    // the wildcard leaf built as full permission `1`, so `ite(guard, 1, 0)`
+    // whose `0 < …` folds to the gating guard (see [`frame_wildcard_slot`]).
+    let resolve = |r: &SeedRef| r.resolve(w.args, values);
+    let slot_wildcard = perm_r.has_wildcard();
+    let wc_slot = w.frame_only && slot_wildcard;
+    let before = ctx.egraph.total_number_of_nodes();
+    let addr = addr_r.build(&mut ctx.egraph, resolve, w.pc_lits, changed);
+    let wildcard_as = if wc_slot {
+        WildcardAs::One
+    } else {
+        WildcardAs::Fresh
+    };
+    let perm = build_perm(ctx, perm_r, &resolve, w.pc_lits, changed, wildcard_as);
+    if ctx.egraph.total_number_of_nodes() != before {
+        ctx.reduce();
+    }
+    let addr = ctx.egraph.find(addr);
+    // Values are read from the *original* heap (aliased slots agree); the hit
+    // chunk's recipe provenance rides along.
+    let (value, recipe) = slot_value(ctx, w, i, elem, |ctx, h| {
+        h.entries()
+            .find_map(|(_, c)| {
+                (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
+                    .then(|| (c.value, c.recipe.clone()))
+            })
+            .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None))
+    });
+    let present = if wc_slot {
+        frame_wildcard_slot(ctx, w, kind, addr, perm, heap)?
+    } else {
+        // The slot's permission shape is the static source for the consume
+        // rule (see [`Demand`]). Shape-only, so it is the same predicate the IR
+        // side asks.
+        let demand = if slot_wildcard {
+            Demand::Wildcard
+        } else {
+            Demand::Concrete
+        };
+        apply_slot_perm(ctx, w, kind, addr, perm, value, recipe.clone(), demand, heap)?
+    };
+    let member = ctx.option_member(elem.clone(), present, value);
+    Ok(SlotOut {
+        value,
+        recipe,
+        member,
+    })
+}
+
+/// A footprint slot's value, by `w.source`: a fresh value for `Fresh`, and
+/// `unwrap(proj_i(s))` for `ProjectSnap(s)` (mirrored into the recipe during a
+/// certificate walk). `ReadHeap(h)` depends on the slot's shape, so the caller
+/// supplies it as `read_heap`. Works for any `elem`, so a quantified slot (whose
+/// value is its `ValueMap`) can share it.
+fn slot_value(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    i: usize,
+    elem: &Type,
+    read_heap: impl FnOnce(&mut VerifyContext<'_>, &Heap) -> (egg::Id, Option<Val>),
+) -> (egg::Id, Option<Val>) {
+    match w.source {
+        ValueSource::ReadHeap(h) => read_heap(ctx, h),
+        // `proj_i(s)` recovers the optional member (collapsing to the `cons`
+        // argument when `s` is concrete); `unwrap` peels to the field value.
+        // A certificate walk mirrors the projection into the recipe.
+        ValueSource::ProjectSnap(s, s_recipe) => {
+            let proj_id = ctx.alloc.proj(w.resource, 0, i);
+            let opt_ty = ctx.alloc.option_type(elem.clone());
+            let opt = ctx.add_func_app_id(proj_id, Box::new([]), opt_ty, Box::new([*s]));
+            let value = ctx.option_unwrap(elem.clone(), opt);
+            let recipe = match (ctx.recipe.is_some(), s_recipe) {
+                (true, Some(sr)) => {
+                    use crate::verify::rewrite::AxiomPure;
+                    let unwrap_id = ctx.alloc.option_value();
+                    let rb = ctx.recipe.as_mut().unwrap();
+                    let opt = rb.emit(AxiomPure::App {
+                        func: proj_id,
+                        type_args: Vec::new(),
+                        args: vec![sr.clone()],
+                    });
+                    Some(rb.emit(AxiomPure::App {
+                        func: unwrap_id,
+                        type_args: vec![elem.clone()],
+                        args: vec![opt],
+                    }))
+                }
+                _ => None,
+            };
+            (value, recipe)
+        }
+        // Inhale: an unconstrained fresh value per slot.
+        ValueSource::Fresh => (ctx.fresh_symbolic_value(elem.clone()), None),
+    }
+}
+
+/// Apply a single slot's chunk `addr ↦ value` to `heap` per `w.direction`:
+/// subtract it (`Consume`, by `demand`) or union it in (`Produce`), with `perm`
+/// scaled by `w.scale` when set. Returns the slot's presence `0 < perm`
+/// (unscaled).
+#[allow(clippy::too_many_arguments)]
+fn apply_slot_perm(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    kind: &LocationKind,
+    addr: egg::Id,
+    perm: ChunkPerm,
+    value: egg::Id,
+    recipe: Option<Val>,
+    demand: Demand,
+    heap: &mut Heap,
+) -> Result<egg::Id, VerifyError> {
+    let scaled = match w.scale {
+        Some(pm) => scale_perm(ctx, pm, w.scale_wild, perm.clone()),
+        None => perm.clone(),
+    };
+    let chunk = Chunk::new_perm(addr, scaled, value).with_recipe(recipe);
+    *heap = match w.direction {
+        Direction::Consume => heap_subtract(ctx, heap, kind, chunk, w.pc_lits, demand)?,
+        Direction::Produce => heap_union(ctx, heap, kind, chunk, w.pc_lits),
+    };
+    let perm_id = perm.to_id(ctx);
+    Ok(expr!(ctx, (0 / 1) < r { perm_id }))
+}
+
+/// A wildcard slot at a frame-only exhale: no heap effect (the call frames, it
+/// does not consume) and no wildcard is ever built. `presence` is the slot's
+/// permission with the wildcard leaf as `1`, so `0 < presence` folds to the
+/// slot's gating guard (`true` when unconditional). Where the slot is required,
+/// the caller must hold a positive share: prove `guard ⇒ 0 < held` against the
+/// held permission. Returns the guard, which is the slot's presence.
+fn frame_wildcard_slot(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    kind: &LocationKind,
+    addr: egg::Id,
+    presence: ChunkPerm,
+    heap: &Heap,
+) -> Result<egg::Id, VerifyError> {
+    let pp = presence.to_id(ctx);
+    let guard = expr!(ctx, (0 / 1) < r { pp });
+    let (_, existing) = find_chunk_consolidated(ctx, heap, kind, addr, w.pc_lits, true);
+    let suff = match existing {
+        Some(c) => {
+            // `guard ⇒ 0 < held`, proven per leaf (never materialize the held
+            // `Select`): assume `guard` in the pc, prove `0 < leaf` on each
+            // branch. Gated, so presence is respected: a conditionally-held slot
+            // frames only where its guard holds.
+            let held = c.gated_perm(ctx);
+            let mut pc = w.pc_lits.to_vec();
+            pc.push((guard, Polarity::Positive));
+            prove_perm_positive(ctx, &held, &pc)
+        }
+        // No chunk held here: sound only if the slot is not required on this
+        // path (`guard` is false).
+        None => {
+            let not_guard = expr!(ctx, not { guard });
+            ctx.prove_under_pc(not_guard, w.pc_lits)
+        }
+    };
+    // Last resort, the framing twin of what `heap_subtract_inner` does on a
+    // miss: no chunk matched this address on ground (or the one that did could
+    // not be shown positive), but another chunk of the group may sit here —
+    // under an equality the pc does not mention, or under its own presence
+    // guard, which is the `&mut`-reborrow shape. Summarize the group at `addr`
+    // and ask for positivity per leaf. Reached only by a check that would
+    // otherwise fail, so no framing check that succeeds outright pays for it.
+    let suff = suff || {
+        let chunks = heap.chunks_of(kind).to_vec();
+        let (total, set) = summarize_perm_at(ctx, &chunks, addr, w.pc_lits);
+        let mut pc = w.pc_lits.to_vec();
+        pc.push((guard, Polarity::Positive));
+        !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
+    };
+    if !suff {
+        return Err(VerifyError::InsufficientPermission);
+    }
+    Ok(guard)
 }
 
 /// The `cons` of a resource's snapshot from its per-slot `members`
