@@ -1,0 +1,20 @@
+// KNOWN LIMITATION: a method's postcondition is lowered to a `#ensures`
+// resource, and the resource evaluator rejects the `assert` that checks the
+// callee's precondition ("unimplemented: effectful inst in resource body",
+// `src/verify/declaration.rs`). The method is then reported as depending on a
+// failed resource. Reduced from Gobra's dafny_book/chap07 (`AddSub`).
+function sub(x: Int, y: Int): Int
+  requires x >= y
+  ensures result >= 0
+{ x - y }
+
+function sub2(x: Int): Int
+{
+  sub(x, x)
+}
+
+method addsub(x: Int, y: Int)
+  requires x >= y
+  ensures sub(x, y) + y == x
+{
+}

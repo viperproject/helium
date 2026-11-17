@@ -1,0 +1,17 @@
+// KNOWN LIMITATION: in a *function* precondition, `valid(x) && !empty(x)` is
+// lowered with the check of `empty`'s precondition unguarded (`assert
+// empty#requires(x)` instead of `<valid(x)> assert ...`), so the left conjunct
+// is not available when checking the right one and the `#requires` resource
+// fails with "assertion failed". The same expression as a function body, or
+// written with `==>`, keeps the guard and verifies. Reduced from Gobra's
+// dafny_book/chap10 (`RemoveMinIntrinsic`).
+function valid(x: Int): Bool
+{ x >= 0 }
+
+function empty(x: Int): Bool
+  requires valid(x)
+{ x == 0 }
+
+function rm(x: Int): Int
+  requires valid(x) && !empty(x)
+{ x - 1 }
