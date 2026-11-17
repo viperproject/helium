@@ -1660,12 +1660,7 @@ fn walk_footprint(
         // Rebuild the slot's address and permission from their recipes, resolving
         // params to `args` and any earlier-slot value refs to `values` (so a
         // value-dependent inner address like `list(this.next)` resolves).
-        let resolve = |r: &SeedRef| -> egg::Id {
-            match r {
-                SeedRef::Param(k) => args[*k],
-                SeedRef::SlotValue(j) => values[*j],
-            }
-        };
+        let resolve = |r: &SeedRef| r.resolve(args, &values);
         // Heap framing is a *syntactic* e-class match (`heap_subtract`,
         // `ValueSource::ReadHeap`), so a slot address has to be in normal form
         // before we look it up: an address reaching through a snapshot
@@ -1841,18 +1836,12 @@ fn walk_footprint(
         recipes.push(recipe);
     }
     // The body boolean over params ++ all slot values.
-    let resolve = |r: &SeedRef| -> egg::Id {
-        match r {
-            SeedRef::Param(k) => args[*k],
-            SeedRef::SlotValue(j) => values[*j],
-        }
-    };
     // `bool_guard`, not `pc_lits`: it is the path condition at every call site
     // (an `inhale` extends it with `0 < scale`, the others pass `pc_lits`
     // itself), so it is the tighter of the two and always a superset.
     let bool_id = def
         .bool
-        .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+        .build(&mut ctx.egraph, |r| r.resolve(args, &values), pc_lits, &mut changed);
     match direction {
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {

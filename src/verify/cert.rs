@@ -121,6 +121,17 @@ pub(crate) enum SeedRef {
     SlotValue(usize),
 }
 
+impl SeedRef {
+    /// The seed's e-class at a graft site: a param resolves to `args`, a slot
+    /// value to the values `slots` supplied so far.
+    pub(crate) fn resolve(&self, args: &[Id], slots: &[Id]) -> Id {
+        match self {
+            SeedRef::Param(k) => args[*k],
+            SeedRef::SlotValue(j) => slots[*j],
+        }
+    }
+}
+
 /// A self-contained pure recipe rebuilt at a call site with
 /// [`build_instance`](crate::verify::rewrite::build_instance). Its `steps` live
 /// in dense recipe-temp space: `Val::Temp(0..seed_refs.len())` are the seed
