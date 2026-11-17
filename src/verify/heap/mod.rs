@@ -593,6 +593,10 @@ pub struct QuantChunk {
     pub(crate) taken: Rc<[QuantChunk]>,
     /// The value map associated with that chunk
     pub(crate) value_map: egg::Id,
+    /// Recipe provenance of `value_map`, same role as `Chunk::recipe`: in a
+    /// resource body the footprint seed `SlotValue(i)`, so a read through
+    /// this set purifies to `lookup(seed, addr)`. `None` in a method body.
+    pub(crate) recipe: Option<crate::vmir::Val>,
 }
 
 /// Symbolic heap: chunks partitioned by [`LocationKind`]. Each group is an
