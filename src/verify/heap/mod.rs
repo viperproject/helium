@@ -591,8 +591,9 @@ pub struct QuantChunk {
     /// exhale's path condition). A lookup subtracts their permission at the
     /// address from this set's own, so the set's permission is never rebuilt.
     pub(crate) taken: Rc<[QuantChunk]>,
+    /// The value map associated with that chunk
+    pub(crate) value_map: egg::Id
 }
-// qps: im::HashMap<LocationKind, Rc<[QuantChunk]>, FxBuildHasher>
 
 
 /// Symbolic heap: chunks partitioned by [`LocationKind`]. Each group is an

@@ -1173,7 +1173,16 @@ fn eval_heap_inst(
         }
         HeapInst::AddForall { base, q, bind } => {
 
-            // TODO: take the bind into account
+            let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
+            let value_map = match bind {
+                Bind::Fresh => ctx.fresh_symbolic_value(map_ty),
+                Bind::Bound(v) => state.get_val(ctx, v),
+                Bind::SelfSlot => {
+                    return Err(VerifyError::Unimplemented(
+                        "quantified permission in a resource footprint",
+                    ))
+                }
+            };
             // A resource body (certificate walk, `with self`) must record the
             // chunk set as footprint; until it does, an exhale of that resource
             // would consume nothing, so refuse rather than build an empty
@@ -1185,7 +1194,7 @@ fn eval_heap_inst(
             }
             let base_h = get_heap(state, base);
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
-            let chunk = quant_chunk_of(ctx, state, q, pc)?;
+            let chunk = quant_chunk_of(ctx, state, q, pc, value_map)?;
             Ok(base_h.with_qp_chunk(&kind, chunk))
         },
         // Exhale a chunk set `E`: find one held set `Q` that covers it
@@ -1208,7 +1217,11 @@ fn eval_heap_inst(
             }
             let base_h = get_heap(state, base);
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
-            let exhaled = quant_chunk_of(ctx, state, q, pc)?;
+            // The exhaled set's values are the covering set's (an exhale changes
+            // no value), which is only known once one is found below; until
+            // then it carries a placeholder map that is never read.
+            let placeholder = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(q.loc_ty.clone())));
+            let exhaled = quant_chunk_of(ctx, state, q, pc, placeholder)?;
             for (i, held) in base_h.qp_chunks_of(&kind).iter().enumerate() {
                 let contained = check_qp_contained(
                     ctx,
@@ -1222,7 +1235,10 @@ fn eval_heap_inst(
                 )?;
                 if contained {
                     let mut taken = held.taken.to_vec();
-                    taken.push(exhaled);
+                    taken.push(QuantChunk {
+                        value_map: held.value_map,
+                        ..exhaled
+                    });
                     let held = QuantChunk { taken: taken.into(), ..held.clone() };
                     return Ok(base_h.with_qp_chunk_replaced(&kind, i, held));
                 }
@@ -2679,6 +2695,7 @@ fn quant_chunk_of(
     state: &EvalState,
     q: &vmir::QuantChunks,
     pc: &PathConds,
+    value_map: egg::Id,
 ) -> Result<QuantChunk, VerifyError> {
     let caps: Rc<[(usize, egg::Id)]> =
         q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
@@ -2699,6 +2716,7 @@ fn quant_chunk_of(
         inv,
         guard: pc_lits.into(),
         taken: Rc::from([]),
+        value_map,
     })
 }
 
