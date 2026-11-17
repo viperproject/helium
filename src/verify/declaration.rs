@@ -429,11 +429,6 @@ fn eval_pure_inst(
                     (c.value, recipe)
                 }
                 None => {
-                    if ctx.recipe.is_some() {
-                        return Err(VerifyError::Unimplemented(
-                            "purify: deref outside footprint",
-                        ));
-                    }
                     // No single chunk: a quantified chunk set that frames the
                     // read (the same proof as the `Deref` obligation) holds the
                     // value in its map. Several framing sets: the first is
@@ -446,16 +441,36 @@ fn eval_pure_inst(
                     });
                     match framing {
                         Some((k, i)) => {
-                            let map = heap.qp_chunks_of(&k)[i].value_map;
+                            let chunk = &heap.qp_chunks_of(&k)[i];
+                            let map = chunk.value_map;
                             let lookup = ctx.alloc.value_map(&k).lookup;
-                            let v = ctx.add(Symbolic::FuncApp(
-                                lookup,
-                                Box::new([]),
-                                Box::new([map, addr]),
-                            ));
-                            (v, None)
+                            let v = ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([map, addr])));
+                            // In a resource body the read purifies to `lookup(seed, addr)`.
+                            let recipe = if ctx.recipe.is_some() {
+                                let map_r = chunk.recipe.clone().ok_or(VerifyError::Unimplemented(
+                                    "purify: deref outside footprint",
+                                ))?;
+                                let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
+                                let rb = ctx.recipe.as_mut().unwrap();
+                                Some(rb.emit(AxiomPure::App {
+                                    func: lookup,
+                                    type_args: vec![],
+                                    args: vec![map_r, addr_r],
+                                }))
+                            } else {
+                                None
+                            };
+                            (v, recipe)
                         }
-                        None => (ctx.fresh_symbolic_value(ty.clone()), None),
+                        None => {
+                            if ctx.recipe.is_some() {
+                                return Err(VerifyError::Unimplemented(
+                                    "purify: deref outside footprint",
+                                ));
+                            }
+
+                            (ctx.fresh_symbolic_value(ty.clone()), None)
+                        },
                     }
                 }
             }
