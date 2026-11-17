@@ -15,7 +15,7 @@ use crate::{
             Chunk, ChunkPerm, Heap, LocationKind,
             algebra::{
                 Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
-                merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
+                merge_heaps, perm_add, perm_value, prove_perm_positive, prove_perm_write,
                 summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
@@ -677,8 +677,8 @@ fn eval_pure_inst(
             let addr = state.get_val(ctx, loc);
             let id = match state.loc_kind(loc) {
                 Some(k) => {
-                    let chunks = heap.chunks_of(&k).to_vec();
-                    perm_held_at(ctx, &chunks, addr, pc_lits)
+                    let total = perm_total_at(ctx, &heap, &k, addr, pc_lits)?;
+                    perm_value(ctx, total)
                 }
                 None => expr!(ctx, 0 / 1),
             };
@@ -3181,6 +3181,27 @@ fn qp_perm_at(
     Ok(Some(perm))
 }
 
+/// Everything `heap` holds at `addr`: the single chunks' summary plus each
+/// quantified chunk set's share there (its guard folded in, what was exhaled
+/// from it subtracted). A set that cannot name `addr` contributes nothing.
+fn perm_total_at(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Result<ChunkPerm, VerifyError> {
+    let chunks = heap.chunks_of(kind).to_vec();
+    let mut total = summarize_perm_at(ctx, &chunks, addr, pc_lits).0;
+    for set in heap.qp_chunks_of(kind).iter() {
+        if let Some(p) = qp_perm_at(ctx, set, addr)? {
+            let p = gate_perm_by_guard(ctx, &p, &set.guard);
+            total = perm_add(ctx, &total, &p);
+        }
+    }
+    Ok(total)
+}
+
 /// The index (in `heap.qp_chunks_of(kind)`) of the first quantified chunk set
 /// that holds a permission at `addr` satisfying `prove` (enough to read, enough
 /// to write), its inhale guard folded in exactly as for a [`Chunk`]
@@ -3814,23 +3835,23 @@ fn inst_obligations(
                 Some(c.gated_perm(ctx))
             });
             match perm {
-                // No single chunk: a quantified chunk set may still frame it.
-                // Each set is tried on its own (no sum with other chunks yet).
-                None if state.loc_kind(loc).is_some_and(|k| {
-                    qp_framing(ctx, &held, &k, addr, |ctx, p| {
-                        prove_perm_positive(ctx, p, pc_lits)
-                    })
-                    .is_some()
-                }) =>
-                {
-                    vec![]
-                }
-                // A bare (or absent) perm: the goal `0 < leaf` is discharged by
-                // the caller exactly as before (flag-OFF byte-identical).
+                // No single chunk matched: everything the heap holds there (the
+                // single chunks that may alias it plus every quantified chunk
+                // set) must be positive together.
                 None => {
-                    let zero = expr!(ctx, 0 / 1);
-                    let goal = ctx.add(Symbolic::Binary(BinOp::LtR, [zero, zero]));
-                    vec![(goal, VerifyError::InsufficientPermission)]
+                    let framed = state.loc_kind(loc).is_some_and(|k| {
+                        // The body evaluated once already, at the inhale.
+                        let total = perm_total_at(ctx, &held, &k, addr, pc_lits)
+                            .unwrap_or_else(|e| {
+                                panic!("quantified chunk body failed to re-evaluate: {e:?}")
+                            });
+                        prove_perm_positive(ctx, &total, pc_lits)
+                    });
+                    if framed {
+                        vec![]
+                    } else {
+                        vec![(expr!(ctx, false), VerifyError::InsufficientPermission)]
+                    }
                 }
                 Some(p @ ChunkPerm::Leaf { .. }) => {
                     let leaf = p.as_leaf().unwrap();

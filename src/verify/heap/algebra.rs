@@ -1939,22 +1939,18 @@ pub(crate) fn summarize_perm_at(
     )
 }
 
-/// The permission held at `addr`, as a term — what `perm(loc)` evaluates to.
+/// A permission held at some address (the caller's summary, see
+/// `perm_total_at` in `declaration.rs`), as a term — what `perm(loc)` evaluates
+/// to.
 ///
-/// This is the one place the Σ-ite summary is built **eagerly**, because it is the
-/// one place the user asked for the permission *value* rather than for a consume to
-/// succeed. Heap operations reach for it only as a fallback
-/// ([`heap_subtract_inner`]), matching Silicon's split between greedy chunk matching
-/// and `--exhaleMode=1`.
-pub(crate) fn perm_held_at(
-    ctx: &mut VerifyContext<'_>,
-    chunks: &[Chunk],
-    addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> egg::Id {
+/// This is the one place the Σ-ite summary is materialized **eagerly**, because it
+/// is the one place the user asked for the permission *value* rather than for a
+/// consume to succeed. Heap operations reach for the summary only as a fallback
+/// ([`heap_subtract_inner`]), matching Silicon's split between greedy chunk
+/// matching and `--exhaleMode=1`.
+pub(crate) fn perm_value(ctx: &mut VerifyContext<'_>, total: ChunkPerm) -> egg::Id {
     // `perm(loc)` is asked for as a *value*, so the branch structure has to be
     // materialized here — the one place it is.
-    let total = summarize_perm_at(ctx, chunks, addr, pc_lits).0;
     let id = total.to_id(ctx);
     // Flattening loses what the tree made obvious. `perm(x.f)` after a gated
     // wildcard exhale is `ite(c, r, 1/1)`: positive on both arms, but deciding that
