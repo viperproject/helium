@@ -1,7 +1,7 @@
 use crate::dhash::HashMap;
 use std::rc::Rc;
 
-use crate::verify::cert::{PermRecipe, SeedRef, SlotShape};
+use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
 use crate::verify::heap::QuantChunk;
 use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
 use crate::vmir::display::VmirDisplay;
@@ -1386,7 +1386,7 @@ fn find_covering_qp(ctx: &mut VerifyContext<'_>, heap: &Heap, kind: &LocationKin
             return Ok(Some(i));
         }
     }
-    return Ok(None);
+    Ok(None)
 }
 
 /// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
@@ -1690,10 +1690,28 @@ fn walk_footprint(
                 &mut heap,
                 &mut changed,
             )?,
-            SlotShape::Quant { .. } => {
-                return Err(VerifyError::Unimplemented(
-                    "quantified permission in a resource footprint",
-                ));
+            SlotShape::Quant { q, caps } => {
+                if q.body.contains_wc_permission() {
+                    return Err(VerifyError::Unimplemented("wildcard permissions in QP"))
+                }
+                if let Some(pm) = walk.scale  {
+                    let is_one = expr!(ctx, {pm} == (1/1));
+                    if !ctx.prove_under_pc(is_one, walk.pc_lits) {
+                        return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"))
+                    }
+                }
+                walk_qp_slot(
+                    ctx,
+                    &walk,
+                    i,
+                    &slot.kind,
+                    &slot.elem,
+                    q,
+                    caps,
+                    &values,
+                    &mut heap,
+                    &mut changed,
+                )?
             }
         };
         members.push(member);
@@ -1833,6 +1851,50 @@ fn walk_single_slot(
         recipe,
         member,
     })
+}
+
+fn walk_qp_slot(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    i: usize,
+    kind: &LocationKind,
+    elem: &Type,
+    q: &Rc<vmir::QuantChunks>,
+    caps_r: &[(usize, BodyRecipe)],
+    values: &[egg::Id],
+    heap: &mut Heap,
+    changed: &mut Vec<egg::Id>,
+) -> Result<SlotOut, VerifyError> {
+    debug_assert!(matches!(elem, Type::ValueMap(..)), "element type of a qp must be a value map");
+    let resolve = |r: &SeedRef| r.resolve(w.args, values);
+    let before = ctx.egraph.total_number_of_nodes();
+    let caps = caps_r.iter().map(|(k, recipe)| (*k, recipe.build(&mut ctx.egraph, &resolve, w.pc_lits, changed))).collect::<Rc<_>>();
+
+    if ctx.egraph.total_number_of_nodes() != before { ctx.reduce() }
+    let caps = caps.iter().map(|&(k, id)| (k, ctx.egraph.find(id))).collect();
+
+    let (map, recipe) = match w.direction {
+        Direction::Produce => {
+            let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| unreachable!("ReadHeap only consumes"));
+            let chunk = QuantChunk { recipe: recipe.clone(), ..quant_chunk_from_caps(ctx, q, caps, w.pc_lits, map)? };
+            *heap = heap.with_qp_chunk(kind, chunk);
+            (map, recipe)
+        }
+        Direction::Consume => {
+            let placeholder = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(q.loc_ty.clone())));
+            let exhaled = quant_chunk_from_caps(ctx, q, caps, w.pc_lits, placeholder)?;
+            let Some(qp_index) = find_covering_qp(ctx, heap, kind, &exhaled)? else { return Err(VerifyError::InsufficientPermission) };
+            let held = &heap.qp_chunks_of(kind)[qp_index];
+            let (map, recipe) = (held.value_map, held.recipe.clone());
+            if !w.frame_only {
+                *heap = take_from_qp(heap, kind, qp_index, exhaled)
+            }
+            (map, recipe)
+        }
+    };
+
+    let present = expr!(ctx, true);
+    Ok(SlotOut { value: map, recipe, member: ctx.option_member(elem.clone(), present, map) })
 }
 
 /// A footprint slot's value, by `w.source`: a fresh value for `Fresh`, and
@@ -2886,7 +2948,7 @@ fn quant_chunk_of(
         .iter()
         .map(|(v, p)| (state.get_val(ctx, v), *p))
         .collect();
-    quant_chunk_from_caps(ctx, Rc::new(q.clone()), caps, &pc_lits, value_map)
+    quant_chunk_from_caps(ctx, &Rc::new(q.clone()), caps, &pc_lits, value_map)
 }
 
 /// The chunk set of `q` with its captured temps already resolved to `caps`:
@@ -2896,19 +2958,19 @@ fn quant_chunk_of(
 /// proof licenses. The result carries no recipe; the caller sets one.
 fn quant_chunk_from_caps(
     ctx: &mut VerifyContext<'_>,
-    q: Rc<vmir::QuantChunks>,
+    q: &Rc<vmir::QuantChunks>,
     caps: Rc<[(usize, egg::Id)]>,
     pc_lits: &[(egg::Id, Polarity)],
     value_map: egg::Id,
 ) -> Result<QuantChunk, VerifyError> {
     // Distinct bindings that hold permission must name distinct locations.
-    check_qp_injectivity(ctx, &q, pc_lits, &mut |ctx, binders| {
-        eval_qp_instance(ctx, &caps, &q, binders, pc_lits)
+    check_qp_injectivity(ctx, q, pc_lits, &mut |ctx, binders| {
+        eval_qp_instance(ctx, &caps, q, binders, pc_lits)
     })?;
     // One binding per location: assume the inverse axiom that names it.
     let inv = mint_and_assume_inverse_axiom(ctx, &q, &caps, pc_lits)?;
     Ok(QuantChunk {
-        q,
+        q: q.clone(),
         caps,
         inv,
         guard: pc_lits.into(),
