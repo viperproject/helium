@@ -66,10 +66,7 @@ pub(crate) fn check_qp_injectivity(
     pc: &[(Id, Polarity)],
     instantiate: &mut Instantiate<'_>,
 ) -> Result<(), VerifyError> {
-    let recipe = ctx.recipe.take();
-    let res = ctx.with_scratch_graph(|ctx| check_in_scratch(ctx, q, pc, instantiate));
-    ctx.recipe = recipe;
-    res
+    ctx.pause_recipe(|ctx| ctx.with_scratch_graph(|ctx| check_in_scratch(ctx, q, pc, instantiate)))
 }
 
 fn check_in_scratch(
@@ -140,8 +137,7 @@ pub(crate) fn check_qp_contained(
     instantiate: &mut Instantiate<'_>,
     held_at: &mut HeldAt<'_>,
 ) -> Result<bool, VerifyError> {
-    let recipe = ctx.recipe.take();
-    let res = ctx.with_scratch_graph(|ctx| {
+    ctx.pause_recipe(|ctx| ctx.with_scratch_graph(|ctx| {
         let ys = fresh_binders(ctx, q);
         let inst = instantiate(ctx, &ys)?;
         let call = q.loc_call();
@@ -158,9 +154,7 @@ pub(crate) fn check_qp_contained(
         Ok(crate::verify::heap::algebra::prove_sufficient_aligned(
             ctx, &avail, &inst.perm, &lits,
         ))
-    });
-    ctx.recipe = recipe;
-    res
+    }))
 }
 
 /// One fresh constant per binder of `q`.
