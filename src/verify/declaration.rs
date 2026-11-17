@@ -1275,12 +1275,7 @@ fn eval_heap_inst(
             }
             // A wildcard demand needs a fresh amount below what is held, which
             // the containment proof cannot pick.
-            let wild = q.body.perm.is_wildcard()
-                || q.body
-                    .insts
-                    .iter()
-                    .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()));
-            if wild {
+            if q.body.contains_wc_permission() {
                 return Err(VerifyError::Unimplemented(
                     "exhaling a wildcard quantified permission",
                 ));
@@ -1292,33 +1287,14 @@ fn eval_heap_inst(
             // then it carries a placeholder map that is never read.
             let placeholder = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(q.loc_ty.clone())));
             let exhaled = quant_chunk_of(ctx, state, q, pc, placeholder)?;
-            for (i, held) in base_h.qp_chunks_of(&kind).iter().enumerate() {
-                let contained = check_qp_contained(
-                    ctx,
-                    q,
-                    &exhaled.guard,
-                    &mut |ctx, binders| {
-                        eval_qp_instance(ctx, &exhaled.caps, q, binders, &exhaled.guard)
-                    },
-                    &mut |ctx, addr| {
-                        Ok(qp_perm_at(ctx, held, addr)?
-                            .map(|p| crate::verify::heap::gate_perm_by_guard(ctx, &p, &held.guard)))
-                    },
-                )?;
-                if contained {
-                    let mut taken = held.taken.to_vec();
-                    taken.push(QuantChunk {
-                        value_map: held.value_map,
-                        ..exhaled
-                    });
-                    let held = QuantChunk {
-                        taken: taken.into(),
-                        ..held.clone()
-                    };
-                    return Ok(base_h.with_qp_chunk_replaced(&kind, i, held));
-                }
-            }
-            Err(VerifyError::InsufficientPermission)
+            let qp_search_result = find_covering_qp(ctx, &base_h, &kind, &exhaled)?;
+
+            let Some(qp_index) = qp_search_result else {
+                return Err(VerifyError::InsufficientPermission)
+            };
+
+            let new_heap = take_from_qp(&base_h, &kind, qp_index, exhaled);
+            Ok(new_heap)
         }
         // Resource inhale/exhale need the program + certificates; method-only.
         HeapInst::Inhale { .. } | HeapInst::Exhale { .. } => Err(VerifyError::Unimplemented(
@@ -1387,6 +1363,46 @@ fn eval_heap_inst(
             ))
         }
     }
+}
+
+/// Index of the first held set of `kind` that covers `exhale`
+fn find_covering_qp(ctx: &mut VerifyContext<'_>, heap: &Heap, kind: &LocationKind, exhaled: &QuantChunk) -> Result<Option<usize>, VerifyError> {
+    let vmir_chunk = &exhaled.q;
+    for (i, held) in heap.qp_chunks_of(&kind).iter().enumerate() {
+        let contained = check_qp_contained(
+            ctx,
+            vmir_chunk,
+            &exhaled.guard,
+            &mut |ctx, binders| {
+                eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &exhaled.guard)
+            },
+            &mut |ctx, addr| {
+                Ok(qp_perm_at(ctx, held, addr)?
+                    .map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
+            },
+        )?;
+
+        if contained {
+            return Ok(Some(i));
+        }
+    }
+    return Ok(None);
+}
+
+/// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
+/// This function just removes it, no checks are performed.
+fn take_from_qp(heap: &Heap, kind: &LocationKind, i: usize, exhaled: QuantChunk) -> Heap {
+    let held = &heap.qp_chunks_of(kind)[i];
+    let mut taken = held.taken.to_vec();
+    taken.push(QuantChunk {
+        value_map: held.value_map,
+        ..exhaled
+    });
+    let held = QuantChunk {
+        taken: taken.into(),
+        ..held.clone()
+    };
+    heap.with_qp_chunk_replaced(&kind, i, held)
 }
 
 /// Evaluate one instruction of a resource body (well-formedness pass). Resource
