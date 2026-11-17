@@ -169,6 +169,17 @@ pub struct QuantBody {
     pub perm: PermVal,
 }
 
+impl QuantBody {
+    /// Returns true iff in any instruction a wildcard appears or the permission is a wildcard.
+    pub fn contains_wc_permission(&self) -> bool {
+        self.perm.is_wildcard()
+            || self
+            .insts
+            .iter()
+            .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()))
+    }
+}
+
 impl QuantChunks {
     /// One past the last temp this scope owns for binders.
     pub fn step_base(&self) -> usize {
