@@ -133,7 +133,6 @@ pub(crate) type HeldAt<'s> =
 /// is discharged per branch by `prove_sufficient_aligned`. This is what makes
 /// recording the exhaled set as taken from the held one sound: no location
 /// goes negative.
-#[allow(dead_code)] // Wired into `SubForall` next.
 pub(crate) fn check_qp_contained(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,

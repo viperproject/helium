@@ -17,7 +17,7 @@ use crate::{
                 summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
-            quantified_permissions::{QpInstance, check_qp_injectivity},
+            quantified_permissions::{QpInstance, check_qp_contained, check_qp_injectivity},
         },
         lang::Symbolic,
         stats,
@@ -1188,7 +1188,47 @@ fn eval_heap_inst(
             let chunk = quant_chunk_of(ctx, state, q, pc)?;
             Ok(base_h.with_qp_chunk(&kind, chunk))
         },
-        HeapInst::SubForall { .. } => Err(VerifyError::Unimplemented("sub forall to heap")),
+        // Exhale a chunk set `E`: find one held set `Q` that covers it
+        // (`check_qp_contained`) and record `E` as taken from `Q`; lookups then
+        // subtract it (`qp_perm_at`). No sum across sets or single chunks yet.
+        HeapInst::SubForall { base, q } => {
+            if ctx.recipe.is_some() {
+                return Err(VerifyError::Unimplemented(
+                    "quantified permission in a resource footprint",
+                ));
+            }
+            // A wildcard demand needs a fresh amount below what is held, which
+            // the containment proof cannot pick.
+            let wild = q.body.perm.is_wildcard()
+                || q.body.insts.iter().any(
+                    |i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()),
+                );
+            if wild {
+                return Err(VerifyError::Unimplemented("exhaling a wildcard quantified permission"));
+            }
+            let base_h = get_heap(state, base);
+            let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
+            let exhaled = quant_chunk_of(ctx, state, q, pc)?;
+            for (i, held) in base_h.qp_chunks_of(&kind).iter().enumerate() {
+                let contained = check_qp_contained(
+                    ctx,
+                    q,
+                    &exhaled.guard,
+                    &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &exhaled.guard),
+                    &mut |ctx, addr| {
+                        Ok(qp_perm_at(ctx, held, addr)?
+                            .map(|p| crate::verify::heap::gate_perm_by_guard(ctx, &p, &held.guard)))
+                    },
+                )?;
+                if contained {
+                    let mut taken = held.taken.to_vec();
+                    taken.push(exhaled);
+                    let held = QuantChunk { taken: taken.into(), ..held.clone() };
+                    return Ok(base_h.with_qp_chunk_replaced(&kind, i, held));
+                }
+            }
+            Err(VerifyError::InsufficientPermission)
+        }
         // Resource inhale/exhale need the program + certificates; method-only.
         HeapInst::Inhale { .. } | HeapInst::Exhale { .. } => Err(VerifyError::Unimplemented(
             "resource inhale/exhale outside method body",
