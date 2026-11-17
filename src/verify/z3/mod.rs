@@ -393,7 +393,7 @@ fn unique_ret_type(ctxt: &VerifyContext, f: FuncId, tys: &[Type]) -> Type {
     let FuncKind::Decl(member) = ctxt.alloc.kind(&f) else {
         panic!("unique function fn{} is not a declared function", f.0);
     };
-    let (params, ret) = function_signature(ctxt, member, tys);
+    let (params, ret) = ctxt.function_signature(member, tys);
     assert!(
         params.is_empty(),
         "unique function fn{} must be nullary",
@@ -738,6 +738,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
         Type::Generic(_) => unreachable!("generics are currently not supported"),
         // Uninterpreted, as are its operations (see `coll_apply`).
         Type::Coll(..) => Sort::uninterpreted(ty.to_string().into()),
+        Type::ValueMap(t) => Sort::uninterpreted(format!("vmap@[{t}]").into()),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort

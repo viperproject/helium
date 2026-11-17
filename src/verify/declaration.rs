@@ -2121,6 +2121,40 @@ fn eval_from_snap(
 /// that mentions one (a parameter, a local, a field read, an operation's
 /// result) or an operation on one (`|s|` is an `Int` over one). Every
 /// collection the program can build or compare is one of these.
+/// The location kinds of every quantified permission in the program, in first
+/// appearance order and without duplicates: the kinds whose value map needs
+/// its axiom.
+fn decls_qp_kinds(
+    decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
+) -> Vec<LocationKind> {
+    let mut out: Vec<LocationKind> = Vec::new();
+    let mut scan = |insts: &[vmir::Inst]| {
+        for i in insts {
+            if let InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) =
+                &i.kind
+            {
+                let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
+                if !out.contains(&kind) {
+                    out.push(kind);
+                }
+            }
+        }
+    };
+    for d in decls.iter() {
+        match d {
+            vmir::Declaration::Method(m) => scan(&m.flatten()),
+            vmir::Declaration::Resource(r) => scan(&r.body.insts),
+            vmir::Declaration::Function(f) => {
+                if let Some(b) = &f.body {
+                    scan(&b.insts)
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn decls_use_coll(
     decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
     kind: CollKind,
@@ -2239,7 +2273,7 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         ctx.union(res, true_);
         ctx.egraph.rebuild();
     }
-    // The built-in collection axioms (`verify::coll_axioms`): each a closed
+    // The built-in collection axioms (`verify::builtin_axioms`): each a closed
     // `forall` node, true, whose element type stays open for its trigger
     // matches to fix. Only a program that has collections of a kind gets that
     // kind's axioms, so others pay nothing. A map brings the set axioms too:
@@ -2267,6 +2301,22 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
             let q = ctx.add(Symbolic::Forall(rid, tys, Box::new([])));
             let true_ = expr!(ctx, true);
             ctx.union(q, true_);
+        }
+        ctx.egraph.rebuild();
+    }
+    // The read-over-write axiom of each value map a quantified permission
+    // uses (`verify::builtin_axioms::value_map`): closed and ground, true on
+    // every path, so assumed unguarded like the collection axioms.
+    let qp_kinds = decls_qp_kinds(&program.decls);
+    for kind in &qp_kinds {
+        let rid = ctx.alloc.value_map_axiom(kind);
+        let q = ctx.add(Symbolic::Forall(rid, Box::new([]), Box::new([])));
+        let true_ = expr!(ctx, true);
+        ctx.union(q, true_);
+    }
+    if !qp_kinds.is_empty() {
+        for (f, ret) in ctx.alloc.skolem_ret_types() {
+            ctx.func_ret_types.entry(f).or_insert(ret);
         }
         ctx.egraph.rebuild();
     }

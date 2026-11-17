@@ -42,6 +42,7 @@ pub(crate) mod map;
 pub(crate) mod multiset;
 pub(crate) mod seq;
 pub(crate) mod set;
+pub(crate) mod value_map;
 
 use std::sync::LazyLock;
 
@@ -114,6 +115,9 @@ pub(crate) enum STerm {
     OpOn(CollOp, Box<[usize]>, Vec<STerm>),
     /// A witness: a skolem function applied to its operands.
     Skolem(Witness, Vec<STerm>),
+    /// A ground application of a registry function (no type arguments), e.g.
+    /// a value map's `lookup`/`store` (see [`value_map`]).
+    App(FuncId, Vec<STerm>),
     Bin(BinOp, Box<[STerm; 2]>),
     Ite(Box<[STerm; 3]>),
 }
@@ -334,7 +338,10 @@ impl STerm {
             STerm::Var(i) => seen[*i] = true,
             STerm::Int(_) | STerm::Bool(_) | STerm::Empty => {}
             STerm::Unit(e) => e.mark_vars(seen),
-            STerm::Skolem(_, args) | STerm::Op(_, args) | STerm::OpOn(_, _, args) => {
+            STerm::Skolem(_, args)
+            | STerm::Op(_, args)
+            | STerm::OpOn(_, _, args)
+            | STerm::App(_, args) => {
                 args.iter().for_each(|a| a.mark_vars(seen))
             }
             STerm::Bin(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
@@ -376,6 +383,7 @@ impl STerm {
                 );
                 args.iter().for_each(|a| a.check_kind(kind, axiom));
             }
+            STerm::App(_, args) => args.iter().for_each(|a| a.check_kind(kind, axiom)),
             STerm::Bin(_, args) => args.iter().for_each(|a| a.check_kind(kind, axiom)),
             STerm::Ite(args) => args.iter().for_each(|a| a.check_kind(kind, axiom)),
         }
@@ -643,6 +651,14 @@ impl Steps<'_> {
                     args,
                 })
             }
+            STerm::App(func, args) => {
+                let args = args.iter().map(|a| self.emit(a)).collect();
+                self.push(AxiomPure::App {
+                    func: *func,
+                    type_args: vec![],
+                    args,
+                })
+            }
             STerm::Bin(op, args) => {
                 let (l, r) = (self.emit(&args[0]), self.emit(&args[1]));
                 self.push(AxiomPure::Binary(*op, l, r))
@@ -696,6 +712,13 @@ fn trigger(t: &STerm, kind: CollKind, tys: &[Type]) -> PreparedTerm {
         STerm::Op(op, args) => app(TermHead::Coll(op.coll_tys(tys), *op), args),
         STerm::OpOn(op, at, args) => app(
             TermHead::Coll(at.iter().map(|&i| tys[i].clone()).collect(), *op),
+            args,
+        ),
+        STerm::App(func, args) => app(
+            TermHead::Func {
+                func: *func,
+                type_args: Box::new([]),
+            },
             args,
         ),
         STerm::Bin(..) | STerm::Ite(..) | STerm::Skolem(..) => {
