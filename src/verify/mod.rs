@@ -7,7 +7,7 @@ mod expr;
 
 mod analysis;
 mod cert;
-mod coll_axioms;
+mod builtin_axioms;
 mod context;
 mod declaration;
 mod error;

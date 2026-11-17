@@ -121,6 +121,9 @@ pub(crate) struct RecipeTable {
     /// The built-in collection axioms' recipes (`verify::coll_axioms`), by
     /// `CollKind` (`CollKind::ALL` order), each compiled on first use.
     coll_axioms: [Option<Vec<RecipeId>>; 4],
+    /// The read-over-write axiom of each location kind's value map
+    /// (`verify::builtin_axioms::value_map`), compiled on first use.
+    value_map_axioms: HashMap<crate::verify::heap::LocationKind, RecipeId>,
 }
 
 impl RecipeTable {
@@ -136,17 +139,34 @@ impl RecipeTable {
     pub(crate) fn coll_axioms(
         &mut self,
         kind: crate::vmir::CollKind,
-        skolems: &crate::verify::coll_axioms::Skolems,
+        skolems: &crate::verify::builtin_axioms::Skolems,
     ) -> Vec<RecipeId> {
         let slot = &mut self.coll_axioms[kind as usize];
         if slot.is_none() {
-            let ids = crate::verify::coll_axioms::recipes(kind, skolems)
+            let ids = crate::verify::builtin_axioms::recipes(kind, skolems)
                 .into_iter()
                 .map(|r| self.recipes.push_and_get_key(r))
                 .collect();
             *slot = Some(ids);
         }
         slot.clone().expect("just compiled")
+    }
+
+    /// The read-over-write axiom of `kind`'s value map, its functions `f`,
+    /// compiled into the table on the first call.
+    pub(crate) fn value_map_axiom(
+        &mut self,
+        kind: &crate::verify::heap::LocationKind,
+        f: crate::verify::func_registry::ValueFunction,
+    ) -> RecipeId {
+        if let Some(&id) = self.value_map_axioms.get(kind) {
+            return id;
+        }
+        let id = self
+            .recipes
+            .push_and_get_key(crate::verify::builtin_axioms::value_map::recipe(kind, f));
+        self.value_map_axioms.insert(kind.clone(), id);
+        id
     }
 
     /// Add a recipe built outside [`intern`], bypassing dedup: used for the

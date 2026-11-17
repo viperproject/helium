@@ -344,6 +344,7 @@ impl<'a> VerifyContext<'a> {
                 let tys: Vec<String> = tys.iter().map(|t| self.type_name(t)).collect();
                 format!("{}<{}>", kind.name(), tys.join(", "))
             }
+            Type::ValueMap(ty) => format!("Vmap<{}>", self.type_name(ty)),
         }
     }
 
