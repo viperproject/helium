@@ -137,24 +137,26 @@ pub(crate) fn check_qp_contained(
     instantiate: &mut Instantiate<'_>,
     held_at: &mut HeldAt<'_>,
 ) -> Result<bool, VerifyError> {
-    ctx.pause_recipe(|ctx| ctx.with_scratch_graph(|ctx| {
-        let ys = fresh_binders(ctx, q);
-        let inst = instantiate(ctx, &ys)?;
-        let call = q.loc_call();
-        let addr = ctx.add(Symbolic::FuncApp(
-            crate::verify::func_registry::func_id_for_member(call.function),
-            call.type_args.clone().into(),
-            inst.loc_args.into(),
-        ));
-        let Some(avail) = held_at(ctx, addr)? else {
-            return Ok(false);
-        };
-        let mut lits = pc.to_vec();
-        lits.push((inst.cond, Polarity::Positive));
-        Ok(crate::verify::heap::algebra::prove_sufficient_aligned(
-            ctx, &avail, &inst.perm, &lits,
-        ))
-    }))
+    ctx.pause_recipe(|ctx| {
+        ctx.with_scratch_graph(|ctx| {
+            let ys = fresh_binders(ctx, q);
+            let inst = instantiate(ctx, &ys)?;
+            let call = q.loc_call();
+            let addr = ctx.add(Symbolic::FuncApp(
+                crate::verify::func_registry::func_id_for_member(call.function),
+                call.type_args.clone().into(),
+                inst.loc_args.into(),
+            ));
+            let Some(avail) = held_at(ctx, addr)? else {
+                return Ok(false);
+            };
+            let mut lits = pc.to_vec();
+            lits.push((inst.cond, Polarity::Positive));
+            Ok(crate::verify::heap::algebra::prove_sufficient_aligned(
+                ctx, &avail, &inst.perm, &lits,
+            ))
+        })
+    })
 }
 
 /// One fresh constant per binder of `q`.
