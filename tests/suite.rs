@@ -279,7 +279,10 @@ fn root_cause(e: &verify::VerifyError) -> &verify::VerifyError {
 #[test]
 fn qp_injectivity_cases_fail_on_injectivity() {
     let files = vpr_files(&cases_dir().join("failing/qp_injectivity"));
-    assert!(!files.is_empty(), "no .vpr files found in cases/failing/qp_injectivity/");
+    assert!(
+        !files.is_empty(),
+        "no .vpr files found in cases/failing/qp_injectivity/"
+    );
 
     let mut wrong = Vec::new();
     for path in &files {
@@ -302,7 +305,13 @@ fn qp_injectivity_cases_fail_on_injectivity() {
         if !on_injectivity {
             let got = results
                 .iter()
-                .map(|(m, s)| format!("{m}: [{}] {}", s.tag(), s.to_string().lines().next().unwrap_or_default()))
+                .map(|(m, s)| {
+                    format!(
+                        "{m}: [{}] {}",
+                        s.tag(),
+                        s.to_string().lines().next().unwrap_or_default()
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             wrong.push(format!("  {name}: {got}"));

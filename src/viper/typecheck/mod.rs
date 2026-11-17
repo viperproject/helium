@@ -1994,15 +1994,17 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                 leaves
                     .into_iter()
                     .map(|(cond, res, perm)| {
-                        SpatialExp(Box::new(SpatialExpKind::Forall(Box::new(typed::QuantPerm {
-                            bound: bound.clone(),
-                            location_trigger: lowered_triggers.is_empty()
-                                && location_can_trigger(&bound, &res),
-                            triggers: lowered_triggers.clone(),
-                            cond,
-                            res,
-                            perm,
-                        }))))
+                        SpatialExp(Box::new(SpatialExpKind::Forall(Box::new(
+                            typed::QuantPerm {
+                                bound: bound.clone(),
+                                location_trigger: lowered_triggers.is_empty()
+                                    && location_can_trigger(&bound, &res),
+                                triggers: lowered_triggers.clone(),
+                                cond,
+                                res,
+                                perm,
+                            },
+                        ))))
                     })
                     .tree_reduce(|l, r| SpatialExp(Box::new(SpatialExpKind::Conj(l, r))))
                     .ok_or(TypeError::Unsupported(
@@ -2757,7 +2759,8 @@ fn location_can_trigger(bound: &[TypedIdent], res: &ResourceExp<typed::AxiomExt>
         ResourceExpKind::PredicateCall(c) => &c.args[..],
     };
     let mut covered: HashSet<Spur> = HashSet::default();
-    args.iter().all(|a| check_trigger_subterms(a, &mut covered).is_ok())
+    args.iter()
+        .all(|a| check_trigger_subterms(a, &mut covered).is_ok())
         && bound.iter().all(|bv| covered.contains(&bv.name.0))
 }
 

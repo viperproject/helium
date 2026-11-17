@@ -480,8 +480,9 @@ impl FuncRegistry {
     ) -> Vec<crate::verify::lang::RecipeId> {
         let slot = kind as usize;
         if self.coll_skolems[slot].is_none() {
-            let s =
-                crate::verify::builtin_axioms::Skolems::mint(kind, |name, sig| self.skolem(name, sig));
+            let s = crate::verify::builtin_axioms::Skolems::mint(kind, |name, sig| {
+                self.skolem(name, sig)
+            });
             self.coll_skolems[slot] = Some(s);
         }
         let skolems = self.coll_skolems[slot].as_ref().expect("just minted");

@@ -6,6 +6,7 @@
 //! precondition equality) never rides along into a caller — the caller re-derives
 //! whatever it needs itself. See the plan's Findings B/C.
 
+use std::rc::Rc;
 use crate::verify::analysis::ConstFold;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::LocationKind;
@@ -13,6 +14,8 @@ use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{AxiomInst, AxiomPure};
 use crate::vmir::{MemberId, PermInst, PermVal, Polarity, Type, Val};
 use egg::{EGraph, Id};
+use crate::vmir;
+
 /// A (non-recursive) function's verified body as a **pure term recipe** — the
 /// definition `f(params) == <steps>[res]`, add-only. Unlike a certificate this
 /// imports **no e-classes**: the function unfold rule rebuilds `steps` at each
@@ -39,7 +42,7 @@ pub(crate) struct FunctionDefinition {
     /// value is never read (see [`RecipeBuilder::token_steps`]). Rebuilding a step
     /// only *adds* the node, which makes `g` materializable here; the unfold rule
     /// additionally releases each of these under the enclosing `f%pre` truth, so a
-    /// nested callee's axioms activate exactly when this body's own do, and only
+    /// nested callee's axioms activate exactly when this body's own do, and onlyg
     /// under the body-internal condition guarding the nested call.
     pub(crate) token_steps: Vec<TokenStep>,
     /// The **only** thing this function publishes to a caller:
@@ -211,15 +214,28 @@ impl<A> PermRecipe<A> {
     }
 }
 
-/// One footprint slot of a [`ResourceDefinition`]: its location kind and element
-/// type, plus recipes for its address and permission (over the params and any
-/// earlier slot values — see [`SeedRef`]).
+/// One footprint slot of a [`ResourceDefinition`]: its location kind and the
+/// type of the slot's value, plus how to rebuild the slot at a call site.
 #[derive(Clone)]
 pub(crate) struct SlotRecipe {
     pub(crate) kind: LocationKind,
+    /// The type of `SlotValue(i)`: the field/predicate value for a single
+    /// slot, `ValueMap(loc_ty)` for a quantified one.
     pub(crate) elem: Type,
-    pub(crate) addr: BodyRecipe,
-    pub(crate) perm: PermRecipe,
+    pub(crate) shape: SlotShape<BodyRecipe, PermRecipe>,
+}
+
+/// What distinguishes a single `acc(e.f, p)` from a quantified
+/// `forall xs :: c ==> acc(e.f, p)`. Generic so that `RecipeBuilder` can hold
+/// the same shape over `Val`s while the walk is still running.
+#[derive(Clone)]
+pub(crate) enum SlotShape<R, P> {
+    /// One location: its address and permission.
+    Single { addr: R, perm: P },
+    /// A chunk set: the quantifier body (in vmir temp space) and a recipe for
+    /// each value it captures from the resource body (`q.free_temps()`),
+    /// keyed by the captured temp's index.
+    Quant { q: Rc<vmir::QuantChunks>, caps: Vec<(usize, R)> },
 }
 
 /// A resource's verified body as a **pure term recipe**. Each call site rebuilds
@@ -262,7 +278,7 @@ pub(crate) struct RecipeBuilder {
     /// the slot's location kind, element type, and the recipe temps of its
     /// address and permission (sliced into standalone [`SlotRecipe`]s at the
     /// end of the walk).
-    pub(crate) pending_slots: Vec<(LocationKind, Type, Val, PermRecipe<Val>)>,
+    pub(crate) pending_slots: Vec<(LocationKind, Type, SlotShape<Val, PermRecipe<Val>>)>,
     /// Orphan steps that must survive [`Self::slice`]'s backward closure: the
     /// `g%pre` precondition tokens emitted alongside a callee application. Their
     /// value is never consumed, so reachability-from-the-result would prune them

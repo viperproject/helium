@@ -592,9 +592,8 @@ pub struct QuantChunk {
     /// address from this set's own, so the set's permission is never rebuilt.
     pub(crate) taken: Rc<[QuantChunk]>,
     /// The value map associated with that chunk
-    pub(crate) value_map: egg::Id
+    pub(crate) value_map: egg::Id,
 }
-
 
 /// Symbolic heap: chunks partitioned by [`LocationKind`]. Each group is an
 /// `Rc<[Chunk]>` so cloning a heap (frequent — one per instruction) shares the
@@ -658,7 +657,12 @@ impl Heap {
     }
 
     /// Replace the `i`-th chunk set of `kind` (as in [`Self::qp_chunks_of`]).
-    pub(crate) fn with_qp_chunk_replaced(&self, kind: &LocationKind, i: usize, chunk: QuantChunk) -> Self {
+    pub(crate) fn with_qp_chunk_replaced(
+        &self,
+        kind: &LocationKind,
+        i: usize,
+        chunk: QuantChunk,
+    ) -> Self {
         let mut v: Vec<QuantChunk> = self.qp_chunks_of(kind).to_vec();
         v[i] = chunk;
         Self {
@@ -668,7 +672,7 @@ impl Heap {
     }
 
     pub fn with_qp_chunk(&self, kind: &LocationKind, chunk: QuantChunk) -> Self {
-        let mut v : Vec<QuantChunk> = self.qps.get(kind).map(|r| r.to_vec()).unwrap_or_default();
+        let mut v: Vec<QuantChunk> = self.qps.get(kind).map(|r| r.to_vec()).unwrap_or_default();
         v.push(chunk);
         Self {
             groups: self.groups.clone(),
@@ -687,7 +691,10 @@ impl Heap {
         } else {
             self.groups.update(kind.clone(), v.into())
         };
-        Self { groups, qps: self.qps.clone() }
+        Self {
+            groups,
+            qps: self.qps.clone(),
+        }
     }
 
     /// Every chunk in the heap, paired with its location kind.

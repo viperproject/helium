@@ -94,7 +94,7 @@ fn check_in_scratch(
     for inst in [&i1, &i2] {
         lits.push((inst.cond, Polarity::Positive));
         let p = inst.perm.to_id(ctx);
-        lits.push((expr!(ctx, (0 / 1) <r { p }), Polarity::Positive));
+        lits.push((expr!(ctx, (0 / 1) < r { p }), Polarity::Positive));
     }
     for (&a1, &a2) in i1.loc_args.iter().zip(&i2.loc_args) {
         lits.push((expr!(ctx, { a1 } == { a2 }), Polarity::Positive));
@@ -264,16 +264,19 @@ pub(crate) fn mint_and_assume_inverse_axiom(
     let res = c.push(AxiomPure::Ternary(ante, concl, crate::vmir::TRUE));
 
     // Ground (a QP cannot be generic) and fresh, so pushed without dedup.
-    let rid = table.write().expect("recipe table lock").push_fresh(QuantRecipe {
-        n_caps: c.n_caps(),
-        bound: q.bound.clone(),
-        n_tys: 0,
-        own_tys: vec![],
-        groups: c.groups,
-        insts: c.insts,
-        res,
-        guard: None,
-    });
+    let rid = table
+        .write()
+        .expect("recipe table lock")
+        .push_fresh(QuantRecipe {
+            n_caps: c.n_caps(),
+            bound: q.bound.clone(),
+            n_tys: 0,
+            own_tys: vec![],
+            groups: c.groups,
+            insts: c.insts,
+            res,
+            guard: None,
+        });
     let children = caps.iter().map(|&(_, id)| id).collect();
     let node = ctx.add(Symbolic::Forall(rid, Box::new([]), children));
     ctx.assume_guarded(node, pc.iter().rev().copied());
