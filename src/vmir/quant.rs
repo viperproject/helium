@@ -174,9 +174,9 @@ impl QuantBody {
     pub fn contains_wc_permission(&self) -> bool {
         self.perm.is_wildcard()
             || self
-            .insts
-            .iter()
-            .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()))
+                .insts
+                .iter()
+                .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()))
     }
 }
 

@@ -6,15 +6,15 @@
 //! precondition equality) never rides along into a caller — the caller re-derives
 //! whatever it needs itself. See the plan's Findings B/C.
 
-use std::rc::Rc;
 use crate::verify::analysis::ConstFold;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::LocationKind;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{AxiomInst, AxiomPure};
+use crate::vmir;
 use crate::vmir::{MemberId, PermInst, PermVal, Polarity, Type, Val};
 use egg::{EGraph, Id};
-use crate::vmir;
+use std::rc::Rc;
 
 /// A (non-recursive) function's verified body as a **pure term recipe** — the
 /// definition `f(params) == <steps>[res]`, add-only. Unlike a certificate this
@@ -246,7 +246,10 @@ pub(crate) enum SlotShape<R, P> {
     /// A chunk set: the quantifier body (in vmir temp space) and a recipe for
     /// each value it captures from the resource body (`q.free_temps()`),
     /// keyed by the captured temp's index.
-    Quant { q: Rc<vmir::QuantChunks>, caps: Vec<(usize, R)> },
+    Quant {
+        q: Rc<vmir::QuantChunks>,
+        caps: Vec<(usize, R)>,
+    },
 }
 
 /// A resource's verified body as a **pure term recipe**. Each call site rebuilds

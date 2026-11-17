@@ -444,12 +444,16 @@ fn eval_pure_inst(
                             let chunk = &heap.qp_chunks_of(&k)[i];
                             let map = chunk.value_map;
                             let lookup = ctx.alloc.value_map(&k).lookup;
-                            let v = ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([map, addr])));
+                            let v = ctx.add(Symbolic::FuncApp(
+                                lookup,
+                                Box::new([]),
+                                Box::new([map, addr]),
+                            ));
                             // In a resource body the read purifies to `lookup(seed, addr)`.
                             let recipe = if ctx.recipe.is_some() {
-                                let map_r = chunk.recipe.clone().ok_or(VerifyError::Unimplemented(
-                                    "purify: deref outside footprint",
-                                ))?;
+                                let map_r = chunk.recipe.clone().ok_or(
+                                    VerifyError::Unimplemented("purify: deref outside footprint"),
+                                )?;
                                 let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
                                 let rb = ctx.recipe.as_mut().unwrap();
                                 Some(rb.emit(AxiomPure::App {
@@ -470,7 +474,7 @@ fn eval_pure_inst(
                             }
 
                             (ctx.fresh_symbolic_value(ty.clone()), None)
-                        },
+                        }
                     }
                 }
             }
@@ -1223,10 +1227,7 @@ fn eval_heap_inst(
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
             let (value_map, recipe) = match bind {
                 Bind::Fresh => {
-                    debug_assert!(
-                        ctx.recipe.is_none(),
-                        "`with fresh` inside a resource body"
-                    );
+                    debug_assert!(ctx.recipe.is_none(), "`with fresh` inside a resource body");
                     (ctx.fresh_symbolic_value(map_ty), None)
                 }
                 Bind::Bound(v) => (state.get_val(ctx, v), state.recipe_of(v)),
@@ -1290,7 +1291,7 @@ fn eval_heap_inst(
             let qp_search_result = find_covering_qp(ctx, &base_h, &kind, &exhaled)?;
 
             let Some(qp_index) = qp_search_result else {
-                return Err(VerifyError::InsufficientPermission)
+                return Err(VerifyError::InsufficientPermission);
             };
 
             let new_heap = take_from_qp(&base_h, &kind, qp_index, exhaled);
@@ -1366,7 +1367,12 @@ fn eval_heap_inst(
 }
 
 /// Index of the first held set of `kind` that covers `exhale`
-fn find_covering_qp(ctx: &mut VerifyContext<'_>, heap: &Heap, kind: &LocationKind, exhaled: &QuantChunk) -> Result<Option<usize>, VerifyError> {
+fn find_covering_qp(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    exhaled: &QuantChunk,
+) -> Result<Option<usize>, VerifyError> {
     let vmir_chunk = &exhaled.q;
     for (i, held) in heap.qp_chunks_of(&kind).iter().enumerate() {
         let contained = check_qp_contained(
@@ -1377,8 +1383,7 @@ fn find_covering_qp(ctx: &mut VerifyContext<'_>, heap: &Heap, kind: &LocationKin
                 eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &exhaled.guard)
             },
             &mut |ctx, addr| {
-                Ok(qp_perm_at(ctx, held, addr)?
-                    .map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
+                Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
             },
         )?;
 
@@ -1692,12 +1697,12 @@ fn walk_footprint(
             )?,
             SlotShape::Quant { q, caps } => {
                 if q.body.contains_wc_permission() {
-                    return Err(VerifyError::Unimplemented("wildcard permissions in QP"))
+                    return Err(VerifyError::Unimplemented("wildcard permissions in QP"));
                 }
-                if let Some(pm) = walk.scale  {
-                    let is_one = expr!(ctx, {pm} == (1/1));
+                if let Some(pm) = walk.scale {
+                    let is_one = expr!(ctx, { pm } == (1 / 1));
                     if !ctx.prove_under_pc(is_one, walk.pc_lits) {
-                        return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"))
+                        return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
                     }
                 }
                 walk_qp_slot(
@@ -1722,9 +1727,12 @@ fn walk_footprint(
     // `bool_guard`, not `pc_lits`: it is the path condition at every call site
     // (an `inhale` extends it with `0 < scale`, the others pass `pc_lits`
     // itself), so it is the tighter of the two and always a superset.
-    let bool_id = def
-        .bool
-        .build(&mut ctx.egraph, |r| r.resolve(args, &values), pc_lits, &mut changed);
+    let bool_id = def.bool.build(
+        &mut ctx.egraph,
+        |r| r.resolve(args, &values),
+        pc_lits,
+        &mut changed,
+    );
     match direction {
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {
@@ -1843,7 +1851,17 @@ fn walk_single_slot(
         } else {
             Demand::Concrete
         };
-        apply_slot_perm(ctx, w, kind, addr, perm, value, recipe.clone(), demand, heap)?
+        apply_slot_perm(
+            ctx,
+            w,
+            kind,
+            addr,
+            perm,
+            value,
+            recipe.clone(),
+            demand,
+            heap,
+        )?
     };
     let member = ctx.option_member(elem.clone(), present, value);
     Ok(SlotOut {
@@ -1865,25 +1883,48 @@ fn walk_qp_slot(
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
 ) -> Result<SlotOut, VerifyError> {
-    debug_assert!(matches!(elem, Type::ValueMap(..)), "element type of a qp must be a value map");
+    debug_assert!(
+        matches!(elem, Type::ValueMap(..)),
+        "element type of a qp must be a value map"
+    );
     let resolve = |r: &SeedRef| r.resolve(w.args, values);
     let before = ctx.egraph.total_number_of_nodes();
-    let caps = caps_r.iter().map(|(k, recipe)| (*k, recipe.build(&mut ctx.egraph, &resolve, w.pc_lits, changed))).collect::<Rc<_>>();
+    let caps = caps_r
+        .iter()
+        .map(|(k, recipe)| {
+            (
+                *k,
+                recipe.build(&mut ctx.egraph, &resolve, w.pc_lits, changed),
+            )
+        })
+        .collect::<Rc<_>>();
 
-    if ctx.egraph.total_number_of_nodes() != before { ctx.reduce() }
-    let caps = caps.iter().map(|&(k, id)| (k, ctx.egraph.find(id))).collect();
+    if ctx.egraph.total_number_of_nodes() != before {
+        ctx.reduce()
+    }
+    let caps = caps
+        .iter()
+        .map(|&(k, id)| (k, ctx.egraph.find(id)))
+        .collect();
 
     let (map, recipe) = match w.direction {
         Direction::Produce => {
-            let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| unreachable!("ReadHeap only consumes"));
-            let chunk = QuantChunk { recipe: recipe.clone(), ..quant_chunk_from_caps(ctx, q, caps, w.pc_lits, map)? };
+            let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| {
+                unreachable!("ReadHeap only consumes")
+            });
+            let chunk = QuantChunk {
+                recipe: recipe.clone(),
+                ..quant_chunk_from_caps(ctx, q, caps, w.pc_lits, map)?
+            };
             *heap = heap.with_qp_chunk(kind, chunk);
             (map, recipe)
         }
         Direction::Consume => {
             let placeholder = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(q.loc_ty.clone())));
             let exhaled = quant_chunk_from_caps(ctx, q, caps, w.pc_lits, placeholder)?;
-            let Some(qp_index) = find_covering_qp(ctx, heap, kind, &exhaled)? else { return Err(VerifyError::InsufficientPermission) };
+            let Some(qp_index) = find_covering_qp(ctx, heap, kind, &exhaled)? else {
+                return Err(VerifyError::InsufficientPermission);
+            };
             let held = &heap.qp_chunks_of(kind)[qp_index];
             let (map, recipe) = (held.value_map, held.recipe.clone());
             if !w.frame_only {
@@ -1894,7 +1935,11 @@ fn walk_qp_slot(
     };
 
     let present = expr!(ctx, true);
-    Ok(SlotOut { value: map, recipe, member: ctx.option_member(elem.clone(), present, map) })
+    Ok(SlotOut {
+        value: map,
+        recipe,
+        member: ctx.option_member(elem.clone(), present, map),
+    })
 }
 
 /// A footprint slot's value, by `w.source`: a fresh value for `Fresh`, and
