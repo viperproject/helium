@@ -1244,7 +1244,7 @@ pub(crate) fn heap_subtract_inner(
         // Tried only after the plain proof fails: no unaliased consume pays the probe.
         //
         // NOT retried under merge guards here, unlike `heap_subtract_summarized` and
-        // the `SlotPerm::Presence` framing check. This is the hot path — every
+        // the `frame_wildcard_slot` framing check. This is the hot path — every
         // `- acc` reaches it — and measurement says the retry buys nothing on it:
         // where a single chunk's sufficiency is arm-dependent the deciding guard sits
         // below the depth bound, in give-back residue, and a bound wide enough to
