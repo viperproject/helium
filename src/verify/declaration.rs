@@ -1287,15 +1287,24 @@ fn eval_heap_inst(
                 .collect();
             let Some(held) = h.chunk(&kind, addr).cloned() else {
                 // No single chunk: a quantified chunk set may hold write
-                // permission. The heap is left as is: values at QP locations are
-                // not tracked yet (a read there yields a fresh value), and adding
-                // a single chunk would duplicate the permission the set holds.
-                let writable = qp_framing(ctx, &h, &kind, addr, |ctx, p| {
+                // permission.
+                let chunk_index = qp_framing(ctx, &h, &kind, addr, |ctx, p| {
                     prove_perm_write(ctx, p, &kind.bound, &pc_lits)
-                })
-                .is_some();
-                return if writable {
-                    Ok(h)
+                });
+                return if let Some(index) = chunk_index {
+                    let chunk = &h.qp_chunks_of(&kind)[index];
+                    let map = chunk.value_map;
+                    let map_functions = ctx.alloc.value_map(&kind);
+                    let new_map = ctx.add(Symbolic::FuncApp(
+                        map_functions.store,
+                        Box::new([]),
+                        Box::new([map, addr, new_val]),
+                    ));
+                    let new_chunk = QuantChunk {
+                        value_map: new_map,
+                        ..chunk.clone()
+                    };
+                    Ok(h.with_qp_chunk_replaced(&kind, index, new_chunk))
                 } else {
                     Err(VerifyError::InsufficientPermission)
                 };
@@ -1303,7 +1312,7 @@ fn eval_heap_inst(
             let perm = held.ungated_perm().clone();
             let guard = held.guard_pc();
             // SIDECOND: prove `not(perm < cap)` (full/write permission, `cap` =
-            // the location's own permission bound, `1/1` for a field) under pc —
+            // the location's own permission boun, `1/1` for a field) under pc —
             // per leaf, so a branch-structured held perm never materializes. Under
             // the guarded-merge path the write obligation is proven against the
             // guard-gated perm (write required only where the chunk is present).
