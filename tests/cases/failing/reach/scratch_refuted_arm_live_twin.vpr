@@ -1,0 +1,19 @@
+// SOUNDNESS CANARY for tagging a block dead when its scratch refutes its cube.
+//
+// `scratch_refuted_arm_join_value.vpr` under `y != k`: the multi-pattern never
+// completes, so the inner else arm is live. Its assert is proven on its scratch
+// (the cube literal itself), which is consistent; the arm must keep its heap at
+// the join, where `x.f == n - 1`, and the final assert must fail.
+field f: Int
+function h(i: Int): Int
+function g(i: Int): Int
+
+method m(x: Ref, y: Int, k: Int, n: Int)
+  requires acc(x.f)
+  requires forall i: Int :: {h(i), g(i)} h(i) == g(i)
+{
+  if (y != k) {
+    if (h(y) == g(k)) { x.f := n } else { assert h(y) != g(k); x.f := n - 1 }
+  } else { x.f := n }
+  assert x.f == n
+}

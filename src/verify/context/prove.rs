@@ -227,9 +227,9 @@ impl<'a> VerifyContext<'a> {
             stats::bump(|s| s.prove_inconsistent += 1);
             return true;
         }
-        // Dead block: the block's control cube is unsatisfiable, so nothing in it
-        // is reachable and all its obligations hold vacuously. Decided once, when
-        // the scratch was built, instead of rediscovered per obligation.
+        // Dead block: nothing in it is reachable, so all its obligations hold
+        // vacuously. Latched by `mark_unreachable` or when the block's scratch
+        // turns inconsistent, so it is decided once, not per obligation.
         if self.block_dead {
             stats::bump(|s| s.prove_dead_block += 1);
             return true;
@@ -373,6 +373,32 @@ impl<'a> VerifyContext<'a> {
         self.in_block = false;
         self.scratch = None;
         self.block_dead = false;
+    }
+
+    /// Treat the current block's body as unreachable, so its obligations hold
+    /// vacuously: the walk knows control cannot arrive here (every predecessor
+    /// of the block is dead), so no scratch is built to rediscover it.
+    pub(crate) fn mark_unreachable(&mut self) {
+        self.block_dead = true;
+    }
+
+    /// Whether the current block's exit is unreachable as far as its own walk
+    /// knows: it was marked so, or its scratch refuted the cube. The scratch is
+    /// ground plus the cube, and receives the block's later facts only as
+    /// ground's own (guarded) mirrored unions, so its contradiction proves that
+    /// no execution leaves the block, exactly as a cube literal folded against
+    /// its polarity in ground does. Ground unions mirrored since the scratch's
+    /// last rebuild are not congruence-closed yet, hence the rebuild; the
+    /// scratch is dropped right after.
+    pub(crate) fn block_refuted(&mut self) -> bool {
+        if self.block_dead {
+            return true;
+        }
+        if let Some(sc) = self.scratch.as_mut() {
+            sc.egraph.rebuild();
+            self.block_dead = graph_inconsistent(&sc.egraph);
+        }
+        self.block_dead
     }
 
     /// Build the block scratch if absent: clone ground, assume the block cube.
@@ -863,7 +889,7 @@ impl<'a> VerifyContext<'a> {
     /// the graph that already has this block's cube assumed and saturated, reused
     /// across the block's obligations. `None` outside a block (functions and
     /// resources have no CFG, so no scratch); the caller then falls back to its own
-    /// clone-and-probe.
+    /// clone-and-probe. Empty in a dead block (the consume is vacuous).
     ///
     /// This is the pc-alias question [`pc_alias_partners`](crate::verify::heap::algebra::pc_alias_partners)
     /// asks, answered by `find` instead of by a fresh saturation.
@@ -875,9 +901,14 @@ impl<'a> VerifyContext<'a> {
         if !self.in_block {
             return None;
         }
+        // Dead block: the consume is vacuous, so no partner is needed; `None`
+        // would send the caller to a full probe saturation.
+        if self.block_dead {
+            return Some(Vec::new());
+        }
         self.ensure_scratch();
         if self.block_dead {
-            return None;
+            return Some(Vec::new());
         }
         // Translate everything first: `tr` can import nodes and dirty the scratch.
         let ta = self.tr(addr);

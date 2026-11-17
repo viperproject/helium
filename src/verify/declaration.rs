@@ -2471,6 +2471,20 @@ pub(crate) fn verify_method(
         // body insts share it (vmir::Block::cube), so the scratch assumes it once.
         let cube = pc_lits_raw(&mut ctx, &state, &block.cube);
         ctx.begin_block(cube);
+        // Reachability propagates: a block whose only predecessor is dead, or
+        // whose join has both arms dead, is never entered, so the obligations of
+        // its body hold vacuously. The join phase above was walked live on
+        // purpose: a loop exit's frame restore (`union_heaps`) turns two chunks
+        // proven held into a value agreement on ground (an outright union when
+        // its pc is empty), and a vacuous proof must not license a ground fact.
+        let unreached = match &block.preds {
+            vmir::Preds::From(p) => state.dead_blocks.contains(&p.0),
+            vmir::Preds::Join { .. } => state.join_arms_dead == Some((true, true)),
+            vmir::Preds::Entry => false,
+        };
+        if unreached {
+            ctx.mark_unreachable();
+        }
         walk_body(
             &mut ctx,
             program,
@@ -2481,28 +2495,24 @@ pub(crate) fn verify_method(
             eval_method_inst,
             None,
         )?;
-        // Dead-arm tagging: if the block's cube is now refuted in the ground
-        // graph (an unreachable arm — e.g. after `inhale false` unioned a reach
-        // flag with `false`), tag the block so a downstream join merge drops its
-        // heap instead of forming a `0`-leaf that would need a case split. Cheap:
-        // just consults folded literals, no clone. Reachability propagates too: a
-        // block whose only predecessor is dead, or whose join has both arms dead,
-        // is dead.
-        let unreached = match &block.preds {
-            vmir::Preds::From(p) => state.dead_blocks.contains(&p.0),
-            vmir::Preds::Join { .. } => state.join_arms_dead == Some((true, true)),
-            vmir::Preds::Entry => false,
-        };
+        // Dead-arm tagging: if the block was never entered, or its cube is now
+        // refuted — by its own scratch, or in the ground graph (an unreachable
+        // arm — e.g. after `inhale false` unioned a reach flag with `false`) — tag
+        // the block so a downstream join merge drops its heap instead of forming
+        // a `0`-leaf that would need a case split. Cheap: reuses what the block's
+        // proving already found and consults folded literals; at most a rebuild
+        // of the existing scratch, no clone.
         // Raw: this runs *inside* the block, so `collect_pc_lits` would
         // prepend the very cube being lowered.
-        let lits = pc_lits_raw(&mut ctx, &state, &block.cube);
-        let refuted = unreached
-            || lits.iter().any(|(id, pol)| {
-                matches!(
-                    ctx.egraph[ctx.egraph.find(*id)].data.known(),
-                    Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
-                )
-            });
+        let refuted = ctx.block_refuted()
+            || pc_lits_raw(&mut ctx, &state, &block.cube)
+                .iter()
+                .any(|(id, pol)| {
+                    matches!(
+                        ctx.egraph[ctx.egraph.find(*id)].data.known(),
+                        Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
+                    )
+                });
         if refuted {
             state.dead_blocks.insert(bid.0);
         }
