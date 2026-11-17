@@ -151,7 +151,7 @@ pub struct QuantChunks {
     /// uses the location's address call `f(e(xs))`; empty only when that
     /// cannot serve as one either (e.g. a constant receiver).
     pub triggers: Box<[QuantTrigger]>,
-    pub loc_ty : Type,
+    pub loc_ty: Type,
     pub body: QuantBody,
 }
 

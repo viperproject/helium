@@ -1,7 +1,9 @@
-use std::rc::Rc;
 use crate::dhash::HashMap;
+use std::rc::Rc;
 
-use crate::verify::cert::PermRecipe;
+use crate::verify::cert::{PermRecipe, SlotShape};
+use crate::verify::heap::QuantChunk;
+use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
 use crate::vmir::display::VmirDisplay;
 use crate::vmir::{CollKind, CollOp, MapOp, SeqOp};
 use crate::{
@@ -28,8 +30,6 @@ use crate::{
         Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
-use crate::verify::heap::QuantChunk;
-use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
 
 struct EvalState {
     vals: Vec<egg::Id>,
@@ -192,7 +192,10 @@ impl EvalState {
         const UNCAPTURED: usize = usize::MAX;
         let mut vals = vec![egg::Id::from(UNCAPTURED); binder_base];
         for &(k, id) in caps {
-            assert!(k < binder_base, "capture {k} is not below binder_base {binder_base}");
+            assert!(
+                k < binder_base,
+                "capture {k} is not below binder_base {binder_base}"
+            );
             vals[k] = id;
         }
         Self {
@@ -1179,7 +1182,14 @@ fn eval_heap_inst(
                         let rb = ctx.recipe.as_mut().unwrap();
                         let i = rb.pending_slots.len();
                         let seed = rb.emit_seed(crate::verify::cert::SeedRef::SlotValue(i));
-                        rb.pending_slots.push((kind.clone(), elem, addr_r, perm_r));
+                        rb.pending_slots.push((
+                            kind.clone(),
+                            elem,
+                            crate::verify::cert::SlotShape::Single {
+                                addr: addr_r,
+                                perm: perm_r,
+                            },
+                        ));
                         ch = ch.with_recipe(Some(seed));
                     }
                     Ok(heap_union(ctx, &base_h, &kind, ch, &pc_lits))
@@ -1194,7 +1204,6 @@ fn eval_heap_inst(
             }
         }
         HeapInst::AddForall { base, q, bind } => {
-
             let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
             let value_map = match bind {
                 Bind::Fresh => ctx.fresh_symbolic_value(map_ty),
@@ -1202,7 +1211,7 @@ fn eval_heap_inst(
                 Bind::SelfSlot => {
                     return Err(VerifyError::Unimplemented(
                         "quantified permission in a resource footprint",
-                    ))
+                    ));
                 }
             };
             // A resource body (certificate walk, `with self`) must record the
@@ -1218,7 +1227,7 @@ fn eval_heap_inst(
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
             let chunk = quant_chunk_of(ctx, state, q, pc, value_map)?;
             Ok(base_h.with_qp_chunk(&kind, chunk))
-        },
+        }
         // Exhale a chunk set `E`: find one held set `Q` that covers it
         // (`check_qp_contained`) and record `E` as taken from `Q`; lookups then
         // subtract it (`qp_perm_at`). No sum across sets or single chunks yet.
@@ -1231,11 +1240,14 @@ fn eval_heap_inst(
             // A wildcard demand needs a fresh amount below what is held, which
             // the containment proof cannot pick.
             let wild = q.body.perm.is_wildcard()
-                || q.body.insts.iter().any(
-                    |i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()),
-                );
+                || q.body
+                    .insts
+                    .iter()
+                    .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()));
             if wild {
-                return Err(VerifyError::Unimplemented("exhaling a wildcard quantified permission"));
+                return Err(VerifyError::Unimplemented(
+                    "exhaling a wildcard quantified permission",
+                ));
             }
             let base_h = get_heap(state, base);
             let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
@@ -1249,7 +1261,9 @@ fn eval_heap_inst(
                     ctx,
                     q,
                     &exhaled.guard,
-                    &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &exhaled.guard),
+                    &mut |ctx, binders| {
+                        eval_qp_instance(ctx, &exhaled.caps, q, binders, &exhaled.guard)
+                    },
                     &mut |ctx, addr| {
                         Ok(qp_perm_at(ctx, held, addr)?
                             .map(|p| crate::verify::heap::gate_perm_by_guard(ctx, &p, &held.guard)))
@@ -1261,7 +1275,10 @@ fn eval_heap_inst(
                         value_map: held.value_map,
                         ..exhaled
                     });
-                    let held = QuantChunk { taken: taken.into(), ..held.clone() };
+                    let held = QuantChunk {
+                        taken: taken.into(),
+                        ..held.clone()
+                    };
                     return Ok(base_h.with_qp_chunk_replaced(&kind, i, held));
                 }
             }
@@ -1331,7 +1348,6 @@ fn eval_heap_inst(
                 Chunk::new_perm(addr, perm, new_val).with_guard(guard),
             ))
         }
-
     }
 }
 
@@ -1629,7 +1645,16 @@ fn walk_footprint(
         // The slot's permission shape is also the static source for the consume rule
         // its demand selects, at the `SlotPerm::Amount` consume below -- see
         // [`Demand`]. Shape-only, so it is the same predicate the IR side asks.
-        let slot_wildcard = slot.perm.has_wildcard();
+        let SlotShape::Single {
+            addr: slot_addr,
+            perm: slot_perm,
+        } = &slot.shape
+        else {
+            return Err(VerifyError::Unimplemented(
+                "quantified permission in a resource footprint",
+            ));
+        };
+        let slot_wildcard = slot_perm.has_wildcard();
         let slot_demand = if slot_wildcard {
             Demand::Wildcard
         } else {
@@ -1637,9 +1662,7 @@ fn walk_footprint(
         };
         let wc_slot = frame_only && slot_wildcard;
         let before = ctx.egraph.total_number_of_nodes();
-        let addr = slot
-            .addr
-            .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+        let addr = slot_addr.build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
         let wildcard_as = if wc_slot {
             WildcardAs::One
         } else {
@@ -1648,7 +1671,7 @@ fn walk_footprint(
         let bperm = {
             let p = build_perm(
                 ctx,
-                &slot.perm,
+                slot_perm,
                 &resolve,
                 pc_lits,
                 &mut changed,
@@ -2729,8 +2752,11 @@ fn quant_chunk_of(
     pc: &PathConds,
     value_map: egg::Id,
 ) -> Result<QuantChunk, VerifyError> {
-    let caps: Rc<[(usize, egg::Id)]> =
-        q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect();
+    let caps: Rc<[(usize, egg::Id)]> = q
+        .free_temps()
+        .into_iter()
+        .map(|k| (k, state.vals[k]))
+        .collect();
     let pc_lits: Vec<(egg::Id, Polarity)> = pc
         .conds
         .iter()
@@ -2792,7 +2818,12 @@ fn eval_qp_instance(
 
     Ok(QpInstance {
         cond: state.get_val(ctx, &q.body.cond),
-        loc_args: q.loc_call().args.iter().map(|a| state.get_val(ctx, a)).collect(),
+        loc_args: q
+            .loc_call()
+            .args
+            .iter()
+            .map(|a| state.get_val(ctx, a))
+            .collect(),
         perm: eval_perm_structural(ctx, &state, &q.body.perm),
     })
 }
@@ -2830,7 +2861,11 @@ fn qp_perm_at(
     }) else {
         return Ok(None);
     };
-    assert_eq!(args.len(), call.args.iter().count(), "address call arity mismatch");
+    assert_eq!(
+        args.len(),
+        call.args.iter().count(),
+        "address call arity mismatch"
+    );
 
     let binders: Vec<egg::Id> = (0..q.bound.len())
         .map(|j| {
@@ -3162,15 +3197,28 @@ pub(crate) fn verify_resource(
     let footprint = rb
         .pending_slots
         .iter()
-        .map(|(kind, elem, addr, perm)| {
+        .map(|(kind, elem, shape)| {
+            let shape = match shape {
+                SlotShape::Single { addr, perm } => SlotShape::Single {
+                    addr: rb.slice(addr)?,
+                    // One `slice` per operand, shape preserved. Permission step
+                    // lists are short (a `PermInst::Ite` only arises from a
+                    // branch gate or a read-only weakening — see
+                    // `Sink::gate_perm`).
+                    perm: perm.try_map(&mut |v: &Val| rb.slice(v))?,
+                },
+                SlotShape::Quant { q, caps } => SlotShape::Quant {
+                    q: q.clone(),
+                    caps: caps
+                        .iter()
+                        .map(|(k, v)| Ok((*k, rb.slice(v)?)))
+                        .collect::<Result<_, VerifyError>>()?,
+                },
+            };
             Ok(SlotRecipe {
                 kind: kind.clone(),
                 elem: elem.clone(),
-                addr: rb.slice(addr)?,
-                // One `slice` per operand, shape preserved. Permission step lists
-                // are short (a `PermInst::Ite` only arises from a branch gate or a
-                // read-only weakening — see `Sink::gate_perm`).
-                perm: perm.try_map(&mut |v: &Val| rb.slice(v))?,
+                shape,
             })
         })
         .collect::<Result<Vec<_>, VerifyError>>()?;

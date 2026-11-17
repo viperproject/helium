@@ -161,9 +161,15 @@ pub enum HeapInst {
         yields_value: bool,
     },
 
-    AddForall { base: HeapVal, q: Box<QuantChunks>, bind: Bind },
-    SubForall { base: HeapVal, q: Box<QuantChunks> },
-
+    AddForall {
+        base: HeapVal,
+        q: Box<QuantChunks>,
+        bind: Bind,
+    },
+    SubForall {
+        base: HeapVal,
+        q: Box<QuantChunks>,
+    },
 
     /// `h[, s] := base inhale <call> @ <perm>`. Add the resource's delta (scaled by
     /// `perm`) to `base` **and assume** its boolean condition. When the callee is
@@ -223,7 +229,10 @@ pub enum HeapInst {
     /// the head set the rest aside as the frame, so the state after the loop is
     /// their sum. Silicon does the same at a `Kind.Out` edge; our heaps are explicit
     /// values, so the frame is simply named.
-    Union { a: HeapVal, b: HeapVal },
+    Union {
+        a: HeapVal,
+        b: HeapVal,
+    },
 }
 
 impl HeapInst {

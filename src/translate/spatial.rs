@@ -8,7 +8,7 @@ use lasso::Spur;
 use crate::translate::pure_exp::{self, HeapCtx, OldHeaps, PureExt};
 use crate::translate::resource::lower_resource_addr;
 use crate::translate::sink::{PcKind, Sink};
-use crate::translate::{resource, TranslationContext, TranslationError};
+use crate::translate::{TranslationContext, TranslationError, resource};
 use crate::viper::typed;
 use crate::vmir::{self, FALSE, HeapInst, HeapVal, PermVal, Polarity, PureInst, TRUE, Type, Val};
 
@@ -94,7 +94,7 @@ pub(crate) fn spatial_contains_acc<Ext>(exp: &typed::SpatialExp<Ext>) -> bool {
         S::Conj(l, r) => spatial_contains_acc(l) || spatial_contains_acc(r),
         S::Implies(_, r) => spatial_contains_acc(r),
         S::Ternary { then, else_, .. } => spatial_contains_acc(then) || spatial_contains_acc(else_),
-        S::Forall(_) => true
+        S::Forall(_) => true,
     }
 }
 
@@ -430,7 +430,7 @@ fn lower_quant_chunks(
             loc,
             perm,
         },
-        loc_ty
+        loc_ty,
     })
 }
 

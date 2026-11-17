@@ -229,11 +229,11 @@ pub enum SpatialExpKind<PureExt> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuantPerm {
     pub bound: Vec<TypedIdent>,
-    pub triggers: Vec<Vec<TypedPureExp<AxiomExt>>>,   // may be empty
+    pub triggers: Vec<Vec<TypedPureExp<AxiomExt>>>, // may be empty
     /// No user triggers, and the location `f(e(xs))` can serve as the trigger.
     pub location_trigger: bool,
-    pub cond: TypedPureExp<AxiomExt>,                 // conjunction of the guards on the path
-    pub res: ResourceExp<AxiomExt>,                   // receiver/args free of heap reads
+    pub cond: TypedPureExp<AxiomExt>, // conjunction of the guards on the path
+    pub res: ResourceExp<AxiomExt>,   // receiver/args free of heap reads
     pub perm: TypedPureExp<AxiomExt>,
 }
 
