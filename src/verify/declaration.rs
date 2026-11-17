@@ -1912,9 +1912,11 @@ fn walk_qp_slot(
             let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| {
                 unreachable!("ReadHeap only consumes")
             });
+            // Injectivity was proven by the certificate walk; the body boolean
+            // assumed after the slots carries the facts it relied on.
             let chunk = QuantChunk {
                 recipe: recipe.clone(),
-                ..quant_chunk_from_caps(ctx, q, caps, w.pc_lits, map)?
+                ..quant_chunk_injective(ctx, q, caps, w.pc_lits, map)?
             };
             *heap = heap.with_qp_chunk(kind, chunk);
             (map, recipe)
@@ -3011,8 +3013,29 @@ fn quant_chunk_from_caps(
     check_qp_injectivity(ctx, q, pc_lits, &mut |ctx, binders| {
         eval_qp_instance(ctx, &caps, q, binders, pc_lits)
     })?;
+    quant_chunk_injective(ctx, q, caps, pc_lits, value_map)
+}
+
+/// The chunk set of `q` at `caps` whose receiver injectivity is already
+/// established, so only the inverse axiom is assumed here.
+///
+/// The one such caller is a footprint slot *produced* by `walk_footprint`
+/// (inhale, unfold, from_snap): the resource's certificate walk proved
+/// injectivity for arbitrary arguments under the body's earlier conjuncts, and
+/// the produce assumes those conjuncts (the body boolean) under the same
+/// guard. It cannot re-prove it there, since the boolean is assumed only after
+/// all slots are walked. A *consumed* slot must not use this: there the
+/// boolean is asserted after the slots, and an inverse axiom assumed for a
+/// non-injective receiver would make that assertion vacuously provable.
+fn quant_chunk_injective(
+    ctx: &mut VerifyContext<'_>,
+    q: &Rc<vmir::QuantChunks>,
+    caps: Rc<[(usize, egg::Id)]>,
+    pc_lits: &[(egg::Id, Polarity)],
+    value_map: egg::Id,
+) -> Result<QuantChunk, VerifyError> {
     // One binding per location: assume the inverse axiom that names it.
-    let inv = mint_and_assume_inverse_axiom(ctx, &q, &caps, pc_lits)?;
+    let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
     Ok(QuantChunk {
         q: q.clone(),
         caps,
