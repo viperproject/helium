@@ -2,7 +2,7 @@ use crate::dhash::HashMap;
 use std::rc::Rc;
 
 use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
-use crate::verify::heap::QuantChunk;
+use crate::verify::heap::{QPTaken, QuantChunk};
 use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
 use crate::vmir::display::VmirDisplay;
 use crate::vmir::{CollKind, CollOp, MapOp, SeqOp};
@@ -1398,16 +1398,11 @@ fn find_covering_qp(
 /// This function just removes it, no checks are performed.
 fn take_from_qp(heap: &Heap, kind: &LocationKind, i: usize, exhaled: QuantChunk) -> Heap {
     let held = &heap.qp_chunks_of(kind)[i];
-    let mut taken = held.taken.to_vec();
-    taken.push(QuantChunk {
+    let held = held.with_taken(QPTaken::Set(QuantChunk {
         value_map: held.value_map,
         ..exhaled
-    });
-    let held = QuantChunk {
-        taken: taken.into(),
-        ..held.clone()
-    };
-    heap.with_qp_chunk_replaced(&kind, i, held)
+    }));
+    heap.with_qp_chunk_replaced(kind, i, held)
 }
 
 /// Evaluate one instruction of a resource body (well-formedness pass). Resource
@@ -3171,11 +3166,30 @@ fn qp_perm_at(
     }
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
     // What was exhaled from this set, each gated by its exhale's path condition.
-    // A taken set applies the same address function, so it always answers.
     for taken in chunk.taken.iter() {
-        let p = qp_perm_at(ctx, taken, addr)?
-            .expect("a taken chunk set applies the same address function");
-        let p = crate::verify::heap::gate_perm_by_guard(ctx, &p, &taken.guard);
+        let p = match taken {
+            // A taken set applies the same address function, so it always answers.
+            QPTaken::Set(set) => {
+                let p = qp_perm_at(ctx, set, addr)?
+                    .expect("a taken chunk set applies the same address function");
+                gate_perm_by_guard(ctx, &p, &set.guard)
+            }
+            // A single location counts only where it is `addr`.
+            QPTaken::Single {
+                addr: at,
+                perm: p,
+                guard,
+            } => {
+                let p = gate_perm_by_guard(ctx, p, guard);
+                if ctx.egraph.find(*at) == ctx.egraph.find(addr) {
+                    p
+                } else {
+                    let eq = expr!(ctx, { *at } == { addr });
+                    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+                    ChunkPerm::select(ctx, eq, p, zero)
+                }
+            }
+        };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
     Ok(Some(perm))

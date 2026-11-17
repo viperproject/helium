@@ -587,16 +587,44 @@ pub struct QuantChunk {
     pub(crate) inv: Rc<[crate::verify::lang::FuncId]>,
     /// Path-condition cube of the inhale, same role as `Chunk::guard`.
     pub(crate) guard: HeapPc,
-    /// The chunk sets exhaled from this one, each under its own `guard` (the
-    /// exhale's path condition). A lookup subtracts their permission at the
-    /// address from this set's own, so the set's permission is never rebuilt.
-    pub(crate) taken: Rc<[QuantChunk]>,
+    /// What was exhaled from this set, each under its own guard (the exhale's
+    /// path condition): whole chunk sets and single locations. A lookup
+    /// subtracts their permission at the address from this set's own, so the
+    /// set's permission is never rebuilt.
+    pub(crate) taken: Rc<[QPTaken]>,
     /// The value map associated with that chunk
     pub(crate) value_map: egg::Id,
     /// Recipe provenance of `value_map`, same role as `Chunk::recipe`: in a
     /// resource body the footprint seed `SlotValue(i)`, so a read through
     /// this set purifies to `lookup(seed, addr)`. `None` in a method body.
     pub(crate) recipe: Option<crate::vmir::Val>,
+}
+
+/// One exhale recorded against a [`QuantChunk`] (its `taken` list).
+#[derive(Debug, Clone)]
+pub enum QPTaken {
+    /// A whole chunk set exhaled from this one. It applies the same address
+    /// function, and its `guard` is the exhale's path condition.
+    Set(QuantChunk),
+    /// `perm` exhaled at the single location `addr`, under the exhale's path
+    /// condition `guard`. Counts only at an address equal to `addr`.
+    Single {
+        addr: egg::Id,
+        perm: ChunkPerm,
+        guard: HeapPc,
+    },
+}
+
+impl QuantChunk {
+    /// This set with `t` recorded as taken from it.
+    pub(crate) fn with_taken(&self, t: QPTaken) -> QuantChunk {
+        let mut taken = self.taken.to_vec();
+        taken.push(t);
+        QuantChunk {
+            taken: taken.into(),
+            ..self.clone()
+        }
+    }
 }
 
 /// Symbolic heap: chunks partitioned by [`LocationKind`]. Each group is an
