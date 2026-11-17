@@ -435,26 +435,17 @@ fn eval_pure_inst(
                     // value in its map. Several framing sets: the first is
                     // taken (sound; their agreement is not assumed yet).
                     let framing = state.loc_kind(loc).and_then(|k| {
-                        let i = qp_framing(ctx, &heap, &k, addr, |ctx, p| {
-                            prove_perm_positive(ctx, p, pc_lits)
-                        })?;
-                        Some((k, i))
+                        let (set, v) = qp_value_at(ctx, &heap, &k, addr, pc_lits)?;
+                        Some((k, set.recipe.clone(), v))
                     });
                     match framing {
-                        Some((k, i)) => {
-                            let chunk = &heap.qp_chunks_of(&k)[i];
-                            let map = chunk.value_map;
-                            let lookup = ctx.alloc.value_map(&k).lookup;
-                            let v = ctx.add(Symbolic::FuncApp(
-                                lookup,
-                                Box::new([]),
-                                Box::new([map, addr]),
-                            ));
+                        Some((k, map_r, v)) => {
                             // In a resource body the read purifies to `lookup(seed, addr)`.
                             let recipe = if ctx.recipe.is_some() {
-                                let map_r = chunk.recipe.clone().ok_or(
-                                    VerifyError::Unimplemented("purify: deref outside footprint"),
-                                )?;
+                                let map_r = map_r.ok_or(VerifyError::Unimplemented(
+                                    "purify: deref outside footprint",
+                                ))?;
+                                let lookup = ctx.alloc.value_map(&k).lookup;
                                 let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
                                 let rb = ctx.recipe.as_mut().unwrap();
                                 Some(rb.emit(AxiomPure::App {
@@ -1872,13 +1863,15 @@ fn walk_single_slot(
     }
     let addr = ctx.egraph.find(addr);
     // Values are read from the *original* heap (aliased slots agree); the hit
-    // chunk's recipe provenance rides along.
+    // chunk's recipe provenance rides along. A location held only by a
+    // quantified chunk set reads its map, as a `Deref` would (no recipe yet).
     let (value, recipe) = slot_value(ctx, w, i, elem, |ctx, h| {
         h.entries()
             .find_map(|(_, c)| {
                 (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
                     .then(|| (c.value, c.recipe.clone()))
             })
+            .or_else(|| Some((qp_value_at(ctx, h, kind, addr, w.pc_lits)?.1, None)))
             .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None))
     });
     let present = if wc_slot {
@@ -3306,6 +3299,28 @@ fn qp_framing(
             Err(e) => panic!("quantified chunk body failed to re-evaluate: {e:?}"),
         }
     })
+}
+
+/// The first quantified chunk set of `kind` that frames `addr` under `pc_lits`
+/// (see [`qp_framing`]), with the value it holds there: `lookup(map, addr)`.
+fn qp_value_at<'h>(
+    ctx: &mut VerifyContext<'_>,
+    heap: &'h Heap,
+    kind: &LocationKind,
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Option<(&'h QuantChunk, egg::Id)> {
+    let i = qp_framing(ctx, heap, kind, addr, |ctx, p| {
+        prove_perm_positive(ctx, p, pc_lits)
+    })?;
+    let set = &heap.qp_chunks_of(kind)[i];
+    let lookup = ctx.alloc.value_map(kind).lookup;
+    let v = ctx.add(Symbolic::FuncApp(
+        lookup,
+        Box::new([]),
+        Box::new([set.value_map, addr]),
+    ));
+    Some((set, v))
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and
