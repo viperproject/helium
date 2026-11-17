@@ -2781,8 +2781,7 @@ fn check_forall_wd_in_scratch(
 
 /// The chunk set a quantified permission denotes at this program point, shared
 /// by inhale (`AddForall`) and exhale (`SubForall`): its captured temps resolved
-/// in the live state, its receiver injectivity proven under `pc`, and its
-/// inverse axiom (licensed by that proof) assumed.
+/// in the live state, then built by [`quant_chunk_from_caps`].
 fn quant_chunk_of(
     ctx: &mut VerifyContext<'_>,
     state: &EvalState,
@@ -2800,14 +2799,29 @@ fn quant_chunk_of(
         .iter()
         .map(|(v, p)| (state.get_val(ctx, v), *p))
         .collect();
+    quant_chunk_from_caps(ctx, Rc::new(q.clone()), caps, &pc_lits, value_map)
+}
+
+/// The chunk set of `q` with its captured temps already resolved to `caps`:
+/// either from the live state ([`quant_chunk_of`]) or rebuilt from a resource
+/// footprint slot's recipes at a call site (`walk_footprint`). Proves the
+/// receiver injectivity under `pc_lits` and assumes the inverse axiom that
+/// proof licenses. The result carries no recipe; the caller sets one.
+fn quant_chunk_from_caps(
+    ctx: &mut VerifyContext<'_>,
+    q: Rc<vmir::QuantChunks>,
+    caps: Rc<[(usize, egg::Id)]>,
+    pc_lits: &[(egg::Id, Polarity)],
+    value_map: egg::Id,
+) -> Result<QuantChunk, VerifyError> {
     // Distinct bindings that hold permission must name distinct locations.
-    check_qp_injectivity(ctx, q, &pc_lits, &mut |ctx, binders| {
-        eval_qp_instance(ctx, &caps, q, binders, &pc_lits)
+    check_qp_injectivity(ctx, &q, pc_lits, &mut |ctx, binders| {
+        eval_qp_instance(ctx, &caps, &q, binders, pc_lits)
     })?;
     // One binding per location: assume the inverse axiom that names it.
-    let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, &pc_lits)?;
+    let inv = mint_and_assume_inverse_axiom(ctx, &q, &caps, pc_lits)?;
     Ok(QuantChunk {
-        q: Rc::new(q.clone()),
+        q,
         caps,
         inv,
         guard: pc_lits.into(),
