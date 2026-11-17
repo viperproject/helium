@@ -16,6 +16,7 @@ use crate::{
             algebra::{
                 Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
                 merge_heaps, perm_add, perm_value, prove_perm_positive, prove_perm_write,
+                prove_sufficient_aligned,
                 summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
@@ -1219,7 +1220,7 @@ fn eval_heap_inst(
                         "purify: unsupported heap inst in a resource body",
                     ));
                 }
-                heap_subtract(ctx, &base_h, &kind, ch, &pc_lits, demand_of(&cperm))
+                subtract_location(ctx, &base_h, &kind, ch, &pc_lits, demand_of(&cperm))
             }
         }
         HeapInst::AddForall { base, q, bind } => {
@@ -1403,6 +1404,51 @@ fn take_from_qp(heap: &Heap, kind: &LocationKind, i: usize, exhaled: QuantChunk)
         ..exhaled
     }));
     heap.with_qp_chunk_replaced(kind, i, held)
+}
+
+/// Consume the single-location `chunk` from `heap`: from the single chunks
+/// (`heap_subtract`) when they hold it, otherwise as a single-location take
+/// from the first quantified chunk set that holds enough at its address.
+///
+/// The demand is not split across holders (part from a single chunk, part from
+/// a set, or from two sets) yet, and a wildcard demand on a set is
+/// unimplemented: it needs a fresh amount below what the set holds.
+fn subtract_location(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    chunk: Chunk,
+    pc_lits: &[(egg::Id, Polarity)],
+    demand: Demand,
+) -> Result<Heap, VerifyError> {
+    if heap.qp_chunks_of(kind).is_empty() {
+        return heap_subtract(ctx, heap, kind, chunk, pc_lits, demand);
+    }
+    match heap_subtract(ctx, heap, kind, chunk.clone(), pc_lits, demand) {
+        Err(VerifyError::InsufficientPermission) => {}
+        done => return done,
+    }
+    if demand == Demand::Wildcard {
+        return Err(VerifyError::Unimplemented(
+            "exhaling a wildcard location from a quantified permission",
+        ));
+    }
+    let needed = chunk.ungated_perm().clone();
+    for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
+        let Some(held) = qp_perm_at(ctx, set, chunk.addr)? else {
+            continue;
+        };
+        let held = gate_perm_by_guard(ctx, &held, &set.guard);
+        if prove_sufficient_aligned(ctx, &held, &needed, pc_lits) {
+            let set = set.with_taken(QPTaken::Single {
+                addr: chunk.addr,
+                perm: needed,
+                guard: pc_lits.into(),
+            });
+            return Ok(heap.with_qp_chunk_replaced(kind, i, set));
+        }
+    }
+    Err(VerifyError::InsufficientPermission)
 }
 
 /// Evaluate one instruction of a resource body (well-formedness pass). Resource
@@ -2008,7 +2054,7 @@ fn apply_slot_perm(
     };
     let chunk = Chunk::new_perm(addr, scaled, value).with_recipe(recipe);
     *heap = match w.direction {
-        Direction::Consume => heap_subtract(ctx, heap, kind, chunk, w.pc_lits, demand)?,
+        Direction::Consume => subtract_location(ctx, heap, kind, chunk, w.pc_lits, demand)?,
         Direction::Produce => heap_union(ctx, heap, kind, chunk, w.pc_lits),
     };
     let perm_id = perm.to_id(ctx);
@@ -2141,7 +2187,7 @@ fn eval_sub_yield(
             "purify: consume of an unheld location",
         ));
     }
-    let out = heap_subtract(
+    let out = subtract_location(
         ctx,
         &base_h,
         &kind,
@@ -3129,14 +3175,7 @@ fn qp_perm_at(
 ) -> Result<Option<ChunkPerm>, VerifyError> {
     let q = &*chunk.q;
     let call = q.loc_call();
-    let func = crate::verify::func_registry::func_id_for_member(call.function);
-    let class = ctx.egraph.find(addr);
-    let Some(args) = ctx.egraph[class].nodes.iter().find_map(|n| match n {
-        Symbolic::FuncApp(f, tys, args) if *f == func && **tys == call.type_args[..] => {
-            Some(args.clone())
-        }
-        _ => None,
-    }) else {
+    let Some(args) = addr_call_args(ctx, call, addr) else {
         return Ok(None);
     };
     assert_eq!(
@@ -3156,14 +3195,8 @@ fn qp_perm_at(
         .collect();
     let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.guard)?;
 
+    let perm = gate_on_args(ctx, inst.perm, &inst.loc_args, &args);
     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    let mut perm = inst.perm;
-    for (&got, &want) in inst.loc_args.iter().zip(args.iter()).rev() {
-        if ctx.egraph.find(got) != ctx.egraph.find(want) {
-            let eq = expr!(ctx, { got } == { want });
-            perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
-        }
-    }
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
     // What was exhaled from this set, each gated by its exhale's path condition.
     for taken in chunk.taken.iter() {
@@ -3174,25 +3207,59 @@ fn qp_perm_at(
                     .expect("a taken chunk set applies the same address function");
                 gate_perm_by_guard(ctx, &p, &set.guard)
             }
-            // A single location counts only where it is `addr`.
+            // A single location counts only where it is `addr`: compared by
+            // address arguments, as the set's own instance is (address
+            // functions are uninterpreted, so `f(a) = f(b)` does not reduce).
             QPTaken::Single {
                 addr: at,
                 perm: p,
                 guard,
             } => {
                 let p = gate_perm_by_guard(ctx, p, guard);
-                if ctx.egraph.find(*at) == ctx.egraph.find(addr) {
-                    p
-                } else {
-                    let eq = expr!(ctx, { *at } == { addr });
-                    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-                    ChunkPerm::select(ctx, eq, p, zero)
-                }
+                let at_args = addr_call_args(ctx, call, *at)
+                    .expect("a single take from a set is at an address of its kind");
+                gate_on_args(ctx, p, &at_args, &args)
             }
         };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
     Ok(Some(perm))
+}
+
+/// The arguments of `addr` as an application of `call`'s address function (the
+/// receiver of a field, the argument tuple of a predicate), or `None` when its
+/// e-class holds no such application.
+fn addr_call_args(
+    ctx: &VerifyContext<'_>,
+    call: &vmir::FunctionCall,
+    addr: egg::Id,
+) -> Option<Box<[egg::Id]>> {
+    let func = crate::verify::func_registry::func_id_for_member(call.function);
+    let class = ctx.egraph.find(addr);
+    ctx.egraph[class].nodes.iter().find_map(|n| match n {
+        Symbolic::FuncApp(f, tys, args) if *f == func && **tys == call.type_args[..] => {
+            Some(args.clone())
+        }
+        _ => None,
+    })
+}
+
+/// `perm` where the two address argument tuples agree, `0` elsewhere. Arguments
+/// already in one e-class add no gate.
+fn gate_on_args(
+    ctx: &mut VerifyContext<'_>,
+    mut perm: ChunkPerm,
+    got: &[egg::Id],
+    want: &[egg::Id],
+) -> ChunkPerm {
+    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    for (&g, &w) in got.iter().zip(want).rev() {
+        if ctx.egraph.find(g) != ctx.egraph.find(w) {
+            let eq = expr!(ctx, { g } == { w });
+            perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
+        }
+    }
+    perm
 }
 
 /// Everything `heap` holds at `addr`: the single chunks' summary plus each
