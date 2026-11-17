@@ -431,7 +431,29 @@ fn eval_pure_inst(
                             "purify: deref outside footprint",
                         ));
                     }
-                    (ctx.fresh_symbolic_value(ty.clone()), None)
+                    // No single chunk: a quantified chunk set that frames the
+                    // read (the same proof as the `Deref` obligation) holds the
+                    // value in its map. Several framing sets: the first is
+                    // taken (sound; their agreement is not assumed yet).
+                    let framing = state.loc_kind(loc).and_then(|k| {
+                        let i = qp_framing(ctx, &heap, &k, addr, |ctx, p| {
+                            prove_perm_positive(ctx, p, pc_lits)
+                        })?;
+                        Some((k, i))
+                    });
+                    match framing {
+                        Some((k, i)) => {
+                            let map = heap.qp_chunks_of(&k)[i].value_map;
+                            let lookup = ctx.alloc.value_map(&k).lookup;
+                            let v = ctx.add(Symbolic::FuncApp(
+                                lookup,
+                                Box::new([]),
+                                Box::new([map, addr]),
+                            ));
+                            (v, None)
+                        }
+                        None => (ctx.fresh_symbolic_value(ty.clone()), None),
+                    }
                 }
             }
         }
@@ -1268,9 +1290,10 @@ fn eval_heap_inst(
                 // permission. The heap is left as is: values at QP locations are
                 // not tracked yet (a read there yields a fresh value), and adding
                 // a single chunk would duplicate the permission the set holds.
-                let writable = qp_proves(ctx, &h, &kind, addr, |ctx, p| {
+                let writable = qp_framing(ctx, &h, &kind, addr, |ctx, p| {
                     prove_perm_write(ctx, p, &kind.bound, &pc_lits)
-                });
+                })
+                .is_some();
                 return if writable {
                     Ok(h)
                 } else {
@@ -2831,18 +2854,19 @@ fn qp_perm_at(
     Ok(Some(perm))
 }
 
-/// Whether some quantified chunk set of `heap` holds a permission at `addr`
-/// that satisfies `prove` (enough to read, enough to write), its inhale guard
-/// folded in exactly as for a [`Chunk`] ([`Chunk::gated_perm`]). Each set is
-/// tried on its own: no sum with other chunks yet.
-fn qp_proves(
+/// The index (in `heap.qp_chunks_of(kind)`) of the first quantified chunk set
+/// that holds a permission at `addr` satisfying `prove` (enough to read, enough
+/// to write), its inhale guard folded in exactly as for a [`Chunk`]
+/// ([`Chunk::gated_perm`]). Each set is tried on its own: no sum with other
+/// chunks yet.
+fn qp_framing(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
     kind: &LocationKind,
     addr: egg::Id,
     mut prove: impl FnMut(&mut VerifyContext<'_>, &ChunkPerm) -> bool,
-) -> bool {
-    heap.qp_chunks_of(kind).iter().any(|chunk| {
+) -> Option<usize> {
+    heap.qp_chunks_of(kind).iter().position(|chunk| {
         match qp_perm_at(ctx, chunk, addr) {
             Ok(Some(p)) => {
                 let p = crate::verify::heap::gate_perm_by_guard(ctx, &p, &chunk.guard);
@@ -3453,9 +3477,10 @@ fn inst_obligations(
                 // No single chunk: a quantified chunk set may still frame it.
                 // Each set is tried on its own (no sum with other chunks yet).
                 None if state.loc_kind(loc).is_some_and(|k| {
-                    qp_proves(ctx, &held, &k, addr, |ctx, p| {
+                    qp_framing(ctx, &held, &k, addr, |ctx, p| {
                         prove_perm_positive(ctx, p, pc_lits)
                     })
+                    .is_some()
                 }) =>
                 {
                     vec![]
