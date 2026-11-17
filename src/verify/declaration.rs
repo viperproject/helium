@@ -2850,10 +2850,9 @@ fn check_forall_wd(
     // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
     // The certificate recipe (if one is being built) is paused: the WD walk's
     // scratch evaluation must not mirror steps into the host's recipe.
-    let recipe = ctx.recipe.take();
-    let res = ctx.with_scratch_graph(|ctx| check_forall_wd_in_scratch(ctx, q, host, host_pc));
-    ctx.recipe = recipe;
-    res
+    ctx.pause_recipe(|ctx| {
+        ctx.with_scratch_graph(|ctx| check_forall_wd_in_scratch(ctx, q, host, host_pc))
+    })
 }
 
 fn check_forall_wd_in_scratch(
@@ -2990,6 +2989,20 @@ fn quant_chunk_from_caps(
 /// address call (both guaranteed by `lower_quant_chunks`); anything else is a
 /// lowering bug and panics.
 fn eval_qp_instance(
+    ctx: &mut VerifyContext<'_>,
+    caps: &[(usize, egg::Id)],
+    q: &vmir::QuantChunks,
+    binders: &[egg::Id],
+    host_pc: &[(egg::Id, Polarity)],
+) -> Result<QpInstance, VerifyError> {
+    // The instance only feeds proofs (injectivity, containment, a lookup's
+    // permission); its terms never enter a certificate, and its temps carry no
+    // recipes. A read's certificate term is `lookup(seed, addr)`, built by the
+    // `Deref` itself.
+    ctx.pause_recipe(|ctx| eval_qp_instance_unrecorded(ctx, caps, q, binders, host_pc))
+}
+
+fn eval_qp_instance_unrecorded(
     ctx: &mut VerifyContext<'_>,
     caps: &[(usize, egg::Id)],
     q: &vmir::QuantChunks,

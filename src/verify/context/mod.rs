@@ -265,6 +265,19 @@ impl<'a> VerifyContext<'a> {
         member_name_in(self.interner, self.decls, m)
     }
 
+    /// Run `f` with the certificate recipe (if one is being built) switched
+    /// off, and switch it back on afterwards. For evaluation that only feeds a
+    /// proof — a scratch-graph side check, re-evaluating a quantified
+    /// permission's body at an address — and must not mirror steps into the
+    /// certificate: none of its terms are part of the body's pure meaning.
+    pub(crate) fn pause_recipe<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let recipe = self.recipe.take();
+        let res = f(self);
+        debug_assert!(self.recipe.is_none(), "a recipe was started while paused");
+        self.recipe = recipe;
+        res
+    }
+
     /// Parameter and return types of function declaration `func` at
     /// instantiation `tys`: ordinary, domain, and field/predicate address
     /// functions alike.
