@@ -1,7 +1,7 @@
 use crate::dhash::HashMap;
 use std::rc::Rc;
 
-use crate::verify::cert::{PermRecipe, SlotShape};
+use crate::verify::cert::{PermRecipe, SeedRef, SlotShape};
 use crate::verify::heap::QuantChunk;
 use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
 use crate::vmir::display::VmirDisplay;
@@ -1181,11 +1181,11 @@ fn eval_heap_inst(
                         let elem = kind.value.clone();
                         let rb = ctx.recipe.as_mut().unwrap();
                         let i = rb.pending_slots.len();
-                        let seed = rb.emit_seed(crate::verify::cert::SeedRef::SlotValue(i));
+                        let seed = rb.emit_seed(SeedRef::SlotValue(i));
                         rb.pending_slots.push((
                             kind.clone(),
                             elem,
-                            crate::verify::cert::SlotShape::Single {
+                            SlotShape::Single {
                                 addr: addr_r,
                                 perm: perm_r,
                             },
@@ -1205,27 +1205,48 @@ fn eval_heap_inst(
         }
         HeapInst::AddForall { base, q, bind } => {
             let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
-            let value_map = match bind {
-                Bind::Fresh => ctx.fresh_symbolic_value(map_ty),
-                Bind::Bound(v) => state.get_val(ctx, v),
+            let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
+            let (value_map, recipe) = match bind {
+                Bind::Fresh => {
+                    debug_assert!(
+                        ctx.recipe.is_none(),
+                        "`with fresh` inside a resource body"
+                    );
+                    (ctx.fresh_symbolic_value(map_ty), None)
+                }
+                Bind::Bound(v) => (state.get_val(ctx, v), state.recipe_of(v)),
+                // A resource body's footprint slot: record the chunk set in the
+                // certificate under construction. Its value map is the seed
+                // `SlotValue(i)`, supplied at graft time; the captured values
+                // are kept as recipes so a call site can re-evaluate the body.
                 Bind::SelfSlot => {
-                    return Err(VerifyError::Unimplemented(
-                        "quantified permission in a resource footprint",
+                    let caps = q
+                        .free_temps()
+                        .into_iter()
+                        .map(|k| Ok((k, state.require_recipe(&Val::Temp(k), OPERAND_RECIPE)?)))
+                        .collect::<Result<Vec<_>, VerifyError>>()?;
+                    let rb = ctx
+                        .recipe
+                        .as_mut()
+                        .expect("`with self` outside a resource-body (certificate) walk");
+                    let i = rb.pending_slots.len();
+                    let seed = rb.emit_seed(SeedRef::SlotValue(i));
+                    rb.pending_slots.push((
+                        kind.clone(),
+                        map_ty.clone(),
+                        SlotShape::Quant {
+                            q: Rc::new((**q).clone()),
+                            caps,
+                        },
                     ));
+                    (ctx.fresh_symbolic_value(map_ty), Some(seed))
                 }
             };
-            // A resource body (certificate walk, `with self`) must record the
-            // chunk set as footprint; until it does, an exhale of that resource
-            // would consume nothing, so refuse rather than build an empty
-            // footprint.
-            if ctx.recipe.is_some() {
-                return Err(VerifyError::Unimplemented(
-                    "quantified permission in a resource footprint",
-                ));
-            }
             let base_h = get_heap(state, base);
-            let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
-            let chunk = quant_chunk_of(ctx, state, q, pc, value_map)?;
+            let chunk = QuantChunk {
+                recipe,
+                ..quant_chunk_of(ctx, state, q, pc, value_map)?
+            };
             Ok(base_h.with_qp_chunk(&kind, chunk))
         }
         // Exhale a chunk set `E`: find one held set `Q` that covers it
@@ -1319,6 +1340,8 @@ fn eval_heap_inst(
                     ));
                     let new_chunk = QuantChunk {
                         value_map: new_map,
+                        // The old map's recipe no longer names the new map.
+                        recipe: None,
                         ..chunk.clone()
                     };
                     Ok(h.with_qp_chunk_replaced(&kind, index, new_chunk))
@@ -2775,6 +2798,7 @@ fn quant_chunk_of(
         guard: pc_lits.into(),
         taken: Rc::from([]),
         value_map,
+        recipe: None,
     })
 }
 
