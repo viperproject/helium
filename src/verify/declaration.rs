@@ -1352,6 +1352,43 @@ fn decls_qp_kinds(
     out
 }
 
+/// The address functions (field and predicate locations, applied with an
+/// address result type) anywhere in the program: method, resource and function
+/// bodies and the bodies of quantified permissions. Only these are injective;
+/// a resource's member also names its boolean contract function, which is why
+/// the result type decides.
+fn decls_addr_funcs(
+    decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
+) -> crate::dhash::HashSet<crate::verify::lang::FuncId> {
+    fn scan(insts: &[vmir::Inst], out: &mut crate::dhash::HashSet<crate::verify::lang::FuncId>) {
+        for i in insts {
+            match &i.kind {
+                InstKind::Pure(Type::Addr { .. }, PureInst::FunctionCall(fc)) => {
+                    out.insert(crate::verify::func_registry::func_id_for_member(fc.function));
+                }
+                InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
+                    scan(&q.body.insts, out)
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = crate::dhash::HashSet::default();
+    for d in decls.iter() {
+        match d {
+            vmir::Declaration::Method(m) => scan(&m.flatten(), &mut out),
+            vmir::Declaration::Resource(r) => scan(&r.body.insts, &mut out),
+            vmir::Declaration::Function(f) => {
+                if let Some(b) = &f.body {
+                    scan(&b.insts, &mut out)
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn decls_use_coll(
     decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
     kind: CollKind,
@@ -1516,6 +1553,15 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
             ctx.func_ret_types.entry(f).or_insert(ret);
         }
         ctx.egraph.rebuild();
+    }
+    // Field and predicate addresses are injective
+    // (`rewrite::address_injectivity_rule`): `a != b` decides `f(a) != f(b)`,
+    // which value maps (a read after a write), single takes from a chunk set
+    // and the aliasing gates of single chunks compare.
+    let addr_funcs = decls_addr_funcs(&program.decls);
+    if !addr_funcs.is_empty() {
+        ctx.axiom_rules
+            .push(crate::verify::rewrite::address_injectivity_rule(addr_funcs));
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`
     // guarantees a function only calls functions verified earlier, so every

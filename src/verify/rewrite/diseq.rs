@@ -2,7 +2,7 @@
 //! information about its arguments, plus the contra-congruence and
 //! distinguishing-observation appliers.
 
-use crate::dhash::HashMap;
+use crate::dhash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egg::{Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var};
@@ -519,5 +519,108 @@ impl Applier<Symbolic, ConstFold> for UnionEqArgs {
 
     fn vars(&self) -> Vec<Var> {
         vec![self.a, self.b]
+    }
+}
+
+/// `address-injectivity`: a field or predicate **address function** is
+/// injective, since two locations are the same location exactly when their
+/// arguments are. For an `==` between two applications of the same address
+/// function `g` (one of `funcs`, collected by the verifier from the program),
+/// its class gains the argument-wise equality:
+///
+/// ```text
+/// g(a) == g(b)              ≡  a == b
+/// g(a1, a2) == g(b1, b2)    ≡  ite(a1 == b1, a2 == b2, false)
+/// ```
+///
+/// so a disproven argument pair decides the address equality `false` (and
+/// all-proven pairs decide it `true`). Arguments already in one class are left
+/// out of the conjunction. Demand-driven: it only looks at `==` nodes that
+/// exist, so an address no one compares costs nothing.
+pub(crate) fn address_injectivity_rule(funcs: HashSet<FuncId>) -> Rule {
+    timed(bucket_rule(
+        "address-injectivity",
+        EqBucketSearcher,
+        AddrInjectivityApplier {
+            funcs,
+            memo: Memo::new(),
+        },
+    ))
+}
+
+/// Applier for [`address_injectivity_rule`].
+pub(super) struct AddrInjectivityApplier {
+    /// The address functions: members applied with an address result type.
+    funcs: HashSet<FuncId>,
+    /// Cost guard, keyed by the function and the canonical pair of address
+    /// classes it related (re-deriving is idempotent — the unions no-op).
+    memo: Memo<(FuncId, [Id; 2])>,
+}
+
+impl Applier<Symbolic, ConstFold> for AddrInjectivityApplier {
+    fn apply_one(
+        &self,
+        egraph: &mut EGraph<Symbolic, ConstFold>,
+        eclass: Id,
+        _subst: &Subst,
+        _searcher_ast: Option<&PatternAst<Symbolic>>,
+        _rule_name: Symbol,
+    ) -> Vec<Id> {
+        // The differing argument pairs of each address equality in this class.
+        let mut found: Vec<Vec<[Id; 2]>> = Vec::new();
+        for node in &egraph[eclass].nodes {
+            let Symbolic::Binary(BinOp::Eq, [l, r]) = node else {
+                continue;
+            };
+            let (l, r) = (egraph.find(*l), egraph.find(*r));
+            if l == r {
+                continue;
+            }
+            'apps: for lapp in &egraph[l].nodes {
+                let Symbolic::FuncApp(f, ltys, largs) = lapp else {
+                    continue;
+                };
+                if !self.funcs.contains(f) {
+                    continue;
+                }
+                for rapp in &egraph[r].nodes {
+                    let Symbolic::FuncApp(g, rtys, rargs) = rapp else {
+                        continue;
+                    };
+                    if g != f || rtys != ltys || rargs.len() != largs.len() {
+                        continue;
+                    }
+                    if self.memo.insert((*f, [l, r])) {
+                        found.push(
+                            largs
+                                .iter()
+                                .zip(rargs.iter())
+                                .map(|(a, b)| [egraph.find(*a), egraph.find(*b)])
+                                .filter(|[a, b]| a != b)
+                                .collect(),
+                        );
+                    }
+                    break 'apps;
+                }
+            }
+        }
+        let mut changed = Vec::new();
+        for pairs in found {
+            // No differing pair: the applications are congruent, and the
+            // e-graph has already merged `l` and `r`.
+            let Some((&[a, b], rest)) = pairs.split_last() else {
+                continue;
+            };
+            let false_ = egraph.add(Symbolic::Lit(Literal::Bool(false)));
+            let mut conj = egraph.add(Symbolic::Binary(BinOp::Eq, [a, b]));
+            for &[a, b] in rest.iter().rev() {
+                let eq = egraph.add(Symbolic::Binary(BinOp::Eq, [a, b]));
+                conj = egraph.add(Symbolic::Ite([eq, conj, false_]));
+            }
+            if egraph.union(eclass, conj) {
+                changed.push(egraph.find(eclass));
+            }
+        }
+        changed
     }
 }
