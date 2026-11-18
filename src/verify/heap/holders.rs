@@ -13,8 +13,9 @@ use crate::verify::heap::{
     Chunk, ChunkPerm, Heap, LocationKind, QPTaken, gate_perm_by_guard,
 };
 use crate::verify::lang::Symbolic;
-use crate::verify::heap::interface::Value;
-use crate::vmir::{Polarity, Type, Val};
+use crate::verify::heap::interface::{ReadRecipe, Value};
+use crate::verify::rewrite::AxiomPure;
+use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
 
 /// One holder of a permission at an address (see [`holders_at`]): its share
 /// there and the value it holds there.
@@ -164,15 +165,17 @@ fn value_at(
 /// The value at `addr` (of `kind`) from its `holders`, `None` when there are
 /// none. Outside a certificate walk it is [`value_at`]. A certificate names one
 /// holder instead: the first known to hold a positive share, with its recipe
-/// (a chunk set's is `lookup(map, addr)`, built from the address recipe
-/// `addr_r`; without one the recipe is `None`). `None` too when no holder is
-/// known positive there.
+/// (see [`holder_recipe`]). `None` too when no holder is known positive there.
+///
+/// Naming one holder drops what the others hold there, and the walk runs in a
+/// scratch graph, so their agreement would not reach a graft site. It is
+/// recorded in the certificate instead (see [`record_agreements`]).
 pub(super) fn pick_value(
     ctx: &mut VerifyContext<'_>,
     kind: &LocationKind,
     holders: &[Holder],
     pc_lits: &[(egg::Id, Polarity)],
-    addr_r: Option<&Val>,
+    read_recipe: Option<&ReadRecipe>,
 ) -> Option<Value> {
     if holders.is_empty() {
         return None;
@@ -180,26 +183,95 @@ pub(super) fn pick_value(
     if ctx.recipe.is_none() {
         return Some(Value::plain(value_at(ctx, holders, &kind.value, pc_lits)));
     }
-    let h = holders
+    let k = holders
         .iter()
-        .find(|h| prove_perm_positive(ctx, &h.perm, pc_lits))?;
-    let recipe = match (&h.source, addr_r) {
+        .position(|h| prove_perm_positive(ctx, &h.perm, pc_lits))?;
+    let addr_r = read_recipe.and_then(|r| r.addr.as_ref());
+    let recipe = holder_recipe(ctx, kind, &holders[k], addr_r);
+    record_agreements(ctx, kind, holders, k, recipe.as_ref(), read_recipe, pc_lits);
+    Some(Value {
+        id: holders[k].value,
+        recipe,
+    })
+}
+
+/// The recipe naming what `h` holds at the address in a certificate walk: a
+/// single chunk's own recipe, `lookup(map, addr)` for a chunk set (from its
+/// map's recipe and the address recipe `addr_r`). `None` when a part is
+/// missing.
+fn holder_recipe(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    h: &Holder,
+    addr_r: Option<&Val>,
+) -> Option<Val> {
+    match (&h.source, addr_r) {
         (HolderSource::Chunk(r), _) => r.clone(),
         (HolderSource::Set(Some(map_r)), Some(addr_r)) => {
             let lookup = ctx.alloc.value_map(kind).lookup;
-            let rb = ctx.recipe.as_mut().unwrap();
-            Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
+            let rb = ctx.recipe.as_mut().expect("holder recipe outside a certificate walk");
+            Some(rb.emit(AxiomPure::App {
                 func: lookup,
                 type_args: vec![],
                 args: vec![map_r.clone(), addr_r.clone()],
             }))
         }
         (HolderSource::Set(_), _) => None,
-    };
-    Some(Value {
-        id: h.value,
-        recipe,
-    })
+    }
+}
+
+/// In a certificate walk, the agreement between the named holder `holders[k]`
+/// and every later holder also known to hold a positive share: a location has
+/// one value. Assumed here, under the pc, and recorded in the certificate as
+/// `pc_r ==> v_k == v_j` (the read's recipe-space pc folded in), which each
+/// graft site assumes (see `walk_footprint`).
+///
+/// Guarding by the pc alone is sound because positivity was proven here from
+/// what the certificate itself carries: the params, the slot permissions and
+/// the body's conjuncts, all reproduced (assumed or proven) at a graft site
+/// before the agreement is assumed.
+///
+/// A pair without a recipe on either side, or a read without a recipe-space
+/// pc, records nothing: the graft site then knows less, never too much.
+fn record_agreements(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    holders: &[Holder],
+    k: usize,
+    named_r: Option<&Val>,
+    read_recipe: Option<&ReadRecipe>,
+    pc_lits: &[(egg::Id, Polarity)],
+) {
+    let addr_r = read_recipe.and_then(|r| r.addr.as_ref());
+    let pc_r = read_recipe.and_then(|r| r.pc.as_ref());
+    let vk = holders[k].value;
+    for h in &holders[k + 1..] {
+        if ctx.egraph.find(vk) == ctx.egraph.find(h.value) {
+            continue;
+        }
+        if !prove_perm_positive(ctx, &h.perm, pc_lits) {
+            continue;
+        }
+        let eq = expr!(ctx, { vk } == { h.value });
+        ctx.assume_guarded(eq, pc_lits.iter().rev().copied());
+        let (Some(named_r), Some(pc_r)) = (named_r, pc_r) else {
+            continue;
+        };
+        let Some(other_r) = holder_recipe(ctx, kind, h, addr_r) else {
+            continue;
+        };
+        let rb = ctx.recipe.as_mut().expect("agreement outside a certificate walk");
+        let mut fact = rb.emit(AxiomPure::Binary(BinOp::Eq, named_r.clone(), other_r));
+        let true_ = Val::Literal(Literal::Bool(true));
+        // Outermost-first, folded innermost-first (as `implication` does).
+        for (g, pol) in pc_r.iter().rev() {
+            fact = rb.emit(match pol {
+                Polarity::Positive => AxiomPure::Ternary(g.clone(), fact, true_.clone()),
+                Polarity::Negative => AxiomPure::Ternary(g.clone(), true_.clone(), fact),
+            });
+        }
+        rb.record_side_fact(fact);
+    }
 }
 
 /// Consume the single-location `chunk` from `heap`: from the single chunks

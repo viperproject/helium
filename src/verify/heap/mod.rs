@@ -4,7 +4,7 @@ mod holders;
 mod interface;
 mod quantified_permissions;
 
-pub(crate) use interface::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
+pub(crate) use interface::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, ReadRecipe, Value};
 
 use std::cell::Cell;
 use std::rc::Rc;

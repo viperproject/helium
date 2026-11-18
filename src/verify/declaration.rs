@@ -717,6 +717,21 @@ fn walk_footprint(
             ctx.assume_guarded(bool_id, bool_guard.iter().rev().copied());
         }
     }
+    // The side facts the certificate walk recorded (today: holder agreements)
+    // hold in every heap the resource describes, so they are assumed in both
+    // directions. Producing, the slots are about to be held with the shares
+    // the walk proved positive; consuming, they were just taken from holders
+    // that held them. After the body boolean, whose conjuncts those proofs
+    // rested on.
+    for side_fact in &def.side_facts {
+        let fact = side_fact.build(
+            &mut ctx.egraph,
+            |r| r.resolve(args, &values),
+            pc_lits,
+            &mut changed,
+        );
+        ctx.assume_guarded(fact, bool_guard.iter().rev().copied());
+    }
     Ok(FootprintResult {
         heap,
         members,
@@ -2229,6 +2244,7 @@ pub(crate) fn verify_resource(
     Ok(ResourceDefinition {
         footprint,
         bool: rb.slice_with_tokens(&bool_r)?,
+        side_facts: rb.slice_side_facts()?,
     })
 }
 
