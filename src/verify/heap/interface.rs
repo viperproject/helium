@@ -33,7 +33,8 @@ use crate::verify::heap::algebra::{
 };
 use crate::verify::heap::holders::{HolderAt, holders_at, pick_value, subtract_location, sum_perms};
 use crate::verify::heap::quantified_permissions::{
-    check_qp_nonnegative, find_covering_qp, quant_chunk_from_caps, quant_chunk_injective,
+    check_qp_nonnegative, covered_by_sum, find_covering_qp, quant_chunk_from_caps,
+    quant_chunk_injective, take_spread,
     take_from_qp,
 };
 use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind, QuantChunk};
@@ -261,7 +262,17 @@ impl Heap {
                     ctx.fresh_symbolic_value(Type::ValueMap(Box::new(spec.q.loc_ty.clone())));
                 let exhaled = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, placeholder)?;
                 let Some(i) = find_covering_qp(ctx, self, &kind, &exhaled)? else {
-                    return Err(VerifyError::InsufficientPermission);
+                    // No single set covers it: try all holders together. The
+                    // exhaled set's values are then not tied to theirs yet (a
+                    // fresh map: sound, but its snapshot says nothing).
+                    if !covered_by_sum(ctx, self, &kind, &exhaled)? {
+                        return Err(VerifyError::InsufficientPermission);
+                    }
+                    let heap = match mode {
+                        ConsumeMode::Take => take_spread(ctx, self, &kind, exhaled)?,
+                        ConsumeMode::Frame => self.clone(),
+                    };
+                    return Ok((heap, Value::plain(placeholder)));
                 };
                 let held = &self.qp_chunks_of(&kind)[i];
                 let value = Value {

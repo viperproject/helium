@@ -29,7 +29,8 @@ use std::sync::Arc;
 use egg::Id;
 
 use crate::verify::eval::{EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw};
-use crate::verify::heap::{Heap, LocationKind, QPTaken, QuantChunk, gate_perm_by_guard};
+use crate::verify::heap::holders::{HolderAt, greedy_takes, holders_at, sum_perms};
+use crate::verify::heap::{Chunk, Heap, LocationKind, QPTaken, QuantChunk, gate_perm_by_guard};
 use crate::vmir;
 
 use crate::verify::context::VerifyContext;
@@ -466,6 +467,15 @@ pub(super) fn qp_perm_at(
                     ChunkPerm::select(ctx, eq, p, zero)
                 }
             }
+            QPTaken::Share {
+                demand,
+                before,
+                holder,
+                guard,
+            } => {
+                let take = share_at(ctx, demand, before, HolderAt::Set(*holder), addr, guard)?;
+                gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), guard)
+            }
         };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
@@ -534,6 +544,89 @@ pub(super) fn find_covering_qp(
         }
     }
     Ok(None)
+}
+
+/// Whether the exhaled set is covered by everything `heap` holds together: at
+/// each location it names, its amount is at most the sum over all holders
+/// there ([`holders_at`]). The fallback when no single held set covers it.
+pub(super) fn covered_by_sum(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    exhaled: &QuantChunk,
+) -> Result<bool, VerifyError> {
+    let q = &exhaled.q;
+    check_qp_contained(
+        ctx,
+        q,
+        &exhaled.guard,
+        &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &exhaled.guard),
+        &mut |ctx, addr| {
+            let holders = holders_at(ctx, heap, kind, addr, &exhaled.guard)?;
+            Ok(Some(sum_perms(ctx, &holders)))
+        },
+    )
+}
+
+/// What the holder `at` of `before` gives up at `addr` when `demand` is split
+/// greedily over all holders there ([`greedy_takes`]); `0` when `demand` does
+/// not name `addr` or `at` does not hold it. Evaluated under `guard`, the
+/// exhale's path condition.
+fn share_at(
+    ctx: &mut VerifyContext<'_>,
+    demand: &QuantChunk,
+    before: &Heap,
+    at: HolderAt,
+    addr: Id,
+    guard: &[(Id, Polarity)],
+) -> Result<Id, VerifyError> {
+    let zero = expr!(ctx, 0 / 1);
+    let Some(d) = qp_perm_at(ctx, demand, addr)? else {
+        return Ok(zero);
+    };
+    let d = d.to_id(ctx);
+    let kind = LocationKind::from_addr_type(&demand.q.loc_ty).expect("QP loc_ty must be Addr");
+    let holders = holders_at(ctx, before, &kind, addr, guard)?;
+    let takes = greedy_takes(ctx, &holders, d);
+    Ok(holders
+        .iter()
+        .position(|h| h.at == at)
+        .map_or(zero, |i| takes[i]))
+}
+
+/// Take the exhaled set from all holders together, after [`covered_by_sum`]
+/// proved they hold enough. The split is greedy in `holders_at` order: a
+/// single chunk gives up its share at its own address at once; a held set
+/// records a [`QPTaken::Share`], evaluated at each later lookup.
+pub(super) fn take_spread(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    exhaled: QuantChunk,
+) -> Result<Heap, VerifyError> {
+    let guard = exhaled.guard.clone();
+    let mut out = heap.clone();
+    for (i, c) in heap.chunks_of(kind).iter().enumerate() {
+        let take = share_at(ctx, &exhaled, heap, HolderAt::Chunk(i), c.addr, &guard)?;
+        let take = gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), &guard);
+        let rest = crate::verify::heap::algebra::perm_sub_aligned(ctx, c.ungated_perm(), &take);
+        out = out.with_chunk(
+            kind,
+            Chunk::new_perm(c.addr, rest, c.value)
+                .with_recipe(c.recipe.clone())
+                .with_guard(c.guard_pc()),
+        );
+    }
+    for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
+        let set = set.with_taken(QPTaken::Share {
+            demand: exhaled.clone(),
+            before: heap.clone(),
+            holder: i,
+            guard: guard.clone(),
+        });
+        out = out.with_qp_chunk_replaced(kind, i, set);
+    }
+    Ok(out)
 }
 
 /// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
