@@ -449,18 +449,22 @@ pub(super) fn qp_perm_at(
                     .expect("a taken chunk set applies the same address function");
                 gate_perm_by_guard(ctx, &p, &set.guard)
             }
-            // A single location counts only where it is `addr`: compared by
-            // address arguments, as the set's own instance is (address
-            // functions are uninterpreted, so `f(a) = f(b)` does not reduce).
+            // A single location counts only where it is `addr`. Address
+            // functions are injective (`rewrite::address_injectivity_rule`), so
+            // `at == addr` reduces to its arguments.
             QPTaken::Single {
                 addr: at,
                 perm: p,
                 guard,
             } => {
                 let p = gate_perm_by_guard(ctx, p, guard);
-                let at_args = addr_call_args(ctx, call, *at)
-                    .expect("a single take from a set is at an address of its kind");
-                gate_on_args(ctx, p, &at_args, &args)
+                if ctx.egraph.find(*at) == ctx.egraph.find(addr) {
+                    p
+                } else {
+                    let eq = expr!(ctx, { *at } == { addr });
+                    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+                    ChunkPerm::select(ctx, eq, p, zero)
+                }
             }
         };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
