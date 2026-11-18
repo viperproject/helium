@@ -361,13 +361,8 @@ impl Heap {
     }
 
     /// The heap after a branch: `then` where `cond` holds, `els` elsewhere.
-    ///
-    /// Chunk sets are not joined yet: a heap holding one panics.
+    /// Chunk sets are kept from both arms, each under its arm's literal.
     pub(crate) fn merge(ctx: &mut VerifyContext<'_>, cond: egg::Id, then: &Heap, els: &Heap) -> Heap {
-        assert!(
-            !then.has_qp_chunks() && !els.has_qp_chunks(),
-            "joining heaps that hold quantified permissions is not supported"
-        );
         merge_heaps(ctx, cond, then, els)
     }
 
@@ -375,10 +370,6 @@ impl Heap {
     ///
     /// Chunk sets are not summed yet: a heap holding one panics.
     pub(crate) fn union(&self, ctx: &mut VerifyContext<'_>, other: &Heap, pc: &[(egg::Id, Polarity)]) -> Heap {
-        assert!(
-            !self.has_qp_chunks() && !other.has_qp_chunks(),
-            "summing heaps that hold quantified permissions is not supported"
-        );
         union_heaps(ctx, self, other, pc)
     }
 

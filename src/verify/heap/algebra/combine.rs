@@ -5,6 +5,7 @@ use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_push},
 };
+use crate::verify::heap::QuantChunk;
 use crate::vmir::Polarity;
 
 /// Structural control-flow merge of two predecessor exit heaps at a binary join
@@ -101,6 +102,19 @@ pub(in crate::verify::heap) fn merge_heaps(
             };
             if let Some(chunk) = chunk {
                 out = out.with_chunk(kind, chunk);
+            }
+        }
+    }
+    // Chunk sets, naively: every set of each arm is kept, its guard extended by
+    // that arm's branch literal, so it counts only where its arm was taken. A
+    // set held on both arms appears twice under complementary guards: sound,
+    // but nothing after the join can use both copies as one (a write needs one
+    // copy alone to hold write permission).
+    for (arm, pol) in [(h_then, Polarity::Positive), (h_els, Polarity::Negative)] {
+        for (kind, sets) in arm.qps.iter() {
+            for set in sets.iter() {
+                let guard = cube_push(ctx, &set.guard, (cond, pol));
+                out = out.with_qp_chunk(kind, QuantChunk { guard, ..set.clone() });
             }
         }
     }
@@ -224,6 +238,13 @@ pub(in crate::verify::heap) fn union_heaps(
             .with_guard(guard)
             .with_recipe(ca.recipe.clone().or_else(|| cb.recipe.clone()));
         out = out.with_chunk(kind, merged);
+    }
+
+    // Merge QPs in a naive way (a is already contained in out)
+    for (kind, sets) in b.qps.iter() {
+        for set in sets.iter() {
+            out = out.with_qp_chunk(kind, set.clone());
+        }
     }
     ctx.egraph.rebuild();
     out
