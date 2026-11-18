@@ -1,924 +1,30 @@
 use crate::dhash::HashMap;
+use crate::verify::heap::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
+use crate::verify::eval::{
+    EvalState, OPERAND_RECIPE, collect_pc_lits, display_heaps, eval_perm,
+    eval_perm_inst, eval_perm_structural, eval_pure_inst, format_inst, get_heap,
+    pc_lits_raw, perm_recipe,
+};
 use std::rc::Rc;
 
 use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
-use crate::verify::heap::{QPTaken, QuantChunk};
-use crate::verify::heap::quantified_permissions::mint_and_assume_inverse_axiom;
-use crate::vmir::display::VmirDisplay;
 use crate::vmir::{CollKind, CollOp, MapOp, SeqOp};
 use crate::{
     verify::{
         cert::{FunctionDefinition, ResourceDefinition},
         context::VerifyContext,
         error::VerifyError,
-        heap::{
-            Chunk, ChunkPerm, Heap, LocationKind,
-            algebra::{
-                Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
-                merge_heaps, perm_add, perm_value, prove_perm_positive, prove_perm_write,
-                prove_sufficient_aligned,
-                chunk_share_at, summarize_perm_at, union_heaps,
-            },
-            gate_perm_by_guard,
-            quantified_permissions::{QpInstance, check_qp_contained, check_qp_injectivity},
-        },
+        heap::{ChunkPerm, Heap, LocationKind},
         lang::Symbolic,
         stats,
         viz::Snapshotter,
     },
     vmir::{
-        self, Assign, BinOp, Bind, Declaration, Function, HeapInst, HeapVal, Inst, InstKind,
+        self, Assign, BinOp, Bind, Function, HeapInst, Inst, InstKind,
         Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
 
-struct EvalState {
-    vals: Vec<egg::Id>,
-    /// The VMIR `Type` of each `vals` entry, kept in lockstep. The location kind
-    /// of an address operand is read straight from here (`loc_kind`) — no e-graph
-    /// inference. Params seed the initial slots; every `Pure` inst pushes its type.
-    val_types: Vec<Type>,
-    /// Recipe provenance of each `vals` entry, kept in lockstep: the
-    /// recipe-space `Val` a certificate walk associates with the body temp
-    /// (`None` when no recipe is built — method bodies — or the value has no
-    /// pure recipe). One counter with `vals`, so the recipe column cannot
-    /// desync from the eval column.
-    recipes: Vec<Option<Val>>,
-    heaps: Vec<Heap>,
-    /// Permission temps (`p`), evaluated at their defining instruction. A `p`
-    /// temp denotes ONE permission: a `wildcard` under it is minted once here, so
-    /// reading the temp twice reads the same share.
-    perms: Vec<ChunkPerm>,
-    /// The defining instruction of each `perms` entry, kept in lockstep. The
-    /// certificate walk needs the permission's *shape* (not its e-classes) to
-    /// slice a [`PermRecipe`], and a `ChunkPerm` has already lost which operands
-    /// it came from.
-    perm_defs: Vec<vmir::PermInst>,
-    /// Blocks proven **unreachable** (method bodies): the block's cube is
-    /// refuted in the ground graph — e.g. after `bb_unreach`'s `inhale false` —
-    /// or every predecessor is. The Stage-4 join merge drops such an arm outright
-    /// instead of selecting a `0`-leaf against it (which would need an
-    /// exhaustiveness split).
-    ///
-    /// Deadness is a property of a BLOCK, not of its exit heap temp: an empty
-    /// block's exit heap is its predecessor's temp, so tagging the temp also
-    /// tagged every live block that passes the same heap through, and a later
-    /// join dropped a live arm.
-    dead_blocks: crate::dhash::HashSet<usize>,
-    /// For the join block being evaluated: whether its (then, else) predecessor
-    /// blocks are dead. The `Merge` reads this; `None` outside a method join.
-    join_arms_dead: Option<(bool, bool)>,
-}
-
-impl EvalState {
-    fn new() -> Self {
-        Self {
-            vals: Vec::new(),
-            val_types: Vec::new(),
-            recipes: Vec::new(),
-            heaps: Vec::new(),
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        }
-    }
-
-    fn with_args(args: Vec<egg::Id>, arg_types: Vec<Type>) -> Self {
-        debug_assert_eq!(args.len(), arg_types.len());
-        // Params are the identity in recipe space.
-        let recipes = (0..args.len()).map(|i| Some(Val::Temp(i))).collect();
-        Self {
-            vals: args,
-            val_types: arg_types,
-            recipes,
-            heaps: Vec::new(),
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        }
-    }
-
-    fn get_val(&self, ctx: &mut VerifyContext<'_>, val: &Val) -> egg::Id {
-        match val {
-            Val::Temp(n) => self.vals[*n],
-            Val::Literal(lit) => ctx.add(Symbolic::Lit(lit.clone())),
-        }
-    }
-
-    /// The recipe-space term of a body operand: a temp's tracked provenance
-    /// (`None` if it has none), a literal as itself.
-    fn recipe_of(&self, val: &Val) -> Option<Val> {
-        match val {
-            Val::Temp(n) => self.recipes[*n].clone(),
-            Val::Literal(lit) => Some(Val::Literal(lit.clone())),
-        }
-    }
-
-    /// `recipe_of` for a certificate-walk operand that must have a recipe.
-    fn require_recipe(&self, val: &Val, what: &'static str) -> Result<Val, VerifyError> {
-        self.recipe_of(val).ok_or(VerifyError::Unimplemented(what))
-    }
-
-    /// The path condition translated into recipe space (guards of an exported
-    /// fact). Errors if a guard value has no recipe.
-    fn recipe_pc(&self, pc: &PathConds) -> Result<Vec<(Val, Polarity)>, VerifyError> {
-        pc.conds
-            .iter()
-            .map(|(v, p)| {
-                self.require_recipe(v, "purify: path-condition value without a recipe")
-                    .map(|r| (r, *p))
-            })
-            .collect()
-    }
-
-    /// The location kind of an address operand, from its tracked VMIR type. A
-    /// non-`Temp` or non-`Addr`-typed operand has no kind (`None`).
-    fn loc_kind(&self, val: &Val) -> Option<LocationKind> {
-        match val {
-            Val::Temp(n) => LocationKind::from_addr_type(&self.val_types[*n]),
-            Val::Literal(_) => None,
-        }
-    }
-
-    /// The evaluation state a quantifier body starts from. Capture is implicit —
-    /// the body indexes *this* table directly (see [`vmir::Forall`]) — so the frame
-    /// is this state cut to `binder_base`, which is the `forall` step's own temp:
-    /// the first binder takes that slot, so the step's own boolean is unnameable
-    /// from inside. Heaps are dropped; a quantifier body is heap-free by
-    /// construction.
-    fn frame_for(&self, q: &vmir::Forall) -> Self {
-        self.frame_at(q.binder_base)
-    }
-
-    /// [`Self::frame_for`] at an explicit `binder_base`. A quantified
-    /// permission's body uses [`Self::frame_from_caps`] instead.
-    fn frame_at(&self, binder_base: usize) -> Self {
-        let mut frame = Self {
-            vals: self.vals.clone(),
-            val_types: self.val_types.clone(),
-            recipes: self.recipes.clone(),
-            heaps: Vec::new(),
-            // A quantifier body is permission-free, like it is heap-free.
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        };
-        // The step itself is not evaluated yet, so the table ends exactly at its
-        // temp; the truncation is a no-op guard, not a cut.
-        debug_assert!(frame.vals.len() >= binder_base);
-        frame.vals.truncate(binder_base);
-        frame.val_types.truncate(binder_base);
-        frame.recipes.truncate(binder_base);
-        frame
-    }
-
-    /// The evaluation state a quantified permission's body starts from, built
-    /// from the captures its chunk stored at the inhale instead of a live state:
-    /// the chunk is a closure, `caps` its environment.
-    ///
-    /// The table is exactly `binder_base` long, so binders and body steps land on
-    /// the temps the body was lowered with. Only the captured slots are filled;
-    /// `caps` is [`vmir::QuantChunks::free_temps`], so no other slot below
-    /// `binder_base` is read. The rest hold an id that is not an e-class, so a
-    /// read of one (a `free_temps` that missed an operand) fails loudly instead
-    /// of silently resolving against an unrelated value.
-    ///
-    /// Types and recipes are placeholders: pure evaluation reads types only to
-    /// classify `Deref`/`Perm` addresses and recipes only in a certificate walk,
-    /// and a quantified permission's body has neither.
-    fn frame_from_caps(binder_base: usize, caps: &[(usize, egg::Id)]) -> Self {
-        const UNCAPTURED: usize = usize::MAX;
-        let mut vals = vec![egg::Id::from(UNCAPTURED); binder_base];
-        for &(k, id) in caps {
-            assert!(
-                k < binder_base,
-                "capture {k} is not below binder_base {binder_base}"
-            );
-            vals[k] = id;
-        }
-        Self {
-            vals,
-            val_types: vec![Type::Bool; binder_base],
-            recipes: vec![None; binder_base],
-            heaps: Vec::new(),
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        }
-    }
-
-    fn push_val(&mut self, id: egg::Id, ty: Type, recipe: Option<Val>) {
-        self.vals.push(id);
-        self.val_types.push(ty);
-        self.recipes.push(recipe);
-    }
-    fn push_heap(&mut self, heap: Heap) {
-        self.heaps.push(heap);
-    }
-    fn push_perm(&mut self, perm: ChunkPerm, def: vmir::PermInst) {
-        self.perms.push(perm);
-        self.perm_defs.push(def);
-    }
-
-    /// Whether a permission operand is wildcard-derived, without evaluating it.
-    /// A `Temp` answers from its already-evaluated `ChunkPerm`, whose `wild` flag
-    /// carries the provenance the e-graph cannot.
-    fn perm_is_wild(&self, pv: &vmir::PermVal) -> bool {
-        match pv {
-            vmir::PermVal::Amount(_) => false,
-            vmir::PermVal::Wildcard => true,
-            vmir::PermVal::Temp(i) => self.perms[*i].has_wild(),
-        }
-    }
-}
-
-/// Render a single instruction (method or resource body) for error context.
-fn format_inst(
-    inst: &Inst,
-    decls: &typed_index_collections::TiVec<MemberId, Declaration>,
-    interner: &lasso::Rodeo,
-    groups: &lasso::Rodeo<lasso::Spur>,
-    val_base: usize,
-    heap_base: usize,
-) -> String {
-    VmirDisplay::new(
-        (val_base, heap_base, 0usize, std::slice::from_ref(inst)),
-        decls,
-        interner,
-        groups,
-    )
-    .to_string()
-    .trim()
-    .to_string()
-}
-
-/// Heap-fetch is monomorphic — `HeapVal` carries no ctx-heap variant. The
-/// caller-supplied ctx heap of a resource body lives at
-/// `state.heaps[0]` by convention (mirroring how params occupy the
-/// initial `vals` slots).
-fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
-    match hv {
-        HeapVal::Empty => Heap::empty(),
-        HeapVal::Temp(n) => state.heaps[*n].clone(),
-    }
-}
-
-/// Heaps to visualize for an instruction, labeled as in VMIR (`h0`, `h1`, …).
-/// For a heap `combine` this is the base operand plus the result; for any other
-/// instruction it is the current working heap (if any). Called after the
-/// instruction has been evaluated, so the result heap sits at `heaps_before`.
-fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec<(String, Heap)> {
-    match kind {
-        InstKind::Heap(
-            HeapInst::Add { base, .. }
-            | HeapInst::Sub { base, .. }
-            | HeapInst::Inhale { base, .. }
-            | HeapInst::Exhale { base, .. },
-        ) => {
-            let mut res = vec![(base.to_string(), get_heap(state, base))];
-            if heaps_before < state.heaps.len() {
-                res.push((
-                    format!("h{heaps_before}"),
-                    state.heaps[heaps_before].clone(),
-                ));
-            }
-            res
-        }
-        _ => state
-            .heaps
-            .last()
-            .map(|h| (format!("h{}", state.heaps.len() - 1), h.clone()))
-            .into_iter()
-            .collect(),
-    }
-}
-
-/// Lower `pc.conds` to live ids, and nothing else. Use this only where the
-/// ambient cube is already accounted for by the caller; every ordinary inst
-/// wants [`collect_pc_lits`].
-fn pc_lits_raw(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    pc: &PathConds,
-) -> Vec<(egg::Id, Polarity)> {
-    pc.conds
-        .iter()
-        .map(|(v, p)| (state.get_val(ctx, v), *p))
-        .collect()
-}
-
-/// The **effective** path condition of an instruction:
-///
-/// ```text
-/// effective_pc(inst) = ambient_cube(phase) ++ inst.pc
-/// ```
-///
-/// `Inst.pc` is a delta (see [`Sink::ambient`](crate::translate::sink)), so the
-/// ambient cube has to be prepended here. `ctx.current_cube()` *is* that ambient:
-/// it is set by `begin_block` before a block's body walk and cleared by
-/// `end_block` before its join walk, which is exactly the phase split the delta
-/// rule names — a join materializes its own cube literals, so there the ambient
-/// is empty and the delta is the whole pc.
-fn collect_pc_lits(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    pc: &PathConds,
-) -> Vec<(egg::Id, Polarity)> {
-    // Owned first: `state.get_val` needs `&mut ctx`.
-    let mut lits = ctx.current_cube().to_vec();
-    lits.extend(pc_lits_raw(ctx, state, pc));
-    lits
-}
-
-/// Error tag for a certificate-walk operand whose recipe is missing — cannot
-/// happen for a value produced by a purifiable inst, so hitting it means an
-/// unsupported source leaked into a function/resource body.
-const OPERAND_RECIPE: &str = "purify: operand without a recipe";
-
-/// Evaluate a `PureInst` into its symbolic e-class id, plus — when a
-/// certificate recipe is being built (`ctx.recipe`) — the recipe-space `Val`
-/// mirroring it (the single-walk replacement of the old purify pass). `pc_lits`
-/// is the path condition of the owning instruction. A `Deref` consults it to
-/// resolve an address that only aliases a held chunk under the branch (e.g.
-/// `y.f` where `x == y` holds on this path); a `FunctionCall` assumes the
-/// callee's `f%pre` token under it (the token's truth is what releases the
-/// callee's body equality and exported facts). Every other variant ignores it.
-///
-/// `recipe_pc` is the *same* path condition before lowering, needed only when a
-/// recipe is being built: a propagated `g%pre` token records it in recipe space
-/// (via [`EvalState::recipe_pc`]) so the token is released only under the
-/// body-internal condition guarding its call. `None` where no recipe-space pc can
-/// be recovered — a trusted axiom body, or a `forall` WD check whose pc is the
-/// concatenation `host_pc ++ inst.pc` with the host half already lowered to ids.
-/// `None` records empty guards, i.e. exactly the pre-guard behavior: it can only
-/// release a token too eagerly, never too late, so it cannot mask a real failure.
-fn eval_pure_inst(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    ty: &Type,
-    pi: &PureInst,
-    pc_lits: &[(egg::Id, Polarity)],
-    recipe_pc: Option<&PathConds>,
-) -> Result<(egg::Id, Option<Val>), VerifyError> {
-    use crate::verify::rewrite::AxiomPure;
-    Ok(match pi {
-        PureInst::Fresh => (ctx.fresh_symbolic_value(ty.clone()), None),
-        PureInst::Binary(op, l, r) => {
-            let lhs = state.get_val(ctx, l);
-            let rhs = state.get_val(ctx, r);
-            let id = ctx.add(Symbolic::Binary(*op, [lhs, rhs]));
-            let recipe = if ctx.recipe.is_some() {
-                let l = state.require_recipe(l, OPERAND_RECIPE)?;
-                let r = state.require_recipe(r, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Binary(*op, l, r)))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::Ternary(c, t, e) => {
-            let cond = state.get_val(ctx, c);
-            let then_ = state.get_val(ctx, t);
-            let else_ = state.get_val(ctx, e);
-            let id = expr!(ctx, if {cond} then {then_} else {else_});
-            let recipe = if ctx.recipe.is_some() {
-                let c = state.require_recipe(c, OPERAND_RECIPE)?;
-                let t = state.require_recipe(t, OPERAND_RECIPE)?;
-                let e = state.require_recipe(e, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Ternary(c, t, e)))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::RealCast(v) => {
-            let inner = state.get_val(ctx, v);
-            let id = ctx.add(Symbolic::RealCast(inner));
-            let recipe = if ctx.recipe.is_some() {
-                let v = state.require_recipe(v, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::RealCast(v)))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::Deref(hv, loc) => {
-            let heap = get_heap(state, hv);
-            let addr = state.get_val(ctx, loc);
-            let kind = state.loc_kind(loc);
-            // With a chunk set of this kind, the location may be held by several
-            // holders at once, so it is read through all of them (`read_at`).
-            let has_sets = kind
-                .as_ref()
-                .is_some_and(|k| !heap.qp_chunks_of(k).is_empty());
-            let chunk = kind
-                .as_ref()
-                .filter(|_| !has_sets)
-                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(k), addr, pc_lits).cloned());
-            match chunk {
-                Some(c) => {
-                    // The chunk's recipe provenance is the deref's pure term —
-                    // per heap state, so a two-state resource reading the same
-                    // address in `h0` and `h1` stays distinct.
-                    let recipe = if ctx.recipe.is_some() {
-                        Some(c.recipe.clone().ok_or(VerifyError::Unimplemented(
-                            "purify: deref outside footprint",
-                        ))?)
-                    } else {
-                        None
-                    };
-                    (c.value, recipe)
-                }
-                None => {
-                    let read = match &kind {
-                        Some(k) if has_sets => {
-                            let addr_r = match ctx.recipe {
-                                Some(_) => Some(state.require_recipe(loc, OPERAND_RECIPE)?),
-                                None => None,
-                            };
-                            read_at(ctx, &heap, k, addr, ty, pc_lits, addr_r.as_ref())?
-                        }
-                        _ => None,
-                    };
-                    match read {
-                        Some((v, r)) if ctx.recipe.is_none() || r.is_some() => (v, r),
-                        _ if ctx.recipe.is_some() => {
-                            return Err(VerifyError::Unimplemented(
-                                "purify: deref outside footprint",
-                            ));
-                        }
-                        _ => (ctx.fresh_symbolic_value(ty.clone()), None),
-                    }
-                }
-            }
-        }
-        PureInst::FunctionCall(fc) => {
-            // A (possibly generic) Silver `function`: `type_args` are the
-            // result-type vars, part of the `FuncApp` node identity (discriminant);
-            // empty for a monomorphic call. Always heap-free: a heap-dependent
-            // function receives its precondition snapshot as an ordinary arg.
-            //
-            // Just add the uninterpreted application, for abstract, heap-free and
-            // heap-dependent callees alike. A verified callee's definitional
-            // equality `f(args) == body` is installed lazily by its own
-            // `rewrite::function_rule`, not eagerly here.
-            let args: Vec<egg::Id> = fc.args.iter().map(|v| state.get_val(ctx, v)).collect();
-            let func_id = crate::verify::func_registry::func_id_for_member(fc.function);
-            let id = ctx.add_func_app_id(
-                func_id,
-                fc.type_args.clone().into(),
-                ty.clone(),
-                args.clone().into(),
-            );
-            // Silicon's `f%pre`, assumed only at call sites. Every genuine
-            // value-position call mints the callee's `f%pre(args)` token node,
-            // whose *presence* lets `rewrite::function_rule` materialize the
-            // callee's body here, and whose *truth* is what releases the resulting
-            // axioms (`tok ==> f == body`, `tok ==> each exported fact`). The one
-            // non-value position is a **contract-function body** (a lowered
-            // pre/post), handled below.
-            //
-            // The truth is assumed under this call's path condition, so a call
-            // under a ternary/implication cannot release the callee's facts onto a
-            // sibling intra-block path. This is the only place a pc enters the
-            // function-unfold encoding; every axiom above inherits it transitively
-            // through the token. `.rev()` because `pc_lits` is outermost-first and
-            // `implication` folds innermost-first (cf. `InstKind::Assume`).
-            //
-            // A callee in the recursion cycle being verified has no cert yet, but
-            // still gets its token: the spec-derived post rule of the batch
-            // (`rewrite::post_rule`) replays the induction hypothesis only behind
-            // it, i.e. only on the path that makes the call.
-            let in_scc = ctx
-                .recipe
-                .as_ref()
-                .is_some_and(|rb| rb.is_recursive_callee(fc.function));
-            if in_scc
-                || ctx
-                    .fn_certs
-                    .is_none_or(|certs| certs.contains_key(&fc.function))
-            {
-                let name = ctx.member_name(fc.function);
-                let tok = ctx.alloc.fn_pre_token(fc.function, &name);
-                let tok_id = ctx.add(Symbolic::FuncApp(tok, Box::new([]), args.into()));
-                ctx.assume_token_guarded(tok_id, pc_lits.iter().rev().copied());
-            }
-            let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = fc
-                    .args
-                    .iter()
-                    .map(|a| state.require_recipe(a, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                // A recursive call (callee in this function's SCC) targets the
-                // limited twin `f'` — uninterpreted, so unfolding this recipe
-                // at a call site stops after one level. Every other callee
-                // keeps its full id and unfolds normally.
-                let rb = ctx.recipe.as_ref().unwrap();
-                let recursive = rb.is_recursive_callee(fc.function);
-                let propagates_recursive = rb.propagates_recursive_token();
-                let func = if recursive {
-                    let name = ctx.member_name(fc.function);
-                    ctx.alloc.limited(fc.function, &name)
-                } else {
-                    func_id
-                };
-                // Precondition propagation (Silicon's `bodyPreconditionPropagation`):
-                // emit the callee's `g%pre(gargs)` token as an orphan recipe step so
-                // that when *this* body is unfolded (its own token present), the
-                // nested token re-materializes and `g` may unfold in turn — the
-                // cascade proceeds down genuine value chains.
-                //
-                // Which calls those are is the **translator's** call, carried on the
-                // inst as `FunctionCall::export`: a value-position use of a Silver
-                // function exports, an obligation call / a call inside a contract
-                // definition / an `@addr` or domain application does not.
-                //
-                // A recursive call propagates too, although it targets the limited
-                // twin `f'`, which has no unfold rule for the token to trigger: the
-                // token is what releases `f`'s post at `f'(gargs)`
-                // (`rewrite::function_post_rule`), and nothing else may. Except in a
-                // postcondition, which is a verifier fact (SCC membership) rather
-                // than the translator's: see
-                // `RecipeBuilder::propagates_recursive_token`.
-                let propagate = fc.export && (!recursive || propagates_recursive);
-                let g_pre = propagate.then(|| {
-                    let name = ctx.member_name(fc.function);
-                    ctx.alloc.fn_pre_token(fc.function, &name)
-                });
-                let rb = ctx.recipe.as_mut().unwrap();
-                let call = rb.emit(AxiomPure::App {
-                    func,
-                    type_args: fc.type_args.clone(),
-                    args: args.clone(),
-                });
-                if let Some(g_pre) = g_pre {
-                    let tok = rb.emit(AxiomPure::App {
-                        func: g_pre,
-                        type_args: Vec::new(),
-                        args,
-                    });
-                    // The callee-internal pc of *this* call, in recipe space: the
-                    // release becomes `f%pre(a) ==> (pc[x:=a] ==> g%pre(gargs))`, so
-                    // a conditionally-called callee's axioms do not fire at args the
-                    // body never calls it at.
-                    let guards = match recipe_pc {
-                        Some(pc) => state.recipe_pc(pc)?,
-                        None => Vec::new(),
-                    };
-                    // The token's value is never consumed, so `RecipeBuilder::slice`
-                    // would prune it as unreachable from the result. Register it as
-                    // a slice root.
-                    rb.record_token_step(tok, guards);
-                }
-                Some(call)
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // A `forall` is a single e-node: the compiled body (its `RecipeId`, interned
-        // program-wide) as payload, the captured terms as children. Nothing is
-        // instantiated here — the one generic rule (`rewrite::forall_rule`) does that
-        // at the next saturation, guarded on this node merging `true`. In a recipe
-        // it is a `Forall` step: replayed at each call site, it rebuilds the
-        // quantifier e-node with the caller's arguments as capture children.
-        PureInst::Forall(q) => {
-            // Compile the quantifier the first time the walk reaches it. Its
-            // capture list is derived, not stored — see `Forall::free_temps`.
-            // Name resolution rides on copies of the two shared refs, so it does
-            // not borrow `ctx` across the `&mut ctx.alloc`.
-            let (interner, decls) = (ctx.interner, ctx.decls);
-            let names = move |m| crate::verify::context::member_name_in(interner, decls, m);
-            let (recipe_id, free) = crate::verify::quant::intern_forall(ctx.alloc, &names, q)?;
-            let free: Vec<Val> = free.iter().map(|&k| Val::Temp(k)).collect();
-            let caps: Box<[egg::Id]> = free.iter().map(|v| state.get_val(ctx, v)).collect();
-            // Stated directly (not inside an instantiated quantifier), so every
-            // type parameter of a generic axiom's quantifier is still open.
-            let type_args = ctx
-                .alloc
-                .quant_table()
-                .read()
-                .expect("recipe table lock")
-                .get(recipe_id)
-                .open_types();
-            let id = ctx.add(Symbolic::Forall(
-                recipe_id,
-                type_args.iter().cloned().collect(),
-                caps,
-            ));
-            let recipe = if ctx.recipe.is_some() {
-                let caps: Vec<Val> = free
-                    .iter()
-                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit_forall(recipe_id, type_args, caps))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // `unwrap(v)`: the `Some` payload of an `Option`. The result type IS the
-        // element type, so it needs no type argument. A certificate walk mirrors
-        // the projection, exactly as a footprint slot's `unwrap(proj_i(s))` does.
-        PureInst::OptionUnwrap(v) => {
-            let opt = state.get_val(ctx, v);
-            let id = ctx.option_unwrap(ty.clone(), opt);
-            let recipe = if ctx.recipe.is_some() {
-                let vr = state.require_recipe(v, OPERAND_RECIPE)?;
-                let unwrap_id = ctx.alloc.option_value();
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                    func: unwrap_id,
-                    type_args: vec![ty.clone()],
-                    args: vec![vr],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // perm(loc): permission amount held at `loc` in the given heap. Has no
-        // pure recipe — a certificate walk rejects it.
-        PureInst::Perm(hv, loc) => {
-            if ctx.recipe.is_some() {
-                return Err(VerifyError::Unimplemented(
-                    "purify: perm in a function or resource body",
-                ));
-            }
-            let heap = get_heap(state, hv);
-            let addr = state.get_val(ctx, loc);
-            let id = match state.loc_kind(loc) {
-                Some(k) => {
-                    let total = perm_total_at(ctx, &heap, &k, addr, pc_lits)?;
-                    perm_value(ctx, total)
-                }
-                None => expr!(ctx, 0 / 1),
-            };
-            (id, None)
-        }
-        // Semantic ADT nodes. Each is a `FuncApp` over a verifier-minted **concept**
-        // id (one per `(head, variant[, field])`, see `verify::func_registry`); the
-        // ground `type_args` ride in the node's operator identity (the discriminant),
-        // so distinct instantiations never merge and the ADT reductions fire
-        // per concept regardless of instantiation.
-        PureInst::AdtCons {
-            adt,
-            type_args,
-            variant,
-            args,
-        } => {
-            let cons = ctx.alloc.cons(*adt, *variant);
-            let arg_ids: Vec<egg::Id> = args.iter().map(|v| state.get_val(ctx, v)).collect();
-            let id =
-                ctx.add_func_app_id(cons, type_args.clone().into(), ty.clone(), arg_ids.into());
-            let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = args
-                    .iter()
-                    .map(|a| state.require_recipe(a, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: cons,
-                    type_args: type_args.clone(),
-                    args,
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::AdtProj {
-            adt,
-            type_args,
-            variant,
-            field,
-            base,
-        } => {
-            let proj = ctx.alloc.proj(*adt, *variant, *field);
-            let base_id = state.get_val(ctx, base);
-            let id = ctx.add_func_app_id(
-                proj,
-                type_args.clone().into(),
-                ty.clone(),
-                Box::new([base_id]),
-            );
-            let recipe = if ctx.recipe.is_some() {
-                let base = state.require_recipe(base, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: proj,
-                    type_args: type_args.clone(),
-                    args: vec![base],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // A discriminator is the tester `Adt::Ctor?(base)`, a `Bool` application;
-        // the `is` / `variant-narrow` rules give it its meaning.
-        PureInst::AdtIs {
-            adt,
-            type_args,
-            variant,
-            base,
-        } => {
-            let tester = ctx.alloc.adt_is(*adt, *variant);
-            let base_id = state.get_val(ctx, base);
-            let id = ctx.add_func_app_id(
-                tester,
-                type_args.clone().into(),
-                Type::Bool,
-                Box::new([base_id]),
-            );
-            let recipe = if ctx.recipe.is_some() {
-                let base = state.require_recipe(base, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: tester,
-                    type_args: type_args.clone(),
-                    args: vec![base],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::Coll { tys, op, args } => {
-            let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
-            let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = args
-                    .iter()
-                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Coll {
-                    tys: tys.clone(),
-                    op: *op,
-                    args,
-                }))
-            } else {
-                None
-            };
-            let id = ctx.add(Symbolic::Coll(tys.clone(), *op, ids.clone()));
-            // A collection equality (`CollOp::is_eq`) shares its class with the
-            // untyped `l == r`, which the rest of equality reasoning reads.
-            if op.is_eq() {
-                let eq = ctx.add(Symbolic::Binary(BinOp::Eq, [ids[0], ids[1]]));
-                ctx.union(id, eq);
-            }
-            (id, recipe)
-        }
-        PureInst::CollLit {
-            kind,
-            elem_ty,
-            elem,
-        } => {
-            let id = state.get_val(ctx, elem);
-            let recipe = if ctx.recipe.is_some() {
-                let elem = state.require_recipe(elem, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::CollLit {
-                    kind: *kind,
-                    elem_ty: elem_ty.clone(),
-                    elem,
-                }))
-            } else {
-                None
-            };
-            (
-                ctx.add(Symbolic::CollLit(*kind, Box::new(elem_ty.clone()), id)),
-                recipe,
-            )
-        }
-    })
-}
-
-fn heap_acc(ctx: &mut VerifyContext<'_>, loc: &Val, perm: ChunkPerm, state: &EvalState) -> Heap {
-    let addr = state.get_val(ctx, loc);
-    // The location kind (group + held value type + bound) comes straight from the
-    // address operand's VMIR `Type::Addr` — no e-graph inference.
-    let kind = state
-        .loc_kind(loc)
-        .expect("acc location must be Addr-typed");
-    let value = ctx.fresh_symbolic_value(kind.value.clone());
-    Heap::empty().with_chunk(&kind, Chunk::new_perm(addr, perm, value))
-}
-
-/// Resolve a [`vmir::PermVal`] to its e-class id, minting a fresh positive share
-/// for a bare `wildcard`. A concrete `Amount` is exactly the value it wraps, so a
-/// non-wildcard program builds the same term it always did.
-///
-/// A `Temp` was evaluated at its defining instruction, so it costs a lookup and
-/// mints nothing: a `p` temp denotes one permission however many times it is read.
-fn eval_perm(ctx: &mut VerifyContext<'_>, state: &EvalState, perm: &vmir::PermVal) -> egg::Id {
-    eval_perm_structural(ctx, state, perm).to_id(ctx)
-}
-
-/// [`eval_perm`], but keeping the permission's **branch structure** as a
-/// [`ChunkPerm`] instead of flattening it into one `Ite` term — the method-body
-/// twin of [`build_perm`], which does the same for a footprint slot.
-///
-/// The term is identical either way (`ChunkPerm::to_id` rebuilds exactly the `Ite`
-/// this used to add); what differs is that the structure is visible ABOVE the
-/// e-graph, so a consume can align the demand's arms against the held permission's
-/// (`prove_sufficient_aligned`, `perm_sub_aligned`) rather than proving against an
-/// opaque `ite`. Without this, `exhale c ==> acc(x.f)` in a *method* stays opaque
-/// even though the same assertion inside a predicate does not.
-///
-/// `ChunkPerm::select` is the smart constructor, so an ungated permission still
-/// builds exactly the `Leaf` it did before.
-fn eval_perm_structural(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    perm: &vmir::PermVal,
-) -> ChunkPerm {
-    match perm {
-        vmir::PermVal::Amount(v) => ChunkPerm::leaf(state.get_val(ctx, v)),
-        vmir::PermVal::Wildcard => ChunkPerm::wild_leaf(ctx.fresh_wildcard()),
-        vmir::PermVal::Temp(i) => state.perms[*i].clone(),
-    }
-}
-
-/// Evaluate a permission *instruction*, the definition of a `p` temp. The one
-/// place a permission gains branch structure in a method body.
-fn eval_perm_inst(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    inst: &vmir::PermInst,
-) -> ChunkPerm {
-    match inst {
-        vmir::PermInst::Ite(c, t, e) => {
-            let c = state.get_val(ctx, c);
-            let t = eval_perm_structural(ctx, state, t);
-            let e = eval_perm_structural(ctx, state, e);
-            ChunkPerm::select(ctx, c, t, e)
-        }
-    }
-}
-
-/// Which consume rule a permission demand selects. Read off the *evaluated*
-/// permission's provenance, which `ChunkPerm::Leaf`'s `wild` flag carries
-/// structurally -- not recognised in the e-graph after the fact, where congruence
-/// can put a wildcard-bearing term into a literal's class. See [`Demand`].
-fn demand_of(perm: &ChunkPerm) -> Demand {
-    if perm.has_wild() {
-        Demand::Wildcard
-    } else {
-        Demand::Concrete
-    }
-}
-
-/// The recipe-space form of a footprint-slot permission (resource certificate
-/// build): the `p` steps the slot's permission reaches, in dependency order, with
-/// each operand replaced by its recipe temp.
-///
-/// Deliberately *not* flattened into pure steps — see [`PermRecipe`] for why the
-/// `wildcard` must stay out of a rebuilt step stream.
-///
-/// The walk memoizes per body temp, so a permission read twice yields one step and
-/// hence one wildcard at graft time, matching what the IR says: a `p` temp is one
-/// permission.
-fn perm_recipe(state: &EvalState, perm: &vmir::PermVal) -> Result<PermRecipe<Val>, VerifyError> {
-    fn leaf(
-        state: &EvalState,
-        pv: &vmir::PermVal,
-        steps: &mut Vec<vmir::PermInst<Val>>,
-        memo: &mut HashMap<usize, usize>,
-    ) -> Result<vmir::PermVal<Val>, VerifyError> {
-        Ok(match pv {
-            vmir::PermVal::Amount(v) => {
-                vmir::PermVal::Amount(state.require_recipe(v, OPERAND_RECIPE)?)
-            }
-            vmir::PermVal::Wildcard => vmir::PermVal::Wildcard,
-            vmir::PermVal::Temp(i) => {
-                if let Some(j) = memo.get(i) {
-                    return Ok(vmir::PermVal::Temp(*j));
-                }
-                let vmir::PermInst::Ite(c, t, e) = &state.perm_defs[*i];
-                let t = leaf(state, t, steps, memo)?;
-                let e = leaf(state, e, steps, memo)?;
-                let c = state.require_recipe(c, OPERAND_RECIPE)?;
-                steps.push(vmir::PermInst::Ite(c, t, e));
-                let j = steps.len() - 1;
-                memo.insert(*i, j);
-                vmir::PermVal::Temp(j)
-            }
-        })
-    }
-    let mut steps = Vec::new();
-    let mut memo = HashMap::default();
-    let res = leaf(state, perm, &mut steps, &mut memo)?;
-    Ok(PermRecipe { steps, res })
-}
 
 /// What a `wildcard` leaf becomes when a footprint slot's permission is grafted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1089,7 +195,7 @@ fn eval_heap_inst(
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
-            Ok(union_heaps(ctx, &ha, &hb, &pc_lits))
+            Ok(ha.union(ctx, &hb, &pc_lits))
         }
         // Block-IR heap join: structural per-chunk SELECT of the two predecessor
         // exit heaps. Emitted at every CFG join by the block lowering.
@@ -1109,10 +215,9 @@ fn eval_heap_inst(
             let cond_id = state.get_val(ctx, cond);
             let h_then = get_heap(state, then_h);
             let h_els = get_heap(state, els_h);
-            Ok(merge_heaps(ctx, cond_id, &h_then, &h_els))
+            Ok(Heap::merge(ctx, cond_id, &h_then, &h_els))
         }
-        // `base ± acc loc perm`: build the single chunk, then union (Add) or
-        // subtract (Sub) it.
+        // `base + acc(loc, perm)` / `base - acc(loc, perm)`.
         HeapInst::Add {
             base, loc, perm, ..
         }
@@ -1125,92 +230,88 @@ fn eval_heap_inst(
                 _ => None,
             };
             let base_h = get_heap(state, base);
-            let cperm = eval_perm_structural(ctx, state, perm);
-            let chunk = heap_acc(ctx, loc, cperm.clone(), state);
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
-            let (kind, ch) = chunk.entries().next().unwrap();
-            let (kind, mut ch) = (kind.clone(), ch.clone());
-            if let Some(bind) = bind {
-                {
-                    // The bind selects the value source. `Fresh` and `SelfSlot`
-                    // agree on the *value* today — `heap_acc` mints a fresh
-                    // symbolic either way — and differ only in provenance: a
-                    // resource body's slot records a `SlotValue(i)` seed that is
-                    // resolved at graft time by whatever the caller passed. So
-                    // this reads the bind rather than inferring the context, but
-                    // is behavior-preserving.
-                    match bind {
-                        // A resource body's footprint slot. Recorded below.
-                        Bind::SelfSlot => debug_assert!(
-                            ctx.recipe.is_some(),
-                            "`with self` outside a resource-body (certificate) walk"
-                        ),
-                        // A method-body produce: an unconstrained value, and no
-                        // certificate is under construction to record it in.
-                        Bind::Fresh => debug_assert!(
-                            ctx.recipe.is_none(),
-                            "`with fresh` inside a resource body — a body that \
-                             mints an observable value is not deterministic"
-                        ),
-                        // The produce half of a desugared `fold`: the chunk
-                        // holds the snapshot the paired `exhale` handed back,
-                        // rather than a fresh value. That shared term IS the
-                        // equation `snap(P(x)) = cons(body)` -- the binding the
-                        // dedicated `Fold` instruction had to preserve is now
-                        // emergent from naming the same `Val` twice.
-                        Bind::Bound(v) => {
-                            let bound = state.get_val(ctx, v);
-                            ch = Chunk::new_perm(ch.addr, cperm.clone(), bound)
-                                .with_recipe(state.recipe_of(v));
-                        }
-                    }
-                    // A resource body's `acc` records a footprint slot in the
-                    // certificate under construction: its value is the seed
-                    // placeholder `SlotValue(i)` (supplied at graft time), its
-                    // address/permission recipes are sliced at the end of the
-                    // walk. The seed doubles as the chunk's recipe provenance,
-                    // so a later `Deref` purifies to the slot value.
-                    if ctx.recipe.is_some() {
-                        let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
-                        let perm_r = perm_recipe(state, perm)?;
-                        let elem = kind.value.clone();
-                        let rb = ctx.recipe.as_mut().unwrap();
-                        let i = rb.pending_slots.len();
-                        let seed = rb.emit_seed(SeedRef::SlotValue(i));
-                        rb.pending_slots.push((
-                            kind.clone(),
-                            elem,
-                            SlotShape::Single {
-                                addr: addr_r,
-                                perm: perm_r,
-                            },
-                        ));
-                        ch = ch.with_recipe(Some(seed));
-                    }
-                    Ok(heap_union(ctx, &base_h, &kind, ch, &pc_lits))
-                }
-            } else {
+            let l = state
+                .loc(ctx, loc)
+                .expect("acc location must be Addr-typed");
+            let access = Access::Single {
+                loc: l.clone(),
+                perm: eval_perm_structural(ctx, state, perm),
+            };
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            let Some(bind) = bind else {
                 if ctx.recipe.is_some() {
                     return Err(VerifyError::Unimplemented(
                         "purify: unsupported heap inst in a resource body",
                     ));
                 }
-                subtract_location(ctx, &base_h, &kind, ch, &pc_lits, demand_of(&cperm))
+                return Ok(base_h.consume(ctx, access, ConsumeMode::Take, &pc_lits)?.0);
+            };
+            // The bind selects the value source.
+            let mut value = match bind {
+                // A resource body's footprint slot: a placeholder value, named
+                // by the seed recorded below.
+                Bind::SelfSlot => {
+                    debug_assert!(
+                        ctx.recipe.is_some(),
+                        "`with self` outside a resource-body (certificate) walk"
+                    );
+                    Value::plain(ctx.fresh_symbolic_value(l.kind.value.clone()))
+                }
+                // A method-body produce: an unconstrained value, and no
+                // certificate is under construction to record it in.
+                Bind::Fresh => {
+                    debug_assert!(
+                        ctx.recipe.is_none(),
+                        "`with fresh` inside a resource body — a body that \
+                         mints an observable value is not deterministic"
+                    );
+                    Value::plain(ctx.fresh_symbolic_value(l.kind.value.clone()))
+                }
+                // The produce half of a desugared `fold`: the chunk holds the
+                // snapshot the paired `exhale` handed back, rather than a fresh
+                // value. That shared term IS the equation `snap(P(x)) =
+                // cons(body)`.
+                Bind::Bound(v) => Value {
+                    id: state.get_val(ctx, v),
+                    recipe: state.recipe_of(v),
+                },
+            };
+            // A resource body's `acc` records a footprint slot in the
+            // certificate under construction: its value is the seed placeholder
+            // `SlotValue(i)` (supplied at graft time), its address/permission
+            // recipes are sliced at the end of the walk. The seed doubles as the
+            // chunk's recipe provenance, so a later `Deref` purifies to the slot
+            // value.
+            if ctx.recipe.is_some() {
+                let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
+                let perm_r = perm_recipe(state, perm)?;
+                let rb = ctx.recipe.as_mut().unwrap();
+                let i = rb.pending_slots.len();
+                let seed = rb.emit_seed(SeedRef::SlotValue(i));
+                rb.pending_slots.push((
+                    l.kind.clone(),
+                    l.kind.value.clone(),
+                    SlotShape::Single {
+                        addr: addr_r,
+                        perm: perm_r,
+                    },
+                ));
+                value.recipe = Some(seed);
             }
+            base_h.produce(ctx, access, value, &pc_lits)
         }
         HeapInst::AddForall { base, q, bind } => {
             let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
-            let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
-            let (value_map, recipe) = match bind {
+            let spec = quant_spec_of(state, q, Injectivity::Check);
+            let value = match bind {
                 Bind::Fresh => {
                     debug_assert!(ctx.recipe.is_none(), "`with fresh` inside a resource body");
-                    (ctx.fresh_symbolic_value(map_ty), None)
+                    Value::plain(ctx.fresh_symbolic_value(map_ty))
                 }
-                Bind::Bound(v) => (state.get_val(ctx, v), state.recipe_of(v)),
+                Bind::Bound(v) => Value {
+                    id: state.get_val(ctx, v),
+                    recipe: state.recipe_of(v),
+                },
                 // A resource body's footprint slot: record the chunk set in the
                 // certificate under construction. Its value map is the seed
                 // `SlotValue(i)`, supplied at graft time; the captured values
@@ -1228,206 +329,51 @@ fn eval_heap_inst(
                     let i = rb.pending_slots.len();
                     let seed = rb.emit_seed(SeedRef::SlotValue(i));
                     rb.pending_slots.push((
-                        kind.clone(),
+                        spec.kind(),
                         map_ty.clone(),
                         SlotShape::Quant {
-                            q: Rc::new((**q).clone()),
+                            q: spec.q.clone(),
                             caps,
                         },
                     ));
-                    (ctx.fresh_symbolic_value(map_ty), Some(seed))
+                    Value {
+                        id: ctx.fresh_symbolic_value(map_ty),
+                        recipe: Some(seed),
+                    }
                 }
             };
-            let base_h = get_heap(state, base);
-            let chunk = QuantChunk {
-                recipe,
-                ..quant_chunk_of(ctx, state, q, pc, value_map)?
-            };
-            Ok(base_h.with_qp_chunk(&kind, chunk))
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            get_heap(state, base).produce(ctx, Access::Set(spec), value, &pc_lits)
         }
-        // Exhale a chunk set `E`: find one held set `Q` that covers it
-        // (`check_qp_contained`) and record `E` as taken from `Q`; lookups then
-        // subtract it (`qp_perm_at`). No sum across sets or single chunks yet.
+        // Exhale a chunk set: one held set must cover it.
         HeapInst::SubForall { base, q } => {
             if ctx.recipe.is_some() {
                 return Err(VerifyError::Unimplemented(
                     "quantified permission in a resource footprint",
                 ));
             }
-            // A wildcard demand needs a fresh amount below what is held, which
-            // the containment proof cannot pick.
-            if q.body.contains_wc_permission() {
-                return Err(VerifyError::Unimplemented(
-                    "exhaling a wildcard quantified permission",
-                ));
-            }
+            let spec = quant_spec_of(state, q, Injectivity::Check);
+            let pc_lits = pc_lits_raw(ctx, state, pc);
             let base_h = get_heap(state, base);
-            let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
-            // The exhaled set's values are the covering set's (an exhale changes
-            // no value), which is only known once one is found below; until
-            // then it carries a placeholder map that is never read.
-            let placeholder = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(q.loc_ty.clone())));
-            let exhaled = quant_chunk_of(ctx, state, q, pc, placeholder)?;
-            let qp_search_result = find_covering_qp(ctx, &base_h, &kind, &exhaled)?;
-
-            let Some(qp_index) = qp_search_result else {
-                return Err(VerifyError::InsufficientPermission);
-            };
-
-            let new_heap = take_from_qp(&base_h, &kind, qp_index, exhaled);
-            Ok(new_heap)
+            Ok(base_h
+                .consume(ctx, Access::Set(spec), ConsumeMode::Take, &pc_lits)?
+                .0)
         }
         // Resource inhale/exhale need the program + certificates; method-only.
         HeapInst::Inhale { .. } | HeapInst::Exhale { .. } => Err(VerifyError::Unimplemented(
             "resource inhale/exhale outside method body",
         )),
-        // Field assignment `loc := val`: requires write permission at `loc`,
-        // then updates the chunk's value (permission unchanged).
+        // Field assignment `loc := val`: write permission at `loc`, then every
+        // holder of `loc` takes the new value (permissions unchanged).
         HeapInst::Assign(heap, Assign { loc, val }) => {
-            let h = get_heap(state, heap);
-            let addr = state.get_val(ctx, loc);
-            let new_val = state.get_val(ctx, val);
-            let kind = state
-                .loc_kind(loc)
+            let l = state
+                .loc(ctx, loc)
                 .expect("assign location must be Addr-typed");
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
-            let Some(held) = h.chunk(&kind, addr).cloned() else {
-                // No single chunk: a quantified chunk set may hold write
-                // permission.
-                let chunk_index = qp_framing(ctx, &h, &kind, addr, |ctx, p| {
-                    prove_perm_write(ctx, p, &kind.bound, &pc_lits)
-                });
-                return if let Some(index) = chunk_index {
-                    let chunk = &h.qp_chunks_of(&kind)[index];
-                    let map = chunk.value_map;
-                    let map_functions = ctx.alloc.value_map(&kind);
-                    let new_map = ctx.add(Symbolic::FuncApp(
-                        map_functions.store,
-                        Box::new([]),
-                        Box::new([map, addr, new_val]),
-                    ));
-                    let new_chunk = QuantChunk {
-                        value_map: new_map,
-                        // The old map's recipe no longer names the new map.
-                        recipe: None,
-                        ..chunk.clone()
-                    };
-                    Ok(h.with_qp_chunk_replaced(&kind, index, new_chunk))
-                } else {
-                    Err(VerifyError::InsufficientPermission)
-                };
-            };
-            let perm = held.ungated_perm().clone();
-            let guard = held.guard_pc();
-            // SIDECOND: prove `not(perm < cap)` (full/write permission, `cap` =
-            // the location's own permission boun, `1/1` for a field) under pc —
-            // per leaf, so a branch-structured held perm never materializes. Under
-            // the guarded-merge path the write obligation is proven against the
-            // guard-gated perm (write required only where the chunk is present).
-            let proof_perm = if !guard.is_empty() {
-                gate_perm_by_guard(ctx, &perm, &guard)
-            } else {
-                perm.clone()
-            };
-            if !prove_perm_write(ctx, &proof_perm, &kind.bound, &pc_lits) {
-                return Err(VerifyError::InsufficientPermission);
-            }
-            // Permission (and its presence guard) unchanged by the write; keep it
-            // structural.
-            Ok(h.with_chunk(
-                &kind,
-                Chunk::new_perm(addr, perm, new_val).with_guard(guard),
-            ))
+            let new_val = state.get_val(ctx, val);
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            get_heap(state, heap).write(ctx, &l, new_val, &pc_lits)
         }
     }
-}
-
-/// Index of the first held set of `kind` that covers `exhale`
-fn find_covering_qp(
-    ctx: &mut VerifyContext<'_>,
-    heap: &Heap,
-    kind: &LocationKind,
-    exhaled: &QuantChunk,
-) -> Result<Option<usize>, VerifyError> {
-    let vmir_chunk = &exhaled.q;
-    for (i, held) in heap.qp_chunks_of(&kind).iter().enumerate() {
-        let contained = check_qp_contained(
-            ctx,
-            vmir_chunk,
-            &exhaled.guard,
-            &mut |ctx, binders| {
-                eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &exhaled.guard)
-            },
-            &mut |ctx, addr| {
-                Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
-            },
-        )?;
-
-        if contained {
-            return Ok(Some(i));
-        }
-    }
-    Ok(None)
-}
-
-/// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
-/// This function just removes it, no checks are performed.
-fn take_from_qp(heap: &Heap, kind: &LocationKind, i: usize, exhaled: QuantChunk) -> Heap {
-    let held = &heap.qp_chunks_of(kind)[i];
-    let held = held.with_taken(QPTaken::Set(QuantChunk {
-        value_map: held.value_map,
-        ..exhaled
-    }));
-    heap.with_qp_chunk_replaced(kind, i, held)
-}
-
-/// Consume the single-location `chunk` from `heap`: from the single chunks
-/// (`heap_subtract`) when they hold it, otherwise as a single-location take
-/// from the first quantified chunk set that holds enough at its address.
-///
-/// The demand is not split across holders (part from a single chunk, part from
-/// a set, or from two sets) yet, and a wildcard demand on a set is
-/// unimplemented: it needs a fresh amount below what the set holds.
-fn subtract_location(
-    ctx: &mut VerifyContext<'_>,
-    heap: &Heap,
-    kind: &LocationKind,
-    chunk: Chunk,
-    pc_lits: &[(egg::Id, Polarity)],
-    demand: Demand,
-) -> Result<Heap, VerifyError> {
-    if heap.qp_chunks_of(kind).is_empty() {
-        return heap_subtract(ctx, heap, kind, chunk, pc_lits, demand);
-    }
-    match heap_subtract(ctx, heap, kind, chunk.clone(), pc_lits, demand) {
-        Err(VerifyError::InsufficientPermission) => {}
-        done => return done,
-    }
-    if demand == Demand::Wildcard {
-        return Err(VerifyError::Unimplemented(
-            "exhaling a wildcard location from a quantified permission",
-        ));
-    }
-    let needed = chunk.ungated_perm().clone();
-    for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
-        let Some(held) = qp_perm_at(ctx, set, chunk.addr)? else {
-            continue;
-        };
-        let held = gate_perm_by_guard(ctx, &held, &set.guard);
-        if prove_sufficient_aligned(ctx, &held, &needed, pc_lits) {
-            let set = set.with_taken(QPTaken::Single {
-                addr: chunk.addr,
-                perm: needed,
-                guard: pc_lits.into(),
-            });
-            return Ok(heap.with_qp_chunk_replaced(kind, i, set));
-        }
-    }
-    Err(VerifyError::InsufficientPermission)
 }
 
 /// Evaluate one instruction of a resource body (well-formedness pass). Resource
@@ -1729,7 +675,6 @@ fn walk_footprint(
                     ctx,
                     &walk,
                     i,
-                    &slot.kind,
                     &slot.elem,
                     q,
                     caps,
@@ -1836,8 +781,7 @@ fn walk_single_slot(
     // the wildcard leaf built as full permission `1`, so `ite(guard, 1, 0)`
     // whose `0 < …` folds to the gating guard (see [`frame_wildcard_slot`]).
     let resolve = |r: &SeedRef| r.resolve(w.args, values);
-    let slot_wildcard = perm_r.has_wildcard();
-    let wc_slot = w.frame_only && slot_wildcard;
+    let wc_slot = w.frame_only && perm_r.has_wildcard();
     let before = ctx.egraph.total_number_of_nodes();
     let addr = addr_r.build(&mut ctx.egraph, resolve, w.pc_lits, changed);
     let wildcard_as = if wc_slot {
@@ -1854,41 +798,34 @@ fn walk_single_slot(
     // chunk's recipe provenance rides along. With a chunk set of this kind the
     // location is read through all its holders, as a `Deref` is (a set's value
     // has no recipe here: the slot address has none).
+    let loc = Loc {
+        kind: kind.clone(),
+        addr,
+    };
     let (value, recipe) = slot_value(ctx, w, i, elem, |ctx, h| {
-        let read = if h.qp_chunks_of(kind).is_empty() {
-            h.entries().find_map(|(_, c)| {
-                (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
-                    .then(|| (c.value, c.recipe.clone()))
-            })
-        } else {
-            // The bodies evaluated once already, at their inhales.
-            read_at(ctx, h, kind, addr, elem, w.pc_lits, None)
-                .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"))
-        };
-        read.unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None))
+        // The bodies of its chunk sets evaluated once already, at their inhales.
+        let read = h
+            .read(ctx, &loc, w.pc_lits, None)
+            .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
+        match read {
+            Some(v) => (v.id, v.recipe),
+            None => (ctx.fresh_symbolic_value(elem.clone()), None),
+        }
     });
     let present = if wc_slot {
-        frame_wildcard_slot(ctx, w, kind, addr, perm, heap)?
+        // A frame check: no heap effect; presence is the gating guard
+        // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
+        let pp = perm.to_id(ctx);
+        let guard = expr!(ctx, (0 / 1) < r { pp });
+        let access = Access::Single { loc, perm };
+        heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
+        guard
     } else {
-        // The slot's permission shape is the static source for the consume
-        // rule (see [`Demand`]). Shape-only, so it is the same predicate the IR
-        // side asks.
-        let demand = if slot_wildcard {
-            Demand::Wildcard
-        } else {
-            Demand::Concrete
+        let value = Value {
+            id: value,
+            recipe: recipe.clone(),
         };
-        apply_slot_perm(
-            ctx,
-            w,
-            kind,
-            addr,
-            perm,
-            value,
-            recipe.clone(),
-            demand,
-            heap,
-        )?
+        apply_slot_perm(ctx, w, loc, perm, value, heap)?
     };
     let member = ctx.option_member(elem.clone(), present, value);
     Ok(SlotOut {
@@ -1902,7 +839,6 @@ fn walk_qp_slot(
     ctx: &mut VerifyContext<'_>,
     w: &SlotWalk<'_>,
     i: usize,
-    kind: &LocationKind,
     elem: &Type,
     q: &Rc<vmir::QuantChunks>,
     caps_r: &[(usize, BodyRecipe)],
@@ -1934,34 +870,39 @@ fn walk_qp_slot(
         .map(|&(k, id)| (k, ctx.egraph.find(id)))
         .collect();
 
-    let (map, recipe) = match w.direction {
+    let value = match w.direction {
         Direction::Produce => {
             let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| {
                 unreachable!("ReadHeap only consumes")
             });
             // Injectivity was proven by the certificate walk; the body boolean
             // assumed after the slots carries the facts it relied on.
-            let chunk = QuantChunk {
-                recipe: recipe.clone(),
-                ..quant_chunk_injective(ctx, q, caps, w.pc_lits, map)?
+            let spec = QuantSpec {
+                q: q.clone(),
+                caps,
+                injectivity: Injectivity::Established,
             };
-            *heap = heap.with_qp_chunk(kind, chunk);
-            (map, recipe)
+            let value = Value { id: map, recipe };
+            *heap = heap.produce(ctx, Access::Set(spec), value.clone(), w.pc_lits)?;
+            value
         }
         Direction::Consume => {
-            let placeholder = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(q.loc_ty.clone())));
-            let exhaled = quant_chunk_from_caps(ctx, q, caps, w.pc_lits, placeholder)?;
-            let Some(qp_index) = find_covering_qp(ctx, heap, kind, &exhaled)? else {
-                return Err(VerifyError::InsufficientPermission);
+            let spec = QuantSpec {
+                q: q.clone(),
+                caps,
+                injectivity: Injectivity::Check,
             };
-            let held = &heap.qp_chunks_of(kind)[qp_index];
-            let (map, recipe) = (held.value_map, held.recipe.clone());
-            if !w.frame_only {
-                *heap = take_from_qp(heap, kind, qp_index, exhaled)
-            }
-            (map, recipe)
+            let mode = if w.frame_only {
+                ConsumeMode::Frame
+            } else {
+                ConsumeMode::Take
+            };
+            let (out, held) = heap.consume(ctx, Access::Set(spec), mode, w.pc_lits)?;
+            *heap = out;
+            held
         }
     };
+    let (map, recipe) = (value.id, value.recipe);
 
     let present = expr!(ctx, true);
     Ok(SlotOut {
@@ -2018,89 +959,39 @@ fn slot_value(
     }
 }
 
-/// Apply a single slot's chunk `addr ↦ value` to `heap` per `w.direction`:
-/// subtract it (`Consume`, by `demand`) or union it in (`Produce`), with `perm`
-/// scaled by `w.scale` when set. Returns the slot's presence `0 < perm`
-/// (unscaled).
-#[allow(clippy::too_many_arguments)]
+/// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
+/// (`Consume`) or add it (`Produce`), with `perm` scaled by `w.scale` when set.
+/// Returns the slot's presence `0 < perm` (unscaled).
 fn apply_slot_perm(
     ctx: &mut VerifyContext<'_>,
     w: &SlotWalk<'_>,
-    kind: &LocationKind,
-    addr: egg::Id,
+    loc: Loc,
     perm: ChunkPerm,
-    value: egg::Id,
-    recipe: Option<Val>,
-    demand: Demand,
+    value: Value,
     heap: &mut Heap,
 ) -> Result<egg::Id, VerifyError> {
     let scaled = match w.scale {
         Some(pm) => scale_perm(ctx, pm, w.scale_wild, perm.clone()),
         None => perm.clone(),
     };
-    let chunk = Chunk::new_perm(addr, scaled, value).with_recipe(recipe);
+    let access = Access::Single { loc, perm: scaled };
     *heap = match w.direction {
-        Direction::Consume => subtract_location(ctx, heap, kind, chunk, w.pc_lits, demand)?,
-        Direction::Produce => heap_union(ctx, heap, kind, chunk, w.pc_lits),
+        Direction::Consume => {
+            let (out, taken) = heap.consume(ctx, access, ConsumeMode::Take, w.pc_lits)?;
+            // The slot value was read before (from the walk's source heap) and
+            // the consume read the same location of the same state: they agree.
+            if ctx.egraph.find(taken.id) != ctx.egraph.find(value.id) {
+                let eq = expr!(ctx, { taken.id } == { value.id });
+                ctx.assume_guarded(eq, w.pc_lits.iter().rev().copied());
+            }
+            out
+        }
+        Direction::Produce => heap.produce(ctx, access, value, w.pc_lits)?,
     };
     let perm_id = perm.to_id(ctx);
     Ok(expr!(ctx, (0 / 1) < r { perm_id }))
 }
 
-/// A wildcard slot at a frame-only exhale: no heap effect (the call frames, it
-/// does not consume) and no wildcard is ever built. `presence` is the slot's
-/// permission with the wildcard leaf as `1`, so `0 < presence` folds to the
-/// slot's gating guard (`true` when unconditional). Where the slot is required,
-/// the caller must hold a positive share: prove `guard ⇒ 0 < held` against the
-/// held permission. Returns the guard, which is the slot's presence.
-fn frame_wildcard_slot(
-    ctx: &mut VerifyContext<'_>,
-    w: &SlotWalk<'_>,
-    kind: &LocationKind,
-    addr: egg::Id,
-    presence: ChunkPerm,
-    heap: &Heap,
-) -> Result<egg::Id, VerifyError> {
-    let pp = presence.to_id(ctx);
-    let guard = expr!(ctx, (0 / 1) < r { pp });
-    let (_, existing) = find_chunk_consolidated(ctx, heap, kind, addr, w.pc_lits, true);
-    let suff = match existing {
-        Some(c) => {
-            // `guard ⇒ 0 < held`, proven per leaf (never materialize the held
-            // `Select`): assume `guard` in the pc, prove `0 < leaf` on each
-            // branch. Gated, so presence is respected: a conditionally-held slot
-            // frames only where its guard holds.
-            let held = c.gated_perm(ctx);
-            let mut pc = w.pc_lits.to_vec();
-            pc.push((guard, Polarity::Positive));
-            prove_perm_positive(ctx, &held, &pc)
-        }
-        // No chunk held here: sound only if the slot is not required on this
-        // path (`guard` is false).
-        None => {
-            let not_guard = expr!(ctx, not { guard });
-            ctx.prove_under_pc(not_guard, w.pc_lits)
-        }
-    };
-    // Last resort, the framing twin of what `heap_subtract_inner` does on a
-    // miss: no chunk matched this address on ground (or the one that did could
-    // not be shown positive), but another chunk of the group may sit here —
-    // under an equality the pc does not mention, or under its own presence
-    // guard, which is the `&mut`-reborrow shape. Summarize the group at `addr`
-    // and ask for positivity per leaf. Reached only by a check that would
-    // otherwise fail, so no framing check that succeeds outright pays for it.
-    let suff = suff || {
-        let chunks = heap.chunks_of(kind).to_vec();
-        let (total, set) = summarize_perm_at(ctx, &chunks, addr, w.pc_lits);
-        let mut pc = w.pc_lits.to_vec();
-        pc.push((guard, Polarity::Positive));
-        !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
-    };
-    if !suff {
-        return Err(VerifyError::InsufficientPermission);
-    }
-    Ok(guard)
-}
 
 /// The `cons` of a resource's snapshot from its per-slot `members`
 /// (`present ? Some(v) : None`). Predicate snapshots are single-variant,
@@ -2136,51 +1027,25 @@ fn eval_sub_yield(
         unreachable!("eval_sub_yield called on a non-yielding-Sub instruction");
     };
     let base_h = get_heap(state, base);
-    let addr = state.get_val(ctx, loc);
-    let kind = state
-        .loc_kind(loc)
+    let l = state
+        .loc(ctx, loc)
         .expect("acc location must be Addr-typed");
+    let kind = l.kind.clone();
     let cperm = eval_perm_structural(ctx, state, perm);
-    let pc_lits: Vec<(egg::Id, Polarity)> = pc
-        .conds
-        .iter()
-        .map(|(v, p)| (state.get_val(ctx, v), *p))
-        .collect();
-
-    // The held value, and (certificate walks) its provenance. The `Option` below
-    // is concretely `Some` on every path that continues: `heap_subtract` fails
-    // unless the permission is held, so `None` is reachable only at a
-    // provably-non-positive permission.
-    //
-    // A miss of this canonical-address scan is not yet a missing permission: the
-    // subtraction below also matches a chunk whose address equals the demand only
-    // under the path condition, and owes nothing on a dead path -- a plain
-    // `exhale` of the same location succeeds in both cases. So stand in a fresh
-    // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
-    // consumes. A certificate walk needs the held chunk's recipe, so there a miss
-    // stays a failure.
-    let a = ctx.egraph.find(addr);
-    let hit = base_h
-        .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
-    let (held, held_recipe) = match hit {
-        Some(x) => x,
-        None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
-        None => return Err(VerifyError::InsufficientPermission),
+    let pc_lits = pc_lits_raw(ctx, state, pc);
+    // The consume hands back the value it took, read from the holders whose
+    // permission it took, and (certificate walks) its provenance.
+    let access = Access::Single {
+        loc: l,
+        perm: cperm.clone(),
     };
-    if ctx.recipe.is_some() && held_recipe.is_none() {
+    let (out, taken) = base_h.consume(ctx, access, ConsumeMode::Take, &pc_lits)?;
+    if ctx.recipe.is_some() && taken.recipe.is_none() {
         return Err(VerifyError::Unimplemented(
             "purify: consume of an unheld location",
         ));
     }
-    let out = subtract_location(
-        ctx,
-        &base_h,
-        &kind,
-        Chunk::new_perm(addr, cperm.clone(), held),
-        &pc_lits,
-        demand_of(&cperm),
-    )?;
+    let (held, held_recipe) = (taken.id, taken.recipe);
     state.push_heap(out);
 
     // Presence is `0 < perm`, built from the permission the instruction names.
@@ -3001,440 +1866,14 @@ fn check_forall_wd_in_scratch(
     Ok(())
 }
 
-/// The chunk set a quantified permission denotes at this program point, shared
-/// by inhale (`AddForall`) and exhale (`SubForall`): its captured temps resolved
-/// in the live state, then built by [`quant_chunk_from_caps`].
-fn quant_chunk_of(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    q: &vmir::QuantChunks,
-    pc: &PathConds,
-    value_map: egg::Id,
-) -> Result<QuantChunk, VerifyError> {
-    let caps: Rc<[(usize, egg::Id)]> = q
-        .free_temps()
-        .into_iter()
-        .map(|k| (k, state.vals[k]))
-        .collect();
-    let pc_lits: Vec<(egg::Id, Polarity)> = pc
-        .conds
-        .iter()
-        .map(|(v, p)| (state.get_val(ctx, v), *p))
-        .collect();
-    quant_chunk_from_caps(ctx, &Rc::new(q.clone()), caps, &pc_lits, value_map)
-}
-
-/// The chunk set of `q` with its captured temps already resolved to `caps`:
-/// either from the live state ([`quant_chunk_of`]) or rebuilt from a resource
-/// footprint slot's recipes at a call site (`walk_footprint`). Proves the
-/// receiver injectivity under `pc_lits` and assumes the inverse axiom that
-/// proof licenses. The result carries no recipe; the caller sets one.
-fn quant_chunk_from_caps(
-    ctx: &mut VerifyContext<'_>,
-    q: &Rc<vmir::QuantChunks>,
-    caps: Rc<[(usize, egg::Id)]>,
-    pc_lits: &[(egg::Id, Polarity)],
-    value_map: egg::Id,
-) -> Result<QuantChunk, VerifyError> {
-    // Distinct bindings that hold permission must name distinct locations.
-    check_qp_injectivity(ctx, q, pc_lits, &mut |ctx, binders| {
-        eval_qp_instance(ctx, &caps, q, binders, pc_lits)
-    })?;
-    quant_chunk_injective(ctx, q, caps, pc_lits, value_map)
-}
-
-/// The chunk set of `q` at `caps` whose receiver injectivity is already
-/// established, so only the inverse axiom is assumed here.
-///
-/// The one such caller is a footprint slot *produced* by `walk_footprint`
-/// (inhale, unfold, from_snap): the resource's certificate walk proved
-/// injectivity for arbitrary arguments under the body's earlier conjuncts, and
-/// the produce assumes those conjuncts (the body boolean) under the same
-/// guard. It cannot re-prove it there, since the boolean is assumed only after
-/// all slots are walked. A *consumed* slot must not use this: there the
-/// boolean is asserted after the slots, and an inverse axiom assumed for a
-/// non-injective receiver would make that assertion vacuously provable.
-fn quant_chunk_injective(
-    ctx: &mut VerifyContext<'_>,
-    q: &Rc<vmir::QuantChunks>,
-    caps: Rc<[(usize, egg::Id)]>,
-    pc_lits: &[(egg::Id, Polarity)],
-    value_map: egg::Id,
-) -> Result<QuantChunk, VerifyError> {
-    // One binding per location: assume the inverse axiom that names it.
-    let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
-    Ok(QuantChunk {
-        q: q.clone(),
-        caps,
-        inv,
-        guard: pc_lits.into(),
-        taken: Rc::from([]),
-        value_map,
-        recipe: None,
-    })
-}
-
-/// Evaluate a quantified permission's body at `binders`, with its captured
-/// temps resolved through `caps` (the values fixed at the inhale, see
-/// [`EvalState::frame_from_caps`]), never the live state: a lookup may run in
-/// another temp space or after the captured variables were reassigned. Body
-/// permission temps count from 0, so the frame starts with no permissions.
-///
-/// The body holds only `Pure` and `Perm` instructions and its location is an
-/// address call (both guaranteed by `lower_quant_chunks`); anything else is a
-/// lowering bug and panics.
-fn eval_qp_instance(
-    ctx: &mut VerifyContext<'_>,
-    caps: &[(usize, egg::Id)],
-    q: &vmir::QuantChunks,
-    binders: &[egg::Id],
-    host_pc: &[(egg::Id, Polarity)],
-) -> Result<QpInstance, VerifyError> {
-    // The instance only feeds proofs (injectivity, containment, a lookup's
-    // permission); its terms never enter a certificate, and its temps carry no
-    // recipes. A read's certificate term is `lookup(seed, addr)`, built by the
-    // `Deref` itself.
-    ctx.pause_recipe(|ctx| eval_qp_instance_unrecorded(ctx, caps, q, binders, host_pc))
-}
-
-fn eval_qp_instance_unrecorded(
-    ctx: &mut VerifyContext<'_>,
-    caps: &[(usize, egg::Id)],
-    q: &vmir::QuantChunks,
-    binders: &[egg::Id],
-    host_pc: &[(egg::Id, Polarity)],
-) -> Result<QpInstance, VerifyError> {
-    debug_assert_eq!(binders.len(), q.bound.len());
-    let mut state = EvalState::frame_from_caps(q.binder_base, caps);
-    for (&id, ty) in binders.iter().zip(q.bound.iter()) {
-        state.push_val(id, ty.clone(), None);
+/// The chunk set a quantified permission denotes at this program point: its
+/// body plus the values its captured temps have in the live state.
+fn quant_spec_of(state: &EvalState, q: &vmir::QuantChunks, injectivity: Injectivity) -> QuantSpec {
+    QuantSpec {
+        q: Rc::new(q.clone()),
+        caps: q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect(),
+        injectivity,
     }
-
-    for inst in &q.body.insts {
-        let mut pc_lits = host_pc.to_vec();
-        pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
-        match &inst.kind {
-            InstKind::Pure(ty, pi) => {
-                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                state.push_val(id, ty.clone(), None);
-            }
-            InstKind::Perm(pi) => {
-                let p = eval_perm_inst(ctx, &state, pi);
-                state.push_perm(p, pi.clone());
-            }
-            other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
-        }
-    }
-
-    Ok(QpInstance {
-        cond: state.get_val(ctx, &q.body.cond),
-        loc_args: q
-            .loc_call()
-            .args
-            .iter()
-            .map(|a| state.get_val(ctx, a))
-            .collect(),
-        perm: eval_perm_structural(ctx, &state, &q.body.perm),
-    })
-}
-
-/// The permission a quantified chunk set holds at `addr`, or `None` when `addr`
-/// is not an application of the chunk's address function (no binding can name
-/// it). Not yet gated by `chunk.guard`, the inhale's path condition: the caller
-/// gates it exactly as a [`Chunk`]'s guard.
-///
-/// The binding that names `addr = f(as)` is solved per binder `x_j`:
-/// - **projection**: if some address argument is `x_j` itself, `x_j = as_i`;
-/// - otherwise **inversion**: `x_j = inv_j(as)`, with the inverse minted at the
-///   inhale (whose axiom, when assumed, lets the prover reduce it).
-///
-/// The body is evaluated at that binding from the chunk's captures, and its
-/// permission is gated by `c(xs)` and by the rebuilt address arguments being
-/// `as` (Silicon's `e(inv(r)) = r`). That gate is what makes the answer sound
-/// for any solution, even an unconstrained inverse: the permission is returned
-/// only where the instance really names `addr`. Arguments that already coincide
-/// with `as` (every projected one) add no gate.
-fn qp_perm_at(
-    ctx: &mut VerifyContext<'_>,
-    chunk: &QuantChunk,
-    addr: egg::Id,
-) -> Result<Option<ChunkPerm>, VerifyError> {
-    let q = &*chunk.q;
-    let call = q.loc_call();
-    let Some(args) = addr_call_args(ctx, call, addr) else {
-        return Ok(None);
-    };
-    assert_eq!(
-        args.len(),
-        call.args.iter().count(),
-        "address call arity mismatch"
-    );
-
-    let binders: Vec<egg::Id> = (0..q.bound.len())
-        .map(|j| {
-            let me = Val::Temp(q.binder_base + j);
-            match call.args.iter().position(|a| *a == me) {
-                Some(i) => args[i],
-                None => ctx.add(Symbolic::FuncApp(chunk.inv[j], Box::new([]), args.clone())),
-            }
-        })
-        .collect();
-    let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.guard)?;
-
-    let perm = gate_on_args(ctx, inst.perm, &inst.loc_args, &args);
-    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
-    // What was exhaled from this set, each gated by its exhale's path condition.
-    for taken in chunk.taken.iter() {
-        let p = match taken {
-            // A taken set applies the same address function, so it always answers.
-            QPTaken::Set(set) => {
-                let p = qp_perm_at(ctx, set, addr)?
-                    .expect("a taken chunk set applies the same address function");
-                gate_perm_by_guard(ctx, &p, &set.guard)
-            }
-            // A single location counts only where it is `addr`: compared by
-            // address arguments, as the set's own instance is (address
-            // functions are uninterpreted, so `f(a) = f(b)` does not reduce).
-            QPTaken::Single {
-                addr: at,
-                perm: p,
-                guard,
-            } => {
-                let p = gate_perm_by_guard(ctx, p, guard);
-                let at_args = addr_call_args(ctx, call, *at)
-                    .expect("a single take from a set is at an address of its kind");
-                gate_on_args(ctx, p, &at_args, &args)
-            }
-        };
-        perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
-    }
-    Ok(Some(perm))
-}
-
-/// The arguments of `addr` as an application of `call`'s address function (the
-/// receiver of a field, the argument tuple of a predicate), or `None` when its
-/// e-class holds no such application.
-fn addr_call_args(
-    ctx: &VerifyContext<'_>,
-    call: &vmir::FunctionCall,
-    addr: egg::Id,
-) -> Option<Box<[egg::Id]>> {
-    let func = crate::verify::func_registry::func_id_for_member(call.function);
-    let class = ctx.egraph.find(addr);
-    ctx.egraph[class].nodes.iter().find_map(|n| match n {
-        Symbolic::FuncApp(f, tys, args) if *f == func && **tys == call.type_args[..] => {
-            Some(args.clone())
-        }
-        _ => None,
-    })
-}
-
-/// `perm` where the two address argument tuples agree, `0` elsewhere. Arguments
-/// already in one e-class add no gate.
-fn gate_on_args(
-    ctx: &mut VerifyContext<'_>,
-    mut perm: ChunkPerm,
-    got: &[egg::Id],
-    want: &[egg::Id],
-) -> ChunkPerm {
-    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    for (&g, &w) in got.iter().zip(want).rev() {
-        if ctx.egraph.find(g) != ctx.egraph.find(w) {
-            let eq = expr!(ctx, { g } == { w });
-            perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
-        }
-    }
-    perm
-}
-
-/// One holder of a permission at an address (see [`holders_at`]): its share
-/// there and the value it holds there.
-struct Holder {
-    perm: ChunkPerm,
-    value: egg::Id,
-    source: HolderSource,
-}
-
-/// Where a [`Holder`]'s value comes from, with its recipe provenance
-/// (certificate walks).
-enum HolderSource {
-    /// A single chunk; the recipe is the value's own.
-    Chunk(Option<Val>),
-    /// A quantified chunk set; the recipe is its map's (the value is
-    /// `lookup(map, addr)`).
-    Set(Option<Val>),
-}
-
-/// Everything in `heap` that may hold `addr`: each single chunk that may sit
-/// there ([`chunk_share_at`], its aliasing gate folded in) and each quantified
-/// chunk set that can name it ([`qp_perm_at`], its guard folded in, what was
-/// exhaled from it subtracted). In heap order, single chunks first.
-fn holders_at(
-    ctx: &mut VerifyContext<'_>,
-    heap: &Heap,
-    kind: &LocationKind,
-    addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> Result<Vec<Holder>, VerifyError> {
-    let mut holders = Vec::new();
-    for c in heap.chunks_of(kind).iter() {
-        if let Some((perm, _)) = chunk_share_at(ctx, c, addr, pc_lits) {
-            holders.push(Holder {
-                perm,
-                value: c.value,
-                source: HolderSource::Chunk(c.recipe.clone()),
-            });
-        }
-    }
-    for set in heap.qp_chunks_of(kind).iter() {
-        if let Some(p) = qp_perm_at(ctx, set, addr)? {
-            let lookup = ctx.alloc.value_map(kind).lookup;
-            let value = ctx.add(Symbolic::FuncApp(
-                lookup,
-                Box::new([]),
-                Box::new([set.value_map, addr]),
-            ));
-            holders.push(Holder {
-                perm: gate_perm_by_guard(ctx, &p, &set.guard),
-                value,
-                source: HolderSource::Set(set.recipe.clone()),
-            });
-        }
-    }
-    Ok(holders)
-}
-
-/// Everything `heap` holds at `addr`: the sum of its holders' shares.
-fn perm_total_at(
-    ctx: &mut VerifyContext<'_>,
-    heap: &Heap,
-    kind: &LocationKind,
-    addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> Result<ChunkPerm, VerifyError> {
-    let mut total = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    for h in holders_at(ctx, heap, kind, addr, pc_lits)? {
-        total = perm_add(ctx, &total, &h.perm);
-    }
-    Ok(total)
-}
-
-/// The value at a location from its `holders`. A location has one value, so
-/// any two holders with a positive share there agree; that is assumed here,
-/// under the pc. The value is the first holder's whose share is known positive,
-/// behind an `ite` on each holder before it that may be positive; fresh when no
-/// holder is known positive.
-fn value_at(
-    ctx: &mut VerifyContext<'_>,
-    holders: &[Holder],
-    ty: &Type,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> egg::Id {
-    let positive: Vec<egg::Id> = holders
-        .iter()
-        .map(|h| {
-            let p = h.perm.to_id(ctx);
-            expr!(ctx, (0 / 1) < r { p })
-        })
-        .collect();
-    for i in 0..holders.len() {
-        for j in i + 1..holders.len() {
-            let (vi, vj) = (holders[i].value, holders[j].value);
-            if ctx.egraph.find(vi) == ctx.egraph.find(vj) {
-                continue;
-            }
-            // Inside the fact, not as guards: a scratch graph assumes the fact
-            // without its guards (see `assume_guarded`).
-            let eq = expr!(ctx, { vi } == { vj });
-            let both = [
-                (positive[j], Polarity::Positive),
-                (positive[i], Polarity::Positive),
-            ];
-            let agree = ctx.implication(eq, both.into_iter());
-            ctx.assume_guarded(agree, pc_lits.iter().rev().copied());
-        }
-    }
-    let known = holders
-        .iter()
-        .position(|h| prove_perm_positive(ctx, &h.perm, pc_lits));
-    let (mut value, upto) = match known {
-        Some(k) => (holders[k].value, k),
-        None => (ctx.fresh_symbolic_value(ty.clone()), holders.len()),
-    };
-    for i in (0..upto).rev() {
-        value = ctx.add(Symbolic::Ite([positive[i], holders[i].value, value]));
-    }
-    value
-}
-
-/// Read `addr` (of `kind`, value type `ty`) from all its holders in `heap`, or
-/// `None` when nothing may hold it. Outside a certificate walk the value is
-/// [`value_at`]. A certificate names one holder instead: the first known to
-/// hold a positive share, with its recipe (a set's needs the address recipe
-/// `addr_r`; without it the recipe is `None`).
-#[allow(clippy::too_many_arguments)]
-fn read_at(
-    ctx: &mut VerifyContext<'_>,
-    heap: &Heap,
-    kind: &LocationKind,
-    addr: egg::Id,
-    ty: &Type,
-    pc_lits: &[(egg::Id, Polarity)],
-    addr_r: Option<&Val>,
-) -> Result<Option<(egg::Id, Option<Val>)>, VerifyError> {
-    let holders = holders_at(ctx, heap, kind, addr, pc_lits)?;
-    if holders.is_empty() {
-        return Ok(None);
-    }
-    if ctx.recipe.is_none() {
-        return Ok(Some((value_at(ctx, &holders, ty, pc_lits), None)));
-    }
-    let Some(h) = holders
-        .iter()
-        .find(|h| prove_perm_positive(ctx, &h.perm, pc_lits))
-    else {
-        return Ok(None);
-    };
-    let recipe = match (&h.source, addr_r) {
-        (HolderSource::Chunk(r), _) => r.clone(),
-        (HolderSource::Set(Some(map_r)), Some(addr_r)) => {
-            let lookup = ctx.alloc.value_map(kind).lookup;
-            let rb = ctx.recipe.as_mut().unwrap();
-            Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                func: lookup,
-                type_args: vec![],
-                args: vec![map_r.clone(), addr_r.clone()],
-            }))
-        }
-        (HolderSource::Set(_), _) => None,
-    };
-    Ok(Some((h.value, recipe)))
-}
-
-/// The index (in `heap.qp_chunks_of(kind)`) of the first quantified chunk set
-/// that holds a permission at `addr` satisfying `prove` (enough to read, enough
-/// to write), its inhale guard folded in exactly as for a [`Chunk`]
-/// ([`Chunk::gated_perm`]). Each set is tried on its own: no sum with other
-/// chunks yet.
-fn qp_framing(
-    ctx: &mut VerifyContext<'_>,
-    heap: &Heap,
-    kind: &LocationKind,
-    addr: egg::Id,
-    mut prove: impl FnMut(&mut VerifyContext<'_>, &ChunkPerm) -> bool,
-) -> Option<usize> {
-    heap.qp_chunks_of(kind).iter().position(|chunk| {
-        match qp_perm_at(ctx, chunk, addr) {
-            Ok(Some(p)) => {
-                let p = crate::verify::heap::gate_perm_by_guard(ctx, &p, &chunk.guard);
-                prove(ctx, &p)
-            }
-            Ok(None) => false,
-            // The body evaluated once already, at the inhale.
-            Err(e) => panic!("quantified chunk body failed to re-evaluate: {e:?}"),
-        }
-    })
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and
@@ -4036,33 +2475,14 @@ fn inst_obligations(
         // that only aliases a held chunk under this instruction's branch (e.g.
         // `y.f` where `x == y` holds here) still frame.
         InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
-            let addr = state.get_val(ctx, loc);
-            let held = get_heap(state, heap);
-            let perm = state.loc_kind(loc).and_then(|k| {
-                let c = chunk_under_pc(ctx, held.chunks_of(&k), addr, pc_lits)?.clone();
-                // Frame against the gated perm: a conditionally-held location
-                // frames only where its guard holds.
-                Some(c.gated_perm(ctx))
+            let perm = state.loc(ctx, loc).map(|l| {
+                // A chunk set's body evaluated once already, at its inhale.
+                get_heap(state, heap)
+                    .framing_perm(ctx, &l, pc_lits)
+                    .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"))
             });
             match perm {
-                // No single chunk matched: everything the heap holds there (the
-                // single chunks that may alias it plus every quantified chunk
-                // set) must be positive together.
-                None => {
-                    let framed = state.loc_kind(loc).is_some_and(|k| {
-                        // The body evaluated once already, at the inhale.
-                        let total = perm_total_at(ctx, &held, &k, addr, pc_lits)
-                            .unwrap_or_else(|e| {
-                                panic!("quantified chunk body failed to re-evaluate: {e:?}")
-                            });
-                        prove_perm_positive(ctx, &total, pc_lits)
-                    });
-                    if framed {
-                        vec![]
-                    } else {
-                        vec![(expr!(ctx, false), VerifyError::InsufficientPermission)]
-                    }
-                }
+                None => vec![(expr!(ctx, false), VerifyError::InsufficientPermission)],
                 Some(p @ ChunkPerm::Leaf { .. }) => {
                     let leaf = p.as_leaf().unwrap();
                     let zero = expr!(ctx, 0 / 1);
@@ -4073,12 +2493,28 @@ fn inst_obligations(
                 // materialize the `Select`). On success emit no goal; on failure a
                 // trivially-false goal carries the error to the caller.
                 Some(p) => {
-                    if prove_perm_positive(ctx, &p, pc_lits) {
+                    if p.prove_positive(ctx, pc_lits) {
                         vec![]
                     } else {
                         vec![(expr!(ctx, false), VerifyError::InsufficientPermission)]
                     }
                 }
+            }
+        }
+        // A quantified permission's amount must not be negative at any binding
+        // it holds for: `forall xs :: c(xs) ==> not(p(xs) < 0)`. Proven for
+        // fresh binders, so a failure is a trivially-false goal. A wildcard is
+        // positive by construction, as for a single location.
+        InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. })
+            if !q.body.contains_wc_permission() =>
+        {
+            match quant_spec_of(state, q, Injectivity::Check).prove_nonnegative(ctx, pc_lits) {
+                Ok(true) => vec![],
+                Ok(false) => vec![(
+                    expr!(ctx, false),
+                    VerifyError::SideCondition("permission may be negative"),
+                )],
+                Err(e) => vec![(expr!(ctx, false), e)],
             }
         }
         // `not(perm < 0)` desugared to an `Ite`. Applies to a location combine, a
