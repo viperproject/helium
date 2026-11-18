@@ -1,5 +1,10 @@
-pub(crate) mod algebra;
-pub(crate) mod quantified_permissions;
+// The heap's internals: only `interface` is used from outside.
+mod algebra;
+mod holders;
+mod interface;
+mod quantified_permissions;
+
+pub(crate) use interface::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -7,14 +12,14 @@ use std::rc::Rc;
 use lasso::Spur;
 
 use crate::verify::context::VerifyContext;
-use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::lang::Symbolic;
 use crate::vmir;
-use crate::vmir::{Bound, Literal, Polarity, QuantChunks, Type};
+use crate::vmir::{Bound, Literal, Polarity, Type};
 
 /// A path condition in verify space: a single conjunctive cube of e-class
 /// literals (the analog of a block's `PathConds`, already minimized by
 /// `reach.rs` at lowering). Shared `Rc` so cloning a `Heap` per-inst stays O(1).
-pub type HeapPc = Rc<[(egg::Id, Polarity)]>;
+type HeapPc = Rc<[(egg::Id, Polarity)]>;
 
 /// S0 merge instrumentation (gated by `SILVER_OXIDE_TRACE_MERGE`). Counts the
 /// join-merge structures the pc-hoist plan aims to flatten: `Select` nodes
@@ -62,7 +67,7 @@ impl MergeTrace {
         });
     }
 
-    pub(crate) fn bump_zero() {
+    fn bump_zero() {
         if !Self::enabled() {
             return;
         }
@@ -146,7 +151,7 @@ impl ChunkPerm {
 
     /// Structural equality with LEAVES compared by e-class `find` (so a `1/1`
     /// from either arm counts as equal). O(size), no saturation.
-    pub(crate) fn same(ctx: &VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) -> bool {
+    fn same(ctx: &VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) -> bool {
         match (a, b) {
             (ChunkPerm::Leaf { id: x, .. }, ChunkPerm::Leaf { id: y, .. }) => {
                 ctx.egraph.find(*x) == ctx.egraph.find(*y)
@@ -201,7 +206,7 @@ impl ChunkPerm {
     /// same condition class is decided, so only the matching side survives. The
     /// public face of [`Self::collapse_same_cond`], used by `perm_add` to restrict
     /// one addend while descending into the other.
-    pub(crate) fn restrict(
+    fn restrict(
         ctx: &VerifyContext<'_>,
         cond: egg::Id,
         arm: ChunkPerm,
@@ -272,7 +277,7 @@ impl ChunkPerm {
     /// stated about it must be gated by that cube. [`Self::for_each_leaf`] drops
     /// this, which is sound only while every leaf independently satisfies the
     /// fact being stated.
-    pub fn for_each_leaf_under(&self, f: &mut impl FnMut(egg::Id, &[(egg::Id, Polarity)])) {
+    fn for_each_leaf_under(&self, f: &mut impl FnMut(egg::Id, &[(egg::Id, Polarity)])) {
         fn go(
             p: &ChunkPerm,
             path: &mut Vec<(egg::Id, Polarity)>,
@@ -295,7 +300,7 @@ impl ChunkPerm {
 
     /// A representative e-class id for debug display, WITHOUT mutating the graph
     /// (a `Leaf`'s id, or a `Select`'s condition). Viz only — not a real perm id.
-    pub fn repr_id(&self) -> egg::Id {
+    fn repr_id(&self) -> egg::Id {
         match self {
             ChunkPerm::Leaf { id, .. } => *id,
             ChunkPerm::Select { cond, .. } => *cond,
@@ -321,7 +326,7 @@ impl ChunkPerm {
 /// complementary pair (`[c+]` and `[c−]`, the two one-sided chunks of a single
 /// join) is exactly the case that must be dropped, and dropping it must not
 /// depend on an `ite`-idempotence rewrite firing.
-pub(crate) fn cube_meet(
+fn cube_meet(
     ctx: &VerifyContext<'_>,
     a: &[(egg::Id, Polarity)],
     b: &[(egg::Id, Polarity)],
@@ -341,7 +346,7 @@ pub(crate) fn cube_meet(
 /// Whether `cube` entails `sub`: every literal of `sub` already appears in `cube`
 /// with the same polarity, so `sub` holds wherever `cube` does. Syntactic on
 /// e-classes, like [`cube_eq`] — no prove, no saturation.
-pub(crate) fn cube_entails(
+fn cube_entails(
     ctx: &VerifyContext<'_>,
     cube: &[(egg::Id, Polarity)],
     sub: &[(egg::Id, Polarity)],
@@ -355,7 +360,7 @@ pub(crate) fn cube_entails(
 
 /// Set-equality of two guard cubes under canonical e-classes (order-insensitive;
 /// guards are small).
-pub(crate) fn cube_eq(
+fn cube_eq(
     ctx: &VerifyContext<'_>,
     a: &[(egg::Id, Polarity)],
     b: &[(egg::Id, Polarity)],
@@ -369,7 +374,7 @@ pub(crate) fn cube_eq(
 }
 
 /// Append `lit` to a guard cube (idempotent under canonical e-classes).
-pub(crate) fn cube_push(
+fn cube_push(
     ctx: &VerifyContext<'_>,
     base: &[(egg::Id, Polarity)],
     lit: (egg::Id, Polarity),
@@ -390,7 +395,7 @@ pub(crate) fn cube_push(
 /// (no node minted), which is why the unconditional hot path pays nothing for
 /// gating. Prefer [`Chunk::gated_perm`]; this free form is for the two callers
 /// that hold a [`ChunkPerm`] without its chunk.
-pub(crate) fn gate_perm_by_guard(
+fn gate_perm_by_guard(
     ctx: &mut VerifyContext<'_>,
     perm: &ChunkPerm,
     guard: &[(egg::Id, Polarity)],
@@ -436,7 +441,7 @@ impl LocationKind {
 }
 
 #[derive(Debug, Clone)]
-pub struct Chunk {
+pub(crate) struct Chunk {
     /// The address e-class this chunk sits at (its identity within a group).
     pub(crate) addr: egg::Id,
     /// The **ungated** amount. Private: a chunk's real permission is
@@ -477,7 +482,7 @@ impl Chunk {
     }
 
     /// Build a chunk from an explicit permission term (the join merge's select).
-    pub fn new_perm(addr: egg::Id, perm: ChunkPerm, value: egg::Id) -> Self {
+    fn new_perm(addr: egg::Id, perm: ChunkPerm, value: egg::Id) -> Self {
         Self {
             addr,
             perm,
@@ -487,31 +492,31 @@ impl Chunk {
         }
     }
 
-    pub fn with_recipe(mut self, recipe: Option<crate::vmir::Val>) -> Self {
+    fn with_recipe(mut self, recipe: Option<crate::vmir::Val>) -> Self {
         self.recipe = recipe;
         self
     }
 
     /// This chunk's residual presence guard (relative to the heap `pc`).
-    pub(crate) fn guard(&self) -> &[(egg::Id, Polarity)] {
+    fn guard(&self) -> &[(egg::Id, Polarity)] {
         &self.guard
     }
 
     /// This chunk's guard as a shared [`HeapPc`], for re-attaching to a chunk
     /// derived from it ([`Chunk::with_guard`]). `Rc` clone — O(1), unlike
     /// rebuilding one from [`Chunk::guard`].
-    pub(crate) fn guard_pc(&self) -> HeapPc {
+    fn guard_pc(&self) -> HeapPc {
         self.guard.clone()
     }
 
     /// Return this chunk with residual presence guard `guard` (structural share).
-    pub(crate) fn with_guard(mut self, guard: HeapPc) -> Self {
+    fn with_guard(mut self, guard: HeapPc) -> Self {
         self.guard = guard;
         self
     }
 
     /// Return this chunk holding permission `perm` (guard and value unchanged).
-    pub(crate) fn with_perm(mut self, perm: ChunkPerm) -> Self {
+    fn with_perm(mut self, perm: ChunkPerm) -> Self {
         self.perm = perm;
         self
     }
@@ -527,7 +532,7 @@ impl Chunk {
     /// held. That mistake has produced two soundness bugs
     /// (`tests/cases/failing/guarded_nonaliasing_two_arms.vpr`,
     /// `guarded_merge_chunks.vpr`).
-    pub(crate) fn gated_perm(&self, ctx: &mut VerifyContext<'_>) -> ChunkPerm {
+    fn gated_perm(&self, ctx: &mut VerifyContext<'_>) -> ChunkPerm {
         gate_perm_by_guard(ctx, &self.perm, &self.guard)
     }
 
@@ -542,14 +547,14 @@ impl Chunk {
     ///     ([`Chunk::pc_entails_guard`]), which makes the gate a no-op.
     ///
     /// If neither holds, use [`Chunk::gated_perm`].
-    pub(crate) fn ungated_perm(&self) -> &ChunkPerm {
+    fn ungated_perm(&self) -> &ChunkPerm {
         &self.perm
     }
 
     /// The cube this chunk is actually present under here: `pc ∧ guard`, or
     /// `None` when the two are disjoint — the chunk is unreachable in this state
     /// and states nothing.
-    pub(crate) fn presence_cube(
+    fn presence_cube(
         &self,
         ctx: &VerifyContext<'_>,
         pc: &[(egg::Id, Polarity)],
@@ -560,7 +565,7 @@ impl Chunk {
     /// Whether `pc` already entails this chunk's guard, i.e. the consume happens
     /// inside the very region the chunk is present in — so gating would be a
     /// no-op and the flat cube should be carried through untouched.
-    pub(crate) fn pc_entails_guard(
+    fn pc_entails_guard(
         &self,
         ctx: &VerifyContext<'_>,
         pc: &[(egg::Id, Polarity)],
@@ -576,7 +581,7 @@ impl Chunk {
 }
 
 #[derive(Debug, Clone)]
-pub struct QuantChunk {
+struct QuantChunk {
     /// The body, still in vmir temp space.
     pub(crate) q: Rc<vmir::QuantChunks>,
     /// `free_temps()` resolved at inhale: enclosing temp -> its e-class then.
@@ -602,7 +607,7 @@ pub struct QuantChunk {
 
 /// One exhale recorded against a [`QuantChunk`] (its `taken` list).
 #[derive(Debug, Clone)]
-pub enum QPTaken {
+enum QPTaken {
     /// A whole chunk set exhaled from this one. It applies the same address
     /// function, and its `guard` is the exhale's path condition.
     Set(QuantChunk),
@@ -617,7 +622,7 @@ pub enum QPTaken {
 
 impl QuantChunk {
     /// This set with `t` recorded as taken from it.
-    pub(crate) fn with_taken(&self, t: QPTaken) -> QuantChunk {
+    fn with_taken(&self, t: QPTaken) -> QuantChunk {
         let mut taken = self.taken.to_vec();
         taken.push(t);
         QuantChunk {
@@ -658,21 +663,26 @@ impl Heap {
     }
 
     /// The chunks of one location kind (empty slice if none held).
-    pub fn chunks_of(&self, kind: &LocationKind) -> &[Chunk] {
+    fn chunks_of(&self, kind: &LocationKind) -> &[Chunk] {
         self.groups.get(kind).map(|r| &r[..]).unwrap_or(&[])
     }
-    pub(crate) fn qp_chunks_of(&self, kind: &LocationKind) -> &[QuantChunk] {
+    fn qp_chunks_of(&self, kind: &LocationKind) -> &[QuantChunk] {
         self.qps.get(kind).map_or(&[], |v| &v[..])
     }
 
+    /// Whether any quantified chunk set is held.
+    fn has_qp_chunks(&self) -> bool {
+        self.qps.values().any(|v| !v.is_empty())
+    }
+
     /// The chunk held at `addr` within `kind`'s group (exact e-class match).
-    pub fn chunk(&self, kind: &LocationKind, addr: egg::Id) -> Option<&Chunk> {
+    fn chunk(&self, kind: &LocationKind, addr: egg::Id) -> Option<&Chunk> {
         self.chunks_of(kind).iter().find(|c| c.addr == addr)
     }
 
     /// Insert `chunk` into `kind`'s group, replacing any chunk already at the
     /// same `addr` (preserving today's one-chunk-per-address semantics).
-    pub fn with_chunk(&self, kind: &LocationKind, chunk: Chunk) -> Self {
+    fn with_chunk(&self, kind: &LocationKind, chunk: Chunk) -> Self {
         let mut v: Vec<Chunk> = self
             .groups
             .get(kind)
@@ -689,7 +699,7 @@ impl Heap {
     }
 
     /// Replace the `i`-th chunk set of `kind` (as in [`Self::qp_chunks_of`]).
-    pub(crate) fn with_qp_chunk_replaced(
+    fn with_qp_chunk_replaced(
         &self,
         kind: &LocationKind,
         i: usize,
@@ -703,7 +713,7 @@ impl Heap {
         }
     }
 
-    pub fn with_qp_chunk(&self, kind: &LocationKind, chunk: QuantChunk) -> Self {
+    fn with_qp_chunk(&self, kind: &LocationKind, chunk: QuantChunk) -> Self {
         let mut v: Vec<QuantChunk> = self.qps.get(kind).map(|r| r.to_vec()).unwrap_or_default();
         v.push(chunk);
         Self {
@@ -713,7 +723,7 @@ impl Heap {
     }
 
     /// Drop the chunk at `addr` in `kind`'s group (removing the group if empty).
-    pub fn without_chunk(&self, kind: &LocationKind, addr: egg::Id) -> Self {
+    fn without_chunk(&self, kind: &LocationKind, addr: egg::Id) -> Self {
         let Some(group) = self.groups.get(kind) else {
             return self.clone();
         };
@@ -737,7 +747,7 @@ impl Heap {
     }
 
     /// The location kinds (group keys) present in the heap.
-    pub fn kinds(&self) -> impl Iterator<Item = &LocationKind> {
+    fn kinds(&self) -> impl Iterator<Item = &LocationKind> {
         self.groups.keys()
     }
 
@@ -745,7 +755,7 @@ impl Heap {
     /// e-class (`ctx.egraph.find`) so an address that only aliases the stored
     /// key under the currently-assumed context still resolves. Used by the
     /// Stage-4 join merge (a chunk held on both arms must line up by identity).
-    pub fn chunk_canon(
+    fn chunk_canon(
         &self,
         ctx: &VerifyContext<'_>,
         kind: &LocationKind,

@@ -28,6 +28,10 @@ use std::sync::Arc;
 
 use egg::Id;
 
+use crate::verify::eval::{EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw};
+use crate::verify::heap::{Heap, LocationKind, QPTaken, QuantChunk, gate_perm_by_guard};
+use crate::vmir;
+
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::ChunkPerm;
@@ -38,7 +42,7 @@ use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, QuantChunks, Val
 
 /// One instance of a quantified permission's body at given binder values: what
 /// the injectivity check reads off it.
-pub(crate) struct QpInstance {
+pub(super) struct QpInstance {
     /// `c(xs)`: whether this binding contributes a chunk.
     pub(crate) cond: Id,
     /// The arguments of the location's address call: the receiver of `e.f`, the
@@ -50,7 +54,7 @@ pub(crate) struct QpInstance {
 
 /// Evaluate the body of `q` at the given binder values. Supplied by the caller,
 /// which owns the evaluation state the body's captured temps resolve against.
-pub(crate) type Instantiate<'s> =
+type Instantiate<'s> =
     dyn FnMut(&mut VerifyContext<'_>, &[Id]) -> Result<QpInstance, VerifyError> + 's;
 
 /// Prove the receiver injectivity of `q` under the path condition `pc`, or fail
@@ -60,7 +64,7 @@ pub(crate) type Instantiate<'s> =
 /// only for this proof and must not leak into the live graph. The certificate
 /// recipe (if one is being built) is paused for the same reason, exactly as for
 /// a pure `forall`'s well-definedness check.
-pub(crate) fn check_qp_injectivity(
+fn check_qp_injectivity(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
     pc: &[(Id, Polarity)],
@@ -112,7 +116,7 @@ fn check_in_scratch(
 /// The permission a held chunk set has at an address, its guard folded in, or
 /// `None` when the set cannot name that address. Supplied by the caller, which
 /// owns the lookup (`qp_perm_at`).
-pub(crate) type HeldAt<'s> =
+type HeldAt<'s> =
     dyn FnMut(&mut VerifyContext<'_>, Id) -> Result<Option<ChunkPerm>, VerifyError> + 's;
 
 /// Whether the exhaled quantified permission `q` is covered by a held chunk set
@@ -130,7 +134,7 @@ pub(crate) type HeldAt<'s> =
 /// is discharged per branch by `prove_sufficient_aligned`. This is what makes
 /// recording the exhaled set as taken from the held one sound: no location
 /// goes negative.
-pub(crate) fn check_qp_contained(
+fn check_qp_contained(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
     pc: &[(Id, Polarity)],
@@ -160,6 +164,30 @@ pub(crate) fn check_qp_contained(
 }
 
 /// One fresh constant per binder of `q`.
+/// Whether the amount of `q` (captured temps resolved through `caps`) is never
+/// negative where it holds: `forall xs :: c(xs) ==> not(p(xs) < 0)` under the
+/// path condition `pc`. Proven for fresh binders on a scratch graph, with the
+/// certificate recipe paused, as [`check_qp_injectivity`].
+pub(super) fn check_qp_nonnegative(
+    ctx: &mut VerifyContext<'_>,
+    q: &QuantChunks,
+    caps: &[(usize, Id)],
+    pc: &[(Id, Polarity)],
+) -> Result<bool, VerifyError> {
+    ctx.pause_recipe(|ctx| {
+        ctx.with_scratch_graph(|ctx| {
+            let xs = fresh_binders(ctx, q);
+            let inst = eval_qp_instance(ctx, caps, q, &xs, pc)?;
+            let mut lits = pc.to_vec();
+            lits.push((inst.cond, Polarity::Positive));
+            let p = inst.perm.to_id(ctx);
+            let zero = expr!(ctx, 0 / 1);
+            let goal = expr!(ctx, not({ p } < r { zero }));
+            Ok(ctx.prove_under_pc(goal, &lits))
+        })
+    })
+}
+
 fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
     q.bound
         .iter()
@@ -188,7 +216,7 @@ fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
 /// The body is canonicalized exactly as a pure `forall`'s ([`Canonical`]) and
 /// the axiom's steps are appended to it. `caps` is [`QuantChunks::free_temps`],
 /// resolved.
-pub(crate) fn mint_and_assume_inverse_axiom(
+fn mint_and_assume_inverse_axiom(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
     caps: &[(usize, Id)],
@@ -300,4 +328,267 @@ fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
             c.push(AxiomPure::Ternary(cond, t, e))
         }
     }
+}
+
+/// Evaluate a quantified permission's body at `binders`, with its captured
+/// temps resolved through `caps` (the values fixed at the inhale, see
+/// [`EvalState::frame_from_caps`]), never the live state: a lookup may run in
+/// another temp space or after the captured variables were reassigned. Body
+/// permission temps count from 0, so the frame starts with no permissions.
+///
+/// The body holds only `Pure` and `Perm` instructions and its location is an
+/// address call (both guaranteed by `lower_quant_chunks`); anything else is a
+/// lowering bug and panics.
+fn eval_qp_instance(
+    ctx: &mut VerifyContext<'_>,
+    caps: &[(usize, egg::Id)],
+    q: &vmir::QuantChunks,
+    binders: &[egg::Id],
+    host_pc: &[(egg::Id, Polarity)],
+) -> Result<QpInstance, VerifyError> {
+    // The instance only feeds proofs (injectivity, containment, a lookup's
+    // permission); its terms never enter a certificate, and its temps carry no
+    // recipes. A read's certificate term is `lookup(seed, addr)`, built by the
+    // `Deref` itself.
+    ctx.pause_recipe(|ctx| eval_qp_instance_unrecorded(ctx, caps, q, binders, host_pc))
+}
+
+fn eval_qp_instance_unrecorded(
+    ctx: &mut VerifyContext<'_>,
+    caps: &[(usize, egg::Id)],
+    q: &vmir::QuantChunks,
+    binders: &[egg::Id],
+    host_pc: &[(egg::Id, Polarity)],
+) -> Result<QpInstance, VerifyError> {
+    debug_assert_eq!(binders.len(), q.bound.len());
+    let mut state = EvalState::frame_from_caps(q.binder_base, caps);
+    for (&id, ty) in binders.iter().zip(q.bound.iter()) {
+        state.push_val(id, ty.clone(), None);
+    }
+
+    for inst in &q.body.insts {
+        let mut pc_lits = host_pc.to_vec();
+        pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
+        match &inst.kind {
+            InstKind::Pure(ty, pi) => {
+                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
+                state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Perm(pi) => {
+                let p = eval_perm_inst(ctx, &state, pi);
+                state.push_perm(p, pi.clone());
+            }
+            other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
+        }
+    }
+
+    Ok(QpInstance {
+        cond: state.get_val(ctx, &q.body.cond),
+        loc_args: q
+            .loc_call()
+            .args
+            .iter()
+            .map(|a| state.get_val(ctx, a))
+            .collect(),
+        perm: eval_perm_structural(ctx, &state, &q.body.perm),
+    })
+}
+
+/// The permission a quantified chunk set holds at `addr`, or `None` when `addr`
+/// is not an application of the chunk's address function (no binding can name
+/// it). Not yet gated by `chunk.guard`, the inhale's path condition: the caller
+/// gates it exactly as a [`Chunk`]'s guard.
+///
+/// The binding that names `addr = f(as)` is solved per binder `x_j`:
+/// - **projection**: if some address argument is `x_j` itself, `x_j = as_i`;
+/// - otherwise **inversion**: `x_j = inv_j(as)`, with the inverse minted at the
+///   inhale (whose axiom, when assumed, lets the prover reduce it).
+///
+/// The body is evaluated at that binding from the chunk's captures, and its
+/// permission is gated by `c(xs)` and by the rebuilt address arguments being
+/// `as` (Silicon's `e(inv(r)) = r`). That gate is what makes the answer sound
+/// for any solution, even an unconstrained inverse: the permission is returned
+/// only where the instance really names `addr`. Arguments that already coincide
+/// with `as` (every projected one) add no gate.
+pub(super) fn qp_perm_at(
+    ctx: &mut VerifyContext<'_>,
+    chunk: &QuantChunk,
+    addr: egg::Id,
+) -> Result<Option<ChunkPerm>, VerifyError> {
+    let q = &*chunk.q;
+    let call = q.loc_call();
+    let Some(args) = addr_call_args(ctx, call, addr) else {
+        return Ok(None);
+    };
+    assert_eq!(
+        args.len(),
+        call.args.iter().count(),
+        "address call arity mismatch"
+    );
+
+    let binders: Vec<egg::Id> = (0..q.bound.len())
+        .map(|j| {
+            let me = Val::Temp(q.binder_base + j);
+            match call.args.iter().position(|a| *a == me) {
+                Some(i) => args[i],
+                None => ctx.add(Symbolic::FuncApp(chunk.inv[j], Box::new([]), args.clone())),
+            }
+        })
+        .collect();
+    let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.guard)?;
+
+    let perm = gate_on_args(ctx, inst.perm, &inst.loc_args, &args);
+    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
+    // What was exhaled from this set, each gated by its exhale's path condition.
+    for taken in chunk.taken.iter() {
+        let p = match taken {
+            // A taken set applies the same address function, so it always answers.
+            QPTaken::Set(set) => {
+                let p = qp_perm_at(ctx, set, addr)?
+                    .expect("a taken chunk set applies the same address function");
+                gate_perm_by_guard(ctx, &p, &set.guard)
+            }
+            // A single location counts only where it is `addr`: compared by
+            // address arguments, as the set's own instance is (address
+            // functions are uninterpreted, so `f(a) = f(b)` does not reduce).
+            QPTaken::Single {
+                addr: at,
+                perm: p,
+                guard,
+            } => {
+                let p = gate_perm_by_guard(ctx, p, guard);
+                let at_args = addr_call_args(ctx, call, *at)
+                    .expect("a single take from a set is at an address of its kind");
+                gate_on_args(ctx, p, &at_args, &args)
+            }
+        };
+        perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
+    }
+    Ok(Some(perm))
+}
+
+/// The arguments of `addr` as an application of `call`'s address function (the
+/// receiver of a field, the argument tuple of a predicate), or `None` when its
+/// e-class holds no such application.
+fn addr_call_args(
+    ctx: &VerifyContext<'_>,
+    call: &vmir::FunctionCall,
+    addr: egg::Id,
+) -> Option<Box<[egg::Id]>> {
+    let func = crate::verify::func_registry::func_id_for_member(call.function);
+    let class = ctx.egraph.find(addr);
+    ctx.egraph[class].nodes.iter().find_map(|n| match n {
+        Symbolic::FuncApp(f, tys, args) if *f == func && **tys == call.type_args[..] => {
+            Some(args.clone())
+        }
+        _ => None,
+    })
+}
+
+/// `perm` where the two address argument tuples agree, `0` elsewhere. Arguments
+/// already in one e-class add no gate.
+fn gate_on_args(
+    ctx: &mut VerifyContext<'_>,
+    mut perm: ChunkPerm,
+    got: &[egg::Id],
+    want: &[egg::Id],
+) -> ChunkPerm {
+    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    for (&g, &w) in got.iter().zip(want).rev() {
+        if ctx.egraph.find(g) != ctx.egraph.find(w) {
+            let eq = expr!(ctx, { g } == { w });
+            perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
+        }
+    }
+    perm
+}
+
+/// Index of the first held set of `kind` that covers `exhale`
+pub(super) fn find_covering_qp(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    exhaled: &QuantChunk,
+) -> Result<Option<usize>, VerifyError> {
+    let vmir_chunk = &exhaled.q;
+    for (i, held) in heap.qp_chunks_of(&kind).iter().enumerate() {
+        let contained = check_qp_contained(
+            ctx,
+            vmir_chunk,
+            &exhaled.guard,
+            &mut |ctx, binders| {
+                eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &exhaled.guard)
+            },
+            &mut |ctx, addr| {
+                Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
+            },
+        )?;
+
+        if contained {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
+/// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
+/// This function just removes it, no checks are performed.
+pub(super) fn take_from_qp(heap: &Heap, kind: &LocationKind, i: usize, exhaled: QuantChunk) -> Heap {
+    let held = &heap.qp_chunks_of(kind)[i];
+    let held = held.with_taken(QPTaken::Set(QuantChunk {
+        value_map: held.value_map,
+        ..exhaled
+    }));
+    heap.with_qp_chunk_replaced(kind, i, held)
+}
+
+/// The chunk set of `q` with its captured temps already resolved to `caps`:
+/// either from the live state ([`quant_chunk_of`]) or rebuilt from a resource
+/// footprint slot's recipes at a call site (`walk_footprint`). Proves the
+/// receiver injectivity under `pc_lits` and assumes the inverse axiom that
+/// proof licenses. The result carries no recipe; the caller sets one.
+pub(super) fn quant_chunk_from_caps(
+    ctx: &mut VerifyContext<'_>,
+    q: &Rc<vmir::QuantChunks>,
+    caps: Rc<[(usize, egg::Id)]>,
+    pc_lits: &[(egg::Id, Polarity)],
+    value_map: egg::Id,
+) -> Result<QuantChunk, VerifyError> {
+    // Distinct bindings that hold permission must name distinct locations.
+    check_qp_injectivity(ctx, q, pc_lits, &mut |ctx, binders| {
+        eval_qp_instance(ctx, &caps, q, binders, pc_lits)
+    })?;
+    quant_chunk_injective(ctx, q, caps, pc_lits, value_map)
+}
+
+/// The chunk set of `q` at `caps` whose receiver injectivity is already
+/// established, so only the inverse axiom is assumed here.
+///
+/// The one such caller is a footprint slot *produced* by `walk_footprint`
+/// (inhale, unfold, from_snap): the resource's certificate walk proved
+/// injectivity for arbitrary arguments under the body's earlier conjuncts, and
+/// the produce assumes those conjuncts (the body boolean) under the same
+/// guard. It cannot re-prove it there, since the boolean is assumed only after
+/// all slots are walked. A *consumed* slot must not use this: there the
+/// boolean is asserted after the slots, and an inverse axiom assumed for a
+/// non-injective receiver would make that assertion vacuously provable.
+pub(super) fn quant_chunk_injective(
+    ctx: &mut VerifyContext<'_>,
+    q: &Rc<vmir::QuantChunks>,
+    caps: Rc<[(usize, egg::Id)]>,
+    pc_lits: &[(egg::Id, Polarity)],
+    value_map: egg::Id,
+) -> Result<QuantChunk, VerifyError> {
+    // One binding per location: assume the inverse axiom that names it.
+    let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
+    Ok(QuantChunk {
+        q: q.clone(),
+        caps,
+        inv,
+        guard: pc_lits.into(),
+        taken: Rc::from([]),
+        value_map,
+        recipe: None,
+    })
 }

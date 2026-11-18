@@ -11,6 +11,7 @@ mod cert;
 mod context;
 mod declaration;
 mod error;
+mod eval;
 mod func_registry;
 mod heap;
 pub mod lang;
