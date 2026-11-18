@@ -63,6 +63,19 @@ impl Value {
     }
 }
 
+/// A read's recipe-space context in a certificate walk (see [`Heap::read`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ReadRecipe {
+    /// The address's recipe: a value read from a chunk set is named
+    /// `lookup(map, addr)` by it. `None` when the address has none.
+    pub(crate) addr: Option<Val>,
+    /// The read's path condition in recipe space, outermost-first. It guards
+    /// the agreement facts the read records (see
+    /// [`crate::verify::cert::RecipeBuilder::record_side_fact`]). `None` when
+    /// no recipe-space pc can be recovered; then nothing is recorded.
+    pub(crate) pc: Option<Vec<(Val, Polarity)>>,
+}
+
 /// What [`Heap::produce`] adds and [`Heap::consume`] takes.
 pub(crate) enum Access {
     /// `acc(loc, perm)`.
@@ -159,15 +172,16 @@ impl Heap {
     }
 
     /// The value at `loc`, `None` when nothing is known to hold it. Decided by
-    /// the same holders as [`Heap::framing_perm`]. `addr_recipe` is the
-    /// address's recipe, if any: in a certificate walk a value read from a chunk
-    /// set is named `lookup(map, addr)` by it.
+    /// the same holders as [`Heap::framing_perm`]. `read_recipe` is the read's
+    /// recipe-space context in a certificate walk (see [`ReadRecipe`]): it names
+    /// a value read from a chunk set, and guards the agreement between holders
+    /// that the walk records for its certificate.
     pub(crate) fn read(
         &self,
         ctx: &mut VerifyContext<'_>,
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
-        addr_recipe: Option<&Val>,
+        read_recipe: Option<&ReadRecipe>,
     ) -> Result<Option<Value>, VerifyError> {
         if self.qp_chunks_of(&loc.kind).is_empty() {
             let chunk = chunk_under_pc(ctx, self.chunks_of(&loc.kind), loc.addr, pc);
@@ -177,7 +191,7 @@ impl Heap {
             }));
         }
         let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
-        Ok(pick_value(ctx, &loc.kind, &holders, pc, addr_recipe))
+        Ok(pick_value(ctx, &loc.kind, &holders, pc, read_recipe))
     }
 
     /// `perm(loc)`: exactly the permission this heap holds at `loc`, the sum
