@@ -27,7 +27,7 @@ pub(super) struct Holder {
 
 /// Where a [`Holder`] sits in its heap: an index into `chunks_of(kind)` or
 /// `qp_chunks_of(kind)`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HolderAt {
     Chunk(usize),
     Set(usize),
@@ -91,6 +91,26 @@ pub(super) fn sum_perms(ctx: &mut VerifyContext<'_>, holders: &[Holder]) -> Chun
         total = perm_add(ctx, &total, &h.perm);
     }
     total
+}
+
+/// Split `demand` greedily over `holders`, in order: each gives
+/// `min(what it holds, what is still needed)`, so the takes sum to the demand
+/// wherever the holders hold enough. One take per holder.
+pub(super) fn greedy_takes(
+    ctx: &mut VerifyContext<'_>,
+    holders: &[Holder],
+    demand: egg::Id,
+) -> Vec<egg::Id> {
+    let mut remaining = demand;
+    holders
+        .iter()
+        .map(|h| {
+            let hold = h.perm.to_id(ctx);
+            let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
+            remaining = ctx.add(Symbolic::Binary(crate::vmir::BinOp::SubR, [remaining, take]));
+            take
+        })
+        .collect()
 }
 
 /// The value at a location from its `holders`. A location has one value, so

@@ -618,6 +618,17 @@ enum QPTaken {
         perm: ChunkPerm,
         guard: HeapPc,
     },
+    /// This set's share of an exhaled set `demand` that no single holder
+    /// covered: the exhale split it greedily over every holder of `before`
+    /// (the heap just before it), each giving `min(what it holds, what is still
+    /// needed)` in `holders_at` order. This set is `before`'s set number
+    /// `holder`; at an address its share is recomputed from `before` there.
+    Share {
+        demand: QuantChunk,
+        before: Heap,
+        holder: usize,
+        guard: HeapPc,
+    },
 }
 
 impl QuantChunk {
