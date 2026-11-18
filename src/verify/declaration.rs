@@ -17,7 +17,7 @@ use crate::{
                 Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
                 merge_heaps, perm_add, perm_value, prove_perm_positive, prove_perm_write,
                 prove_sufficient_aligned,
-                summarize_perm_at, union_heaps,
+                chunk_share_at, summarize_perm_at, union_heaps,
             },
             gate_perm_by_guard,
             quantified_permissions::{QpInstance, check_qp_contained, check_qp_injectivity},
@@ -412,9 +412,16 @@ fn eval_pure_inst(
         PureInst::Deref(hv, loc) => {
             let heap = get_heap(state, hv);
             let addr = state.get_val(ctx, loc);
-            let chunk = state
-                .loc_kind(loc)
-                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(&k), addr, pc_lits).cloned());
+            let kind = state.loc_kind(loc);
+            // With a chunk set of this kind, the location may be held by several
+            // holders at once, so it is read through all of them (`read_at`).
+            let has_sets = kind
+                .as_ref()
+                .is_some_and(|k| !heap.qp_chunks_of(k).is_empty());
+            let chunk = kind
+                .as_ref()
+                .filter(|_| !has_sets)
+                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(k), addr, pc_lits).cloned());
             match chunk {
                 Some(c) => {
                     // The chunk's recipe provenance is the deref's pure term —
@@ -430,43 +437,24 @@ fn eval_pure_inst(
                     (c.value, recipe)
                 }
                 None => {
-                    // No single chunk: a quantified chunk set that frames the
-                    // read (the same proof as the `Deref` obligation) holds the
-                    // value in its map. Several framing sets: the first is
-                    // taken (sound; their agreement is not assumed yet).
-                    let framing = state.loc_kind(loc).and_then(|k| {
-                        let (set, v) = qp_value_at(ctx, &heap, &k, addr, pc_lits)?;
-                        Some((k, set.recipe.clone(), v))
-                    });
-                    match framing {
-                        Some((k, map_r, v)) => {
-                            // In a resource body the read purifies to `lookup(seed, addr)`.
-                            let recipe = if ctx.recipe.is_some() {
-                                let map_r = map_r.ok_or(VerifyError::Unimplemented(
-                                    "purify: deref outside footprint",
-                                ))?;
-                                let lookup = ctx.alloc.value_map(&k).lookup;
-                                let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
-                                let rb = ctx.recipe.as_mut().unwrap();
-                                Some(rb.emit(AxiomPure::App {
-                                    func: lookup,
-                                    type_args: vec![],
-                                    args: vec![map_r, addr_r],
-                                }))
-                            } else {
-                                None
+                    let read = match &kind {
+                        Some(k) if has_sets => {
+                            let addr_r = match ctx.recipe {
+                                Some(_) => Some(state.require_recipe(loc, OPERAND_RECIPE)?),
+                                None => None,
                             };
-                            (v, recipe)
+                            read_at(ctx, &heap, k, addr, ty, pc_lits, addr_r.as_ref())?
                         }
-                        None => {
-                            if ctx.recipe.is_some() {
-                                return Err(VerifyError::Unimplemented(
-                                    "purify: deref outside footprint",
-                                ));
-                            }
-
-                            (ctx.fresh_symbolic_value(ty.clone()), None)
+                        _ => None,
+                    };
+                    match read {
+                        Some((v, r)) if ctx.recipe.is_none() || r.is_some() => (v, r),
+                        _ if ctx.recipe.is_some() => {
+                            return Err(VerifyError::Unimplemented(
+                                "purify: deref outside footprint",
+                            ));
                         }
+                        _ => (ctx.fresh_symbolic_value(ty.clone()), None),
                     }
                 }
             }
@@ -1863,16 +1851,21 @@ fn walk_single_slot(
     }
     let addr = ctx.egraph.find(addr);
     // Values are read from the *original* heap (aliased slots agree); the hit
-    // chunk's recipe provenance rides along. A location held only by a
-    // quantified chunk set reads its map, as a `Deref` would (no recipe yet).
+    // chunk's recipe provenance rides along. With a chunk set of this kind the
+    // location is read through all its holders, as a `Deref` is (a set's value
+    // has no recipe here: the slot address has none).
     let (value, recipe) = slot_value(ctx, w, i, elem, |ctx, h| {
-        h.entries()
-            .find_map(|(_, c)| {
+        let read = if h.qp_chunks_of(kind).is_empty() {
+            h.entries().find_map(|(_, c)| {
                 (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
                     .then(|| (c.value, c.recipe.clone()))
             })
-            .or_else(|| Some((qp_value_at(ctx, h, kind, addr, w.pc_lits)?.1, None)))
-            .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None))
+        } else {
+            // The bodies evaluated once already, at their inhales.
+            read_at(ctx, h, kind, addr, elem, w.pc_lits, None)
+                .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"))
+        };
+        read.unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None))
     });
     let present = if wc_slot {
         frame_wildcard_slot(ctx, w, kind, addr, perm, heap)?
@@ -3255,9 +3248,64 @@ fn gate_on_args(
     perm
 }
 
-/// Everything `heap` holds at `addr`: the single chunks' summary plus each
-/// quantified chunk set's share there (its guard folded in, what was exhaled
-/// from it subtracted). A set that cannot name `addr` contributes nothing.
+/// One holder of a permission at an address (see [`holders_at`]): its share
+/// there and the value it holds there.
+struct Holder {
+    perm: ChunkPerm,
+    value: egg::Id,
+    source: HolderSource,
+}
+
+/// Where a [`Holder`]'s value comes from, with its recipe provenance
+/// (certificate walks).
+enum HolderSource {
+    /// A single chunk; the recipe is the value's own.
+    Chunk(Option<Val>),
+    /// A quantified chunk set; the recipe is its map's (the value is
+    /// `lookup(map, addr)`).
+    Set(Option<Val>),
+}
+
+/// Everything in `heap` that may hold `addr`: each single chunk that may sit
+/// there ([`chunk_share_at`], its aliasing gate folded in) and each quantified
+/// chunk set that can name it ([`qp_perm_at`], its guard folded in, what was
+/// exhaled from it subtracted). In heap order, single chunks first.
+fn holders_at(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Result<Vec<Holder>, VerifyError> {
+    let mut holders = Vec::new();
+    for c in heap.chunks_of(kind).iter() {
+        if let Some((perm, _)) = chunk_share_at(ctx, c, addr, pc_lits) {
+            holders.push(Holder {
+                perm,
+                value: c.value,
+                source: HolderSource::Chunk(c.recipe.clone()),
+            });
+        }
+    }
+    for set in heap.qp_chunks_of(kind).iter() {
+        if let Some(p) = qp_perm_at(ctx, set, addr)? {
+            let lookup = ctx.alloc.value_map(kind).lookup;
+            let value = ctx.add(Symbolic::FuncApp(
+                lookup,
+                Box::new([]),
+                Box::new([set.value_map, addr]),
+            ));
+            holders.push(Holder {
+                perm: gate_perm_by_guard(ctx, &p, &set.guard),
+                value,
+                source: HolderSource::Set(set.recipe.clone()),
+            });
+        }
+    }
+    Ok(holders)
+}
+
+/// Everything `heap` holds at `addr`: the sum of its holders' shares.
 fn perm_total_at(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
@@ -3265,15 +3313,103 @@ fn perm_total_at(
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Result<ChunkPerm, VerifyError> {
-    let chunks = heap.chunks_of(kind).to_vec();
-    let mut total = summarize_perm_at(ctx, &chunks, addr, pc_lits).0;
-    for set in heap.qp_chunks_of(kind).iter() {
-        if let Some(p) = qp_perm_at(ctx, set, addr)? {
-            let p = gate_perm_by_guard(ctx, &p, &set.guard);
-            total = perm_add(ctx, &total, &p);
-        }
+    let mut total = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    for h in holders_at(ctx, heap, kind, addr, pc_lits)? {
+        total = perm_add(ctx, &total, &h.perm);
     }
     Ok(total)
+}
+
+/// The value at a location from its `holders`. A location has one value, so
+/// any two holders with a positive share there agree; that is assumed here,
+/// under the pc. The value is the first holder's whose share is known positive,
+/// behind an `ite` on each holder before it that may be positive; fresh when no
+/// holder is known positive.
+fn value_at(
+    ctx: &mut VerifyContext<'_>,
+    holders: &[Holder],
+    ty: &Type,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> egg::Id {
+    let positive: Vec<egg::Id> = holders
+        .iter()
+        .map(|h| {
+            let p = h.perm.to_id(ctx);
+            expr!(ctx, (0 / 1) < r { p })
+        })
+        .collect();
+    for i in 0..holders.len() {
+        for j in i + 1..holders.len() {
+            let (vi, vj) = (holders[i].value, holders[j].value);
+            if ctx.egraph.find(vi) == ctx.egraph.find(vj) {
+                continue;
+            }
+            // Inside the fact, not as guards: a scratch graph assumes the fact
+            // without its guards (see `assume_guarded`).
+            let eq = expr!(ctx, { vi } == { vj });
+            let both = [
+                (positive[j], Polarity::Positive),
+                (positive[i], Polarity::Positive),
+            ];
+            let agree = ctx.implication(eq, both.into_iter());
+            ctx.assume_guarded(agree, pc_lits.iter().rev().copied());
+        }
+    }
+    let known = holders
+        .iter()
+        .position(|h| prove_perm_positive(ctx, &h.perm, pc_lits));
+    let (mut value, upto) = match known {
+        Some(k) => (holders[k].value, k),
+        None => (ctx.fresh_symbolic_value(ty.clone()), holders.len()),
+    };
+    for i in (0..upto).rev() {
+        value = ctx.add(Symbolic::Ite([positive[i], holders[i].value, value]));
+    }
+    value
+}
+
+/// Read `addr` (of `kind`, value type `ty`) from all its holders in `heap`, or
+/// `None` when nothing may hold it. Outside a certificate walk the value is
+/// [`value_at`]. A certificate names one holder instead: the first known to
+/// hold a positive share, with its recipe (a set's needs the address recipe
+/// `addr_r`; without it the recipe is `None`).
+#[allow(clippy::too_many_arguments)]
+fn read_at(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    addr: egg::Id,
+    ty: &Type,
+    pc_lits: &[(egg::Id, Polarity)],
+    addr_r: Option<&Val>,
+) -> Result<Option<(egg::Id, Option<Val>)>, VerifyError> {
+    let holders = holders_at(ctx, heap, kind, addr, pc_lits)?;
+    if holders.is_empty() {
+        return Ok(None);
+    }
+    if ctx.recipe.is_none() {
+        return Ok(Some((value_at(ctx, &holders, ty, pc_lits), None)));
+    }
+    let Some(h) = holders
+        .iter()
+        .find(|h| prove_perm_positive(ctx, &h.perm, pc_lits))
+    else {
+        return Ok(None);
+    };
+    let recipe = match (&h.source, addr_r) {
+        (HolderSource::Chunk(r), _) => r.clone(),
+        (HolderSource::Set(Some(map_r)), Some(addr_r)) => {
+            let lookup = ctx.alloc.value_map(kind).lookup;
+            let rb = ctx.recipe.as_mut().unwrap();
+            Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
+                func: lookup,
+                type_args: vec![],
+                args: vec![map_r.clone(), addr_r.clone()],
+            }))
+        }
+        (HolderSource::Set(_), _) => None,
+    };
+    Ok(Some((h.value, recipe)))
 }
 
 /// The index (in `heap.qp_chunks_of(kind)`) of the first quantified chunk set
@@ -3299,28 +3435,6 @@ fn qp_framing(
             Err(e) => panic!("quantified chunk body failed to re-evaluate: {e:?}"),
         }
     })
-}
-
-/// The first quantified chunk set of `kind` that frames `addr` under `pc_lits`
-/// (see [`qp_framing`]), with the value it holds there: `lookup(map, addr)`.
-fn qp_value_at<'h>(
-    ctx: &mut VerifyContext<'_>,
-    heap: &'h Heap,
-    kind: &LocationKind,
-    addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> Option<(&'h QuantChunk, egg::Id)> {
-    let i = qp_framing(ctx, heap, kind, addr, |ctx, p| {
-        prove_perm_positive(ctx, p, pc_lits)
-    })?;
-    let set = &heap.qp_chunks_of(kind)[i];
-    let lookup = ctx.alloc.value_map(kind).lookup;
-    let v = ctx.add(Symbolic::FuncApp(
-        lookup,
-        Box::new([]),
-        Box::new([set.value_map, addr]),
-    ));
-    Some((set, v))
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and

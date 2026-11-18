@@ -1826,6 +1826,60 @@ pub(crate) fn merge_heaps(
     out
 }
 
+/// What the single chunk `c` contributes at `addr`: its gated amount there and
+/// the cube that contribution is conditional on (empty on a ground match, the
+/// chunk's guard when the equality holds wherever it is held, else the address
+/// equality itself). `None` when it provably contributes nothing (aliasing
+/// disproven, or its guard contradicts the pc). One summand of
+/// [`summarize_perm_at`].
+pub(crate) fn chunk_share_at(
+    ctx: &mut VerifyContext<'_>,
+    c: &Chunk,
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Option<(ChunkPerm, crate::verify::heap::HeapPc)> {
+    let canon = ctx.egraph.find(addr);
+    let held = c.gated_perm(ctx);
+    // Ground match: no address gate at all (and no `Eq` node minted).
+    let share: (ChunkPerm, crate::verify::heap::HeapPc) = if ctx.egraph.find(c.addr) == canon {
+        (held, std::rc::Rc::from(Vec::new()))
+    } else {
+        let eq = expr!(ctx, { c.addr } == { addr });
+        // Disproven aliasing contributes nothing — skip before minting the gate.
+        if matches!(
+            ctx.egraph[ctx.egraph.find(eq)].data.known(),
+            Some(Literal::Bool(false))
+        ) {
+            return None;
+        }
+        // Equal wherever this chunk is held: no address gate, and the
+        // condition on the contribution is the guard `held` already carries.
+        let presence = match c.presence_cube(ctx, pc_lits) {
+            // Guard contradicts the pc — the chunk is unreachable here.
+            None => return None,
+            Some(cube) => cube,
+        };
+        if !c.guard().is_empty() && ctx.prove_under_pc(eq, &presence) {
+            (held, c.guard_pc())
+        } else {
+            // Structural, not folded into the term. Gating the amount as
+            // `ite(eq, held, 0)` collapses the whole summary to one flat
+            // leaf, and `prove_perm_leaves` then has nothing to split on:
+            // sufficiency has to be shown against
+            // `ite(a==c, p, 0) + ite(b==c, q, 0)` with every alias gate
+            // still open. Kept as a `Select`, `perm_add` distributes it,
+            // and each leaf is proven under its own gate polarities.
+            let cube = vec![(eq, Polarity::Positive)];
+            let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+            (
+                ChunkPerm::select(ctx, eq, held, zero),
+                std::rc::Rc::from(cube),
+            )
+        }
+    };
+    Some(share)
+}
+
 /// The **Σ-ite summary** of a location: the permission held at `addr`, summed over
 /// *every* chunk of the group, each gated by whether it sits at that address.
 ///
@@ -1884,49 +1938,12 @@ pub(crate) fn summarize_perm_at(
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> (ChunkPerm, Vec<(Chunk, crate::verify::heap::HeapPc)>) {
-    let canon = ctx.egraph.find(addr);
     let mut total: Option<ChunkPerm> = None;
     let mut set: Vec<(Chunk, crate::verify::heap::HeapPc)> = Vec::new();
     for c in chunks {
-        let held = c.gated_perm(ctx);
-        // Ground match: no address gate at all (and no `Eq` node minted).
-        let (amount, cube): (ChunkPerm, crate::verify::heap::HeapPc) =
-            if ctx.egraph.find(c.addr) == canon {
-                (held, std::rc::Rc::from(Vec::new()))
-            } else {
-                let eq = expr!(ctx, { c.addr } == { addr });
-                // Disproven aliasing contributes nothing — skip before minting the gate.
-                if matches!(
-                    ctx.egraph[ctx.egraph.find(eq)].data.known(),
-                    Some(Literal::Bool(false))
-                ) {
-                    continue;
-                }
-                // Equal wherever this chunk is held: no address gate, and the
-                // condition on the contribution is the guard `held` already carries.
-                let presence = match c.presence_cube(ctx, pc_lits) {
-                    // Guard contradicts the pc — the chunk is unreachable here.
-                    None => continue,
-                    Some(cube) => cube,
-                };
-                if !c.guard().is_empty() && ctx.prove_under_pc(eq, &presence) {
-                    (held, c.guard_pc())
-                } else {
-                    // Structural, not folded into the term. Gating the amount as
-                    // `ite(eq, held, 0)` collapses the whole summary to one flat
-                    // leaf, and `prove_perm_leaves` then has nothing to split on:
-                    // sufficiency has to be shown against
-                    // `ite(a==c, p, 0) + ite(b==c, q, 0)` with every alias gate
-                    // still open. Kept as a `Select`, `perm_add` distributes it,
-                    // and each leaf is proven under its own gate polarities.
-                    let cube = vec![(eq, Polarity::Positive)];
-                    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-                    (
-                        ChunkPerm::select(ctx, eq, held, zero),
-                        std::rc::Rc::from(cube),
-                    )
-                }
-            };
+        let Some((amount, cube)) = chunk_share_at(ctx, c, addr, pc_lits) else {
+            continue;
+        };
         set.push((c.clone(), cube));
         total = Some(match total {
             None => amount,
