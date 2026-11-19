@@ -36,11 +36,7 @@ pub(in crate::verify::heap) fn chunk_share_at(
         }
         // Equal wherever this chunk is held: no address gate, and the
         // condition on the contribution is the guard `held` already carries.
-        let presence = match c.presence_cube(ctx, pc_lits) {
-            // Guard contradicts the pc — the chunk is unreachable here.
-            None => return None,
-            Some(cube) => cube,
-        };
+        let presence = c.presence_cube(ctx, pc_lits)?;
         if !c.guard().is_empty() && ctx.prove_under_pc(eq, &presence) {
             (held, c.guard_pc())
         } else {

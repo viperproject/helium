@@ -788,11 +788,6 @@ impl Heap {
         self.qps.get(kind).map_or(&[], |v| &v[..])
     }
 
-    /// Whether any quantified chunk set is held.
-    fn has_qp_chunks(&self) -> bool {
-        self.qps.values().any(|v| !v.is_empty())
-    }
-
     /// The chunk held at `addr` within `kind`'s group (exact e-class match).
     fn chunk(&self, kind: &LocationKind, addr: egg::Id) -> Option<&Chunk> {
         self.chunks_of(kind).iter().find(|c| c.addr == addr)

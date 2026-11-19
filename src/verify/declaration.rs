@@ -870,7 +870,7 @@ fn walk_qp_slot(
         .map(|(k, recipe)| {
             (
                 *k,
-                recipe.build(&mut ctx.egraph, &resolve, w.pc_lits, changed),
+                recipe.build(&mut ctx.egraph, resolve, w.pc_lits, changed),
             )
         })
         .collect::<Rc<_>>();

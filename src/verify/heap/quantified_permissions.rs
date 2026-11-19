@@ -610,7 +610,7 @@ pub(super) fn find_covering_qp(
 ) -> Result<Option<usize>, VerifyError> {
     let vmir_chunk = &exhaled.q;
     let pc = exhaled.eval_pc();
-    for (i, held) in heap.qp_chunks_of(&kind).iter().enumerate() {
+    for (i, held) in heap.qp_chunks_of(kind).iter().enumerate() {
         let contained = check_qp_contained(
             ctx,
             vmir_chunk,
