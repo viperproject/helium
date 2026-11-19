@@ -361,11 +361,7 @@ fn cube_entails(
 
 /// Set-equality of two guard cubes under canonical e-classes (order-insensitive;
 /// guards are small).
-fn cube_eq(
-    ctx: &VerifyContext<'_>,
-    a: &[(egg::Id, Polarity)],
-    b: &[(egg::Id, Polarity)],
-) -> bool {
+fn cube_eq(ctx: &VerifyContext<'_>, a: &[(egg::Id, Polarity)], b: &[(egg::Id, Polarity)]) -> bool {
     a.len() == b.len()
         && a.iter().all(|(ia, pa)| {
             let ca = ctx.egraph.find(*ia);
@@ -566,11 +562,7 @@ impl Chunk {
     /// Whether `pc` already entails this chunk's guard, i.e. the consume happens
     /// inside the very region the chunk is present in — so gating would be a
     /// no-op and the flat cube should be carried through untouched.
-    fn pc_entails_guard(
-        &self,
-        ctx: &VerifyContext<'_>,
-        pc: &[(egg::Id, Polarity)],
-    ) -> bool {
+    fn pc_entails_guard(&self, ctx: &VerifyContext<'_>, pc: &[(egg::Id, Polarity)]) -> bool {
         cube_entails(ctx, pc, &self.guard)
     }
 
@@ -711,7 +703,13 @@ impl QPTaken {
                 perm: perm.clone(),
                 guard: cube_push(ctx, guard, lit),
             },
-            Taken::Share { demand, before, holder, pc, guard } => Taken::Share {
+            Taken::Share {
+                demand,
+                before,
+                holder,
+                pc,
+                guard,
+            } => Taken::Share {
                 demand: demand.clone(),
                 before: before.clone(),
                 holder: *holder,
@@ -749,7 +747,6 @@ impl QuantChunk {
             guard: cube_push(ctx, &self.guard, lit),
             ..self.clone()
         }
-
     }
 }
 
@@ -820,12 +817,7 @@ impl Heap {
     }
 
     /// Replace the `i`-th chunk set of `kind` (as in [`Self::qp_chunks_of`]).
-    fn with_qp_chunk_replaced(
-        &self,
-        kind: &LocationKind,
-        i: usize,
-        chunk: QuantChunk,
-    ) -> Self {
+    fn with_qp_chunk_replaced(&self, kind: &LocationKind, i: usize, chunk: QuantChunk) -> Self {
         let mut v: Vec<QuantChunk> = self.qp_chunks_of(kind).to_vec();
         v[i] = chunk;
         Self {

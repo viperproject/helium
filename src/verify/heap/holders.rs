@@ -5,15 +5,14 @@
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::algebra::{
-    Demand, chunk_share_at, heap_subtract, perm_add, prove_perm_positive,
-    prove_sufficient_aligned,
+    Demand, chunk_share_at, heap_subtract, perm_add, prove_perm_positive, prove_sufficient_aligned,
 };
+use crate::verify::heap::interface::{ReadRecipe, Value};
 use crate::verify::heap::quantified_permissions::qp_perm_at;
 use crate::verify::heap::{
     Chunk, ChunkPerm, Heap, LocationKind, Restored, Taken, gate_perm_by_guard,
 };
 use crate::verify::lang::Symbolic;
-use crate::verify::heap::interface::{ReadRecipe, Value};
 use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
 
@@ -139,7 +138,10 @@ pub(super) fn greedy_takes(
         .map(|h| {
             let hold = h.perm.to_id(ctx);
             let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
-            remaining = ctx.add(Symbolic::Binary(crate::vmir::BinOp::SubR, [remaining, take]));
+            remaining = ctx.add(Symbolic::Binary(
+                crate::vmir::BinOp::SubR,
+                [remaining, take],
+            ));
             take
         })
         .collect()
@@ -240,7 +242,10 @@ fn holder_recipe(
         (HolderSource::Chunk(r), _) => r.clone(),
         (HolderSource::Set(Some(map_r)), Some(addr_r)) => {
             let lookup = ctx.alloc.value_map(kind).lookup;
-            let rb = ctx.recipe.as_mut().expect("holder recipe outside a certificate walk");
+            let rb = ctx
+                .recipe
+                .as_mut()
+                .expect("holder recipe outside a certificate walk");
             Some(rb.emit(AxiomPure::App {
                 func: lookup,
                 type_args: vec![],
@@ -291,7 +296,10 @@ fn record_agreements(
         let Some(other_r) = holder_recipe(ctx, kind, h, addr_r) else {
             continue;
         };
-        let rb = ctx.recipe.as_mut().expect("agreement outside a certificate walk");
+        let rb = ctx
+            .recipe
+            .as_mut()
+            .expect("agreement outside a certificate walk");
         let mut fact = rb.emit(AxiomPure::Binary(BinOp::Eq, named_r.clone(), other_r));
         let true_ = Val::Literal(Literal::Bool(true));
         // Outermost-first, folded innermost-first (as `implication` does).
@@ -339,11 +347,14 @@ pub(super) fn subtract_location(
         };
         let held = gate_perm_by_guard(ctx, &held, &set.guard);
         if prove_sufficient_aligned(ctx, &held, &needed, pc_lits) {
-            let set = set.with_taken(ctx, Taken::Single {
-                addr: chunk.addr,
-                perm: needed,
-                guard: std::rc::Rc::from([]),
-            });
+            let set = set.with_taken(
+                ctx,
+                Taken::Single {
+                    addr: chunk.addr,
+                    perm: needed,
+                    guard: std::rc::Rc::from([]),
+                },
+            );
             return Ok(heap.with_qp_chunk_replaced(kind, i, set));
         }
     }

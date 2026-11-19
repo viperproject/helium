@@ -16,7 +16,8 @@ use crate::{
         lang::Symbolic,
     },
     vmir::{
-        self, BinOp, Declaration, HeapInst, HeapVal, Inst, InstKind, MemberId, PathConds, Polarity, PureInst, Type, Val,
+        self, BinOp, Declaration, HeapInst, HeapVal, Inst, InstKind, MemberId, PathConds, Polarity,
+        PureInst, Type, Val,
     },
 };
 
@@ -269,7 +270,11 @@ pub(crate) fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
 /// For a heap `combine` this is the base operand plus the result; for any other
 /// instruction it is the current working heap (if any). Called after the
 /// instruction has been evaluated, so the result heap sits at `heaps_before`.
-pub(crate) fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec<(String, Heap)> {
+pub(crate) fn display_heaps(
+    state: &EvalState,
+    kind: &InstKind,
+    heaps_before: usize,
+) -> Vec<(String, Heap)> {
     match kind {
         InstKind::Heap(
             HeapInst::Add { base, .. }
@@ -413,10 +418,13 @@ pub(crate) fn eval_pure_inst(
             // recipe and records holder agreements under the recipe-space pc.
             // A pc guard without a recipe leaves the pc `None`: the read then
             // records no agreement, which only loses facts.
-            let read_recipe = ctx.recipe.is_some().then(|| crate::verify::heap::ReadRecipe {
-                addr: state.recipe_of(loc),
-                pc: recipe_pc.and_then(|pc| state.recipe_pc(pc).ok()),
-            });
+            let read_recipe = ctx
+                .recipe
+                .is_some()
+                .then(|| crate::verify::heap::ReadRecipe {
+                    addr: state.recipe_of(loc),
+                    pc: recipe_pc.and_then(|pc| state.recipe_pc(pc).ok()),
+                });
             let held = match state.loc(ctx, loc) {
                 Some(l) => heap.read(ctx, &l, pc_lits, read_recipe.as_ref())?,
                 None => None,
@@ -787,7 +795,11 @@ pub(crate) fn eval_pure_inst(
 ///
 /// A `Temp` was evaluated at its defining instruction, so it costs a lookup and
 /// mints nothing: a `p` temp denotes one permission however many times it is read.
-pub(crate) fn eval_perm(ctx: &mut VerifyContext<'_>, state: &EvalState, perm: &vmir::PermVal) -> egg::Id {
+pub(crate) fn eval_perm(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    perm: &vmir::PermVal,
+) -> egg::Id {
     eval_perm_structural(ctx, state, perm).to_id(ctx)
 }
 
@@ -843,7 +855,10 @@ pub(crate) fn eval_perm_inst(
 /// The walk memoizes per body temp, so a permission read twice yields one step and
 /// hence one wildcard at graft time, matching what the IR says: a `p` temp is one
 /// permission.
-pub(crate) fn perm_recipe(state: &EvalState, perm: &vmir::PermVal) -> Result<PermRecipe<Val>, VerifyError> {
+pub(crate) fn perm_recipe(
+    state: &EvalState,
+    perm: &vmir::PermVal,
+) -> Result<PermRecipe<Val>, VerifyError> {
     fn leaf(
         state: &EvalState,
         pv: &vmir::PermVal,

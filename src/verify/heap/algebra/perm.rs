@@ -1,10 +1,6 @@
 //! Permission amounts: arithmetic over [`ChunkPerm`] and the proofs about it (sufficient, positive, write).
 
-use crate::verify::{
-    context::VerifyContext,
-    heap::ChunkPerm,
-    lang::Symbolic,
-};
+use crate::verify::{context::VerifyContext, heap::ChunkPerm, lang::Symbolic};
 use crate::vmir::{BinOp, Bound, Literal, Polarity};
 
 /// [`perm_add`], but a leaf whose sum mentions a `wildcard` becomes a **fresh
@@ -50,7 +46,11 @@ use crate::vmir::{BinOp, Bound, Literal, Polarity};
 /// path. The arm-dependence lives entirely in *which leaf* — which the per-leaf
 /// positivity test already decides — not in whether the leaf's fact holds. This is
 /// why no pc/guard cube is threaded here, unlike the bound axiom.
-pub(super) fn perm_add_wildcard(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) -> ChunkPerm {
+pub(super) fn perm_add_wildcard(
+    ctx: &mut VerifyContext<'_>,
+    a: &ChunkPerm,
+    b: &ChunkPerm,
+) -> ChunkPerm {
     match (a, b) {
         (ChunkPerm::Leaf { id: x, wild: wx }, ChunkPerm::Leaf { id: y, wild: wy }) => {
             let (x, y, wild) = (*x, *y, *wx || *wy);
@@ -419,7 +419,11 @@ pub(in crate::verify::heap) fn prove_perm_write(
 /// conditions are exactly the union of the operands' — no condition is invented,
 /// so no split is either: the leaf count is fixed by how many distinct branch
 /// literals the participating chunks' guards mention, never by a search bound.
-pub(in crate::verify::heap) fn perm_add(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) -> ChunkPerm {
+pub(in crate::verify::heap) fn perm_add(
+    ctx: &mut VerifyContext<'_>,
+    a: &ChunkPerm,
+    b: &ChunkPerm,
+) -> ChunkPerm {
     match (a, b) {
         (ChunkPerm::Leaf { id: x, wild: wx }, ChunkPerm::Leaf { id: y, wild: wy }) => {
             ChunkPerm::Leaf {
@@ -522,7 +526,10 @@ pub(super) fn perm_all_zero(ctx: &VerifyContext<'_>, perm: &ChunkPerm) -> bool {
 /// consume to succeed. Heap operations reach for the summary only as a fallback
 /// ([`heap_subtract_inner`]), matching Silicon's split between greedy chunk
 /// matching and `--exhaleMode=1`.
-pub(in crate::verify::heap) fn perm_value(ctx: &mut VerifyContext<'_>, total: ChunkPerm) -> egg::Id {
+pub(in crate::verify::heap) fn perm_value(
+    ctx: &mut VerifyContext<'_>,
+    total: ChunkPerm,
+) -> egg::Id {
     // `perm(loc)` is asked for as a *value*, so the branch structure has to be
     // materialized here — the one place it is.
     let id = total.to_id(ctx);
