@@ -9,9 +9,7 @@ use crate::verify::heap::algebra::{
 };
 use crate::verify::heap::interface::{ReadRecipe, Value};
 use crate::verify::heap::quantified_permissions::qp_perm_at;
-use crate::verify::heap::{
-    Chunk, ChunkPerm, Heap, LocationKind, Restored, Taken, gate_perm_by_guard,
-};
+use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind, Restored, Taken};
 use crate::verify::lang::Symbolic;
 use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
@@ -66,23 +64,21 @@ pub(super) fn holders_at(
         }
     }
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
-        if let Some(p) = qp_perm_at(ctx, set, addr)? {
-            let lookup = ctx.alloc.value_map(kind).lookup;
-            let value = ctx.add(Symbolic::FuncApp(
-                lookup,
-                Box::new([]),
-                Box::new([set.value_map, addr]),
-            ));
-            for r in set.restored.iter() {
-                define_restored(ctx, kind, r, addr)?;
-            }
-            holders.push(Holder {
-                perm: gate_perm_by_guard(ctx, &p, &set.guard),
-                value,
-                source: HolderSource::Set(set.recipe.clone()),
-                at: HolderAt::Set(i),
-            });
+        let lookup = ctx.alloc.value_map(kind).lookup;
+        let value = ctx.add(Symbolic::FuncApp(
+            lookup,
+            Box::new([]),
+            Box::new([set.value_map, addr]),
+        ));
+        for r in set.restored.iter() {
+            define_restored(ctx, kind, r, addr)?;
         }
+        holders.push(Holder {
+            perm: qp_perm_at(ctx, set, addr)?,
+            value,
+            source: HolderSource::Set(set.recipe.clone()),
+            at: HolderAt::Set(i),
+        });
     }
     Ok(holders)
 }
@@ -95,9 +91,7 @@ fn define_restored(
     addr: egg::Id,
 ) -> Result<(), VerifyError> {
     let positive = |ctx: &mut VerifyContext<'_>, set: &crate::verify::heap::QuantChunk| {
-        let perm = qp_perm_at(ctx, set, addr)?
-            .expect("a taken chunk set applies the same address function");
-        let perm = gate_perm_by_guard(ctx, &perm, &set.guard).to_id(ctx);
+        let perm = qp_perm_at(ctx, set, addr)?.to_id(ctx);
         Ok::<_, VerifyError>(expr!(ctx, (0 / 1) < r { perm }))
     };
     let inside = positive(ctx, &rest.region)?;
@@ -342,10 +336,7 @@ pub(super) fn subtract_location(
     }
     let needed = chunk.ungated_perm().clone();
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
-        let Some(held) = qp_perm_at(ctx, set, chunk.addr)? else {
-            continue;
-        };
-        let held = gate_perm_by_guard(ctx, &held, &set.guard);
+        let held = qp_perm_at(ctx, set, chunk.addr)?;
         if prove_sufficient_aligned(ctx, &held, &needed, pc_lits) {
             let set = set.with_taken(
                 ctx,

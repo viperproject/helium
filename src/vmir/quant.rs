@@ -186,27 +186,6 @@ impl QuantChunks {
         self.binder_base + self.bound.len()
     }
 
-    /// The address call defining `body.loc`. Value temps number the body's
-    /// `Pure` insts from [`Self::step_base`] (a `Perm` inst defines none).
-    pub fn loc_call(&self) -> &crate::vmir::FunctionCall {
-        let Val::Temp(k) = self.body.loc else {
-            panic!("QP location must be a body temp, got {}", self.body.loc);
-        };
-        let def = self
-            .body
-            .insts
-            .iter()
-            .filter_map(|i| match &i.kind {
-                crate::vmir::InstKind::Pure(_, pi) => Some(pi),
-                _ => None,
-            })
-            .nth(k - self.step_base());
-        match def {
-            Some(crate::vmir::PureInst::FunctionCall(fc)) => fc,
-            other => panic!("QP location must be an address call, defined by {other:?}"),
-        }
-    }
-
     /// The enclosing temps this scope mentions (its capture list), triggers
     /// first, then the body, then `cond`, `loc` and the permission amount.
     pub fn free_temps(&self) -> Vec<usize> {
