@@ -294,7 +294,7 @@ impl Heap {
                     recipe: held.recipe.clone(),
                 };
                 let heap = match mode {
-                    ConsumeMode::Take => take_from_qp(self, &kind, i, exhaled),
+                    ConsumeMode::Take => take_from_qp(ctx, self, &kind, i, exhaled),
                     ConsumeMode::Frame => self.clone(),
                 };
                 Ok((heap, value))

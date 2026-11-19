@@ -1553,15 +1553,16 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         }
         ctx.egraph.rebuild();
     }
-    // The read-over-write axiom of each value map a quantified permission
-    // uses (`verify::builtin_axioms::value_map`): closed and ground, true on
+    // The axioms of each value map a quantified permission uses
+    // (`verify::builtin_axioms::value_map`): closed and ground, true on
     // every path, so assumed unguarded like the collection axioms.
     let qp_kinds = decls_qp_kinds(&program.decls);
     for kind in &qp_kinds {
-        let rid = ctx.alloc.value_map_axiom(kind);
-        let q = ctx.add(Symbolic::Forall(rid, Box::new([]), Box::new([])));
-        let true_ = expr!(ctx, true);
-        ctx.union(q, true_);
+        for rid in ctx.alloc.value_map_axioms(kind) {
+            let q = ctx.add(Symbolic::Forall(rid, Box::new([]), Box::new([])));
+            let true_ = expr!(ctx, true);
+            ctx.union(q, true_);
+        }
     }
     if !qp_kinds.is_empty() {
         for (f, ret) in ctx.alloc.skolem_ret_types() {

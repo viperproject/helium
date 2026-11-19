@@ -30,7 +30,7 @@ use egg::Id;
 
 use crate::verify::eval::{EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw};
 use crate::verify::heap::holders::{HolderAt, greedy_takes, holders_at, sum_perms};
-use crate::verify::heap::{Chunk, Heap, LocationKind, QPTaken, QuantChunk, gate_perm_by_guard};
+use crate::verify::heap::{Chunk, Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard};
 use crate::vmir;
 
 use crate::verify::context::VerifyContext;
@@ -443,9 +443,9 @@ pub(super) fn qp_perm_at(
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
     // What was exhaled from this set, each gated by its exhale's path condition.
     for taken in chunk.taken.iter() {
-        let p = match taken {
+        let p = match &taken.what {
             // A taken set applies the same address function, so it always answers.
-            QPTaken::Set(set) => {
+            Taken::Set(set) => {
                 let p = qp_perm_at(ctx, set, addr)?
                     .expect("a taken chunk set applies the same address function");
                 gate_perm_by_guard(ctx, &p, &set.guard)
@@ -453,7 +453,7 @@ pub(super) fn qp_perm_at(
             // A single location counts only where it is `addr`. Address
             // functions are injective (`rewrite::address_injectivity_rule`), so
             // `at == addr` reduces to its arguments.
-            QPTaken::Single {
+            Taken::Single {
                 addr: at,
                 perm: p,
                 guard,
@@ -467,7 +467,7 @@ pub(super) fn qp_perm_at(
                     ChunkPerm::select(ctx, eq, p, zero)
                 }
             }
-            QPTaken::Share {
+            Taken::Share {
                 demand,
                 before,
                 holder,
@@ -597,7 +597,7 @@ fn share_at(
 /// Take the exhaled set from all holders together, after [`covered_by_sum`]
 /// proved they hold enough. The split is greedy in `holders_at` order: a
 /// single chunk gives up its share at its own address at once; a held set
-/// records a [`QPTaken::Share`], evaluated at each later lookup.
+/// records a [`Taken::Share`], evaluated at each later lookup.
 pub(super) fn take_spread(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
@@ -618,7 +618,7 @@ pub(super) fn take_spread(
         );
     }
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
-        let set = set.with_taken(QPTaken::Share {
+        let set = set.with_taken(ctx, Taken::Share {
             demand: exhaled.clone(),
             before: heap.clone(),
             holder: i,
@@ -631,9 +631,15 @@ pub(super) fn take_spread(
 
 /// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
 /// This function just removes it, no checks are performed.
-pub(super) fn take_from_qp(heap: &Heap, kind: &LocationKind, i: usize, exhaled: QuantChunk) -> Heap {
+pub(super) fn take_from_qp(
+    ctx: &mut VerifyContext<'_>,
+    heap: &Heap,
+    kind: &LocationKind,
+    i: usize,
+    exhaled: QuantChunk,
+) -> Heap {
     let held = &heap.qp_chunks_of(kind)[i];
-    let held = held.with_taken(QPTaken::Set(QuantChunk {
+    let held = held.with_taken(ctx, Taken::Set(QuantChunk {
         value_map: held.value_map,
         ..exhaled
     }));
@@ -680,6 +686,7 @@ pub(super) fn quant_chunk_injective(
     // One binding per location: assume the inverse axiom that names it.
     let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
     Ok(QuantChunk {
+        origin: SetId::fresh(ctx),
         q: q.clone(),
         caps,
         inv,
