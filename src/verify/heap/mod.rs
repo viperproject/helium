@@ -5,6 +5,7 @@ mod interface;
 mod quantified_permissions;
 
 pub(crate) use interface::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, ReadRecipe, Value};
+pub(crate) use quantified_permissions::InverseAxioms;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -609,10 +610,17 @@ struct QuantChunk {
     /// arguments of the location's address call to that binder (see
     /// `quantified_permissions::mint_and_assume_inverse_axiom`).
     pub(crate) inv: Rc<[crate::verify::lang::FuncId]>,
-    /// Path-condition cube of the inhale, same role as `Chunk::guard`.
+    /// The path condition of the inhale. With `guard`, what the body is
+    /// evaluated and reasoned about under ([`QuantChunk::eval_pc`]); it does
+    /// not gate the set's permission: a heap belongs to the path it was built
+    /// on, so the set is held wherever that heap is used.
+    pub(crate) pc: HeapPc,
+    /// Presence guard, same role as `Chunk::guard`: the branch literals under
+    /// which this set is held, empty at the inhale and extended per join by
+    /// `merge_heaps`. It gates the set's permission.
     pub(crate) guard: HeapPc,
-    /// What was exhaled from this set, each under its own guard (the exhale's
-    /// path condition): whole chunk sets and single locations. A lookup
+    /// What was exhaled from this set, each under its own presence guard:
+    /// whole chunk sets and single locations. A lookup
     /// subtracts their permission at the address from this set's own, so the
     /// set's permission is never rebuilt.
     pub(crate) taken: Rc<[QPTaken]>,
@@ -666,10 +674,11 @@ struct QPTaken {
 #[derive(Debug, Clone)]
 enum Taken {
     /// A whole chunk set exhaled from this one. It applies the same address
-    /// function, and its `guard` is the exhale's path condition.
+    /// function; its `pc` is the exhale's path condition.
     Set(QuantChunk),
-    /// `perm` exhaled at the single location `addr`, under the exhale's path
-    /// condition `guard`. Counts only at an address equal to `addr`.
+    /// `perm` exhaled at the single location `addr`, present under `guard`
+    /// (empty at the exhale, extended per join). Counts only at an address
+    /// equal to `addr`.
     Single {
         addr: egg::Id,
         perm: ChunkPerm,
@@ -680,10 +689,14 @@ enum Taken {
     /// (the heap just before it), each giving `min(what it holds, what is still
     /// needed)` in `holders_at` order. This set is `before`'s set number
     /// `holder`; at an address its share is recomputed from `before` there.
+    ///
+    /// `pc` is the exhale's path condition, under which the split is
+    /// recomputed; `guard` its presence, as for `Single`.
     Share {
         demand: QuantChunk,
         before: Heap,
         holder: usize,
+        pc: HeapPc,
         guard: HeapPc,
     },
 }
@@ -698,10 +711,11 @@ impl QPTaken {
                 perm: perm.clone(),
                 guard: cube_push(ctx, guard, lit),
             },
-            Taken::Share { demand, before, holder, guard } => Taken::Share {
+            Taken::Share { demand, before, holder, pc, guard } => Taken::Share {
                 demand: demand.clone(),
                 before: before.clone(),
                 holder: *holder,
+                pc: pc.clone(),
                 guard: cube_push(ctx, guard, lit),
             },
         };
@@ -721,6 +735,12 @@ impl QuantChunk {
             taken: taken.into(),
             ..self.clone()
         }
+    }
+
+    /// What this set's body is evaluated under: the inhale's path condition
+    /// and the branch literals it is held under since.
+    fn eval_pc(&self) -> Vec<(egg::Id, Polarity)> {
+        self.pc.iter().chain(self.guard.iter()).copied().collect()
     }
 
     /// This set, held only where `lit` also holds.
