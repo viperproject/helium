@@ -1,0 +1,48 @@
+// KNOWN LIMITATION: `m` fails with "insufficient permission", but only as a
+// consequence of `snap_footprint_address_via_postcondition.vpr`.
+//
+// `snapO#ensures` fails ("purify: snap value outside footprint"), so callers
+// lose `snapO`'s postcondition `bytes(a) == to_b(result)`. Without it, `m`
+// cannot show that the unfolded `U(from_b(bytes(a)))` is `U(s)`, and the call
+// `use(s)` reports insufficient permission. Deleting the second `ensures` of
+// `snapO` makes `m` verify.
+//
+// This is the shape of Prusti's `move_place` / `change_unique_ref_place` and
+// `snap_current_unique_ref` call sites (Ru2 suite): 89 of the 838 listed
+// marco_benchmark files report this error, almost all of them downstream of
+// the snapshot failure.
+domain Bytes {
+  function from_b(b: Int): Ref
+  function to_b(r: Ref): Int
+  axiom { forall r: Ref :: { to_b(r) } from_b(to_b(r)) == r }
+}
+
+predicate MB(a: Ref)
+
+function bytes(a: Ref): Int
+  requires acc(MB(a), wildcard)
+
+predicate U(x: Ref)
+
+function snapU(x: Ref): Int
+  requires acc(U(x), wildcard)
+
+predicate O(a: Ref) {
+  acc(MB(a)) && acc(U(from_b(bytes(a))))
+}
+
+function snapO(a: Ref): Ref
+  requires acc(O(a), wildcard)
+  ensures unfolding acc(O(a), wildcard) in bytes(a) == to_b(result)
+  ensures unfolding acc(O(a), wildcard) in snapU(result) == snapU(result)
+
+method use(x: Ref)
+  requires acc(U(x))
+
+method m(a: Ref)
+  requires acc(O(a))
+{
+  var s: Ref := snapO(a)
+  unfold acc(O(a))
+  use(s)
+}

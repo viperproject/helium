@@ -1,0 +1,17 @@
+// KNOWN LIMITATION: "assertion failed" on `t != null` while holding `acc(t.h)`.
+//
+// In Viper, holding a positive permission to `t.h` implies `t != null`; Silicon
+// assumes this on every field-chunk inhale. Helium never derives it (no rule or
+// chunk fact relates field permissions to `null`), so e.g.
+// `(r.left == null ? 0 : r.left.height)` after `r.left := t` does not
+// simplify to `t.height`.
+//
+// Reduced from `Vi/viper/all/issues/silicon/0075_AVLTree.nokeys`
+// (`rebalanceLL/LR/RR/RL`: `close(r)`'s precondition after `r.left := this`).
+field h: Int
+
+method m(t: Ref)
+  requires acc(t.h)
+{
+  assert t != null
+}

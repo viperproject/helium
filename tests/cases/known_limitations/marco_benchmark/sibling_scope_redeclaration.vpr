@@ -1,0 +1,16 @@
+// KNOWN LIMITATION: "name `x` already declared in this scope". Two sibling
+// blocks each declare a local `x`; the scopes do not overlap, and Silver
+// accepts this.
+//
+// Nagini's SIF encoding emits such blocks
+// (`PyP/nagini/sif_mpp/...secc-db-pred.py`, method `lookup`).
+method m() {
+  {
+    var x: Int
+    x := 1
+  }
+  {
+    var x: Int
+    x := 2
+  }
+}

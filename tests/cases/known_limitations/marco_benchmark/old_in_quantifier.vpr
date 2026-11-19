@@ -1,0 +1,32 @@
+// KNOWN LIMITATION: "`old` not allowed in this context" for `old(..)` inside a
+// `forall` in a method postcondition.
+//
+// The quantifier body is lowered like a domain axiom, which rejects `old`.
+// The heap part, `old(bytes(a))`, does not mention the bound variable `s`:
+// pushing `old` inward (`old(e == f(s))` is `old(e) == f(s)` for heap-free
+// `f(s)`) and hoisting `old(bytes(a))` out of the quantifier would make the
+// body heap-free.
+//
+// Shape of Prusti's `memory_block_join$struct$..` (Ru2 suite): 257 of the 838
+// listed marco_benchmark files hit this message. Counted together with
+// `heap_function_in_quantifier.vpr` (440 files in all).
+predicate MB(a: Ref)
+
+function bytes(a: Ref): Int
+  requires acc(MB(a), wildcard)
+
+function to_bytes(s: Int): Int
+
+method join(a: Ref)
+  requires acc(MB(a))
+  ensures acc(MB(a))
+  ensures forall s: Int :: { to_bytes(s) }
+    old(bytes(a) == to_bytes(s)) ==> bytes(a) == to_bytes(s)
+
+method client(a: Ref)
+  requires acc(MB(a))
+  requires bytes(a) == to_bytes(3)
+{
+  join(a)
+  assert bytes(a) == to_bytes(3)
+}

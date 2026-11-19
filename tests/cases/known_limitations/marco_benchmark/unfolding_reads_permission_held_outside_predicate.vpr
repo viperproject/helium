@@ -1,0 +1,18 @@
+// KNOWN LIMITATION: "insufficient permission" on `m#requires`.
+//
+// The read `x.f` sits under `unfolding acc(P(x)) in ..`, but its permission
+// comes from the conjunct `acc(x.f)` next to it, not from `P`'s body. Purifying
+// the `unfolding` looks for `x.f` only in what the unfolding produces. When
+// `P` itself holds a fraction of `x.f`, it verifies.
+//
+// Found while reducing `Vi/viper/all/chalice/AVLTree.iterative` (method `has`,
+// invariant `unfolding acc(valid(n)) in n.root == this.root1`, where
+// `acc(n.root, 4/10)` is held outside `valid(n)`).
+field f: Int
+
+predicate P(x: Ref) {
+  true
+}
+
+method m(x: Ref)
+  requires acc(x.f) && acc(P(x)) && (unfolding acc(P(x)) in x.f == 1)

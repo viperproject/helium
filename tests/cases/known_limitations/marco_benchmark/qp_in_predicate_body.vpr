@@ -1,0 +1,18 @@
+// KNOWN LIMITATION: "unsupported construct: quantified permission" in a
+// predicate body.
+//
+// Prusti's `FracRef`, `UniqueRef` and `OwnedNonAliased` range predicates have
+// this shape (see `qp_predicate_in_function_precondition.vpr` for the count).
+field v: Int
+
+predicate Arr(s: Set[Ref]) {
+  forall r: Ref :: { r.v } r in s ==> acc(r.v)
+}
+
+method client(x: Ref)
+  requires acc(x.v)
+{
+  fold Arr(Set(x))
+  unfold Arr(Set(x))
+  x.v := 1
+}

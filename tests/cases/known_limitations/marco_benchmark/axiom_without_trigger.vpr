@@ -1,0 +1,17 @@
+// KNOWN LIMITATION: "`forall` needs an explicit trigger — triggers are never
+// inferred". Silicon infers `{ p(x) }` here.
+//
+// Nagini's prelude (`PredicateInstancesNestedRelation.nestedReflex`, `PyType`,
+// `tuple_types`) and Gobra's Dafny-book output have trigger-less axioms:
+// 14 of the 838 listed marco_benchmark files hit this.
+domain D {
+  function p(x: Int): Bool
+
+  axiom {
+    forall x: Int :: !p(x)
+  }
+}
+
+method m() {
+  assert !p(3)
+}
