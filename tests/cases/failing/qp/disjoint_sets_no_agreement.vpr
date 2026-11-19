@@ -1,0 +1,14 @@
+// QP medium: a location in only one of two sets says nothing about the other
+// set's map there.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method disjoint_sets_no_agreement(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in s && b in t && a != b
+  requires a.f == 3
+{
+  assert b.f == 3
+}

@@ -1,0 +1,11 @@
+// QP easy: a quantified permission added and removed by statements rather
+// than by the contract.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_exhale_stmt(s: Set[Ref])
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+}

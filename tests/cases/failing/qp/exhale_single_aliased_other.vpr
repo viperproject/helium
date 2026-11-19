@@ -1,0 +1,13 @@
+// QP medium: exhaling a member leaves the others; but if `b` may equal `a`,
+// `b.f` can no longer be shown readable.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method exhale_single_aliased_other(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s
+{
+  exhale acc(a.f)
+  var v: Int := b.f
+}

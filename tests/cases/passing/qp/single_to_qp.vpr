@@ -1,0 +1,10 @@
+// QP medium: a single `acc` is exhaled as a chunk set over a singleton domain.
+//
+// Must VERIFY.
+field f: Int
+
+method single_to_qp(a: Ref)
+  requires acc(a.f)
+  ensures forall x: Ref :: x in Set(a) ==> acc(x.f)
+{
+}

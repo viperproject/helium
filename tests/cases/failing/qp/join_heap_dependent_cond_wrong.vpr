@@ -1,0 +1,15 @@
+// QP medium (branch join): the branch condition reads the member; on the
+// skipped path its value is only known to be <= 0, not 0.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method join_heap_dependent_cond_wrong(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (a.f > 0) {
+    a.f := 0
+  }
+  assert a.f == 0
+}

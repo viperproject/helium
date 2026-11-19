@@ -1,0 +1,18 @@
+// QP medium (branch join): one branch carves a single location out of the
+// chunk set. Afterwards that member is held only on the other path, every
+// other member on both.
+//
+// Must VERIFY.
+field f: Int
+
+method join_exhale_single_one_branch(s: Set[Ref], a: Ref, b: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b
+{
+  if (c) {
+    exhale acc(a.f)
+  }
+  assert perm(a.f) == (c ? none : write)
+  assert perm(b.f) == write
+  b.f := 1
+}

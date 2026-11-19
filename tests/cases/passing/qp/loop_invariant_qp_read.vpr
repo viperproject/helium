@@ -1,0 +1,24 @@
+// QP medium (loop exit / heap sum): the invariant carries the whole chunk set
+// and a value fact; the body only reads. The frame keeps a fully-taken set,
+// the invariant heap the live one.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_invariant_qp_read(s: Set[Ref], a: Ref, n: Int) returns (r: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3 && 0 <= n
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+{
+  var i: Int := 0
+  r := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+    invariant a.f == 3
+  {
+    r := a.f
+    i := i + 1
+  }
+  assert a.f == 3
+}

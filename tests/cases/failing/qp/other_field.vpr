@@ -1,0 +1,12 @@
+// QP medium: the chunk set grants `f`, the write is to `g`.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+field g: Int
+
+method other_field(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  a.g := 1
+}

@@ -1,0 +1,21 @@
+// QP medium (loop exit / heap sum): the member carried by the invariant was
+// written in the loop; its old value from the frame set must not leak back
+// through the sum (the frame set has a hole there).
+//
+// Must FAIL (assertion).
+field f: Int
+
+method loop_single_from_qp_value(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant acc(a.f)
+  {
+    a.f := i
+    i := i + 1
+  }
+  assert a.f == 3
+}

@@ -1,0 +1,16 @@
+// QP medium: one quantifier grants two fields (`flatten_qp` splits the body
+// into two chunk sets).
+//
+// Must VERIFY.
+field f: Int
+field g: Int
+
+method two_fields(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f) && acc(x.g)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f) && acc(x.g)
+{
+  a.f := 1
+  a.g := a.f + 1
+  assert a.g == 2
+}

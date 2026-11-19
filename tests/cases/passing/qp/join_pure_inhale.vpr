@@ -1,0 +1,15 @@
+// QP medium (branch join): one branch only learns a pure fact about a member;
+// the fact must survive the join under its branch condition, nothing more.
+//
+// Must VERIFY.
+field f: Int
+
+method join_pure_inhale(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    inhale a.f == 1
+  }
+  assert c ==> a.f == 1
+}

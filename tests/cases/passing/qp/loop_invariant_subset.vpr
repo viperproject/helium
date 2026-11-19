@@ -1,0 +1,21 @@
+// QP medium (loop exit / heap sum): the invariant holds the chunk set over a
+// subset `t` of `s`; the frame keeps `s` minus `t`. Every member of `s` is
+// held in full after the exit, by one side or the other.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_invariant_subset(s: Set[Ref], t: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires t subset s && a in s && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in t ==> acc(x.f)
+  {
+    i := i + 1
+  }
+  assert perm(a.f) == write
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+}

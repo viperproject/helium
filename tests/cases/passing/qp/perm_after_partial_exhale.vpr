@@ -1,0 +1,13 @@
+// QP easy: `perm` of a member after half of the chunk set was exhaled (what
+// was taken from the set is subtracted).
+//
+// Must VERIFY.
+field f: Int
+
+method perm_after_partial_exhale(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert perm(a.f) == 1/2
+}

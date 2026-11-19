@@ -1,0 +1,26 @@
+// QP medium (loop exit / give back): the invariant takes the subset `t` of
+// `s` and writes it. After the loop the set is whole again: inside `t` it has
+// the loop's values, outside them the values from before.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_give_back_region_values(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires t subset s && a in t && b in s && !(b in t)
+  requires b.f == 7
+{
+  var i: Int := 0
+  while (i < n)
+    invariant forall x: Ref :: x in t ==> acc(x.f)
+    invariant i > 0 ==> a.f == 3
+  {
+    a.f := 3
+    i := i + 1
+  }
+  assert b.f == 7
+  assert n > 0 ==> a.f == 3
+  a.f := 4
+  b.f := 5
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+}

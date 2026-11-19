@@ -1,0 +1,10 @@
+// QP easy: reading `b.f` when nothing says `b` is in the domain.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method read_outside_domain(s: Set[Ref], b: Ref) returns (v: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+{
+  v := b.f
+}

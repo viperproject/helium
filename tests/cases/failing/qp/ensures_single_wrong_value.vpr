@@ -1,0 +1,13 @@
+// QP medium: the value handed out with a single location must be the one
+// written, not any value.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method ensures_single_wrong_value(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures acc(a.f) && a.f == 6
+{
+  a.f := 5
+}

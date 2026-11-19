@@ -1,0 +1,12 @@
+// QP medium: exhaling one member leaves a distinct member readable.
+//
+// Must VERIFY.
+field f: Int
+
+method exhale_single_keeps_other(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b
+{
+  exhale acc(a.f)
+  var v: Int := b.f
+}

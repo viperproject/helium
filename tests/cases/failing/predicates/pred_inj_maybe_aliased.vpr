@@ -1,0 +1,15 @@
+// Counterpart of passing/pred_inj_perm_distinct.vpr: without `x != y` the two
+// halves may sit at one location, so `perm(P(x))` may be `1/1`. Injectivity
+// must not invent a disequality.
+//
+// Must FAIL.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method test(x: Ref, y: Ref)
+  requires acc(P(x), 1/2) && acc(P(y), 1/2)
+{
+  assert perm(P(x)) == 1/2
+}

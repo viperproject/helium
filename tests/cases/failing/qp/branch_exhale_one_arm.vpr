@@ -1,0 +1,13 @@
+// QP medium: one arm exhales the chunk set, so after the join the member may
+// not be held.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method branch_exhale_one_arm(s: Set[Ref], a: Ref, b: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (b) { exhale forall x: Ref :: x in s ==> acc(x.f) }
+  var v: Int := a.f
+}

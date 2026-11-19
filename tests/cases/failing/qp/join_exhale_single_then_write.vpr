@@ -1,0 +1,15 @@
+// QP medium (branch join): one path carved `a` out of the chunk set; writing
+// it after the join fails on that path.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method join_exhale_single_then_write(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    exhale acc(a.f)
+  }
+  a.f := 1
+}

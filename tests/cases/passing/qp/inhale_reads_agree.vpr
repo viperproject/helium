@@ -1,0 +1,10 @@
+field f: Int
+
+method reads_agree(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  var y: Int := a.f
+  var z: Int := a.f
+  assert y == z
+}

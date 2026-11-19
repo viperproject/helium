@@ -1,0 +1,17 @@
+// QP medium (branch join): a write in a then-branch with no else. After the
+// join the member's value depends on the branch; the permission does not.
+//
+// Must VERIFY.
+field f: Int
+
+method join_no_else_write(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3
+{
+  if (c) {
+    a.f := 1
+  }
+  assert c ==> a.f == 1
+  assert !c ==> a.f == 3
+  assert perm(a.f) == write
+}

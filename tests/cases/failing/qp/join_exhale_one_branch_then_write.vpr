@@ -1,0 +1,15 @@
+// QP medium (branch join): one path gave away half of the chunk set, so after
+// the join there is no write permission on that path.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method join_exhale_one_branch_then_write(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  }
+  a.f := 1
+}

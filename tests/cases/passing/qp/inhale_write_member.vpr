@@ -1,0 +1,12 @@
+// QP easy: writing one member of an inhaled chunk set. The receiver is the
+// binder itself, so the lookup at `a.f` instantiates the body at `x := a`.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_write_member(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  a.f := 5
+}

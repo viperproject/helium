@@ -1,0 +1,15 @@
+// QP medium: a branch that does not touch the chunk set; the set is still held
+// after the join.
+//
+// Must VERIFY.
+field f: Int
+field g: Int
+
+method branch_no_change(s: Set[Ref], a: Ref, b: Bool, c: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  requires acc(c.g)
+{
+  if (b) { c.g := 1 } else { c.g := 2 }
+  var v: Int := a.f
+}

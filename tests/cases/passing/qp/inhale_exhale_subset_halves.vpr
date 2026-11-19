@@ -1,0 +1,14 @@
+// QP medium: exhaling a subset's chunk set, in two halves, from a held set
+// over a superset. Each containment proof uses `t subset s` for the fresh
+// binder, and the second sees the first one taken.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_exhale_subset_halves(s: Set[Ref], t: Set[Ref])
+{
+  inhale t subset s
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  exhale forall y: Ref :: y in t ==> acc(y.f, 1/2)
+  exhale forall y: Ref :: y in t ==> acc(y.f, 1/2)
+}

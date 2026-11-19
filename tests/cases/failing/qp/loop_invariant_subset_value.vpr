@@ -1,0 +1,20 @@
+// QP medium (loop exit / heap sum): the invariant carries the subset `t`, and
+// `a` may be in it, so the value of `a` is havocked on that path. Catches a sum
+// that prefers the frame map for every member of `s`.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method loop_invariant_subset_value(s: Set[Ref], t: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires t subset s && a in s && a.f == 3 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in t ==> acc(x.f)
+  {
+    i := i + 1
+  }
+  assert a.f == 3
+}

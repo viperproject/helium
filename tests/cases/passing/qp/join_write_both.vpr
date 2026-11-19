@@ -1,0 +1,17 @@
+// QP medium (branch join): both branches write the same member, differently.
+//
+// Must VERIFY.
+field f: Int
+
+method join_write_both(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    a.f := 1
+  } else {
+    a.f := 2
+  }
+  assert a.f == (c ? 1 : 2)
+  assert perm(a.f) == write
+}

@@ -1,0 +1,19 @@
+// QP medium (branch join): the callee on one path returns the chunk set with
+// unknown values; the old value does not survive the join.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method callee(s: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+
+method join_call_in_branch_value(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3
+{
+  if (c) {
+    callee(s)
+  }
+  assert a.f == 3
+}

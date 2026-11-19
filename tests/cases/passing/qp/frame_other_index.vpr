@@ -1,0 +1,16 @@
+// QP medium: in a sequence of distinct references, writing one element's field
+// leaves another element's field unchanged.
+//
+// Must VERIFY.
+field f: Int
+
+method frame_other_index(xs: Seq[Ref])
+  requires forall i: Int, j: Int :: { xs[i], xs[j] } 0 <= i && i < j && j < |xs| ==> xs[i] != xs[j]
+  requires forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+  requires 2 <= |xs|
+{
+  var v: Int := xs[1].f
+  xs[0].f := 7
+  assert xs[1].f == v
+  assert xs[0].f == 7
+}

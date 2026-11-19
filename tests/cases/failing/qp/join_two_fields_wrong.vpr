@@ -1,0 +1,19 @@
+// QP medium (branch join): the branches write different fields. Catches a join
+// that merges the two location kinds into one.
+//
+// Must FAIL (assertion).
+field f: Int
+field g: Int
+
+method join_two_fields_wrong(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: x in s ==> acc(x.g)
+  requires a in s && a.f == 0 && a.g == 0
+{
+  if (c) {
+    a.f := 1
+  } else {
+    a.g := 1
+  }
+  assert a.f == 1
+}

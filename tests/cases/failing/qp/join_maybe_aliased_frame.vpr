@@ -1,0 +1,15 @@
+// QP medium (branch join): the branch writes `b`, which may be `a`, so the old
+// value of `a` is not guaranteed after the join.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method join_maybe_aliased_frame(s: Set[Ref], a: Ref, b: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a.f == 3
+{
+  if (c) {
+    b.f := 5
+  }
+  assert a.f == 3
+}

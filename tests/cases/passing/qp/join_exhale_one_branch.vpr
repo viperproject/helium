@@ -1,0 +1,18 @@
+// QP medium (branch join): only one branch exhales half of the chunk set; the
+// joined permission is a branch-dependent amount at every member.
+//
+// Must VERIFY.
+field f: Int
+
+method join_exhale_one_branch(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  }
+  assert perm(a.f) == (c ? 1/2 : write)
+  if (!c) {
+    a.f := 1
+  }
+}

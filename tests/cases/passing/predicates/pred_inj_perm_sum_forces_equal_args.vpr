@@ -1,0 +1,19 @@
+// The other direction of injectivity: a total of `1/1` at `Q(x, i)` from two
+// halves forces the two locations to coincide, `Q(y, j) == Q(x, i)`, and that
+// must give back equal arguments, `x == y && i == j`.
+// The predicate counterpart of
+// passing/permissions/perm_sum_needs_location_injectivity.vpr.
+//
+// Must VERIFY.
+
+field f: Int
+
+predicate Q(x: Ref, i: Int) { acc(x.f, 1/2) }
+
+method test(x: Ref, y: Ref, i: Int, j: Int)
+  requires acc(Q(x, i), 1/2) && acc(Q(y, j), 1/2)
+{
+  inhale perm(Q(x, i)) == 1/1
+  assert x == y
+  assert i == j
+}

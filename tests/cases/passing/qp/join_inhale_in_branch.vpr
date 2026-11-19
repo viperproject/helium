@@ -1,0 +1,18 @@
+// QP medium (branch join): the heap holds no chunk set before the branch; one
+// branch inhales one. The join pairs a chunk set with nothing.
+//
+// Must VERIFY.
+field f: Int
+
+method join_inhale_in_branch(s: Set[Ref], a: Ref, c: Bool)
+  requires a in s
+{
+  if (c) {
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+  }
+  assert perm(a.f) == (c ? write : none)
+  if (c) {
+    a.f := 1
+    assert a.f == 1
+  }
+}

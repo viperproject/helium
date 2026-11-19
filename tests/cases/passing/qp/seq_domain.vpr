@@ -1,0 +1,12 @@
+// QP easy: the domain is membership in a sequence instead of a set.
+//
+// Must VERIFY.
+field f: Int
+
+method seq_domain(xs: Seq[Ref], a: Ref) returns (v: Int)
+  requires forall x: Ref :: x in xs ==> acc(x.f)
+  requires a in xs
+  ensures forall x: Ref :: x in xs ==> acc(x.f)
+{
+  v := a.f
+}

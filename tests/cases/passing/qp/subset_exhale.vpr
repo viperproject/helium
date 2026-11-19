@@ -1,0 +1,11 @@
+// QP medium: a chunk set over a subset of the held domain can be exhaled.
+//
+// Must VERIFY.
+field f: Int
+
+method subset_exhale(s: Set[Ref], t: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires t subset s
+  ensures forall x: Ref :: x in t ==> acc(x.f)
+{
+}

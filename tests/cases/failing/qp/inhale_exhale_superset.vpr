@@ -1,0 +1,11 @@
+// QP medium: exhaling over a set not known to be covered by the held one. For
+// a fresh `y in t`, `y in s` is unknown, so the held permission may be 0.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method inhale_exhale_superset(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  exhale forall y: Ref :: y in t ==> acc(y.f)
+}
