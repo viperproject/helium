@@ -192,19 +192,17 @@ fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
 
 /// Mint the inverse functions of an inhaled chunk set and assume its inverse
 /// axiom under the inhale's path condition `pc`. Returns the inverses, one per
-/// binder, for the chunk to carry (a lookup at an address applies them to the
-/// address call's arguments).
+/// binder, for the chunk to carry (a lookup at an address applies them to it).
 ///
-/// With `e(xs)` the arguments of the location's address call (as in the
-/// injectivity check above) and `inv_j` fresh, the axiom is
+/// With `f(e(xs))` the location's address and `inv_j` fresh, the axiom is
 ///
 /// ```text
-/// forall xs :: {triggers}   c(xs) ∧ 0 < p(xs)  ==>  ⋀_j inv_j(e(xs)) = xs_j
+/// forall xs :: {triggers}   c(xs) ∧ 0 < p(xs)  ==>  ⋀_j inv_j(f(e(xs))) = xs_j
 /// ```
 ///
 /// Its antecedent is the injectivity check's, which is what makes it
 /// consistent; so it must only be assumed once [`check_qp_injectivity`] passed
-/// under the same `pc`. Silicon's second axiom `e(inv(r)) = r` is left to the
+/// under the same `pc`. Silicon's second axiom `f(e(inv(r))) = r` is left to the
 /// lookup, which conjoins it into the chunk's condition at the address it asks
 /// about.
 ///
@@ -217,7 +215,6 @@ fn mint_and_assume_inverse_axiom(
     caps: &[(usize, Id)],
     pc: &[(Id, Polarity)],
 ) -> Result<Rc<[FuncId]>, VerifyError> {
-    let loc_call = q.loc_call();
     // Without a trigger the axiom could never fire; assuming nothing is sound.
     if q.triggers.is_empty() {
         return Ok(mint_inverses(ctx, q));
@@ -238,7 +235,7 @@ fn mint_and_assume_inverse_axiom(
         &q.body.insts,
     )?;
 
-    // `c(xs) ∧ 0 < p(xs)  ==>  ⋀_j inv_j(e(xs)) = xs_j`
+    // `c(xs) ∧ 0 < p(xs)  ==>  ⋀_j inv_j(f(e(xs))) = xs_j`
     let perms: Vec<&PermInst> = q
         .body
         .insts
@@ -251,7 +248,7 @@ fn mint_and_assume_inverse_axiom(
     let pos = positive(&mut c, &q.body.perm, &perms);
     let cond = c.rename(&q.body.cond);
     let ante = and(&mut c, cond, pos);
-    let args: Vec<Val> = loc_call.args.iter().map(|a| c.rename(a)).collect();
+    let loc = c.rename(&q.body.loc);
 
     // A set with the same axiom up to its inverses, over the same captures,
     // already has inverses: reuse them, so its forall is the same node.
@@ -260,63 +257,56 @@ fn mint_and_assume_inverse_axiom(
         groups: c.groups.clone(),
         insts: c.insts.clone(),
         ante: ante.clone(),
-        args: args.clone(),
+        loc: loc.clone(),
     };
     let cap_ids: Vec<Id> = caps.iter().map(|&(_, id)| id).collect();
-    if let Some((rid, inv)) = ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
-        let node = ctx.add(Symbolic::Forall(rid, Box::new([]), cap_ids.into()));
-        ctx.assume_guarded(node, pc.iter().rev().copied());
-        return Ok(inv);
-    }
-    let inv = mint_inverses(ctx, q);
-    let eqs: Vec<Val> = inv
-        .iter()
-        .enumerate()
-        .map(|(j, &func)| {
-            let binder = c.rename(&Val::Temp(q.binder_base + j));
-            let app = c.push(AxiomPure::App {
-                func,
-                type_args: vec![],
-                args: args.clone(),
-            });
-            c.push(AxiomPure::Binary(BinOp::Eq, app, binder))
-        })
-        .collect();
-    let concl = eqs
-        .into_iter()
-        .reduce(|a, b| and(&mut c, a, b))
-        .expect("a quantified permission binds a variable");
-    let res = c.push(AxiomPure::Ternary(ante, concl, crate::vmir::TRUE));
-
-    // Ground (a QP cannot be generic) and fresh, so pushed without dedup.
-    let rid = table
-        .write()
-        .expect("recipe table lock")
-        .push_fresh(QuantRecipe {
-            n_caps: c.n_caps(),
-            bound: q.bound.clone(),
-            n_tys: 0,
-            own_tys: vec![],
-            groups: c.groups,
-            insts: c.insts,
-            res,
-            guard: None,
-        });
-    ctx.inverse_axioms
-        .insert(&ctx.egraph, shape, &cap_ids, rid, inv.clone());
+    let (rid, inv) = match ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
+        Some(found) => found,
+        None => {
+            let inv = mint_inverses(ctx, q);
+            let mut concl = crate::vmir::TRUE;
+            for (j, &func) in inv.iter().enumerate() {
+                let binder = c.rename(&Val::Temp(q.binder_base + j));
+                let args = vec![loc.clone()];
+                let app = c.push(AxiomPure::App {
+                    func,
+                    type_args: vec![],
+                    args,
+                });
+                let eq = c.push(AxiomPure::Binary(BinOp::Eq, app, binder));
+                concl = and(&mut c, eq, concl);
+            }
+            let res = c.push(AxiomPure::Ternary(ante, concl, crate::vmir::TRUE));
+            // Ground (a QP cannot be generic) and fresh, so pushed without dedup.
+            let rid = table
+                .write()
+                .expect("recipe table lock")
+                .push_fresh(QuantRecipe {
+                    n_caps: c.n_caps(),
+                    bound: q.bound.clone(),
+                    n_tys: 0,
+                    own_tys: vec![],
+                    groups: c.groups,
+                    insts: c.insts,
+                    res,
+                    guard: None,
+                });
+            ctx.inverse_axioms
+                .insert(&ctx.egraph, shape, &cap_ids, rid, inv.clone());
+            (rid, inv)
+        }
+    };
     let node = ctx.add(Symbolic::Forall(rid, Box::new([]), cap_ids.into()));
     ctx.assume_guarded(node, pc.iter().rev().copied());
     Ok(inv)
 }
 
-/// One fresh inverse per binder of `q`, from its address function's parameters.
+/// One fresh inverse per binder of `q`, from its location's address type.
 fn mint_inverses(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Rc<[FuncId]> {
-    let loc_call = q.loc_call();
-    let (params, _) = ctx.function_signature(loc_call.function, &loc_call.type_args);
     q.bound
         .iter()
         .map(|ret| {
-            let f = ctx.alloc.qp_inverse(params.clone(), ret.clone());
+            let f = ctx.alloc.qp_inverse(vec![q.loc_ty.clone()], ret.clone());
             ctx.func_ret_types.insert(f, ret.clone());
             f
         })
@@ -333,7 +323,7 @@ pub(crate) struct InverseShape {
     groups: Vec<Vec<crate::verify::rewrite::PreparedTerm>>,
     insts: Vec<crate::verify::rewrite::AxiomInst>,
     ante: Val,
-    args: Vec<Val>,
+    loc: Val,
 }
 
 /// The inverse axioms assumed in one member's e-graph, by shape and captures.
@@ -467,12 +457,12 @@ fn eval_qp_instance_unrecorded(
 ///
 /// The binding that names `addr = f(as)` is solved per binder `x_j`:
 /// - **projection**: if some address argument is `x_j` itself, `x_j = as_i`;
-/// - otherwise **inversion**: `x_j = inv_j(as)`, with the inverse minted at the
+/// - otherwise **inversion**: `x_j = inv_j(addr)`, with the inverse minted at the
 ///   inhale (whose axiom, when assumed, lets the prover reduce it).
 ///
 /// The body is evaluated at that binding from the chunk's captures, and its
 /// permission is gated by `c(xs)` and by the rebuilt address being `addr`
-/// (Silicon's `e(inv(r)) = r`). That gate is what makes the answer sound for
+/// (Silicon's `f(e(inv(r))) = r`). That gate is what makes the answer sound for
 /// any solution, even an unconstrained inverse: the permission is returned only
 /// where the instance really names `addr`. With every binder projected the
 /// rebuilt address is `addr` itself and adds no gate.
@@ -486,33 +476,23 @@ pub(super) fn qp_perm_at(
     let Some(args) = addr_call_args(ctx, call, addr) else {
         return Ok(None);
     };
-    assert_eq!(
-        args.len(),
-        call.args.iter().count(),
-        "address call arity mismatch"
-    );
-
     let binders: Vec<egg::Id> = (0..q.bound.len())
         .map(|j| {
             let me = Val::Temp(q.binder_base + j);
             match call.args.iter().position(|a| *a == me) {
                 Some(i) => args[i],
-                None => ctx.add(Symbolic::FuncApp(chunk.inv[j], Box::new([]), args.clone())),
+                None => ctx.add(Symbolic::FuncApp(
+                    chunk.inv[j],
+                    Box::new([]),
+                    Box::new([addr]),
+                )),
             }
         })
         .collect();
     let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.eval_pc())?;
 
+    let perm = gate_at(ctx, inst.perm, inst.addr, addr);
     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    // Where the instance names `addr`. With every binder projected the two
-    // addresses are congruent and need no gate; an inverted one reduces to its
-    // arguments (`rewrite::address_injectivity_rule`).
-    let perm = if ctx.egraph.find(inst.addr) == ctx.egraph.find(addr) {
-        inst.perm
-    } else {
-        let eq = expr!(ctx, { inst.addr } == { addr });
-        ChunkPerm::select(ctx, eq, inst.perm, zero.clone())
-    };
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
     // What was exhaled from this set, each gated by its presence guard.
     for taken in chunk.taken.iter() {
@@ -523,22 +503,14 @@ pub(super) fn qp_perm_at(
                     .expect("a taken chunk set applies the same address function");
                 gate_perm_by_guard(ctx, &p, &set.guard)
             }
-            // A single location counts only where it is `addr`. Address
-            // functions are injective (`rewrite::address_injectivity_rule`), so
-            // `at == addr` reduces to its arguments.
+            // A single location counts only where it is `addr`.
             Taken::Single {
                 addr: at,
                 perm: p,
                 guard,
             } => {
                 let p = gate_perm_by_guard(ctx, p, guard);
-                if ctx.egraph.find(*at) == ctx.egraph.find(addr) {
-                    p
-                } else {
-                    let eq = expr!(ctx, { *at } == { addr });
-                    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-                    ChunkPerm::select(ctx, eq, p, zero)
-                }
+                gate_at(ctx, p, *at, addr)
             }
             Taken::Share {
                 demand,
@@ -555,6 +527,18 @@ pub(super) fn qp_perm_at(
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
     Ok(Some(perm))
+}
+
+/// `perm` where the address `at` is `addr`, `0` elsewhere; no gate when they are
+/// one e-class. Address functions are injective
+/// (`rewrite::address_injectivity_rule`), so the gate reduces to the arguments.
+fn gate_at(ctx: &mut VerifyContext<'_>, perm: ChunkPerm, at: Id, addr: Id) -> ChunkPerm {
+    if ctx.egraph.find(at) == ctx.egraph.find(addr) {
+        return perm;
+    }
+    let eq = expr!(ctx, { at } == { addr });
+    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    ChunkPerm::select(ctx, eq, perm, zero)
 }
 
 /// The arguments of `addr` as an application of `call`'s address function (the

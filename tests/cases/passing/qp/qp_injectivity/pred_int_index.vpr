@@ -1,0 +1,8 @@
+// QP injectivity over a predicate with a reference and an integer argument:
+// the integer binder is the second argument.
+predicate Q(a: Ref, i: Int)
+
+method pred_int_index(a: Ref, n: Int)
+{
+  inhale forall i: Int :: 0 <= i && i < n ==> acc(Q(a, i))
+}

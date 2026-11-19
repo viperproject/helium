@@ -1,0 +1,10 @@
+// QP injectivity over a two-argument predicate: the binder `y` is not an
+// argument, so `P(x, r)` is named once for every `y` in `t`.
+//
+// Must FAIL (quantified permission might not be injective).
+predicate P(x: Ref, y: Ref)
+
+method pred_binder_unused(s: Set[Ref], t: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, r))
+}

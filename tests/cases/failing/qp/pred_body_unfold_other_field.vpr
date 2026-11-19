@@ -1,0 +1,19 @@
+// A QP over a two-argument predicate with a body: unfolding `P(a, b)` gives
+// `a.f` and `b.g`, not `b.f`.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+field g: Int
+
+// Owns the first argument's `f` and the second argument's `g`.
+predicate P(x: Ref, y: Ref) {
+  acc(x.f) && acc(y.g)
+}
+
+method pred_body_unfold_other_field(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref)
+  requires a in s && b in t
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+  unfold acc(P(a, b))
+  b.f := 1
+}

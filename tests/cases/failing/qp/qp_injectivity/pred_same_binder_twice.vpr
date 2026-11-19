@@ -1,0 +1,10 @@
+// QP injectivity over a two-argument predicate: both arguments are `x`, so the
+// binder `y` does not determine the instance.
+//
+// Must FAIL (quantified permission might not be injective).
+predicate P(x: Ref, y: Ref)
+
+method pred_same_binder_twice(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, x))
+}
