@@ -1,0 +1,13 @@
+// QP easy: the chunk set covers `f` only; writing `g` of a member is not
+// permitted.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+field g: Int
+
+method inhale_write_other_field(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  a.g := 5
+}

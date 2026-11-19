@@ -1,0 +1,14 @@
+// pred_inj_perm_distinct.vpr for an abstract predicate. Its location function
+// is lowered differently from a concrete predicate's: a plain `Function` decl,
+// where a concrete predicate's address function is the `Resource`'s own id.
+// Both lowerings must be injective.
+//
+// Must VERIFY.
+
+predicate A(x: Ref)
+
+method test(x: Ref, y: Ref)
+  requires acc(A(x), 1/2) && acc(A(y), 1/2) && x != y
+{
+  assert perm(A(x)) == 1/2
+}

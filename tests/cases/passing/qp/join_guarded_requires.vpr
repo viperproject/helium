@@ -1,0 +1,16 @@
+// QP medium (branch join): the chunk set is only held under a condition, and
+// the body branches on that same condition.
+//
+// Must VERIFY.
+field f: Int
+
+method join_guarded_requires(s: Set[Ref], a: Ref, c: Bool)
+  requires c ==> (forall x: Ref :: x in s ==> acc(x.f))
+  requires a in s
+{
+  if (c) {
+    a.f := 1
+  }
+  assert c ==> perm(a.f) == write && a.f == 1
+  assert !c ==> perm(a.f) == none
+}

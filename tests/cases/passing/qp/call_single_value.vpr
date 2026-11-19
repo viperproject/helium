@@ -1,0 +1,16 @@
+// QP medium: a callee's precondition reads the value of a location the caller
+// holds only through a chunk set.
+//
+// Must VERIFY.
+field f: Int
+
+method callee(a: Ref)
+  requires acc(a.f) && a.f == 5
+
+method call_single_value(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  a.f := 5
+  callee(a)
+}

@@ -1,0 +1,16 @@
+// QP medium: the callee's precondition is a distinct sequence plus a QP over
+// its elements. A caller passing a sequence with a duplicate must be rejected,
+// and the callee's inverse axiom must not make that rejection vacuous.
+//
+// Must FAIL.
+field f: Int
+
+method callee(s: Seq[Ref])
+  requires forall i: Int, j: Int :: { s[i], s[j] } 0 <= i && i < j && j < |s| ==> s[i] != s[j]
+  requires forall j: Int :: 0 <= j && j < |s| ==> acc(s[j].f)
+
+method caller(a: Ref)
+  requires acc(a.f)
+{
+  callee(Seq(a, a))
+}

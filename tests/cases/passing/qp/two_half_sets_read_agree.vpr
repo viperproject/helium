@@ -1,0 +1,16 @@
+// QP medium: two chunk sets each hold half of the same location. A read while
+// both shares are positive ties their maps together there, so the value read
+// before exhaling one set is still the value read from the other.
+//
+// Must VERIFY.
+field f: Int
+
+method two_half_sets_read_agree(s: Set[Ref], t: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in s && a in t
+{
+  var v: Int := a.f
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert a.f == v
+}

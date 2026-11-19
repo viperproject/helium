@@ -1,0 +1,19 @@
+// Predicate addresses that reach the method through an unfolded footprint (a
+// certificate replay, not a call evaluated in the method body) must be
+// injective too: after unfolding `Pair`, the `P(y)` chunk's gate
+// `P(y) == P(x)` must be refuted from the body's `x != y`.
+//
+// Must VERIFY.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+predicate Pair(x: Ref, y: Ref) { acc(P(x), 1/2) && acc(P(y), 1/2) && x != y }
+
+method test(x: Ref, y: Ref)
+  requires Pair(x, y)
+{
+  unfold Pair(x, y)
+  assert perm(P(x)) == 1/2
+}

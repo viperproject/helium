@@ -1,0 +1,12 @@
+// QP medium: two sets do not cover a third set that is larger than both.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method union_not_covered(s1: Set[Ref], s2: Set[Ref], b: Ref)
+  requires forall x: Ref :: x in s1 ==> acc(x.f)
+  requires forall x: Ref :: x in s2 ==> acc(x.f)
+  requires (s1 intersection s2) == Set[Ref]()
+{
+  exhale forall x: Ref :: x in (s1 union s2 union Set(b)) ==> acc(x.f)
+}

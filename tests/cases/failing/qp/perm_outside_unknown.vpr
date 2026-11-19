@@ -1,0 +1,10 @@
+// QP easy: `perm` of a location that may lie outside the chunk set's domain.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method perm_outside_unknown(s: Set[Ref], b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+{
+  assert perm(b.f) == write
+}

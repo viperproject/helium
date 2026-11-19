@@ -1,0 +1,15 @@
+// QP medium: after exhaling the union of two sets (split over both), a member
+// of the first set has nothing left to read.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method union_overlap_twice(s1: Set[Ref], s2: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s1 ==> acc(x.f)
+  requires forall x: Ref :: x in s2 ==> acc(x.f)
+  requires (s1 intersection s2) == Set[Ref]()
+  requires a in s1
+{
+  exhale forall x: Ref :: x in (s1 union s2) ==> acc(x.f)
+  var v: Int := a.f
+}

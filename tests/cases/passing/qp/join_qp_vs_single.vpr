@@ -1,0 +1,18 @@
+// QP medium (branch join): one branch holds `a` through a chunk set, the other
+// through a single chunk. After the join `a` is writable on both paths.
+//
+// Must VERIFY.
+field f: Int
+
+method join_qp_vs_single(s: Set[Ref], a: Ref, c: Bool)
+  requires a in s
+{
+  if (c) {
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+  } else {
+    inhale acc(a.f)
+  }
+  assert perm(a.f) == write
+  a.f := 1
+  assert a.f == 1
+}

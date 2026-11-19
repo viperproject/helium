@@ -1,0 +1,19 @@
+// QP medium (branch join): both branches inhale the same chunk set (two fresh
+// value maps) and learn different values for one member.
+//
+// Must VERIFY.
+field f: Int
+
+method join_inhale_both_values(s: Set[Ref], a: Ref, c: Bool)
+  requires a in s
+{
+  if (c) {
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+    inhale a.f == 1
+  } else {
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+    inhale a.f == 2
+  }
+  assert a.f == (c ? 1 : 2)
+  assert perm(a.f) == write
+}

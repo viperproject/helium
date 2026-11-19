@@ -1,0 +1,20 @@
+// QP medium (loop exit / heap sum): the chunk set goes through the invariant,
+// which says nothing about the value, so the old value is lost even though the
+// body never writes.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method loop_invariant_forgets_value(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+  {
+    i := i + 1
+  }
+  assert a.f == 3
+}

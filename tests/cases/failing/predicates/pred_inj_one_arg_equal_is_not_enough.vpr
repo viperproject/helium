@@ -1,0 +1,14 @@
+// Injectivity is per argument tuple: `x == y` alone does not make `Q(x, i)`
+// and `Q(y, j)` the same location, so the exhaled half may not cover `Q(y, j)`.
+//
+// Must FAIL.
+
+field f: Int
+
+predicate Q(x: Ref, i: Int) { acc(x.f, 1/2) }
+
+method test(x: Ref, y: Ref, i: Int, j: Int)
+  requires acc(Q(x, i), 1/2) && x == y
+{
+  exhale acc(Q(y, j), 1/2)
+}

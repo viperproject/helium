@@ -1,0 +1,13 @@
+// QP medium: a 1/2 chunk set and a single 1/2 `acc` at one member add up to
+// write permission there (quantified and non-quantified chunks combine).
+//
+// Must VERIFY.
+field f: Int
+
+method qp_plus_single(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires acc(a.f, 1/2)
+  requires a in s
+{
+  a.f := 1
+}

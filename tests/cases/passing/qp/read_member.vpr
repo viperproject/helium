@@ -1,0 +1,33 @@
+// QP easy: reading a field of one element of the quantified domain. The read
+// needs a lookup of `a.f` in the chunk set at the instance `x := a`.
+//
+// Must VERIFY.
+field f: Int
+
+method read_member(s: Set[Ref], a: Ref) returns (v: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+{
+  v := a.f
+}
+
+
+method read_member_set(s: Set[Ref], a: Ref) returns (v:Int)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f);
+  inhale a in s;
+
+  var x: Int := a.f
+}
+
+
+method read_member_at_index(s: Seq[Ref], j: Int) returns (v:Int)
+{
+  inhale forall i: Int, k: Int :: { s[i], s[k] } 0 <= i && i < k && k < |s| ==> s[i] != s[k]
+  inhale forall i : Int :: 0 <= i && i < |s| ==> acc(s[i].f);
+  inhale 0<= j;
+  inhale j < |s|
+
+  var x: Int := s[j].f
+}

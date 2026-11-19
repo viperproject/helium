@@ -1,0 +1,20 @@
+// QP medium (branch join): both branches do the *same* exhale. The joined heap
+// should be indistinguishable from doing it unconditionally.
+//
+// Must VERIFY.
+field f: Int
+
+method join_same_exhale_both(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3
+{
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  } else {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  }
+  assert perm(a.f) == 1/2
+  assert a.f == 3
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert perm(a.f) == none
+}

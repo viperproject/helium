@@ -1,0 +1,19 @@
+// QP medium (branch join): the chunk set already had part of one location
+// taken out before the branch. The join must keep that hole on both paths.
+//
+// Must VERIFY.
+field f: Int
+
+method join_after_partial_exhale(s: Set[Ref], a: Ref, b: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b
+{
+  exhale acc(b.f, 1/2)
+  if (c) {
+    a.f := 1
+  } else {
+    a.f := 2
+  }
+  assert perm(b.f) == 1/2
+  assert a.f == (c ? 1 : 2)
+}

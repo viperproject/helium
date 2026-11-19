@@ -1,0 +1,14 @@
+// QP medium (branch join): the chunk set exists on one path only; reading a
+// member after the join fails on the other.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method join_inhale_one_branch_then_read(s: Set[Ref], a: Ref, c: Bool) returns (r: Int)
+  requires a in s
+{
+  if (c) {
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+  }
+  r := a.f
+}

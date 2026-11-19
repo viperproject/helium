@@ -1,0 +1,17 @@
+// QP medium (branch join): writes to `a` in both branches leave a distinct
+// member `b` of the same chunk set untouched.
+//
+// Must VERIFY.
+field f: Int
+
+method join_write_frames_other(s: Set[Ref], a: Ref, b: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b && b.f == 7
+{
+  if (c) {
+    a.f := 1
+  } else {
+    a.f := 2
+  }
+  assert b.f == 7
+}

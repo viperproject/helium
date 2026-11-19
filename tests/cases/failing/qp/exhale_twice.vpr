@@ -1,0 +1,13 @@
+// QP easy: the chunk set is exhaled twice. The domain is non-empty (`a in s`),
+// so the second exhale has nothing to take from.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method exhale_twice(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+}

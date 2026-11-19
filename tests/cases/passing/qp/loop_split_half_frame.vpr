@@ -1,0 +1,23 @@
+// QP medium (loop exit / heap sum): the invariant takes half of the chunk set,
+// the frame keeps the other half. At the exit both halves sit on the same
+// locations: the permissions add up to write, and the frame half (which still
+// knows the value) and the invariant half (a fresh map) must agree.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_split_half_frame(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  {
+    i := i + 1
+  }
+  assert perm(a.f) == write
+  assert a.f == 3
+  a.f := 4
+}

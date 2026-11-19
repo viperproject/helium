@@ -1,0 +1,20 @@
+// QP medium (loop exit / give back): the loop writes `a.f` and its invariant
+// forgets the value. Cancelling the frame's take must not bring back the
+// value from before the loop.
+//
+// Must FAIL (assertion failed).
+field f: Int
+
+method loop_give_back_stale_value(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 0
+{
+  var i: Int := 0
+  while (i < n)
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+  {
+    a.f := 1
+    i := i + 1
+  }
+  assert a.f == 0
+}

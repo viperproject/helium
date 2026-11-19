@@ -1,0 +1,11 @@
+// QP medium: one single location cannot be handed out as a set twice.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method single_to_qp_twice(a: Ref)
+  requires acc(a.f)
+{
+  exhale forall x: Ref :: x in Set(a) ==> acc(x.f)
+  exhale forall x: Ref :: x in Set(a) ==> acc(x.f)
+}

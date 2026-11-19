@@ -1,0 +1,20 @@
+// QP medium (loop exit / heap sum): the loop does not touch the chunk set at
+// all. It stays in the frame, and the sum at the loop exit adds it back to an
+// invariant heap that holds nothing, value included.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_frame_keeps_qp(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+  {
+    i := i + 1
+  }
+  assert a.f == 3
+  a.f := 4
+}

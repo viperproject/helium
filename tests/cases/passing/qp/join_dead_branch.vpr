@@ -1,0 +1,19 @@
+// QP medium (branch join): the else-branch is dead (its condition contradicts
+// the precondition) and would exhale everything. The join must not let the
+// dead branch weaken the live one.
+//
+// Must VERIFY.
+field f: Int
+
+method join_dead_branch(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (a in s) {
+    a.f := 1
+  } else {
+    exhale forall x: Ref :: x in s ==> acc(x.f)
+  }
+  assert perm(a.f) == write
+  assert a.f == 1
+}

@@ -1,0 +1,19 @@
+// QP medium: a callee takes half of one member and gives it back. The caller
+// kept the other half in the chunk set, so the value cannot have changed: the
+// returned single chunk and the set agree on it.
+//
+// Must VERIFY.
+field f: Int
+
+method callee(a: Ref)
+  requires acc(a.f, 1/2)
+  ensures acc(a.f, 1/2)
+
+method callee_half_keeps_value(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  a.f := 5
+  callee(a)
+  assert a.f == 5
+}

@@ -1,0 +1,14 @@
+// QP easy: exhaling half of a chunk set leaves the other half, which still
+// frames a read. The exhaled set is recorded as taken from the held one, and
+// the lookup at `a.f` subtracts it: 1 - 1/2 > 0.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_exhale_half_then_read(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  var v: Int := a.f
+}

@@ -1,0 +1,16 @@
+// QP medium: the callee takes the chunk set and gives nothing back; reading a
+// member afterwards has no permission.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method callee(s: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.f)
+
+method caller(s: Set[Ref], a: Ref) returns (v: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  callee(s)
+  v := a.f
+}

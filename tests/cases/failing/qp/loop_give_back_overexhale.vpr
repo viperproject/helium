@@ -1,0 +1,20 @@
+// QP medium (loop exit / give back): two loops in a row each take and give
+// back the whole set. Afterwards it is held once, not twice.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method loop_give_back_overexhale(s: Set[Ref], n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+  { i := i + 1 }
+  i := 0
+  while (i < n)
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+  { i := i + 1 }
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+}

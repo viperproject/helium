@@ -1,0 +1,18 @@
+// QP medium (branch join): both branches write, but the assertion pairs each
+// value with the wrong branch. Catches a join that ignores (or flips) the
+// branch condition when selecting value maps.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method join_values_swapped(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    a.f := 1
+  } else {
+    a.f := 2
+  }
+  assert a.f == (c ? 2 : 1)
+}

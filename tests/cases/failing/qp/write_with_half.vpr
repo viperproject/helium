@@ -1,0 +1,11 @@
+// QP easy: the chunk set grants only 1/2, a write needs full permission.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method write_with_half(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires a in s
+{
+  a.f := 1
+}

@@ -1,0 +1,13 @@
+// QP medium: a postcondition hands out one member of the chunk set as a single
+// location; its value is the one written through the set.
+//
+// Must VERIFY.
+field f: Int
+
+method ensures_single_value(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures acc(a.f) && a.f == 5
+{
+  a.f := 5
+}

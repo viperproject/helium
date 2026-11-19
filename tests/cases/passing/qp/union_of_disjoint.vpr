@@ -1,0 +1,13 @@
+// QP medium: two chunk sets over disjoint domains are exhaled as one over the
+// union.
+//
+// Must VERIFY.
+field f: Int
+
+method union_of_disjoint(s1: Set[Ref], s2: Set[Ref])
+  requires forall x: Ref :: x in s1 ==> acc(x.f)
+  requires forall x: Ref :: x in s2 ==> acc(x.f)
+  requires (s1 intersection s2) == Set[Ref]()
+  ensures forall x: Ref :: x in (s1 union s2) ==> acc(x.f)
+{
+}

@@ -1,0 +1,11 @@
+// QP easy: a 1/2 chunk set does not give full permission to its members.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method perm_too_high(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires a in s
+{
+  assert perm(a.f) == write
+}

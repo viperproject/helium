@@ -1,0 +1,15 @@
+// QP easy: `perm` of a location inside the domain is the quantified amount,
+// for a full and for a fractional chunk set.
+//
+// Must VERIFY.
+field f: Int
+field g: Int
+
+method perm_of_member(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: x in s ==> acc(x.g, 1/2)
+  requires a in s
+{
+  assert perm(a.f) == write
+  assert perm(a.g) == 1/2
+}

@@ -1,0 +1,20 @@
+// QP medium (branch join): the branches write different fields, each held by
+// its own chunk set. The join has to treat the two location kinds separately.
+//
+// Must VERIFY.
+field f: Int
+field g: Int
+
+method join_two_fields(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: x in s ==> acc(x.g)
+  requires a in s && a.f == 0 && a.g == 0
+{
+  if (c) {
+    a.f := 1
+  } else {
+    a.g := 1
+  }
+  assert a.f == (c ? 1 : 0)
+  assert a.g == (c ? 0 : 1)
+}

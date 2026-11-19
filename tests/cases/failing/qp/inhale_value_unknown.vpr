@@ -1,0 +1,9 @@
+field f: Int
+
+method value_unknown(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  //:: ExpectedOutput(assert.failed:assertion.false)
+  assert a.f == 0
+}
