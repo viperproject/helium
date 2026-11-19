@@ -1,0 +1,8 @@
+// QP injectivity over a two-argument predicate with a fixed second argument:
+// only the first argument varies, and it is the binder.
+predicate P(x: Ref, y: Ref)
+
+method pred_fixed_second_arg(s: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(P(x, r))
+}

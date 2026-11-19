@@ -1,0 +1,21 @@
+// A QP over a two-argument predicate with a body: writing inside `P(a, b)`
+// says nothing about `P(a, c)` when `b != c`.
+//
+// Must FAIL (assertion might not hold).
+field f: Int
+field g: Int
+
+// Owns the first argument's `f` and the second argument's `g`.
+predicate P(x: Ref, y: Ref) {
+  acc(x.f) && acc(y.g)
+}
+
+method pred_body_fold_other_instance(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref, c: Ref)
+  requires a in s && b in t && c in t && b != c
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+  unfold acc(P(a, b))
+  a.f := 5
+  fold acc(P(a, b))
+  assert (unfolding acc(P(a, c)) in c.g) == 5
+}

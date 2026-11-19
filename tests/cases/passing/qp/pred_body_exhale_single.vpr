@@ -1,0 +1,17 @@
+// A QP over a two-argument predicate with a body: one instance taken out of
+// the set leaves the others in place.
+field f: Int
+field g: Int
+
+// Owns the first argument's `f` and the second argument's `g`.
+predicate P(x: Ref, y: Ref) {
+  acc(x.f) && acc(y.g)
+}
+
+method pred_body_exhale_single(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref, c: Ref)
+  requires a in s && b in t && c in t && b != c
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+  exhale acc(P(a, b))
+  exhale acc(P(a, c))
+}

@@ -1,0 +1,13 @@
+// QP injectivity over a predicate with a body and a reference and an integer
+// argument: the integer binder is the second argument.
+field f: Int
+
+// Owns `a.f` and says the index is in range.
+predicate Q(a: Ref, i: Int) {
+  acc(a.f) && 0 <= i
+}
+
+method pred_body_int_index(a: Ref, n: Int)
+{
+  inhale forall i: Int :: 0 <= i && i < n ==> acc(Q(a, i), 1/n)
+}

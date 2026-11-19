@@ -1,0 +1,8 @@
+// A QP over a two-argument predicate, inhaled and exhaled as a whole.
+predicate P(x: Ref, y: Ref)
+
+method pred_two_args_exhale_all(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+  exhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+}
