@@ -342,7 +342,7 @@ pub(super) fn subtract_location(
             let set = set.with_taken(ctx, Taken::Single {
                 addr: chunk.addr,
                 perm: needed,
-                guard: pc_lits.into(),
+                guard: std::rc::Rc::from([]),
             });
             return Ok(heap.with_qp_chunk_replaced(kind, i, set));
         }

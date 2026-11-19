@@ -66,6 +66,10 @@ pub(crate) struct VerifyContext<'a> {
     /// Monotonic source of heap identities: the origin of a chunk set and the
     /// id of each exhale recorded against one (see [`Self::fresh_heap_id`]).
     heap_id_counter: u32,
+    /// The inverse axioms assumed so far, for chunk sets to share (see
+    /// `heap::quantified_permissions::InverseAxioms`). Holds e-class ids, so a
+    /// scratch graph's additions are dropped with it.
+    pub(crate) inverse_axioms: crate::verify::heap::InverseAxioms,
     /// Cheap string repr for member/constructor names.
     pub(crate) interner: &'a Rodeo,
     /// Member names indexed by `MemberId` (for `member_name`/`func_name`).
@@ -195,6 +199,7 @@ impl<'a> VerifyContext<'a> {
             axiom_rules: Vec::new(),
             fresh_counter: 0,
             heap_id_counter: 0,
+            inverse_axioms: Default::default(),
             interner,
             decls,
             groups,

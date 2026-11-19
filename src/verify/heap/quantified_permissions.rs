@@ -36,8 +36,9 @@ use crate::vmir;
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::ChunkPerm;
-use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::lang::{FuncId, RecipeId, Symbolic};
 use crate::verify::quant::{Canonical, QuantRecipe};
+use crate::verify::analysis::ConstFold;
 use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, QuantChunks, Val};
 
@@ -223,21 +224,10 @@ fn mint_and_assume_inverse_axiom(
     caps: &[(usize, Id)],
     pc: &[(Id, Polarity)],
 ) -> Result<Rc<[FuncId]>, VerifyError> {
-    // One fresh inverse per binder, from the address function's parameters.
     let loc_call = q.loc_call();
-    let (params, _) = ctx.function_signature(loc_call.function, &loc_call.type_args);
-    let inv: Rc<[FuncId]> = q
-        .bound
-        .iter()
-        .map(|ret| {
-            let f = ctx.alloc.qp_inverse(params.clone(), ret.clone());
-            ctx.func_ret_types.insert(f, ret.clone());
-            f
-        })
-        .collect();
     // Without a trigger the axiom could never fire; assuming nothing is sound.
     if q.triggers.is_empty() {
-        return Ok(inv);
+        return Ok(mint_inverses(ctx, q));
     }
 
     let free: Vec<usize> = caps.iter().map(|&(k, _)| k).collect();
@@ -269,6 +259,23 @@ fn mint_and_assume_inverse_axiom(
     let cond = c.rename(&q.body.cond);
     let ante = and(&mut c, cond, pos);
     let args: Vec<Val> = loc_call.args.iter().map(|a| c.rename(a)).collect();
+
+    // A set with the same axiom up to its inverses, over the same captures,
+    // already has inverses: reuse them, so its forall is the same node.
+    let shape = InverseShape {
+        bound: q.bound.clone(),
+        groups: c.groups.clone(),
+        insts: c.insts.clone(),
+        ante: ante.clone(),
+        args: args.clone(),
+    };
+    let cap_ids: Vec<Id> = caps.iter().map(|&(_, id)| id).collect();
+    if let Some((rid, inv)) = ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
+        let node = ctx.add(Symbolic::Forall(rid, Box::new([]), cap_ids.into()));
+        ctx.assume_guarded(node, pc.iter().rev().copied());
+        return Ok(inv);
+    }
+    let inv = mint_inverses(ctx, q);
     let eqs: Vec<Val> = inv
         .iter()
         .enumerate()
@@ -302,10 +309,79 @@ fn mint_and_assume_inverse_axiom(
             res,
             guard: None,
         });
-    let children = caps.iter().map(|&(_, id)| id).collect();
-    let node = ctx.add(Symbolic::Forall(rid, Box::new([]), children));
+    ctx.inverse_axioms.insert(&ctx.egraph, shape, &cap_ids, rid, inv.clone());
+    let node = ctx.add(Symbolic::Forall(rid, Box::new([]), cap_ids.into()));
     ctx.assume_guarded(node, pc.iter().rev().copied());
     Ok(inv)
+}
+
+/// One fresh inverse per binder of `q`, from its address function's parameters.
+fn mint_inverses(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Rc<[FuncId]> {
+    let loc_call = q.loc_call();
+    let (params, _) = ctx.function_signature(loc_call.function, &loc_call.type_args);
+    q.bound
+        .iter()
+        .map(|ret| {
+            let f = ctx.alloc.qp_inverse(params.clone(), ret.clone());
+            ctx.func_ret_types.insert(f, ret.clone());
+            f
+        })
+        .collect()
+}
+
+/// An inverse axiom with its inverses left out: everything
+/// [`mint_and_assume_inverse_axiom`] canonicalizes before it names them. Two
+/// chunk sets of one shape over the same captures state the same axiom up to
+/// the inverses, so they can share them.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct InverseShape {
+    bound: Box<[vmir::Type]>,
+    groups: Vec<Vec<crate::verify::rewrite::PreparedTerm>>,
+    insts: Vec<crate::verify::rewrite::AxiomInst>,
+    ante: Val,
+    args: Vec<Val>,
+}
+
+/// The inverse axioms assumed in one member's e-graph, by shape and captures.
+///
+/// Sharing is what keeps a run of loops linear: each loop's invariant set
+/// would otherwise mint its own forall, and every one of them keeps firing on
+/// every later trigger term. It is sound because one shape over the same
+/// captures is one proposition, licensed by each set's own injectivity check;
+/// the forall is assumed again under each set's path condition. The captures
+/// must agree, not just the shape: inverses shared across different captures
+/// would equate the binders of two different sets naming one location.
+#[derive(Clone, Default)]
+pub(crate) struct InverseAxioms(
+    std::collections::HashMap<InverseShape, Vec<(Vec<Id>, RecipeId, Rc<[FuncId]>)>>,
+);
+
+impl InverseAxioms {
+    fn find(
+        &self,
+        egraph: &mut egg::EGraph<Symbolic, ConstFold>,
+        shape: &InverseShape,
+        caps: &[Id],
+    ) -> Option<(RecipeId, Rc<[FuncId]>)> {
+        self.0.get(shape)?.iter().find_map(|(cs, rid, inv)| {
+            cs.iter()
+                .zip(caps)
+                .all(|(&a, &b)| egraph.find(a) == egraph.find(b))
+                .then(|| (*rid, inv.clone()))
+        })
+    }
+
+    fn insert(
+        &mut self,
+        egraph: &egg::EGraph<Symbolic, ConstFold>,
+        shape: InverseShape,
+        caps: &[Id],
+        rid: RecipeId,
+        inv: Rc<[FuncId]>,
+    ) {
+        let caps = caps.iter().map(|&c| egraph.find(c)).collect();
+        self.0.entry(shape).or_default().push((caps, rid, inv));
+    }
 }
 
 /// `a ∧ b`, as `a ? b : false` (the shape the e-graph's `ite` rule splits).
@@ -436,12 +512,12 @@ pub(super) fn qp_perm_at(
             }
         })
         .collect();
-    let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.guard)?;
+    let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.eval_pc())?;
 
     let perm = gate_on_args(ctx, inst.perm, &inst.loc_args, &args);
     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
-    // What was exhaled from this set, each gated by its exhale's path condition.
+    // What was exhaled from this set, each gated by its presence guard.
     for taken in chunk.taken.iter() {
         let p = match &taken.what {
             // A taken set applies the same address function, so it always answers.
@@ -471,9 +547,11 @@ pub(super) fn qp_perm_at(
                 demand,
                 before,
                 holder,
+                pc,
                 guard,
             } => {
-                let take = share_at(ctx, demand, before, HolderAt::Set(*holder), addr, guard)?;
+                let at_pc: Vec<_> = pc.iter().chain(guard.iter()).copied().collect();
+                let take = share_at(ctx, demand, before, HolderAt::Set(*holder), addr, &at_pc)?;
                 gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), guard)
             }
         };
@@ -526,14 +604,13 @@ pub(super) fn find_covering_qp(
     exhaled: &QuantChunk,
 ) -> Result<Option<usize>, VerifyError> {
     let vmir_chunk = &exhaled.q;
+    let pc = exhaled.eval_pc();
     for (i, held) in heap.qp_chunks_of(&kind).iter().enumerate() {
         let contained = check_qp_contained(
             ctx,
             vmir_chunk,
-            &exhaled.guard,
-            &mut |ctx, binders| {
-                eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &exhaled.guard)
-            },
+            &pc,
+            &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &pc),
             &mut |ctx, addr| {
                 Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
             },
@@ -551,11 +628,12 @@ pub(super) fn find_covering_qp(
 /// counts, so a set that gave something away is not the same as its origin.
 pub(super) fn same_footprint(ctx: &mut VerifyContext<'_>, a: &QuantChunk, b: &QuantChunk) -> bool {
     let within = |ctx: &mut VerifyContext<'_>, sub: &QuantChunk, held: &QuantChunk| {
+        let pc = sub.eval_pc();
         check_qp_contained(
             ctx,
             &sub.q,
-            &sub.guard,
-            &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &sub.guard),
+            &pc,
+            &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &pc),
             &mut |ctx, addr| {
                 Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
             },
@@ -576,13 +654,14 @@ pub(super) fn covered_by_sum(
     exhaled: &QuantChunk,
 ) -> Result<bool, VerifyError> {
     let q = &exhaled.q;
+    let pc = exhaled.eval_pc();
     check_qp_contained(
         ctx,
         q,
-        &exhaled.guard,
-        &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &exhaled.guard),
+        &pc,
+        &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &pc),
         &mut |ctx, addr| {
-            let holders = holders_at(ctx, heap, kind, addr, &exhaled.guard)?;
+            let holders = holders_at(ctx, heap, kind, addr, &pc)?;
             Ok(Some(sum_perms(ctx, &holders)))
         },
     )
@@ -624,11 +703,11 @@ pub(super) fn take_spread(
     kind: &LocationKind,
     exhaled: QuantChunk,
 ) -> Result<Heap, VerifyError> {
-    let guard = exhaled.guard.clone();
+    let pc = exhaled.eval_pc();
     let mut out = heap.clone();
     for (i, c) in heap.chunks_of(kind).iter().enumerate() {
-        let take = share_at(ctx, &exhaled, heap, HolderAt::Chunk(i), c.addr, &guard)?;
-        let take = gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), &guard);
+        let take = share_at(ctx, &exhaled, heap, HolderAt::Chunk(i), c.addr, &pc)?;
+        let take = gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), &exhaled.guard);
         let rest = crate::verify::heap::algebra::perm_sub_aligned(ctx, c.ungated_perm(), &take);
         out = out.with_chunk(
             kind,
@@ -642,7 +721,8 @@ pub(super) fn take_spread(
             demand: exhaled.clone(),
             before: heap.clone(),
             holder: i,
-            guard: guard.clone(),
+            pc: pc.clone().into(),
+            guard: exhaled.guard.clone(),
         });
         out = out.with_qp_chunk_replaced(kind, i, set);
     }
@@ -680,7 +760,7 @@ pub(super) fn take_from_qp(
 /// matters, as the heap is dropped from only there on, so the containment is
 /// proven under both guards.
 fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChunk) -> bool {
-    let pc: Vec<_> = held.guard.iter().chain(exhaled.guard.iter()).copied().collect();
+    let pc: Vec<_> = held.eval_pc().into_iter().chain(exhaled.eval_pc()).collect();
     check_qp_contained(
         ctx,
         &held.q,
@@ -738,7 +818,8 @@ pub(super) fn quant_chunk_injective(
         q: q.clone(),
         caps,
         inv,
-        guard: pc_lits.into(),
+        pc: pc_lits.into(),
+        guard: Rc::from([]),
         taken: Rc::from([]),
         value_map,
         recipe: None,
