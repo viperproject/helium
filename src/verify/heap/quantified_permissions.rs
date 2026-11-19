@@ -651,6 +651,11 @@ pub(super) fn take_spread(
 
 /// Subtracts the `exhaled` chunk from the `i`th chunk of `kind` in heap. Returns the heap with the subtraction
 /// This function just removes it, no checks are performed.
+///
+/// When the exhale takes everything the set still holds (the usual hand-off
+/// of a whole set to a loop or a callee), the set is dropped instead: it holds
+/// no permission, so nothing can be read through it, and later unions and
+/// reads do not have to look past it.
 pub(super) fn take_from_qp(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
@@ -659,11 +664,34 @@ pub(super) fn take_from_qp(
     exhaled: QuantChunk,
 ) -> Heap {
     let held = &heap.qp_chunks_of(kind)[i];
+    if emptied_by(ctx, held, &exhaled) {
+        return heap.with_qp_chunk_removed(kind, i);
+    }
     let held = held.with_taken(ctx, Taken::Set(QuantChunk {
         value_map: held.value_map,
         ..exhaled
     }));
     heap.with_qp_chunk_replaced(kind, i, held)
+}
+
+/// Whether taking `exhaled` leaves `held` empty on the exhale's path: what
+/// `held` still holds is contained in `exhaled`. The other direction is what
+/// made `held` the covering set ([`find_covering_qp`]). Only the exhale's path
+/// matters, as the heap is dropped from only there on, so the containment is
+/// proven under both guards.
+fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChunk) -> bool {
+    let pc: Vec<_> = held.guard.iter().chain(exhaled.guard.iter()).copied().collect();
+    check_qp_contained(
+        ctx,
+        &held.q,
+        &pc,
+        &mut |ctx, binders| eval_qp_instance(ctx, &held.caps, &held.q, binders, &pc),
+        &mut |ctx, addr| {
+            Ok(qp_perm_at(ctx, exhaled, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &exhaled.guard)))
+        },
+    )
+    // The body evaluated once already, at its inhale.
+    .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
 }
 
 /// The chunk set of `q` with its captured temps already resolved to `caps`:
