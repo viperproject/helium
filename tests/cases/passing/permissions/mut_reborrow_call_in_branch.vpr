@@ -13,9 +13,9 @@
 // Everything the three members need follows from taking that guard seriously:
 //   - `summarize_perm_at` decides the address gate under `pc ∧ chunk.guard`
 //     rather than on ground, so the chain is released and the gate disappears;
-//   - the summarized total stays a `ChunkPerm` tree, so `prove_sufficient` splits
-//     it per leaf with the guard literal in the pc — the split set is the guards
-//     the chunks already carry, not a searched one;
+//   - the summarized total keeps each member's `ChunkPerm` structure, so its
+//     sufficiency is decided per path with the guard literal in the pc — the split
+//     set is the guards the chunks already carry, not a searched one;
 //   - the guard survives a consume (`heap_subtract_inner` skips the gating
 //     entirely when the pc already entails it; `heap_subtract_summarized` carries
 //     it onto the remainder), so it is still there for the join-level consume;

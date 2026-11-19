@@ -1,0 +1,21 @@
+// A summarized sum is decided path by path, and a path stops as soon as the chunks
+// present on it cover the obligation. `a`'s half alone does not cover a full
+// demand, so the path where `a` is present goes on to `b` (or `c`); the path with
+// none of them present is closed by the precondition.
+
+field f: Int
+
+method halves_then_whole(a: Ref, b: Ref, c: Ref, z: Ref)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2) && acc(c.f)
+  requires (z == a && z == b) || z == c
+{
+  exhale acc(z.f)
+}
+
+// `perm(z.f)` sums two half-permission members; the precondition puts `z` at one.
+method positive_somewhere(a: Ref, b: Ref, z: Ref)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+  requires z == a || z == b
+{
+  assert perm(z.f) > none
+}

@@ -29,6 +29,7 @@ const GATED: &[&str] = &[
     "rule_applications",
     "prove_calls",
     "prove_probe",
+    "perm_sum_steps",
 ];
 const GROWTH: f64 = 1.5;
 const SHRINK: f64 = 2.0;
