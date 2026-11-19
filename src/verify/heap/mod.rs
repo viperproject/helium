@@ -814,6 +814,15 @@ impl Heap {
         }
     }
 
+    fn with_qp_chunk_removed(&self, kind: &LocationKind, i: usize) -> Self {
+        let mut v: Vec<QuantChunk> = self.qp_chunks_of(kind).to_vec();
+        v.remove(i);
+        Self {
+            groups: self.groups.clone(),
+            qps: self.qps.update(kind.clone(), v.into()),
+        }
+    }
+
     fn with_qp_chunk(&self, kind: &LocationKind, chunk: QuantChunk) -> Self {
         let mut v: Vec<QuantChunk> = self.qps.get(kind).map(|r| r.to_vec()).unwrap_or_default();
         v.push(chunk);
