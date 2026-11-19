@@ -264,11 +264,10 @@ impl Heap {
                     Injectivity::Check,
                     "a consumed chunk set must have its injectivity checked"
                 );
-                if spec.q.body.contains_wc_permission() {
-                    return Err(VerifyError::Unimplemented(
-                        "exhaling a wildcard quantified permission",
-                    ));
-                }
+                assert!(
+                    !spec.q.body.contains_wc_permission(),
+                    "a wildcard quantified permission is rejected at translation"
+                );
                 let kind = spec.kind();
                 // The exhaled set's values are the covering set's (an exhale
                 // changes no value), known only once one is found below; until
