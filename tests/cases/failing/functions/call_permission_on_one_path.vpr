@@ -1,0 +1,13 @@
+// The footprint is held only when `b`; the call is unconditional. Silicon rejects it.
+
+field f: Int
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+method bad(x: Ref, b: Bool)
+    requires b ==> acc(x.f, 1/2)
+{
+    var v: Int := rd(x)
+}

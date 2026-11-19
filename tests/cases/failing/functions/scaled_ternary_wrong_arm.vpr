@@ -1,0 +1,11 @@
+// `x.f` is held (scaled) only on the `b` arm of the predicate body; reading it
+// unconditionally must be rejected. Silicon rejects it.
+
+field f: Int
+field g: Int
+
+predicate PT(x: Ref, b: Bool) { b ? acc(x.f, 1/2) : acc(x.g, 1/2) }
+
+function bad(x: Ref, b: Bool): Int
+    requires acc(PT(x, b), write)
+{ unfolding acc(PT(x, b), write) in x.f }
