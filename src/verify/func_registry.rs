@@ -64,11 +64,13 @@ pub struct SkolemSig {
 
 /// The value-map functions of one location kind (see
 /// [`FuncRegistry::value_map`]): `lookup(m, a)` reads the value at address `a`
-/// of map `m`, `store(m, a, v)` is `m` with `a` set to `v`.
+/// of map `m`, `store(m, a, v)` is `m` with `a` set to `v`, and
+/// `join(c, m1, m2)` is `m1` where `c` holds and `m2` elsewhere (a branch join).
 #[derive(Debug, Clone, Copy)]
 pub struct ValueFunction {
     pub lookup: FuncId,
     pub store: FuncId,
+    pub join: FuncId,
 }
 
 /// Allocates and names the verifier ids for polymorphic ADT constructors /
@@ -425,6 +427,13 @@ impl FuncRegistry {
                 &format!("{name}.store"),
                 SkolemSig {
                     params: vec![map.clone(), addr, kind.value.clone()],
+                    ret: map.clone(),
+                },
+            ),
+            join: self.skolem(
+                &format!("{name}.join"),
+                SkolemSig {
+                    params: vec![Type::Bool, map.clone(), map.clone()],
                     ret: map,
                 },
             ),
@@ -433,15 +442,15 @@ impl FuncRegistry {
         f
     }
 
-    /// The read-over-write axiom of `kind`'s value map (see
-    /// `verify::builtin_axioms::value_map`), minting its functions and compiling
-    /// it into the recipe table on first use.
-    pub(crate) fn value_map_axiom(&mut self, kind: &LocationKind) -> crate::verify::lang::RecipeId {
+    /// The axioms of `kind`'s value map (see `verify::builtin_axioms::value_map`),
+    /// minting its functions and compiling them into the recipe table on first
+    /// use.
+    pub(crate) fn value_map_axioms(&mut self, kind: &LocationKind) -> Vec<crate::verify::lang::RecipeId> {
         let f = self.value_map(kind);
         self.quant_table
             .write()
             .expect("recipe table lock")
-            .value_map_axiom(kind, f)
+            .value_map_axioms(kind, f)
     }
 
     /// The parameter and return types of the skolem function of kind

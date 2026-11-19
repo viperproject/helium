@@ -580,8 +580,27 @@ impl Chunk {
     }
 }
 
+/// The identity of a chunk set: minted where the set is created (its inhale,
+/// or a produced footprint slot) and kept by every later version of it (a
+/// take, a write, a join). Two sets with one origin are copies of one inhale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SetId(u32);
+
+/// The identity of one exhale recorded against a chunk set ([`QPTaken`]),
+/// minted when it is recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TakeId(u32);
+
+impl SetId {
+    pub(crate) fn fresh(ctx: &mut VerifyContext<'_>) -> SetId {
+        SetId(ctx.fresh_heap_id())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct QuantChunk {
+    /// Which inhale this set is a version of (see [`SetId`]).
+    pub(crate) origin: SetId,
     /// The body, still in vmir temp space.
     pub(crate) q: Rc<vmir::QuantChunks>,
     /// `free_temps()` resolved at inhale: enclosing temp -> its e-class then.
@@ -605,9 +624,19 @@ struct QuantChunk {
     pub(crate) recipe: Option<crate::vmir::Val>,
 }
 
-/// One exhale recorded against a [`QuantChunk`] (its `taken` list).
+/// One exhale recorded against a [`QuantChunk`] (its `taken` list): what was
+/// taken, and which exhale took it.
 #[derive(Debug, Clone)]
-enum QPTaken {
+struct QPTaken {
+    /// Which exhale this is. Copies of one set share the entries recorded
+    /// before they diverged, and only those share an id.
+    pub(crate) id: TakeId,
+    pub(crate) what: Taken,
+}
+
+/// What an exhale took from a chunk set (see [`QPTaken`]).
+#[derive(Debug, Clone)]
+enum Taken {
     /// A whole chunk set exhaled from this one. It applies the same address
     /// function, and its `guard` is the exhale's path condition.
     Set(QuantChunk),
@@ -631,15 +660,48 @@ enum QPTaken {
     },
 }
 
+impl QPTaken {
+    /// This exhale, counted only where `lit` also holds. Still the same exhale.
+    fn under(&self, ctx: &VerifyContext<'_>, lit: (egg::Id, Polarity)) -> QPTaken {
+        let what = match &self.what {
+            Taken::Set(s) => Taken::Set(s.under(ctx, lit)),
+            Taken::Single { addr, perm, guard } => Taken::Single {
+                addr: *addr,
+                perm: perm.clone(),
+                guard: cube_push(ctx, guard, lit),
+            },
+            Taken::Share { demand, before, holder, guard } => Taken::Share {
+                demand: demand.clone(),
+                before: before.clone(),
+                holder: *holder,
+                guard: cube_push(ctx, guard, lit),
+            },
+        };
+        QPTaken { id: self.id, what }
+    }
+}
+
 impl QuantChunk {
-    /// This set with `t` recorded as taken from it.
-    fn with_taken(&self, t: QPTaken) -> QuantChunk {
+    /// This set with `what` recorded as taken from it, as a new exhale.
+    fn with_taken(&self, ctx: &mut VerifyContext<'_>, what: Taken) -> QuantChunk {
         let mut taken = self.taken.to_vec();
-        taken.push(t);
+        taken.push(QPTaken {
+            id: TakeId(ctx.fresh_heap_id()),
+            what,
+        });
         QuantChunk {
             taken: taken.into(),
             ..self.clone()
         }
+    }
+
+    /// This set, held only where `lit` also holds.
+    fn under(&self, ctx: &VerifyContext<'_>, lit: (egg::Id, Polarity)) -> QuantChunk {
+        QuantChunk {
+            guard: cube_push(ctx, &self.guard, lit),
+            ..self.clone()
+        }
+
     }
 }
 

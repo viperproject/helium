@@ -10,7 +10,7 @@ use crate::verify::heap::algebra::{
 };
 use crate::verify::heap::quantified_permissions::qp_perm_at;
 use crate::verify::heap::{
-    Chunk, ChunkPerm, Heap, LocationKind, QPTaken, gate_perm_by_guard,
+    Chunk, ChunkPerm, Heap, LocationKind, Taken, gate_perm_by_guard,
 };
 use crate::verify::lang::Symbolic;
 use crate::verify::heap::interface::{ReadRecipe, Value};
@@ -308,7 +308,7 @@ pub(super) fn subtract_location(
         };
         let held = gate_perm_by_guard(ctx, &held, &set.guard);
         if prove_sufficient_aligned(ctx, &held, &needed, pc_lits) {
-            let set = set.with_taken(QPTaken::Single {
+            let set = set.with_taken(ctx, Taken::Single {
                 addr: chunk.addr,
                 perm: needed,
                 guard: pc_lits.into(),

@@ -63,6 +63,9 @@ pub(crate) struct VerifyContext<'a> {
     /// counter means no id is ever reused across them — so folding `Wildcard` into
     /// `Fresh` later needs no id migration.
     fresh_counter: u32,
+    /// Monotonic source of heap identities: the origin of a chunk set and the
+    /// id of each exhale recorded against one (see [`Self::fresh_heap_id`]).
+    heap_id_counter: u32,
     /// Cheap string repr for member/constructor names.
     pub(crate) interner: &'a Rodeo,
     /// Member names indexed by `MemberId` (for `member_name`/`func_name`).
@@ -191,6 +194,7 @@ impl<'a> VerifyContext<'a> {
             static_reduce: rewrite::reduce_rules(),
             axiom_rules: Vec::new(),
             fresh_counter: 0,
+            heap_id_counter: 0,
             interner,
             decls,
             groups,
@@ -513,6 +517,16 @@ impl<'a> VerifyContext<'a> {
     ) -> egg::Id {
         self.func_ret_types.entry(id).or_insert(ret_ty);
         self.add(Symbolic::FuncApp(id, type_args, args))
+    }
+
+    /// A heap identity never handed out before in this context: the origin of
+    /// a chunk set (`heap::SetId`) or the id of a recorded exhale
+    /// (`heap::TakeId`). Unique per context, so two copies of a heap item
+    /// carry the same id exactly when they descend from one creation.
+    pub(crate) fn fresh_heap_id(&mut self) -> u32 {
+        let id = self.heap_id_counter;
+        self.heap_id_counter += 1;
+        id
     }
 
     pub(crate) fn fresh_symbolic_value(&mut self, ty: Type) -> egg::Id {

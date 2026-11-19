@@ -1,11 +1,13 @@
 //! Combining whole heaps: the join after a branch and the sum of two heaps held at once.
 
+use crate::dhash::HashSet;
 use super::*;
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_push},
 };
-use crate::verify::heap::QuantChunk;
+use crate::verify::heap::{QPTaken, QuantChunk};
+use std::rc::Rc;
 use crate::vmir::Polarity;
 
 /// Structural control-flow merge of two predecessor exit heaps at a binary join
@@ -105,21 +107,97 @@ pub(in crate::verify::heap) fn merge_heaps(
             }
         }
     }
-    // Chunk sets, naively: every set of each arm is kept, its guard extended by
-    // that arm's branch literal, so it counts only where its arm was taken. A
-    // set held on both arms appears twice under complementary guards: sound,
-    // but nothing after the join can use both copies as one (a write needs one
-    // copy alone to hold write permission).
-    for (arm, pol) in [(h_then, Polarity::Positive), (h_els, Polarity::Negative)] {
-        for (kind, sets) in arm.qps.iter() {
-            for set in sets.iter() {
-                let guard = cube_push(ctx, &set.guard, (cond, pol));
-                out = out.with_qp_chunk(kind, QuantChunk { guard, ..set.clone() });
-            }
+    // Chunk sets: one held on both arms is kept once (see `merge_sets`).
+    let kinds = h_then.qps.keys().chain(h_els.qps.keys()).collect::<HashSet<_>>();
+    for kind in kinds {
+        let sets = merge_sets(ctx, kind, cond, h_then.qp_chunks_of(kind), h_els.qp_chunks_of(kind));
+        for set in sets {
+            out = out.with_qp_chunk(kind, set);
         }
     }
     assume_location_axioms(ctx, &out);
     out
+}
+
+/// The chunk sets of one kind after a join of `then` and `els` on `cond`.
+///
+/// A set held on both arms is two copies of one inhale: they share their
+/// `origin`. Such a pair is kept once ([`merge_set`]). A set held on one arm
+/// only counts where that arm was taken: its guard gets the arm's literal.
+fn merge_sets(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    cond: egg::Id,
+    then: &[QuantChunk],
+    els: &[QuantChunk],
+) -> Vec<QuantChunk> {
+    let mut els_left: Vec<Option<&QuantChunk>> = els.iter().map(Some).collect();
+    let mut out = Vec::new();
+    for t in then {
+        let partner = els_left
+            .iter_mut()
+            .find(|e| e.is_some_and(|e| e.origin == t.origin))
+            .and_then(Option::take);
+        out.push(match partner {
+            Some(e) => merge_set(ctx, kind, cond, t, e),
+            None => t.under(ctx, (cond, Polarity::Positive)),
+        });
+    }
+    for e in els_left.into_iter().flatten() {
+        out.push(e.under(ctx, (cond, Polarity::Negative)));
+    }
+    out
+}
+
+/// One set from its copies `t` (then-arm) and `e` (else-arm). `taken` is
+/// append-only, so the copies share the exhales recorded before the branch
+/// (equal ids); what each arm took after it is kept under that arm's literal. Differing value
+/// maps (a write on an arm) join as `join(cond, t's, e's)`, read through the
+/// read-over-join axiom (`builtin_axioms::value_map`); the joined map has no
+/// recipe.
+fn merge_set(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    cond: egg::Id,
+    t: &QuantChunk,
+    e: &QuantChunk,
+) -> QuantChunk {
+    // Sets are never dropped from a heap and only a join changes a guard, so
+    // copies of one inhale reach a join under the guard they were inhaled with.
+    assert!(
+        cube_eq(ctx, &t.guard, &e.guard),
+        "two copies of one chunk set reach a join under different guards"
+    );
+    let shared = t
+        .taken
+        .iter()
+        .zip(e.taken.iter())
+        .take_while(|(a, b)| a.id == b.id)
+        .count();
+    let taken: Rc<[QPTaken]> = if shared == t.taken.len() && shared == e.taken.len() {
+        t.taken.clone()
+    } else {
+        let then_only = t.taken[shared..].iter().map(|x| x.under(ctx, (cond, Polarity::Positive)));
+        let then_only: Vec<QPTaken> = then_only.collect();
+        let els_only: Vec<QPTaken> = e.taken[shared..]
+            .iter()
+            .map(|x| x.under(ctx, (cond, Polarity::Negative)))
+            .collect();
+        t.taken[..shared].iter().cloned().chain(then_only).chain(els_only).collect()
+    };
+    let (value_map, recipe) = if ctx.egraph.find(t.value_map) == ctx.egraph.find(e.value_map) {
+        (t.value_map, t.recipe.clone())
+    } else {
+        let join = ctx.alloc.value_map(kind).join;
+        let args = Box::new([cond, t.value_map, e.value_map]);
+        (ctx.add(crate::verify::lang::Symbolic::FuncApp(join, Box::new([]), args)), None)
+    };
+    QuantChunk {
+        taken,
+        value_map,
+        recipe,
+        ..t.clone()
+    }
 }
 
 /// The **sum** of two heaps held simultaneously (`HeapInst::Union`).
