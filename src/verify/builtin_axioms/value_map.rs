@@ -46,7 +46,12 @@ pub(crate) fn recipes(kind: &LocationKind, f: ValueFunction) -> Vec<QuantRecipe>
     let joined = STerm::App(f.join, vec![c.clone(), m1.clone(), m2.clone()]);
     let read = lookup(joined, r.clone());
     let body = eq(read.clone(), ite(c, lookup(m1, r.clone()), lookup(m2, r)));
-    let over_join = axiom(kind, Box::new([Type::Bool, map.clone(), map, addr]), &read, &body);
+    let over_join = axiom(
+        kind,
+        Box::new([Type::Bool, map.clone(), map, addr]),
+        &read,
+        &body,
+    );
 
     vec![over_write, over_join]
 }
@@ -70,7 +75,11 @@ fn axiom(kind: &LocationKind, bound: Box<[Type]>, read: &STerm, body: &STerm) ->
         bound,
         n_tys: 0,
         own_tys: vec![],
-        groups: vec![vec![trigger(read, unused, std::slice::from_ref(&kind.value))]],
+        groups: vec![vec![trigger(
+            read,
+            unused,
+            std::slice::from_ref(&kind.value),
+        )]],
         insts: steps.insts,
         res,
         guard: None,

@@ -31,11 +31,12 @@ use crate::verify::heap::algebra::{
     Demand, chunk_under_pc, find_chunk_consolidated, heap_union, merge_heaps, perm_value,
     prove_perm_positive, prove_perm_write, summarize_perm_at, union_heaps,
 };
-use crate::verify::heap::holders::{HolderAt, holders_at, pick_value, subtract_location, sum_perms};
+use crate::verify::heap::holders::{
+    HolderAt, holders_at, pick_value, subtract_location, sum_perms,
+};
 use crate::verify::heap::quantified_permissions::{
     check_qp_nonnegative, covered_by_sum, find_covering_qp, quant_chunk_from_caps,
-    quant_chunk_injective, take_spread,
-    take_from_qp,
+    quant_chunk_injective, take_from_qp, take_spread,
 };
 use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind, QuantChunk};
 use crate::verify::lang::Symbolic;
@@ -362,14 +363,24 @@ impl Heap {
 
     /// The heap after a branch: `then` where `cond` holds, `els` elsewhere.
     /// Chunk sets are kept from both arms, each under its arm's literal.
-    pub(crate) fn merge(ctx: &mut VerifyContext<'_>, cond: egg::Id, then: &Heap, els: &Heap) -> Heap {
+    pub(crate) fn merge(
+        ctx: &mut VerifyContext<'_>,
+        cond: egg::Id,
+        then: &Heap,
+        els: &Heap,
+    ) -> Heap {
         merge_heaps(ctx, cond, then, els)
     }
 
     /// The sum of two heaps held at once.
     ///
     /// Chunk sets are not summed yet: a heap holding one panics.
-    pub(crate) fn union(&self, ctx: &mut VerifyContext<'_>, other: &Heap, pc: &[(egg::Id, Polarity)]) -> Heap {
+    pub(crate) fn union(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        other: &Heap,
+        pc: &[(egg::Id, Polarity)],
+    ) -> Heap {
         union_heaps(ctx, self, other, pc)
     }
 
@@ -394,8 +405,8 @@ impl Heap {
         } else {
             self.read(ctx, loc, pc, None)?
         };
-        let value = value
-            .unwrap_or_else(|| Value::plain(ctx.fresh_symbolic_value(loc.kind.value.clone())));
+        let value =
+            value.unwrap_or_else(|| Value::plain(ctx.fresh_symbolic_value(loc.kind.value.clone())));
         let demand = if perm.has_wild() {
             Demand::Wildcard
         } else {

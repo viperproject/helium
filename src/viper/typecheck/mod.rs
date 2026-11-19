@@ -4,7 +4,7 @@ use lasso::Spur;
 use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
 
 use crate::viper::{
-    self,
+    self, IdnDeclTyped, QuantifierKind,
     globals::{DtorInfo, GlobalSignature, Globals},
     interner::Interner,
     typed::{
@@ -12,7 +12,6 @@ use crate::viper::{
         MethodEnsuresExt, PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp,
         SpatialExp, SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
     },
-    IdnDeclTyped, QuantifierKind,
 };
 
 mod error;

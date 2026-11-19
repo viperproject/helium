@@ -1,16 +1,16 @@
 //! Combining whole heaps: the join after a branch and the sum of two heaps held at once.
 
-use crate::dhash::HashSet;
 use super::*;
+use crate::dhash::HashSet;
+use crate::verify::heap::quantified_permissions::same_footprint;
+use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken, cube_entails};
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_push},
 };
-use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken, cube_entails};
-use crate::verify::heap::quantified_permissions::same_footprint;
+use crate::vmir::Polarity;
 use crate::vmir::Type;
 use std::rc::Rc;
-use crate::vmir::Polarity;
 
 /// Structural control-flow merge of two predecessor exit heaps at a binary join
 /// (`HeapInst::Merge`). The reachability edge is carried as a **flat per-chunk
@@ -110,9 +110,19 @@ pub(in crate::verify::heap) fn merge_heaps(
         }
     }
     // Chunk sets: one held on both arms is kept once (see `merge_sets`).
-    let kinds = h_then.qps.keys().chain(h_els.qps.keys()).collect::<HashSet<_>>();
+    let kinds = h_then
+        .qps
+        .keys()
+        .chain(h_els.qps.keys())
+        .collect::<HashSet<_>>();
     for kind in kinds {
-        let sets = merge_sets(ctx, kind, cond, h_then.qp_chunks_of(kind), h_els.qp_chunks_of(kind));
+        let sets = merge_sets(
+            ctx,
+            kind,
+            cond,
+            h_then.qp_chunks_of(kind),
+            h_els.qp_chunks_of(kind),
+        );
         for set in sets {
             out = out.with_qp_chunk(kind, set);
         }
@@ -179,26 +189,43 @@ fn merge_set(
     let taken: Rc<[QPTaken]> = if shared == t.taken.len() && shared == e.taken.len() {
         t.taken.clone()
     } else {
-        let then_only = t.taken[shared..].iter().map(|x| x.under(ctx, (cond, Polarity::Positive)));
+        let then_only = t.taken[shared..]
+            .iter()
+            .map(|x| x.under(ctx, (cond, Polarity::Positive)));
         let then_only: Vec<QPTaken> = then_only.collect();
         let els_only: Vec<QPTaken> = e.taken[shared..]
             .iter()
             .map(|x| x.under(ctx, (cond, Polarity::Negative)))
             .collect();
-        t.taken[..shared].iter().cloned().chain(then_only).chain(els_only).collect()
+        t.taken[..shared]
+            .iter()
+            .cloned()
+            .chain(then_only)
+            .chain(els_only)
+            .collect()
     };
     let (value_map, recipe) = if ctx.egraph.find(t.value_map) == ctx.egraph.find(e.value_map) {
         (t.value_map, t.recipe.clone())
     } else {
         let join = ctx.alloc.value_map(kind).join;
         let args = Box::new([cond, t.value_map, e.value_map]);
-        (ctx.add(crate::verify::lang::Symbolic::FuncApp(join, Box::new([]), args)), None)
+        (
+            ctx.add(crate::verify::lang::Symbolic::FuncApp(
+                join,
+                Box::new([]),
+                args,
+            )),
+            None,
+        )
     };
     // A joined map reads one arm's map or the other's, so each arm's
     // restored maps still need their definitions.
     let mut restored = t.restored.to_vec();
     for r in e.restored.iter() {
-        if !restored.iter().any(|x| ctx.egraph.find(x.map) == ctx.egraph.find(r.map)) {
+        if !restored
+            .iter()
+            .any(|x| ctx.egraph.find(x.map) == ctx.egraph.find(r.map))
+        {
             restored.push(r.clone());
         }
     }
@@ -425,7 +452,11 @@ fn give_back(
 
 /// Whether `cube` holds wherever `pc` does: each literal is in `pc` or proven
 /// under it (a fact assumed earlier on the path).
-fn cube_holds(ctx: &mut VerifyContext<'_>, pc: &[(egg::Id, Polarity)], cube: &[(egg::Id, Polarity)]) -> bool {
+fn cube_holds(
+    ctx: &mut VerifyContext<'_>,
+    pc: &[(egg::Id, Polarity)],
+    cube: &[(egg::Id, Polarity)],
+) -> bool {
     cube.iter().all(|&(id, pol)| {
         if cube_entails(ctx, pc, &[(id, pol)]) {
             return true;

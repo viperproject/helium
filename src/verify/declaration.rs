@@ -1,10 +1,9 @@
 use crate::dhash::HashMap;
-use crate::verify::heap::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
 use crate::verify::eval::{
-    EvalState, OPERAND_RECIPE, collect_pc_lits, display_heaps, eval_perm,
-    eval_perm_inst, eval_perm_structural, eval_pure_inst, format_inst, get_heap,
-    pc_lits_raw, perm_recipe,
+    EvalState, OPERAND_RECIPE, collect_pc_lits, display_heaps, eval_perm, eval_perm_inst,
+    eval_perm_structural, eval_pure_inst, format_inst, get_heap, pc_lits_raw, perm_recipe,
 };
+use crate::verify::heap::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
 use std::rc::Rc;
 
 use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
@@ -20,11 +19,10 @@ use crate::{
         viz::Snapshotter,
     },
     vmir::{
-        self, Assign, BinOp, Bind, Function, HeapInst, Inst, InstKind,
-        Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
+        self, Assign, BinOp, Bind, Function, HeapInst, Inst, InstKind, Literal, MemberId, Method,
+        PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
-
 
 /// What a `wildcard` leaf becomes when a footprint slot's permission is grafted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1007,7 +1005,6 @@ fn apply_slot_perm(
     Ok(expr!(ctx, (0 / 1) < r { perm_id }))
 }
 
-
 /// The `cons` of a resource's snapshot from its per-slot `members`
 /// (`present ? Some(v) : None`). Predicate snapshots are single-variant,
 /// non-generic ADTs headed by the resource id.
@@ -1379,7 +1376,9 @@ fn decls_addr_funcs(
         for i in insts {
             match &i.kind {
                 InstKind::Pure(Type::Addr { .. }, PureInst::FunctionCall(fc)) => {
-                    out.insert(crate::verify::func_registry::func_id_for_member(fc.function));
+                    out.insert(crate::verify::func_registry::func_id_for_member(
+                        fc.function,
+                    ));
                 }
                 InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
                     scan(&q.body.insts, out)
@@ -1933,7 +1932,11 @@ fn check_forall_wd_in_scratch(
 fn quant_spec_of(state: &EvalState, q: &vmir::QuantChunks, injectivity: Injectivity) -> QuantSpec {
     QuantSpec {
         q: Rc::new(q.clone()),
-        caps: q.free_temps().into_iter().map(|k| (k, state.vals[k])).collect(),
+        caps: q
+            .free_temps()
+            .into_iter()
+            .map(|k| (k, state.vals[k]))
+            .collect(),
         injectivity,
     }
 }
@@ -2542,7 +2545,9 @@ fn inst_obligations(
                 // A chunk set's body evaluated once already, at its inhale.
                 get_heap(state, heap)
                     .framing_perm(ctx, &l, pc_lits)
-                    .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"))
+                    .unwrap_or_else(|e| {
+                        panic!("quantified chunk body failed to re-evaluate: {e:?}")
+                    })
             });
             match perm {
                 None => vec![(expr!(ctx, false), VerifyError::InsufficientPermission)],

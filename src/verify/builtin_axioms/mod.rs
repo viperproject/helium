@@ -341,9 +341,7 @@ impl STerm {
             STerm::Skolem(_, args)
             | STerm::Op(_, args)
             | STerm::OpOn(_, _, args)
-            | STerm::App(_, args) => {
-                args.iter().for_each(|a| a.mark_vars(seen))
-            }
+            | STerm::App(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Bin(_, args) => args.iter().for_each(|a| a.mark_vars(seen)),
             STerm::Ite(args) => args.iter().for_each(|a| a.mark_vars(seen)),
         }

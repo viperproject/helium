@@ -445,7 +445,10 @@ impl FuncRegistry {
     /// The axioms of `kind`'s value map (see `verify::builtin_axioms::value_map`),
     /// minting its functions and compiling them into the recipe table on first
     /// use.
-    pub(crate) fn value_map_axioms(&mut self, kind: &LocationKind) -> Vec<crate::verify::lang::RecipeId> {
+    pub(crate) fn value_map_axioms(
+        &mut self,
+        kind: &LocationKind,
+    ) -> Vec<crate::verify::lang::RecipeId> {
         let f = self.value_map(kind);
         self.quant_table
             .write()

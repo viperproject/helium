@@ -28,17 +28,21 @@ use std::sync::Arc;
 
 use egg::Id;
 
-use crate::verify::eval::{EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw};
+use crate::verify::eval::{
+    EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
+};
 use crate::verify::heap::holders::{HolderAt, greedy_takes, holders_at, sum_perms};
-use crate::verify::heap::{Chunk, Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard};
+use crate::verify::heap::{
+    Chunk, Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard,
+};
 use crate::vmir;
 
+use crate::verify::analysis::ConstFold;
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::ChunkPerm;
 use crate::verify::lang::{FuncId, RecipeId, Symbolic};
 use crate::verify::quant::{Canonical, QuantRecipe};
-use crate::verify::analysis::ConstFold;
 use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, QuantChunks, Val};
 
@@ -309,7 +313,8 @@ fn mint_and_assume_inverse_axiom(
             res,
             guard: None,
         });
-    ctx.inverse_axioms.insert(&ctx.egraph, shape, &cap_ids, rid, inv.clone());
+    ctx.inverse_axioms
+        .insert(&ctx.egraph, shape, &cap_ids, rid, inv.clone());
     let node = ctx.add(Symbolic::Forall(rid, Box::new([]), cap_ids.into()));
     ctx.assume_guarded(node, pc.iter().rev().copied());
     Ok(inv)
@@ -717,13 +722,16 @@ pub(super) fn take_spread(
         );
     }
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
-        let set = set.with_taken(ctx, Taken::Share {
-            demand: exhaled.clone(),
-            before: heap.clone(),
-            holder: i,
-            pc: pc.clone().into(),
-            guard: exhaled.guard.clone(),
-        });
+        let set = set.with_taken(
+            ctx,
+            Taken::Share {
+                demand: exhaled.clone(),
+                before: heap.clone(),
+                holder: i,
+                pc: pc.clone().into(),
+                guard: exhaled.guard.clone(),
+            },
+        );
         out = out.with_qp_chunk_replaced(kind, i, set);
     }
     Ok(out)
@@ -747,10 +755,13 @@ pub(super) fn take_from_qp(
     if emptied_by(ctx, held, &exhaled) {
         return heap.with_qp_chunk_removed(kind, i);
     }
-    let held = held.with_taken(ctx, Taken::Set(QuantChunk {
-        value_map: held.value_map,
-        ..exhaled
-    }));
+    let held = held.with_taken(
+        ctx,
+        Taken::Set(QuantChunk {
+            value_map: held.value_map,
+            ..exhaled
+        }),
+    );
     heap.with_qp_chunk_replaced(kind, i, held)
 }
 
@@ -760,14 +771,21 @@ pub(super) fn take_from_qp(
 /// matters, as the heap is dropped from only there on, so the containment is
 /// proven under both guards.
 fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChunk) -> bool {
-    let pc: Vec<_> = held.eval_pc().into_iter().chain(exhaled.eval_pc()).collect();
+    let pc: Vec<_> = held
+        .eval_pc()
+        .into_iter()
+        .chain(exhaled.eval_pc())
+        .collect();
     check_qp_contained(
         ctx,
         &held.q,
         &pc,
         &mut |ctx, binders| eval_qp_instance(ctx, &held.caps, &held.q, binders, &pc),
         &mut |ctx, addr| {
-            Ok(qp_perm_at(ctx, exhaled, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &exhaled.guard)))
+            Ok(
+                qp_perm_at(ctx, exhaled, addr)?
+                    .map(|p| gate_perm_by_guard(ctx, &p, &exhaled.guard)),
+            )
         },
     )
     // The body evaluated once already, at its inhale.
