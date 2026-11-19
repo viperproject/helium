@@ -546,6 +546,26 @@ pub(super) fn find_covering_qp(
     Ok(None)
 }
 
+/// Whether `a` and `b` name the same locations with the same amounts, each
+/// contained in the other ([`check_qp_contained`]). What was taken from either
+/// counts, so a set that gave something away is not the same as its origin.
+pub(super) fn same_footprint(ctx: &mut VerifyContext<'_>, a: &QuantChunk, b: &QuantChunk) -> bool {
+    let within = |ctx: &mut VerifyContext<'_>, sub: &QuantChunk, held: &QuantChunk| {
+        check_qp_contained(
+            ctx,
+            &sub.q,
+            &sub.guard,
+            &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &sub.guard),
+            &mut |ctx, addr| {
+                Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
+            },
+        )
+        // The bodies evaluated once already, at their inhales.
+        .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
+    };
+    within(ctx, a, b) && within(ctx, b, a)
+}
+
 /// Whether the exhaled set is covered by everything `heap` holds together: at
 /// each location it names, its amount is at most the sum over all holders
 /// there ([`holders_at`]). The fallback when no single held set covers it.
@@ -694,5 +714,6 @@ pub(super) fn quant_chunk_injective(
         taken: Rc::from([]),
         value_map,
         recipe: None,
+        restored: Rc::from([]),
     })
 }

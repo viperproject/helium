@@ -6,7 +6,9 @@ use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_push},
 };
-use crate::verify::heap::{QPTaken, QuantChunk};
+use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken, cube_entails};
+use crate::verify::heap::quantified_permissions::same_footprint;
+use crate::vmir::Type;
 use std::rc::Rc;
 use crate::vmir::Polarity;
 
@@ -192,10 +194,19 @@ fn merge_set(
         let args = Box::new([cond, t.value_map, e.value_map]);
         (ctx.add(crate::verify::lang::Symbolic::FuncApp(join, Box::new([]), args)), None)
     };
+    // A joined map reads one arm's map or the other's, so each arm's
+    // restored maps still need their definitions.
+    let mut restored = t.restored.to_vec();
+    for r in e.restored.iter() {
+        if !restored.iter().any(|x| ctx.egraph.find(x.map) == ctx.egraph.find(r.map)) {
+            restored.push(r.clone());
+        }
+    }
     QuantChunk {
         taken,
         value_map,
         recipe,
+        restored: restored.into(),
         ..t.clone()
     }
 }
@@ -318,12 +329,111 @@ pub(in crate::verify::heap) fn union_heaps(
         out = out.with_chunk(kind, merged);
     }
 
-    // Merge QPs in a naive way (a is already contained in out)
+    // Chunk sets (`out` already holds a's). A set given back to the one it
+    // was taken from cancels that take ([`give_back`]): at a loop exit the
+    // frame's set took the invariant's at the head, and the invariant hands it
+    // back. Every other set is kept as is.
     for (kind, sets) in b.qps.iter() {
         for set in sets.iter() {
-            out = out.with_qp_chunk(kind, set.clone());
+            let mut hit = None;
+            for (j, held) in out.qp_chunks_of(kind).iter().enumerate() {
+                if let Some(c) = give_back(ctx, kind, set, held, pc_lits)
+                    .or_else(|| give_back(ctx, kind, held, set, pc_lits))
+                {
+                    hit = Some((j, c));
+                    break;
+                }
+            }
+            out = match hit {
+                Some((j, c)) => out.with_qp_chunk_replaced(kind, j, c),
+                None => out.with_qp_chunk(kind, set.clone()),
+            };
         }
     }
     ctx.egraph.rebuild();
     out
+}
+
+/// `x` with `y` given back, or `None` when `y` is not something `x` gave away.
+///
+/// It is when `x` recorded taking a set with `y`'s footprint (same body and
+/// captures, both guards entailed by `pc`) and nothing was taken from `y`
+/// since. Then `x` without that take holds what both held. Its values are
+/// `y`'s inside the taken region (they may have changed while `x` did not hold
+/// it) and `x`'s elsewhere: `y`'s map when the region is all of `x`, `x`'s when
+/// the two maps are already one, and otherwise a fresh map defined by a
+/// [`Restored`] entry. That one is defined only at addresses read through
+/// `x` (`holders::holders_at`), so where it leaves as a snapshot its values are
+/// unknown: sound, but incomplete.
+fn give_back(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    x: &QuantChunk,
+    y: &QuantChunk,
+    pc: &[(egg::Id, Polarity)],
+) -> Option<QuantChunk> {
+    if !y.taken.is_empty() || !cube_holds(ctx, pc, &y.guard) {
+        return None;
+    }
+    let k = x.taken.iter().position(|t| match &t.what {
+        Taken::Set(s) => cube_holds(ctx, pc, &s.guard) && same_footprint(ctx, s, y),
+        _ => false,
+    })?;
+    let Taken::Set(region) = &x.taken[k].what else {
+        unreachable!("matched a taken set above")
+    };
+    let region = region.clone();
+    let mut taken = x.taken.to_vec();
+    taken.remove(k);
+    let mut restored = x.restored.to_vec();
+    restored.extend(y.restored.iter().cloned());
+    let own = QuantChunk {
+        taken: Rc::from([]),
+        ..x.clone()
+    };
+    let (value_map, recipe) = if ctx.egraph.find(x.value_map) == ctx.egraph.find(y.value_map) {
+        (x.value_map, x.recipe.clone())
+    } else if same_footprint(ctx, &own, &region) {
+        // `x` gave all it was inhaled with: every value it can name is `y`'s,
+        // and outside its domain its map is never read. No map to define,
+        // which also keeps the map whole where it leaves as a snapshot.
+        (y.value_map, y.recipe.clone())
+    } else {
+        let addr = Type::Addr {
+            group: kind.group,
+            value: Box::new(kind.value.clone()),
+            bound: kind.bound.clone(),
+        };
+        let map = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(addr)));
+        restored.push(Restored {
+            map,
+            region,
+            kept: x.clone(),
+            new: y.value_map,
+            old: x.value_map,
+        });
+        (map, None)
+    };
+    Some(QuantChunk {
+        taken: taken.into(),
+        value_map,
+        recipe,
+        restored: restored.into(),
+        ..x.clone()
+    })
+}
+
+/// Whether `cube` holds wherever `pc` does: each literal is in `pc` or proven
+/// under it (a fact assumed earlier on the path).
+fn cube_holds(ctx: &mut VerifyContext<'_>, pc: &[(egg::Id, Polarity)], cube: &[(egg::Id, Polarity)]) -> bool {
+    cube.iter().all(|&(id, pol)| {
+        if cube_entails(ctx, pc, &[(id, pol)]) {
+            return true;
+        }
+        let goal = match pol {
+            Polarity::Positive => id,
+            Polarity::Negative => expr!(ctx, { id } == false),
+        };
+        ctx.prove_under_pc(goal, pc)
+    })
 }

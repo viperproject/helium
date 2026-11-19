@@ -622,6 +622,34 @@ struct QuantChunk {
     /// resource body the footprint seed `SlotValue(i)`, so a read through
     /// this set purifies to `lookup(seed, addr)`. `None` in a method body.
     pub(crate) recipe: Option<crate::vmir::Val>,
+    /// The maps minted when a taken set was given back to this one (see
+    /// [`Restored`]); each is defined at an address where it is read.
+    pub(crate) restored: Rc<[Restored]>,
+}
+
+/// A value map minted when a set taken from a chunk set came back (a loop
+/// exit hands back what its head took, see `algebra::combine::union_heaps`):
+/// inside the taken `region` it reads the returned values `new`, elsewhere the
+/// set's own `old` ones.
+///
+/// ```text
+/// lookup(map, r) == (0 < perm(region, r) ? lookup(new, r) : lookup(old, r))
+/// 0 < perm(region, r) && 0 < perm(kept, r)  ==>  lookup(new, r) == lookup(old, r)
+/// ```
+///
+/// The second line is value agreement: where the set `kept` (the one given
+/// back to, as it was before) held a share too, the values cannot have changed.
+///
+/// `map` is fresh, so this only defines it. It is assumed per address, where
+/// a read meets it (`holders::holders_at`): the region is a chunk set, which no
+/// ground term names.
+#[derive(Debug, Clone)]
+struct Restored {
+    pub(crate) map: egg::Id,
+    pub(crate) region: QuantChunk,
+    pub(crate) kept: QuantChunk,
+    pub(crate) new: egg::Id,
+    pub(crate) old: egg::Id,
 }
 
 /// One exhale recorded against a [`QuantChunk`] (its `taken` list): what was

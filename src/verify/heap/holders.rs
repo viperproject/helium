@@ -10,7 +10,7 @@ use crate::verify::heap::algebra::{
 };
 use crate::verify::heap::quantified_permissions::qp_perm_at;
 use crate::verify::heap::{
-    Chunk, ChunkPerm, Heap, LocationKind, Taken, gate_perm_by_guard,
+    Chunk, ChunkPerm, Heap, LocationKind, Restored, Taken, gate_perm_by_guard,
 };
 use crate::verify::lang::Symbolic;
 use crate::verify::heap::interface::{ReadRecipe, Value};
@@ -74,6 +74,9 @@ pub(super) fn holders_at(
                 Box::new([]),
                 Box::new([set.value_map, addr]),
             ));
+            for r in set.restored.iter() {
+                define_restored(ctx, kind, r, addr)?;
+            }
             holders.push(Holder {
                 perm: gate_perm_by_guard(ctx, &p, &set.guard),
                 value,
@@ -83,6 +86,34 @@ pub(super) fn holders_at(
         }
     }
     Ok(holders)
+}
+
+/// Assume what the restored map `rest.map` reads at `addr` (see [`Restored`]).
+fn define_restored(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    rest: &Restored,
+    addr: egg::Id,
+) -> Result<(), VerifyError> {
+    let positive = |ctx: &mut VerifyContext<'_>, set: &crate::verify::heap::QuantChunk| {
+        let perm = qp_perm_at(ctx, set, addr)?
+            .expect("a taken chunk set applies the same address function");
+        let perm = gate_perm_by_guard(ctx, &perm, &set.guard).to_id(ctx);
+        Ok::<_, VerifyError>(expr!(ctx, (0 / 1) < r { perm }))
+    };
+    let inside = positive(ctx, &rest.region)?;
+    let kept = positive(ctx, &rest.kept)?;
+    let lookup = ctx.alloc.value_map(kind).lookup;
+    let [read, new, old] = [rest.map, rest.new, rest.old]
+        .map(|m| ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([m, addr]))));
+    let value = ctx.add(Symbolic::Ite([inside, new, old]));
+    let fact = expr!(ctx, { read } == { value });
+    ctx.assume_guarded(fact, std::iter::empty());
+    let eq = expr!(ctx, { new } == { old });
+    let both = [(kept, Polarity::Positive), (inside, Polarity::Positive)];
+    let agree = ctx.implication(eq, both.into_iter());
+    ctx.assume_guarded(agree, std::iter::empty());
+    Ok(())
 }
 
 /// The sum of the `holders`' shares: everything they hold at the address.
