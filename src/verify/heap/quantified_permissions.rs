@@ -114,11 +114,9 @@ fn check_injectivity_in_scratch(
     Ok(())
 }
 
-/// The permission a held chunk set has at an address, its guard folded in, or
-/// `None` when the set cannot name that address. Supplied by the caller, which
-/// owns the lookup (`qp_perm_at`).
-type HeldAt<'s> =
-    dyn FnMut(&mut VerifyContext<'_>, Id) -> Result<Option<ChunkPerm>, VerifyError> + 's;
+/// The permission held at an address, guards folded in. Supplied by the caller,
+/// which owns the lookup (`qp_perm_at`, or a sum over all holders).
+type HeldAt<'s> = dyn FnMut(&mut VerifyContext<'_>, Id) -> Result<ChunkPerm, VerifyError> + 's;
 
 /// Whether the exhaled quantified permission `q` is covered by a held chunk set
 /// under the exhale's path condition `pc`: every location it names has at least
@@ -146,9 +144,7 @@ fn check_qp_contained(
         ctx.with_scratch_graph(|ctx| {
             let ys = fresh_binders(ctx, q);
             let inst = instantiate(ctx, &ys)?;
-            let Some(avail) = held_at(ctx, inst.addr)? else {
-                return Ok(false);
-            };
+            let avail = held_at(ctx, inst.addr)?;
             let mut lits = pc.to_vec();
             lits.push((inst.cond, Polarity::Positive));
             Ok(crate::verify::heap::algebra::prove_sufficient_aligned(
@@ -450,46 +446,27 @@ fn eval_qp_instance_unrecorded(
     })
 }
 
-/// The permission a quantified chunk set holds at `addr`, or `None` when `addr`
-/// is not an application of the chunk's address function (no binding can name
-/// it). Not yet gated by `chunk.guard`, the inhale's path condition: the caller
-/// gates it exactly as a [`Chunk`]'s guard.
+/// The permission a quantified chunk set holds at `addr`, gated by its presence
+/// guard `chunk.guard` exactly as a [`Chunk`]'s.
 ///
-/// The binding that names `addr = f(as)` is solved per binder `x_j`:
-/// - **projection**: if some address argument is `x_j` itself, `x_j = as_i`;
-/// - otherwise **inversion**: `x_j = inv_j(addr)`, with the inverse minted at the
-///   inhale (whose axiom, when assumed, lets the prover reduce it).
-///
-/// The body is evaluated at that binding from the chunk's captures, and its
-/// permission is gated by `c(xs)` and by the rebuilt address being `addr`
-/// (Silicon's `f(e(inv(r))) = r`). That gate is what makes the answer sound for
-/// any solution, even an unconstrained inverse: the permission is returned only
-/// where the instance really names `addr`. With every binder projected the
-/// rebuilt address is `addr` itself and adds no gate.
+/// The binding that names `addr` is `x_j = inv_j(addr)`, with the inverses
+/// minted at the inhale (whose axiom, once it fires on `addr`, lets the prover
+/// reduce them). The body is evaluated at that binding from the chunk's
+/// captures, and its permission is gated by `c(xs)` and by the rebuilt address
+/// being `addr` (Silicon's `f(e(inv(r))) = r`). That gate is what makes the
+/// answer sound for any inverse, even an unconstrained one: the permission
+/// counts only where the instance really names `addr`.
 pub(super) fn qp_perm_at(
     ctx: &mut VerifyContext<'_>,
     chunk: &QuantChunk,
     addr: egg::Id,
-) -> Result<Option<ChunkPerm>, VerifyError> {
-    let q = &*chunk.q;
-    let call = q.loc_call();
-    let Some(args) = addr_call_args(ctx, call, addr) else {
-        return Ok(None);
-    };
-    let binders: Vec<egg::Id> = (0..q.bound.len())
-        .map(|j| {
-            let me = Val::Temp(q.binder_base + j);
-            match call.args.iter().position(|a| *a == me) {
-                Some(i) => args[i],
-                None => ctx.add(Symbolic::FuncApp(
-                    chunk.inv[j],
-                    Box::new([]),
-                    Box::new([addr]),
-                )),
-            }
-        })
+) -> Result<ChunkPerm, VerifyError> {
+    let binders: Vec<egg::Id> = chunk
+        .inv
+        .iter()
+        .map(|&inv| ctx.add(Symbolic::FuncApp(inv, Box::new([]), Box::new([addr]))))
         .collect();
-    let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.eval_pc())?;
+    let inst = eval_qp_instance(ctx, &chunk.caps, &chunk.q, &binders, &chunk.eval_pc())?;
 
     let perm = gate_at(ctx, inst.perm, inst.addr, addr);
     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
@@ -497,12 +474,7 @@ pub(super) fn qp_perm_at(
     // What was exhaled from this set, each gated by its presence guard.
     for taken in chunk.taken.iter() {
         let p = match &taken.what {
-            // A taken set applies the same address function, so it always answers.
-            Taken::Set(set) => {
-                let p = qp_perm_at(ctx, set, addr)?
-                    .expect("a taken chunk set applies the same address function");
-                gate_perm_by_guard(ctx, &p, &set.guard)
-            }
+            Taken::Set(set) => qp_perm_at(ctx, set, addr)?,
             // A single location counts only where it is `addr`.
             Taken::Single {
                 addr: at,
@@ -526,7 +498,7 @@ pub(super) fn qp_perm_at(
         };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
-    Ok(Some(perm))
+    Ok(gate_perm_by_guard(ctx, &perm, &chunk.guard))
 }
 
 /// `perm` where the address `at` is `addr`, `0` elsewhere; no gate when they are
@@ -539,24 +511,6 @@ fn gate_at(ctx: &mut VerifyContext<'_>, perm: ChunkPerm, at: Id, addr: Id) -> Ch
     let eq = expr!(ctx, { at } == { addr });
     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
     ChunkPerm::select(ctx, eq, perm, zero)
-}
-
-/// The arguments of `addr` as an application of `call`'s address function (the
-/// receiver of a field, the argument tuple of a predicate), or `None` when its
-/// e-class holds no such application.
-fn addr_call_args(
-    ctx: &VerifyContext<'_>,
-    call: &vmir::FunctionCall,
-    addr: egg::Id,
-) -> Option<Box<[egg::Id]>> {
-    let func = crate::verify::func_registry::func_id_for_member(call.function);
-    let class = ctx.egraph.find(addr);
-    ctx.egraph[class].nodes.iter().find_map(|n| match n {
-        Symbolic::FuncApp(f, tys, args) if *f == func && **tys == call.type_args[..] => {
-            Some(args.clone())
-        }
-        _ => None,
-    })
 }
 
 /// Index of the first held set of `kind` that covers `exhale`
@@ -574,9 +528,7 @@ pub(super) fn find_covering_qp(
             vmir_chunk,
             &pc,
             &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &pc),
-            &mut |ctx, addr| {
-                Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
-            },
+            &mut |ctx, addr| qp_perm_at(ctx, held, addr),
         )?;
 
         if contained {
@@ -597,9 +549,7 @@ pub(super) fn same_footprint(ctx: &mut VerifyContext<'_>, a: &QuantChunk, b: &Qu
             &sub.q,
             &pc,
             &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &pc),
-            &mut |ctx, addr| {
-                Ok(qp_perm_at(ctx, held, addr)?.map(|p| gate_perm_by_guard(ctx, &p, &held.guard)))
-            },
+            &mut |ctx, addr| qp_perm_at(ctx, held, addr),
         )
         // The bodies evaluated once already, at their inhales.
         .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
@@ -625,7 +575,7 @@ pub(super) fn covered_by_sum(
         &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &pc),
         &mut |ctx, addr| {
             let holders = holders_at(ctx, heap, kind, addr, &pc)?;
-            Ok(Some(sum_perms(ctx, &holders)))
+            Ok(sum_perms(ctx, &holders))
         },
     )
 }
@@ -643,10 +593,7 @@ fn share_at(
     guard: &[(Id, Polarity)],
 ) -> Result<Id, VerifyError> {
     let zero = expr!(ctx, 0 / 1);
-    let Some(d) = qp_perm_at(ctx, demand, addr)? else {
-        return Ok(zero);
-    };
-    let d = d.to_id(ctx);
+    let d = qp_perm_at(ctx, demand, addr)?.to_id(ctx);
     let kind = LocationKind::from_addr_type(&demand.q.loc_ty).expect("QP loc_ty must be Addr");
     let holders = holders_at(ctx, before, &kind, addr, guard)?;
     let takes = greedy_takes(ctx, &holders, d);
@@ -739,12 +686,7 @@ fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChu
         &held.q,
         &pc,
         &mut |ctx, binders| eval_qp_instance(ctx, &held.caps, &held.q, binders, &pc),
-        &mut |ctx, addr| {
-            Ok(
-                qp_perm_at(ctx, exhaled, addr)?
-                    .map(|p| gate_perm_by_guard(ctx, &p, &exhaled.guard)),
-            )
-        },
+        &mut |ctx, addr| qp_perm_at(ctx, exhaled, addr),
     )
     // The body evaluated once already, at its inhale.
     .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
