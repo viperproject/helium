@@ -1,0 +1,18 @@
+// Soundness canary for `passing/ctor_ite_unreachable_bottom_arm.vpr`: the
+// inversion pins the matching arm's guard true and nothing else.
+
+adt E { c0() c1(x: Int) c2() }
+
+function unreachable(): E
+  ensures false
+
+function tower(d: Int, k: Int): E
+{
+  d == 2 ? c2() : (d == 1 ? c1(k) : (d == 0 ? c0() : unreachable()))
+}
+
+method top_arm_pins_only_one_polarity(d: Int, k: Int)
+{
+  assume tower(d, k) == c2()
+  assert d != 2
+}

@@ -7,7 +7,7 @@
 
 use egg::{Applier, EGraph, Id, PatternAst, SearchMatches, Searcher, Subst, Symbol, Var};
 
-use crate::verify::analysis::ConstFold;
+use crate::verify::analysis::{ConstFold, Fingerprint};
 use crate::verify::lang::{Discriminant, Symbolic};
 use crate::vmir::Literal;
 
@@ -148,6 +148,11 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
             // `discr == cons(1)`, which is the permission gate on the variant's
             // footprint. Identical arms (`ite(c, x, x)`) and same-constructor arms
             // pin nothing, which is right: neither says anything about `c`.
+            //
+            // An arm whose own fingerprint is unknown can still be ruled out: see
+            // [`arm_excluded`]. That is what inverts a tower whose bottom arm is
+            // not a constructor but Prusti's `s_T_unreachable()`, so that only the
+            // tower's guards being exhaustive keeps the bottom arm from being taken.
             if let Some(self_fp) = egraph[eclass].data.fingerprint() {
                 let arm_differs = |arm: Id| {
                     egraph[arm]
@@ -155,11 +160,23 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
                         .fingerprint()
                         .is_some_and(|fp| fp.differs_from(&self_fp))
                 };
-                if arm_differs(t) {
+                let (t_differs, e_differs) = (arm_differs(t), arm_differs(e));
+                if t_differs {
                     unions.push((c, Target::False));
                 }
-                if arm_differs(e) {
+                if e_differs {
                     unions.push((c, Target::True));
+                }
+                // Not for a boolean class: those are clause towers, which the
+                // and/or decompositions above handle, and the `true` class holds
+                // every guarded fact, so walking it would cost a walk per fact.
+                let value_class = !matches!(self_fp, Fingerprint::Lit(Literal::Bool(_)));
+                if value_class && !t_differs && !e_differs && known_bool(egraph, c).is_none() {
+                    if arm_excluded(egraph, e, &self_fp, (c, false)) {
+                        unions.push((c, Target::True));
+                    } else if arm_excluded(egraph, t, &self_fp, (c, true)) {
+                        unions.push((c, Target::False));
+                    }
                 }
             }
             match known_bool(egraph, c) {
@@ -212,6 +229,105 @@ impl Applier<Symbolic, ConstFold> for IteReduceApplier {
     fn vars(&self) -> Vec<Var> {
         vec![]
     }
+}
+
+/// Whether `arm` — the branch an `ite` takes when `lit = (c, b)` holds, i.e. `c`
+/// has value `b` — provably differs from a class pinned to `target`, so that `lit`
+/// cannot hold in that class.
+///
+/// The arm is walked as a case tower: an arm is excluded if its fingerprint
+/// differs from `target`; or if it holds an `ite(c', t', e')` with one branch
+/// excluded that way (or `c'` decided) and the other branch excluded in turn,
+/// under the path extended by the literal that reaches it; or if the path that
+/// reaches it is refuted ([`path_refuted`]). Each class is entered once, so a
+/// walk costs at most the classes of the tower below `arm`.
+///
+/// Sound for any `ite`: on a model where the path holds, the class takes one of
+/// the walked arms, each of which differs from `target` or is not reachable.
+fn arm_excluded(
+    egraph: &EGraph<Symbolic, ConstFold>,
+    arm: Id,
+    target: &Fingerprint<'_>,
+    lit: (Id, bool),
+) -> bool {
+    let differs = |x: Id| {
+        egraph[x]
+            .data
+            .fingerprint()
+            .is_some_and(|fp| fp.differs_from(target))
+    };
+    let mut path: Vec<(Id, bool)> = Vec::new();
+    let mut visited = crate::dhash::HashSet::default();
+    // Depth-first, with the path shared across the stack: an entry records the
+    // path length at its parent and the literal that reaches it from there.
+    let mut stack: Vec<(Id, usize, Option<(Id, bool)>)> = vec![(arm, 0, Some(lit))];
+    while let Some((x, depth, step)) = stack.pop() {
+        path.truncate(depth);
+        path.extend(step);
+        let x = egraph.find(x);
+        if differs(x) {
+            continue;
+        }
+        let mut leaf = true;
+        // An arm pinned to `target`'s own value or constructor is no tower to
+        // walk: only an unreachable path keeps it from being taken.
+        if egraph[x].data.fingerprint().is_none() && visited.insert(x) {
+            for node in &egraph[x].nodes {
+                let Symbolic::Ite([c, t, e]) = node else {
+                    continue;
+                };
+                let (c, t, e) = (egraph.find(*c), egraph.find(*t), egraph.find(*e));
+                let next = match known_bool(egraph, c) {
+                    Some(true) => (t, None),
+                    Some(false) => (e, None),
+                    None if differs(t) => (e, Some((c, false))),
+                    None if differs(e) => (t, Some((c, true))),
+                    None => continue,
+                };
+                stack.push((next.0, path.len(), next.1));
+                leaf = false;
+            }
+        }
+        if leaf && !path_refuted(egraph, &path) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether the conjunction of `path`'s literals is refuted: its negation, as the
+/// nested clause a guard chain folds into ([`fold_guard_ids`]: `ite(g, R, true)`
+/// for `g`, `ite(g, true, R)` for `¬g`, innermost `false`), is in the graph and
+/// known `true`. A function body's propagated callee tokens are exactly such
+/// clauses (`guards ⟹ g%pre`), and the token of a callee whose postcondition is
+/// `false` is refuted, so the path to such a call is refuted here. Lookups only:
+/// nothing is added.
+fn path_refuted(egraph: &EGraph<Symbolic, ConstFold>, path: &[(Id, bool)]) -> bool {
+    let (Some(true_), Some(false_)) = (
+        egraph.lookup(Symbolic::Lit(Literal::Bool(true))),
+        egraph.lookup(Symbolic::Lit(Literal::Bool(false))),
+    ) else {
+        return false;
+    };
+    let mut clause = false_;
+    for &(g, b) in path.iter().rev() {
+        match known_bool(egraph, g) {
+            // A literal that holds adds nothing to the conjunction; one that
+            // fails refutes it.
+            Some(v) if v == b => continue,
+            Some(_) => return true,
+            None => {}
+        }
+        let node = match b {
+            true => Symbolic::Ite([g, clause, true_]),
+            false => Symbolic::Ite([g, true_, clause]),
+        };
+        match egraph.lookup(node) {
+            Some(id) => clause = egraph.find(id),
+            None => return false,
+        }
+    }
+    known_bool(egraph, clause) == Some(true)
 }
 
 /// Terminating `ite` simplifications, shared by the saturation rule set and the
