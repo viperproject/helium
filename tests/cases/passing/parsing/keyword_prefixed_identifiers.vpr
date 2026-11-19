@@ -1,0 +1,208 @@
+// Identifiers that begin with a Viper keyword (`assertion`, `Integer`,
+// `letter`, ...) are ordinary identifiers. A keyword only counts as one when
+// it is not followed by another identifier character.
+
+// Type names that start with a built-in type name.
+domain Integer { function integerZero(): Integer }
+domain Boolean { function booleanZero(): Boolean }
+domain Reference { function referenceZero(): Reference }
+domain Permission { function permissionZero(): Permission }
+domain Rationals { function rationalsZero(): Rationals }
+domain Sequence { function sequenceZero(): Sequence }
+domain Settings { function settingsZero(): Settings }
+domain Maps { function mapsZero(): Maps }
+domain Multisets { function multisetsZero(): Multisets }
+
+domain domainish {
+  function uniqueness(i: Int): Int
+  axiom axiomatic { forall i: Int :: { uniqueness(i) } uniqueness(i) == i }
+}
+
+field fieldValue: Int
+field newer: Int
+
+function functional(assertCount: Int): Int
+  requires requiresArg(assertCount)
+  ensures ensuresResult(result, assertCount)
+{ assertCount + 1 }
+
+function requiresArg(i: Int): Bool { i >= 0 }
+function ensuresResult(resultant: Int, i: Int): Bool { resultant == i + 1 }
+
+predicate predicated(r: Ref) { acc(r.fieldValue) }
+
+method methodical(inhaled: Int) returns (returnsValue: Int)
+  requires inhaled >= 0
+  ensures returnsValue == inhaled
+{
+  returnsValue := inhaled
+}
+
+// Built-in type names as prefixes of user type names.
+method typed(
+  i: Integer, b: Boolean, r: Reference, p: Permission, q: Rationals,
+  s: Sequence, t: Settings, m: Maps, u: Multisets
+) {
+  assert i == i && b == b && r == r && p == p && q == q
+  assert s == s && t == t && m == m && u == u
+  assert integerZero() == integerZero()
+}
+
+// Statement keywords as prefixes of variable names, both as a statement's
+// first token and inside expressions.
+method statements(inhaled: Int)
+  requires inhaled >= 0
+{
+  var assertCount: Int := inhaled
+  var assumed: Bool := true
+  var refuted: Int := 0
+  var inhaling: Int := 1
+  var exhaled: Int := 2
+  var folded: Int := 3
+  var unfolded: Int := 4
+  var gotoTarget: Int := 5
+  var labelled: Int := 6
+  var variable: Int := 7
+  var packaged: Int := 8
+  var applied: Int := 9
+  var freshly: Int := 10
+  var quasihavocked: Int := 11
+  var constrainingValue: Int := 12
+  var havocked: Int := 13
+  var whileCount: Int := 0
+  var ifValue: Int := 0
+  var elseValue: Int := 0
+  var elseifValue: Int := 0
+  var newValue: Int := 0
+  var returnsValue: Int
+
+  assertCount := assertCount + 1
+  assumed := !assumed
+  refuted := refuted + 1
+  inhaling := inhaling + 1
+  exhaled := exhaled + 1
+  folded := folded + 1
+  unfolded := unfolded + 1
+  gotoTarget := gotoTarget + 1
+  labelled := labelled + 1
+  variable := variable + 1
+  packaged := packaged + 1
+  applied := applied + 1
+  freshly := freshly + 1
+  quasihavocked := quasihavocked + 1
+  constrainingValue := constrainingValue + 1
+  havocked := havocked + 1
+  whileCount := whileCount + 1
+  ifValue := ifValue + 1
+  elseValue := elseValue + 1
+  elseifValue := elseifValue + 1
+  newValue := newValue + 1
+  returnsValue := methodical(inhaled)
+
+  assert assertCount == inhaled + 1
+  assume assumed == false
+  assert refuted == 1 && inhaling == 2 && exhaled == 3
+  assert folded == 4 && unfolded == 5 && gotoTarget == 6
+  assert labelled == 7 && variable == 8 && packaged == 9
+  assert applied == 10 && freshly == 11 && quasihavocked == 12
+  assert constrainingValue == 13 && havocked == 14
+  assert whileCount == 1 && ifValue == 1 && elseValue == 1
+  assert elseifValue == 1 && newValue == 1
+  assert returnsValue == inhaled
+}
+
+// `if` / `else` / `elseif` / `while` / `invariant` followed by identifiers
+// that start with them.
+method control(ifCond: Bool, elseCond: Bool) {
+  var whileCount: Int := 0
+  var elseValue: Int := 0
+  if (ifCond) {
+    elseValue := 1
+  } elseif (elseCond) {
+    elseValue := 2
+  } else {
+    elseValue := 3
+  }
+  elseValue := 0
+  while (whileCount < 3)
+    invariant invariantHolds(whileCount)
+    decreases 3 - whileCount
+  {
+    whileCount := whileCount + 1
+  }
+  assert whileCount == 3
+  assert elseValue == 0
+}
+
+function invariantHolds(i: Int): Bool { 0 <= i && i <= 3 }
+
+// Expression keywords as prefixes of variable names.
+method expressions(r: Ref)
+  requires acc(r.fieldValue) && acc(r.newer)
+{
+  var truthy: Bool := true
+  var falsehood: Bool := false
+  var nullable: Ref := null
+  var resultValue: Int := 1
+  var oldValue: Int := r.fieldValue
+  var nonempty: Int := 2
+  var writeable: Int := 3
+  var epsilons: Int := 4
+  var wildcards: Int := 5
+  var permitted: Int := 6
+  var accum: Int := 7
+  var forallCount: Int := 8
+  var existsFlag: Bool := true
+  var forpermValue: Int := 9
+  var letter: Bool := true
+  var inside: Int := 10
+  var unfoldingValue: Int := 11
+  var foldingValue: Int := 12
+  var applyingValue: Int := 13
+  var packagingValue: Int := 14
+  var lhsValue: Int := 15
+  var unionized: Int := 16
+  var setminusValue: Int := 17
+  var intersectionValue: Int := 18
+  var subsetValue: Int := 19
+
+  assert truthy && !falsehood && nullable == null
+  assert resultValue == 1 && oldValue == old(r.fieldValue)
+  assert nonempty == 2 && writeable == 3 && epsilons == 4
+  assert wildcards == 5 && permitted == 6 && accum == 7
+  assert forallCount == 8 && existsFlag && forpermValue == 9
+  assert inside == 10 && unfoldingValue == 11 && foldingValue == 12
+  assert applyingValue == 13 && packagingValue == 14 && lhsValue == 15
+  assert unionized == 16 && setminusValue == 17
+  assert intersectionValue == 18 && subsetValue == 19
+
+  // `letter == (3) in Set(3)` is `letter == ((3) in Set(3))`, not a
+  // `let ter == (3) in ...` binding.
+  assert letter == (3) in Set(3)
+  // `inside` after an expression is not the `in` operator.
+  assert accum + inside == 17
+}
+
+// Field names and allocation with keyword-prefixed names.
+method allocation() returns (r: Ref)
+  ensures acc(r.fieldValue) && acc(r.newer)
+{
+  var newish: Int := 1
+  r := new(fieldValue, newer)
+  r.newer := newish
+  r.fieldValue := functional(newish)
+  assert r.fieldValue == 2
+}
+
+// Keyword-prefixed method, function, and predicate names in use.
+method calls(r: Ref)
+  requires predicated(r)
+  ensures predicated(r)
+{
+  unfold predicated(r)
+  fold predicated(r)
+  var returnsValue: Int
+  returnsValue := methodical(3)
+  assert returnsValue == 3
+  assert uniqueness(4) == 4
+}

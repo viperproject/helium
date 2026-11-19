@@ -15,19 +15,14 @@ peg::parser! {
         rule char() -> &'input str
             = $(['A'..='Z' | 'a'..='z'| '$' | '_' | '\'' | '0'..='9' ])
 
+        /// A whole word (an identifier-shaped token) that is one of
+        /// `RESERVED`. Matching the whole word, rather than a keyword prefix,
+        /// keeps `inhaled` or `elseif` from being cut short at `in` / `else`.
         rule reserved()
-            = "havoc" / "true" / "false"
-            / "Set" / "Seq" / "Map" / "Multiset" / "Int" / "Bool" / "Perm" / "Ref" / "Rational"
-            / "forperm" / "let" / "in" / "if" / "else" / "elseif" / "while" / "do"
-            / "assert" / "assume" / "havoc"
-            / "return" / "continue" / "skip"
-            / "forall" / "exists"
-            / "inhale" / "exhale" / "unfold" / "fold" / "acc"
-            / "none" / "wildcard" / "write" / "epsilon"
-            / "requires" / "ensures" / "returns" / "decreases" / "result"
+            = w:$(start_char() char()*) {? if RESERVED.contains(&w) { Ok(()) } else { Err("reserved word") } }
 
         rule ident() -> Ident
-            = quiet! { !(reserved() white_space()) n:$(start_char() char()*) { Ident::Raw(n.to_string())} }
+            = quiet! { !reserved() n:$(start_char() char()*) { Ident::Raw(n.to_string())} }
             / expected!("identifier")
 
         rule idndecl() -> IdnDecl = n:ident() { IdnDecl(n) }
@@ -36,6 +31,9 @@ peg::parser! {
             = quiet! {  n:$(start_char() char()*) { Ident::Raw(n.to_string())} }
             / expected!("label")
 
+        /// A keyword. Every keyword in the grammar goes through `kw`, so that a
+        /// keyword is never matched as the prefix of a longer identifier
+        /// (`Integer`, `whileCount`, `letter`, `newer`, ...).
         rule kw<R>(r: rule<R>) -> () = r() !char()
 
         rule integer() -> num::BigInt = s:$("-"? ['0'..='9']+) {? s.parse().or(Err("invalid integer")) }
@@ -55,22 +53,29 @@ peg::parser! {
 
         rule type_() -> Type
             =
-              "Int" { Type::Int }
-            / "Bool" { Type::Bool }
-            / "Perm" { Type::Real }
-            / "Ref" { Type::Ref }
-            / "Rational"   { Type::Real }
-            / "Seq" _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
-            / "Set" _ "[" _ ty:type_() _ "]" { Type::Set(Box::new(ty)) }
+              kw(<"Int">) { Type::Int }
+            / kw(<"Bool">) { Type::Bool }
+            / kw(<"Perm">) { Type::Real }
+            / kw(<"Ref">) { Type::Ref }
+            / kw(<"Rational">)   { Type::Real }
+            / kw(<"Seq">) _ "[" _ ty:type_() _ "]" { Type::Seq(Box::new(ty)) }
+            / kw(<"Set">) _ "[" _ ty:type_() _ "]" { Type::Set(Box::new(ty)) }
             / ty:map_type() { ty }
-            / "Multiset" _ "[" _ ty:type_() _ "]" { Type::Multiset(Box::new(ty)) }
+            / kw(<"Multiset">) _ "[" _ ty:type_() _ "]" { Type::Multiset(Box::new(ty)) }
             / type_constr()
 
         /// `Map[K, V]`.
         rule map_type() -> Type
-            = "Map" _ "[" _ k:type_() _ "," _ v:type_() _ "]" { Type::Map(Box::new(k), Box::new(v)) }
+            = kw(<"Map">) _ "[" _ k:type_() _ "," _ v:type_() _ "]" { Type::Map(Box::new(k), Box::new(v)) }
 
-        rule type_constr() -> Type = nm:ident() _ tys:("[" _ tys:(type_() ** comma()) _ "]" { tys })?
+        /// A user type name, or a collection type with the wrong number of
+        /// type arguments (`Seq`, `Set[Int, Int]`), which the typechecker
+        /// rejects by name.
+        rule type_name() -> Ident
+            = ident()
+            / n:$(kw(<"Seq">) / kw(<"Set">) / kw(<"Map">) / kw(<"Multiset">)) { Ident::Raw(n.to_string()) }
+
+        rule type_constr() -> Type = nm:type_name() _ tys:("[" _ tys:(type_() ** comma()) _ "]" { tys })?
             {   let tys = tys.unwrap_or_default();
                 Type::Domain(nm, tys)
             }
@@ -86,7 +91,7 @@ peg::parser! {
             / e:suffix_exp() { ResAccess::Loc(Exp::impure(e)) }
 
         rule acc_exp() -> AccExp
-            = "acc" _ "(" _ loc:suffix_exp() _ perm:("," _ e:exp() { e })? _ ")" {
+            = kw(<"acc">) _ "(" _ loc:suffix_exp() _ perm:("," _ e:exp() { e })? _ ")" {
                 AccExp { loc: Exp::impure(loc), perm: perm.unwrap_or_else(ExpKind::write) }
             }
 
@@ -147,10 +152,10 @@ peg::parser! {
         //     / "Multiset" _ "[" _ ty:type_() _ "]" _ "(" _ ")"{ ExpKind::Ascribe(Box::new(ExpKind::Call(Call { kind: None, name: Ident::multiset(), args: Vec::new() })), Type::Domain(Ident::multiset(), vec![ty])) }
         //     / "Multiset" _ "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: Ident::multiset(), args: es }) }
 
-        rule forperm_exp() -> ExpKind = "forperm" _ args:(formal_arg() ++ comma()) _ "[" _ res:res_access() _ "]" _ "::" _ exp:exp()
+        rule forperm_exp() -> ExpKind = kw(<"forperm">) _ args:(formal_arg() ++ comma()) _ "[" _ res:res_access() _ "]" _ "::" _ exp:exp()
             { ExpKind::ForPerm(args, res, exp) }
 
-        rule let_in_exp() -> ExpKind = "let" _ id:idndecl() _ "==" _ "(" _ e:exp() _ ")" _ "in" _ body:exp()
+        rule let_in_exp() -> ExpKind = kw(<"let">) _ id:idndecl() _ "==" _ "(" _ e:exp() _ ")" _ kw(<"in">) _ body:exp()
             { ExpKind::LetIn(id, e, body) }
 
         rule func_app() -> ExpKind = id:ident() (" ")* "(" _ es:(exp() ** comma()) _ ")" { ExpKind::Call(Call { kind: None, name: id, args: es }) }
@@ -176,10 +181,10 @@ peg::parser! {
             / kw(<"perm">) _ "(" _ l:exp() _ ")" { ExpKind::UnOp(UnOp::Perm, l) }
             / "[" _ e:exp() _ "," _ f:exp() _ "]" { ExpKind::BinOp(BinOp::InhaleExhale, e, f)}
 
-            / kw(<"unfolding">) _ acc:fold_target() _ "in" _ e:exp() { ExpKind::HeapUpdate(HeapUpdateOp::Unfold, acc, e) }
-            / kw(<"folding">) _ fold_target() _ "in" _ exp() { ExpKind::Unsupported("folding") }
-            / kw(<"applying">) _ "(" _ exp() _ ")" _ "in" _ exp() { ExpKind::Unsupported("applying") }
-            / kw(<"packaging">) _ "(" _ exp() _ ")" _ "in" _ exp() { ExpKind::Unsupported("packaging") }
+            / kw(<"unfolding">) _ acc:fold_target() _ kw(<"in">) _ e:exp() { ExpKind::HeapUpdate(HeapUpdateOp::Unfold, acc, e) }
+            / kw(<"folding">) _ fold_target() _ kw(<"in">) _ exp() { ExpKind::Unsupported("folding") }
+            / kw(<"applying">) _ "(" _ exp() _ ")" _ kw(<"in">) _ exp() { ExpKind::Unsupported("applying") }
+            / kw(<"packaging">) _ "(" _ exp() _ ")" _ kw(<"in">) _ exp() { ExpKind::Unsupported("packaging") }
             / kw(<"forall">) _ args:(formal_arg() ++ comma()) _ "::" _ triggers:(trigger()**_) _ e:exp() { ExpKind::Quantifier(QuantifierKind::Forall, args, triggers, e) }
             / kw(<"exists">) _ args:(formal_arg() ++ comma()) _ "::" _ triggers:(trigger()**_) _ e:exp() { ExpKind::Quantifier(QuantifierKind::Exists, args, triggers, e) }
 
@@ -218,15 +223,15 @@ peg::parser! {
             x:@ (_ ">=" _) y:(@) { ExpKind::BinOp(BinOp::Ge, Exp::unknown(x), Exp::unknown(y)) }
             x:@ (_ ">" _) y:(@) {  ExpKind::BinOp(BinOp::Gt, Exp::unknown(x), Exp::unknown(y)) }
             x:@ (_ "<" _) y:(@) { ExpKind::BinOp(BinOp::Lt, Exp::unknown(x), Exp::unknown(y)) }
-            x:@ (_ "in" &(white_space() / "(") _) y:(@) { ExpKind::BinOp(BinOp::In, Exp::unknown(x), Exp::unknown(y))}
+            x:@ (_ kw(<"in">) _) y:(@) { ExpKind::BinOp(BinOp::In, Exp::unknown(x), Exp::unknown(y))}
             --
             x:(@) (_ "-" _) y:@ { ExpKind::BinOp(BinOp::Minus, Exp::unknown(x), Exp::unknown(y)) }
             x:(@) (_ "+" _) y:@ { ExpKind::BinOp(BinOp::Plus, Exp::unknown(x), Exp::unknown(y)) }
             x:(@) (_ "++" _) y:@ { ExpKind::BinOp(BinOp::Concat, Exp::unknown(x), Exp::unknown(y)) }
-            x:(@) (_ "union" white_space() _) y:@ { ExpKind::BinOp(BinOp::Union, Exp::unknown(x), Exp::unknown(y)) }
-            x:(@) (_ "setminus" white_space() _) y:@ { ExpKind::BinOp(BinOp::SetMinus, Exp::unknown(x), Exp::unknown(y))}
-            x:(@) (_ "intersection" white_space() _) y:@ { ExpKind::BinOp(BinOp::Intersection, Exp::unknown(x), Exp::unknown(y))}
-            x:(@) (_ "subset" white_space() _) y:@ { ExpKind::BinOp(BinOp::Subset, Exp::unknown(x), Exp::unknown(y))}
+            x:(@) (_ kw(<"union">) _) y:@ { ExpKind::BinOp(BinOp::Union, Exp::unknown(x), Exp::unknown(y)) }
+            x:(@) (_ kw(<"setminus">) _) y:@ { ExpKind::BinOp(BinOp::SetMinus, Exp::unknown(x), Exp::unknown(y))}
+            x:(@) (_ kw(<"intersection">) _) y:@ { ExpKind::BinOp(BinOp::Intersection, Exp::unknown(x), Exp::unknown(y))}
+            x:(@) (_ kw(<"subset">) _) y:@ { ExpKind::BinOp(BinOp::Subset, Exp::unknown(x), Exp::unknown(y))}
             --
             x:(@) (_ "*" _) y:@ { ExpKind::BinOp(BinOp::Mult, Exp::unknown(x), Exp::unknown(y)) }
             x:(@) (_ "/" _) y:@ { ExpKind::BinOp(BinOp::Div, Exp::unknown(x), Exp::unknown(y)) }
@@ -310,7 +315,7 @@ peg::parser! {
         rule bracketed<R>(r: rule<R>) -> Vec<R> = "[" _ res:(r() ** comma()) _ "]" { res }
         rule braced<R>(r: rule<R>) -> Vec<R> = "{" _ res:(r() ** comma()) _ "}" { res }
 
-        rule while_statement() -> Statement = "while" _ "(" _ cond:exp() _ ")" _ spec:semied(<while_spec_item()>)* _ block:block()
+        rule while_statement() -> Statement = kw(<"while">) _ "(" _ cond:exp() _ ")" _ spec:semied(<while_spec_item()>)* _ block:block()
             {
                 let mut invs = Vec::new();
                 let mut decs = Vec::new();
@@ -325,16 +330,16 @@ peg::parser! {
 
         rule while_spec_item() -> Result<Invariant, Decreases> = i:invariant() { Ok(i) } / d:decreases_raw() { Err(d) }
 
-        rule invariant() -> Invariant = "invariant" _ e:exp() { Invariant(e) }
+        rule invariant() -> Invariant = kw(<"invariant">) _ e:exp() { Invariant(e) }
 
-        rule if_statement() -> Statement = "if" _ "(" _ cond:exp() _ ")" _ then:block() _ elsifs:(elsif_block()** _) _ else_:("else" _ else_:block() { else_})? {
+        rule if_statement() -> Statement = kw(<"if">) _ "(" _ cond:exp() _ ")" _ then:block() _ elsifs:(elsif_block()** _) _ else_:(kw(<"else">) _ else_:block() { else_})? {
             let mut elsifs = [(cond, then)].into_iter().chain(elsifs).rev();
             let (cond, then) = elsifs.next().unwrap();
             elsifs.fold(Statement::If(cond, then, else_), |acc, (cond, then)| Statement::If(cond, then, Some(Block(vec![acc]))))
         }
 
         rule elsif_block() -> (Exp, StmtBlock) =
-            "elseif" _ "(" _ exp:exp() _ ")" _ block:block() { (exp, block)}
+            kw(<"elseif">) _ "(" _ exp:exp() _ ")" _ block:block() { (exp, block)}
 
         rule multi_assign_stmt() -> Statement =
             (assign_target() ++ comma()) _ ":=" _ e:(exp() ++ comma())
@@ -354,14 +359,14 @@ peg::parser! {
         }}
 
         rule assign_rhs() -> AssignRhs =
-              "new" _ "(" _ "*" _ ")" { AssignRhs::New(StarOrNames::Star) }
-            / "new" _ "(" _ args:(ident() ** comma()) _ ")" { AssignRhs::New(StarOrNames::Names(args))}
+              kw(<"new">) _ "(" _ "*" _ ")" { AssignRhs::New(StarOrNames::Star) }
+            / kw(<"new">) _ "(" _ args:(ident() ** comma()) _ ")" { AssignRhs::New(StarOrNames::Names(args))}
             / e:exp() { match *e.kind {
                 ExpKind::Call(Call { name, args, .. }) => AssignRhs::Call(Call { kind: None, name, args }),
                 _ => AssignRhs::Exp(e)
             }}
 
-        rule constraining_block() -> () = "constraining" _ "(" _ exp() ++ comma() _ ")" _ block()
+        rule constraining_block() -> () = kw(<"constraining">) _ "(" _ exp() ++ comma() _ ")" _ block()
 
         rule expression_or_block() -> ExpOrBlock = exp:exp()  { ExpOrBlock::Exp(exp) } / block:block() { ExpOrBlock::Block(block) }
 
@@ -377,10 +382,10 @@ peg::parser! {
             / p:predicate() { Declaration::Predicate(p) }
             / m:method() { Declaration::Method(m) }
 
-        rule import() -> Import = "import" _ r:("<" _ r:relative_path() _ ">" { (r, false) } / "\"" _ r:relative_path() _ "\"" { (r, true) })
+        rule import() -> Import = kw(<"import">) _ r:("<" _ r:relative_path() _ ">" { (r, false) } / "\"" _ r:relative_path() _ "\"" { (r, true) })
             { Import { path: r.0, local: r.1 } }
 
-        rule define() -> Define = "define" _ nm:idndecl() _ ids:(tupled(<idndecl()>))? _ body:expression_or_block()
+        rule define() -> Define = kw(<"define">) _ nm:idndecl() _ ids:(tupled(<idndecl()>))? _ body:expression_or_block()
             { Define { name: nm, args: ids.unwrap_or_default(), body } }
 
         rule multi_decl() -> Vec<Declaration> =
@@ -389,7 +394,7 @@ peg::parser! {
         rule domain_params() -> Vec<IdnDecl> = params:(bracketed(<idndecl()>))? { params.unwrap_or_default() }
 
         rule domain() -> Vec<Declaration> =
-            "domain" _
+            kw(<"domain">) _
             name:idndecl() _
             params:domain_params() _
             interp:domain_interpretation()? _
@@ -400,39 +405,39 @@ peg::parser! {
             ).collect()
         }
 
-        rule domain_interpretation() -> Vec<(Ident, String)> = "interpretation" _ rs:tupled(<interpretation_elt()>) { rs }
+        rule domain_interpretation() -> Vec<(Ident, String)> = kw(<"interpretation">) _ rs:tupled(<interpretation_elt()>) { rs }
 
         rule interpretation_elt() -> (Ident, String) = i:ident() _ ":" _ s:string_lit() { (i, s)}
 
         rule domain_element() -> DomainElementKind = f:domain_function() { DomainElementKind::Function(f)} / a:axiom() { DomainElementKind::Axiom(a) }
 
-        rule domain_function() -> DomainFunction = u:"unique"? _ sig:domain_function_signature() _ interp:func_interpretation()?
+        rule domain_function() -> DomainFunction = u:kw(<"unique">)? _ sig:domain_function_signature() _ interp:func_interpretation()?
             { DomainFunction { unique: u.is_some(), signature: sig, interpretation: interp } }
 
-        rule domain_function_signature() -> Signature = "function" _ id:idndecl() _ "(" _ args:(decl_formal_arg() ** comma()) _ ")" _ ":" _ ret:type_()
+        rule domain_function_signature() -> Signature = kw(<"function">) _ id:idndecl() _ "(" _ args:(decl_formal_arg() ** comma()) _ ")" _ ":" _ ret:type_()
             { Signature { name: id, args, ret: vec!(ArgOrType::Type(ret)) } }
 
-        rule func_interpretation() -> String = "interpretation" _ s:string_lit() { s }
+        rule func_interpretation() -> String = kw(<"interpretation">) _ s:string_lit() { s }
 
-        rule field() -> Vec<Declaration> = "field" _ fields:((f:formal_arg() {
+        rule field() -> Vec<Declaration> = kw(<"field">) _ fields:((f:formal_arg() {
             Declaration::Field(Field(f))
         }) ** comma()) { fields }
 
         rule function() -> Function = sig:function_signature() _ cont:contract()  _ body:block_exp()?
             { Function { signature: sig, contract: cont, body } }
 
-        rule function_signature() -> Signature = "function" _ id:idndecl() _ "(" _ args:(decl_named_formal_arg() ** comma()) _ ")" _ ":" _ ret:type_()
+        rule function_signature() -> Signature = kw(<"function">) _ id:idndecl() _ "(" _ args:(decl_named_formal_arg() ** comma()) _ ")" _ ":" _ ret:type_()
             { Signature { name: id, args, ret: vec!(ArgOrType::Type(ret)) } }
 
-        rule predicate() -> Predicate = "predicate" _ id:idndecl() _ args:tupled(<decl_named_formal_arg()>) _ exp:block_exp()?
+        rule predicate() -> Predicate = kw(<"predicate">) _ id:idndecl() _ args:tupled(<decl_named_formal_arg()>) _ exp:block_exp()?
             { Predicate { signature: Signature { name: id, args, ret: Vec::new() }, body: exp } }
 
-        rule formal_returns()  -> Vec<ArgOrType> = "returns" _ rets:tupled(<decl_named_formal_arg()>) { rets }
+        rule formal_returns()  -> Vec<ArgOrType> = kw(<"returns">) _ rets:tupled(<decl_named_formal_arg()>) { rets }
 
-        rule method() -> Method = "method" _ id:idndecl() _ args:tupled(<decl_named_formal_arg()>) _ ret:formal_returns()? _ cont:contract() _ body:block()?
+        rule method() -> Method = kw(<"method">) _ id:idndecl() _ args:tupled(<decl_named_formal_arg()>) _ ret:formal_returns()? _ cont:contract() _ body:block()?
             { Method { signature: Signature { name: id, args, ret: ret.unwrap_or_default() }, contract: cont, body } }
 
-        rule adt() -> Vec<Declaration> = "adt" _ name:idndecl() _ params:domain_params() _ vars:adt_variants() _ derives:derives()?
+        rule adt() -> Vec<Declaration> = kw(<"adt">) _ name:idndecl() _ params:domain_params() _ vars:adt_variants() _ derives:derives()?
             {
                 let variants = vars.iter().map(|v| Variant { name: v.signature.name.clone(), fields: v.signature.args.clone() }).collect();
                 let adt = Adt { name: name.clone(), params, variants, derives: derives.map(|s| vec![s]).unwrap_or_default() };
@@ -445,20 +450,20 @@ peg::parser! {
 
         rule adt_variants() -> Vec<AdtConstructor> = "{" _ vars:adt_variant()* _ "}" { vars }
 
-        rule derives() -> String = "derives" _ "{" _ str:$((!"}" [_])*) _ "}" { str.to_string() }
+        rule derives() -> String = kw(<"derives">) _ "{" _ str:$((!"}" [_])*) _ "}" { str.to_string() }
 
         rule relative_path() -> String = s:$(['~' | '.']? (['/']? ['.' | 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\\' | '-' | ' '])+) { s.to_string() }
 
         rule string_lit() -> String = str:$("\"" _ (!"\"" [_])* _ "\"") { str.to_string() }
 
-        rule axiom() -> Axiom = "axiom" _ name :idndecl()? _ exp:block_exp()
+        rule axiom() -> Axiom = kw(<"axiom">) _ name :idndecl()? _ exp:block_exp()
             { Axiom {name, exp } }
 
-        rule precondition() -> Exp = "requires" _ e:exp() { e }
+        rule precondition() -> Exp = kw(<"requires">) _ e:exp() { e }
 
-        rule postcondition() -> Exp = "ensures" _ e:exp() { e }
+        rule postcondition() -> Exp = kw(<"ensures">) _ e:exp() { e }
 
-        rule decreases_raw() -> Decreases = "decreases" _ d:decreases_kind()? _ e:("if" _ e:exp() { e })? { Decreases { kind: d, guard: e } }
+        rule decreases_raw() -> Decreases = kw(<"decreases">) _ d:decreases_kind()? _ e:(kw(<"if">) _ e:exp() { e })? { Decreases { kind: d, guard: e } }
 
         rule decreases_kind() -> DecreasesKind = "*" { DecreasesKind::Star } / "_" { DecreasesKind::Underscore } / e:(exp() ** comma()) { DecreasesKind::Exp(e) }
 
@@ -486,6 +491,89 @@ peg::parser! {
 
 
     }
+}
+
+/// Words that are never an identifier. A word only counts as reserved when it
+/// is the whole word: `Integer` or `inhaled` are ordinary identifiers.
+const RESERVED: &[&str] = &[
+    "havoc",
+    "true",
+    "false",
+    "Set",
+    "Seq",
+    "Map",
+    "Multiset",
+    "Int",
+    "Bool",
+    "Perm",
+    "Ref",
+    "Rational",
+    "forperm",
+    "let",
+    "in",
+    "if",
+    "else",
+    "elseif",
+    "while",
+    "do",
+    "assert",
+    "assume",
+    "return",
+    "continue",
+    "skip",
+    "forall",
+    "exists",
+    "inhale",
+    "exhale",
+    "unfold",
+    "fold",
+    "acc",
+    "none",
+    "wildcard",
+    "write",
+    "epsilon",
+    "requires",
+    "ensures",
+    "returns",
+    "decreases",
+    "result",
+];
+
+/// Identifiers that start with a keyword are ordinary identifiers, and a
+/// keyword never matches as the prefix of a longer word.
+#[test]
+fn keyword_prefixed_identifiers() {
+    let parse = |src| *viper_parser::exp(src).unwrap().kind;
+    for name in [
+        "assertion",
+        "inhaled",
+        "elseif_",
+        "Integer",
+        "newer",
+        "letter",
+        "accum",
+        "forallCount",
+        "resultant",
+        "trueish",
+    ] {
+        assert_eq!(
+            parse(name),
+            ExpKind::Ident(Ident::Raw(name.to_string())),
+            "{name}"
+        );
+    }
+    // `letter == (3) in s` is `letter == ((3) in s)`, not `let ter == (3) in s`.
+    let ExpKind::BinOp(BinOp::Eq, lhs, rhs) = parse("letter == (3) in s") else {
+        panic!("expected an equality");
+    };
+    assert_eq!(lhs, raw_ident("letter"));
+    assert!(matches!(&*rhs.kind, ExpKind::BinOp(BinOp::In, ..)));
+    // `x inside` is not `x in side`, and `accum(x)` is a call, not `acc(..)`.
+    assert!(viper_parser::exp("x inside").is_err());
+    assert!(matches!(parse("accum(x)"), ExpKind::Call(_)));
+    // Reserved words stay reserved whatever follows them.
+    assert!(matches!(parse("result"), ExpKind::Result));
+    assert!(viper_parser::exp("assert").is_err());
 }
 
 #[test]
