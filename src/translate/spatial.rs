@@ -227,6 +227,11 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
         }
         S::Forall(qp) => {
             let q = Box::new(lower_quant_chunks(b, env, sink, qp)?);
+            if q.body.contains_wc_permission() {
+                return Err(TranslationError::Unsupported(
+                    "wildcard permission in a quantified permission",
+                ));
+            }
             // Inhale adds the chunk set; exhale subtracts it. The pc rides on the
             // inst exactly as for a single `acc` (see the `Acc` arm).
             let inst = match mode {

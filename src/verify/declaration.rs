@@ -660,9 +660,10 @@ fn walk_footprint(
                 &mut changed,
             )?,
             SlotShape::Quant { q, caps } => {
-                if q.body.contains_wc_permission() {
-                    return Err(VerifyError::Unimplemented("wildcard permissions in QP"));
-                }
+                assert!(
+                    !q.body.contains_wc_permission(),
+                    "a wildcard quantified permission is rejected at translation"
+                );
                 if let Some(pm) = walk.scale {
                     let is_one = expr!(ctx, { pm } == (1 / 1));
                     if !ctx.prove_under_pc(is_one, walk.pc_lits) {
@@ -2571,11 +2572,8 @@ fn inst_obligations(
         }
         // A quantified permission's amount must not be negative at any binding
         // it holds for: `forall xs :: c(xs) ==> not(p(xs) < 0)`. Proven for
-        // fresh binders, so a failure is a trivially-false goal. A wildcard is
-        // positive by construction, as for a single location.
-        InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. })
-            if !q.body.contains_wc_permission() =>
-        {
+        // fresh binders, so a failure is a trivially-false goal.
+        InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
             match quant_spec_of(state, q, Injectivity::Check).prove_nonnegative(ctx, pc_lits) {
                 Ok(true) => vec![],
                 Ok(false) => vec![(
