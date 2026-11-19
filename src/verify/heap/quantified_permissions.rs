@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! forall xs1, xs2 ::
-//!     c(xs1) ∧ c(xs2) ∧ 0 < p(xs1) ∧ 0 < p(xs2) ∧ e(xs1) = e(xs2)  ==>  xs1 = xs2
+//!     c(xs1) ∧ c(xs2) ∧ 0 < p(xs1) ∧ 0 < p(xs2) ∧ f(e(xs1)) = f(e(xs2))  ==>  xs1 = xs2
 //! ```
 //!
 //! This is what later licenses the inverse-function view of the chunk set (one
@@ -16,12 +16,10 @@
 //! constants, the antecedents go into the path condition, and the binder
 //! equalities are the goals.
 //!
-//! The antecedent compares the address call's **arguments** (`e(xs)`, the
-//! receiver of a field, the argument tuple of a predicate), not the addresses
-//! themselves, as Viper does. Address functions are uninterpreted here, so
-//! `f(a) = f(b)` would not give the prover `a = b`; since every instance of one
-//! chunk set applies the same address function, equal arguments is exactly
-//! equal locations.
+//! The antecedent compares the **addresses**, as Viper does. Address functions
+//! are injective (`rewrite::address_injectivity_rule`), so the prover gets the
+//! arguments' equality (`e(xs)`, the receiver of a field, the argument tuple of
+//! a predicate) from it.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -51,9 +49,9 @@ use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, QuantChunks, Val
 pub(super) struct QpInstance {
     /// `c(xs)`: whether this binding contributes a chunk.
     pub(crate) cond: Id,
-    /// The arguments of the location's address call: the receiver of `e.f`, the
-    /// argument tuple of `P(..)`.
-    pub(crate) loc_args: Vec<Id>,
+    /// The location's address `f(e(xs))`: the address call applied to its
+    /// arguments (the receiver of `e.f`, the argument tuple of `P(..)`).
+    pub(crate) addr: Id,
     /// `p(xs)`, with the enclosing branch conditions folded in.
     pub(crate) perm: ChunkPerm,
 }
@@ -76,7 +74,9 @@ fn check_qp_injectivity(
     pc: &[(Id, Polarity)],
     instantiate: &mut Instantiate<'_>,
 ) -> Result<(), VerifyError> {
-    ctx.pause_recipe(|ctx| ctx.with_scratch_graph(|ctx| check_injectivity_in_scratch(ctx, q, pc, instantiate)))
+    ctx.pause_recipe(|ctx| {
+        ctx.with_scratch_graph(|ctx| check_injectivity_in_scratch(ctx, q, pc, instantiate))
+    })
 }
 
 fn check_injectivity_in_scratch(
@@ -89,11 +89,6 @@ fn check_injectivity_in_scratch(
     let x2 = fresh_binders(ctx, q);
     let i1 = instantiate(ctx, &x1)?;
     let i2 = instantiate(ctx, &x2)?;
-    assert_eq!(
-        i1.loc_args.len(),
-        i2.loc_args.len(),
-        "two instances of one quantified permission must apply the same address function"
-    );
 
     // pc ++ antecedents: the order `prove_under_pc` (and the block scratch's
     // cube prefix test) expects, as in a pure `forall`'s WD check.
@@ -103,9 +98,9 @@ fn check_injectivity_in_scratch(
         let p = inst.perm.to_id(ctx);
         lits.push((expr!(ctx, (0 / 1) < r { p }), Polarity::Positive));
     }
-    for (&a1, &a2) in i1.loc_args.iter().zip(&i2.loc_args) {
-        lits.push((expr!(ctx, { a1 } == { a2 }), Polarity::Positive));
-    }
+    // Same location: the address functions are injective
+    // (`rewrite::address_injectivity_rule`), so this gives the arguments' equality.
+    lits.push((expr!(ctx, { i1.addr } == { i2.addr }), Polarity::Positive));
 
     // One goal per binder: `xs1 = xs2` component-wise.
     for (&b1, &b2) in x1.iter().zip(&x2) {
@@ -151,13 +146,7 @@ fn check_qp_contained(
         ctx.with_scratch_graph(|ctx| {
             let ys = fresh_binders(ctx, q);
             let inst = instantiate(ctx, &ys)?;
-            let call = q.loc_call();
-            let addr = ctx.add(Symbolic::FuncApp(
-                crate::verify::func_registry::func_id_for_member(call.function),
-                call.type_args.clone().into(),
-                inst.loc_args.into(),
-            ));
-            let Some(avail) = held_at(ctx, addr)? else {
+            let Some(avail) = held_at(ctx, inst.addr)? else {
                 return Ok(false);
             };
             let mut lits = pc.to_vec();
@@ -466,12 +455,7 @@ fn eval_qp_instance_unrecorded(
 
     Ok(QpInstance {
         cond: state.get_val(ctx, &q.body.cond),
-        loc_args: q
-            .loc_call()
-            .args
-            .iter()
-            .map(|a| state.get_val(ctx, a))
-            .collect(),
+        addr: state.get_val(ctx, &q.body.loc),
         perm: eval_perm_structural(ctx, &state, &q.body.perm),
     })
 }
@@ -487,11 +471,11 @@ fn eval_qp_instance_unrecorded(
 ///   inhale (whose axiom, when assumed, lets the prover reduce it).
 ///
 /// The body is evaluated at that binding from the chunk's captures, and its
-/// permission is gated by `c(xs)` and by the rebuilt address arguments being
-/// `as` (Silicon's `e(inv(r)) = r`). That gate is what makes the answer sound
-/// for any solution, even an unconstrained inverse: the permission is returned
-/// only where the instance really names `addr`. Arguments that already coincide
-/// with `as` (every projected one) add no gate.
+/// permission is gated by `c(xs)` and by the rebuilt address being `addr`
+/// (Silicon's `e(inv(r)) = r`). That gate is what makes the answer sound for
+/// any solution, even an unconstrained inverse: the permission is returned only
+/// where the instance really names `addr`. With every binder projected the
+/// rebuilt address is `addr` itself and adds no gate.
 pub(super) fn qp_perm_at(
     ctx: &mut VerifyContext<'_>,
     chunk: &QuantChunk,
@@ -519,8 +503,16 @@ pub(super) fn qp_perm_at(
         .collect();
     let inst = eval_qp_instance(ctx, &chunk.caps, q, &binders, &chunk.eval_pc())?;
 
-    let perm = gate_on_args(ctx, inst.perm, &inst.loc_args, &args);
     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    // Where the instance names `addr`. With every binder projected the two
+    // addresses are congruent and need no gate; an inverted one reduces to its
+    // arguments (`rewrite::address_injectivity_rule`).
+    let perm = if ctx.egraph.find(inst.addr) == ctx.egraph.find(addr) {
+        inst.perm
+    } else {
+        let eq = expr!(ctx, { inst.addr } == { addr });
+        ChunkPerm::select(ctx, eq, inst.perm, zero.clone())
+    };
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
     // What was exhaled from this set, each gated by its presence guard.
     for taken in chunk.taken.iter() {
@@ -581,24 +573,6 @@ fn addr_call_args(
         }
         _ => None,
     })
-}
-
-/// `perm` where the two address argument tuples agree, `0` elsewhere. Arguments
-/// already in one e-class add no gate.
-fn gate_on_args(
-    ctx: &mut VerifyContext<'_>,
-    mut perm: ChunkPerm,
-    got: &[egg::Id],
-    want: &[egg::Id],
-) -> ChunkPerm {
-    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    for (&g, &w) in got.iter().zip(want).rev() {
-        if ctx.egraph.find(g) != ctx.egraph.find(w) {
-            let eq = expr!(ctx, { g } == { w });
-            perm = ChunkPerm::select(ctx, eq, perm, zero.clone());
-        }
-    }
-    perm
 }
 
 /// Index of the first held set of `kind` that covers `exhale`
