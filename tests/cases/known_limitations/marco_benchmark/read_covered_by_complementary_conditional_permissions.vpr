@@ -1,0 +1,18 @@
+// KNOWN LIMITATION: "unimplemented: purify: deref outside footprint" on
+// `m#requires`.
+//
+// `x.v` is held on both paths, through two conditional chunks with
+// complementary guards (`b` and `!b`), so the unguarded read `x.v == 1` is
+// framed. Precondition purification looks for one footprint slot that covers
+// the read and finds none.
+//
+// Reduced from the PVL kernels under `Vi/viper/quantifiedpermissions/third_party`
+// (`test_forward_dep_pvl`, `test_kernel_example_v2_pvl`, `test_binomial_auto`:
+// `Ref__main_barrier`, where the guards are `last_barrier == 0 / 1` and the read
+// sits under `this_barrier == 1`, which implies `last_barrier == 0`).
+field v: Int
+
+method m(x: Ref, b: Bool)
+  requires b ==> acc(x.v)
+  requires !b ==> acc(x.v)
+  requires x.v == 1

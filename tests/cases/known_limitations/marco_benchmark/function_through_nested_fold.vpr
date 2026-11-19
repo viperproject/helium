@@ -1,0 +1,30 @@
+// KNOWN LIMITATION: "assertion failed" on `length(xs) == 2` after folding
+// `list(ys)` and then nesting it inside `list(xs)`.
+//
+// `length(xs)` unfolds to `1 + length(ys)`, which needs a second unrolling
+// against the nested `list(ys)` snapshot. Helium does not do it: inserting
+// `assert length(ys) == 1` right after `fold acc(list(ys))` (while `list(ys)`
+// is still at top level) makes the method verify.
+//
+// Reduced from `Vi/viper/all/functions/linkedlists` (methods `append`,
+// `insert`).
+field next: Ref
+
+predicate list(xs: Ref) {
+  acc(xs.next) && (xs.next != null ==> acc(list(xs.next)))
+}
+
+function length(xs: Ref): Int
+  requires acc(list(xs))
+{
+  unfolding acc(list(xs)) in 1 + (xs.next == null ? 0 : length(xs.next))
+}
+
+method m(xs: Ref, ys: Ref)
+  requires acc(xs.next) && acc(ys.next) && ys.next == null && ys != null
+{
+  fold acc(list(ys))
+  xs.next := ys
+  fold acc(list(xs))
+  assert length(xs) == 2
+}

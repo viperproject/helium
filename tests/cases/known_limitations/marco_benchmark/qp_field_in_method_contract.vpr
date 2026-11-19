@@ -1,0 +1,14 @@
+// KNOWN LIMITATION: "unsupported construct: quantified permission" for a
+// quantified field permission in a method precondition.
+//
+// Seen in Prusti's `Vec` / `ArrayList` methods and in the PVL kernels under
+// `Vi/viper/quantifiedpermissions/third_party` (see
+// `qp_predicate_in_function_precondition.vpr` for the count).
+field v: Int
+
+method m(s: Set[Ref], x: Ref)
+  requires forall r: Ref :: { r.v } r in s ==> acc(r.v)
+  requires x in s
+{
+  x.v := 1
+}

@@ -1,0 +1,13 @@
+// KNOWN LIMITATION: "unsupported construct: new(*)" — allocation with
+// permission to every field.
+//
+// Seen in `Vi/viper/all/chalice/RingBufferRd` (`TestHarness`).
+field f: Int
+field g: Int
+
+method m() {
+  var x: Ref
+  x := new(*)
+  x.f := 1
+  x.g := 2
+}

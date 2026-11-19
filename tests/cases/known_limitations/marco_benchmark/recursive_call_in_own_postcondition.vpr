@@ -1,0 +1,16 @@
+// KNOWN LIMITATION: "assertion failed" on `f`'s own postcondition, which
+// mentions a recursive call `f(n - 1)`.
+//
+// For `0 < n` the body *is* `f(n - 1)`, so `result ==> f(n - 1)` holds.
+// Likely cause (not confirmed): inside its own SCC, Helium routes `f(n - 1)`
+// through the uninterpreted limited twin, and the call in the postcondition is
+// not identified with the call in the body.
+//
+// Reduced from `VeC/vercors/publications/RedBlack/Util.java`
+// (`method_Util_isPrefix`, `isInfix` and the lemmas over them).
+function f(n: Int): Bool
+  decreases _
+  ensures result && 0 < n ==> f(n - 1)
+{
+  n <= 0 ? true : f(n - 1)
+}

@@ -1,0 +1,14 @@
+// KNOWN LIMITATION: "`result` not allowed in this context" for `result` inside
+// a `forall` in a function postcondition. The quantifier body is lowered with
+// the domain-axiom rules, which reject `result`.
+//
+// Nagini's `int___unbox__` prelude function has this shape, as do VerCors'
+// `toBag` functions: 6 of the 838 listed marco_benchmark files hit it.
+function g(y: Int): Int
+
+function f(x: Int): Int
+  ensures forall y: Int :: { g(y) } y == x ==> g(y) == result
+
+method client() {
+  assert f(1) == g(1)
+}

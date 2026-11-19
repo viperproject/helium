@@ -1,0 +1,13 @@
+// KNOWN LIMITATION: "unsupported pure expression: Acc(..)" for `acc(..)` in the
+// body of a `let`, i.e. an impure `let`. `let` is only lowered as a pure
+// expression.
+//
+// Gobra's struct allocation (`inhale (let fn$$1 == (fn$$0) in acc(..) && ..)`)
+// has this shape: `Go/gobra/.../tour/Tree.gobra` and
+// `.../evaluation/binary_tree.gobra` (2 of the 838 listed marco_benchmark files).
+field f: Int
+
+method m(x: Ref) {
+  inhale (let y == (x) in acc(y.f))
+  x.f := 1
+}

@@ -1,0 +1,15 @@
+// KNOWN LIMITATION: "unsupported construct: inhale-exhale expression `[A, B]`".
+//
+// Nagini wraps its obligation checks in `[true, perm(..) == none && forperm ..]`
+// in nearly every contract and loop invariant: 9 of the 838 listed
+// marco_benchmark files hit this (see also `forperm.vpr`, which those
+// contracts need next). `unsupported/inhale_exhale.vpr` pins the rejection
+// itself; this case pins that the program should verify.
+field f: Int
+
+method m(x: Ref)
+  requires [true, perm(x.f) == none]
+
+method client(x: Ref) {
+  m(x)
+}

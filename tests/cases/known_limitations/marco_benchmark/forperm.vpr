@@ -1,0 +1,12 @@
+// KNOWN LIMITATION: "unsupported construct: forperm".
+//
+// Nagini's obligation checks use `forperm` inside the inhale-exhale
+// expressions of `inhale_exhale_expression.vpr`, so the same Nagini files
+// need it as soon as `[A, B]` is supported.
+field f: Int
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  assert forperm r: Ref [r.f] :: r == x
+}

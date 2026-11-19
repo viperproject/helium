@@ -1,0 +1,29 @@
+// KNOWN LIMITATION: "assertion failed" on `!contains(t, v)` right after
+// unfolding and re-folding `tree(t)`, which leaves the state unchanged.
+//
+// What matters is the *conditional* precondition `t != null ==> acc(tree(t))`
+// of the recursive function: with `requires acc(tree(t))` and the null test
+// moved into the body, or without the recursive call, it verifies.
+//
+// Reduced from `Go/gobra/.../tour/Tree.gobra` and `.../evaluation/binary_tree.gobra`
+// (`deleteLeftMost`): Gobra encodes `nil`-able pointers this way.
+field left: Ref
+field val: Int
+
+predicate tree(t: Ref) {
+  acc(t.left) && acc(t.val) && (t.left != null ==> acc(tree(t.left)))
+}
+
+function contains(t: Ref, v: Int): Bool
+  requires t != null ==> acc(tree(t))
+{
+  t != null && (unfolding acc(tree(t)) in t.val == v || contains(t.left, v))
+}
+
+method m(t: Ref, v: Int)
+  requires t != null && acc(tree(t)) && !contains(t, v)
+{
+  unfold acc(tree(t))
+  fold acc(tree(t))
+  assert !contains(t, v)
+}

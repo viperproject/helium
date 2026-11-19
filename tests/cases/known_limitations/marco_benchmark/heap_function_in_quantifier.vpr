@@ -1,0 +1,29 @@
+// KNOWN LIMITATION: "heap-dependent function `bytes` called inside a `forall`:
+// a quantifier body must be heap-free".
+//
+// The heap read `bytes(a)` does not mention the bound variable `s`, so it could
+// be evaluated once outside the quantifier and the body would be heap-free.
+// Every such quantifier in the benchmark has this shape: all 865 `forall`s in
+// Prusti's bodyless `memory_block_join` / `memory_block_split` methods read only
+// heap terms closed under the binder.
+//
+// Together with `old_in_quantifier.vpr` this blocks 440 of the 838 listed
+// marco_benchmark files (Ru2 suite); 356 hit this message.
+predicate MB(a: Ref)
+
+function bytes(a: Ref): Int
+  requires acc(MB(a), wildcard)
+
+function to_bytes(s: Int): Int
+
+method join(a: Ref)
+  requires acc(MB(a))
+  ensures acc(MB(a))
+  ensures forall s: Int :: { to_bytes(s) } bytes(a) == to_bytes(s)
+
+method client(a: Ref)
+  requires acc(MB(a))
+{
+  join(a)
+  assert bytes(a) == to_bytes(3)
+}
