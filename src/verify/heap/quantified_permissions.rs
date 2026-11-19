@@ -76,10 +76,10 @@ fn check_qp_injectivity(
     pc: &[(Id, Polarity)],
     instantiate: &mut Instantiate<'_>,
 ) -> Result<(), VerifyError> {
-    ctx.pause_recipe(|ctx| ctx.with_scratch_graph(|ctx| check_in_scratch(ctx, q, pc, instantiate)))
+    ctx.pause_recipe(|ctx| ctx.with_scratch_graph(|ctx| check_injectivity_in_scratch(ctx, q, pc, instantiate)))
 }
 
-fn check_in_scratch(
+fn check_injectivity_in_scratch(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
     pc: &[(Id, Polarity)],
