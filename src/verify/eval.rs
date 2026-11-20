@@ -34,6 +34,9 @@ pub(crate) struct EvalState {
     /// desync from the eval column.
     pub(crate) recipes: Vec<Option<Val>>,
     pub(crate) heaps: Vec<Heap>,
+    /// The cube of the block being walked (`None` in a body without blocks):
+    /// the region a heap built here gets ([`EvalState::region`]).
+    pub(crate) block_cube: Option<PathConds>,
     /// Permission temps (`p`), evaluated at their defining instruction. A `p`
     /// temp denotes ONE permission: a `wildcard` under it is minted once here, so
     /// reading the temp twice reads the same share.
@@ -66,6 +69,7 @@ impl EvalState {
             val_types: Vec::new(),
             recipes: Vec::new(),
             heaps: Vec::new(),
+            block_cube: None,
             perms: Vec::new(),
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
@@ -82,6 +86,7 @@ impl EvalState {
             val_types: arg_types,
             recipes,
             heaps: Vec::new(),
+            block_cube: None,
             perms: Vec::new(),
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
@@ -159,6 +164,7 @@ impl EvalState {
             val_types: self.val_types.clone(),
             recipes: self.recipes.clone(),
             heaps: Vec::new(),
+            block_cube: None,
             // A quantifier body is permission-free, like it is heap-free.
             perms: Vec::new(),
             perm_defs: Vec::new(),
@@ -203,6 +209,7 @@ impl EvalState {
             val_types: vec![Type::Bool; binder_base],
             recipes: vec![None; binder_base],
             heaps: Vec::new(),
+            block_cube: None,
             perms: Vec::new(),
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
@@ -217,6 +224,21 @@ impl EvalState {
     }
     pub(crate) fn push_heap(&mut self, heap: Heap) {
         self.heaps.push(heap);
+    }
+
+    /// The region of a heap built here: the current block's cube, lowered.
+    /// Never the instruction's own pc, whose suffix beyond the cube gates that
+    /// one instruction only, not the heap the walk goes on with.
+    ///
+    /// In a join phase the cube is resolvable only once the join's reach
+    /// values are defined. The lowering emits the `Merge` and everything after
+    /// it behind them, so an undefined value here is a lowering bug, and
+    /// `get_val` panics on it.
+    pub(crate) fn region(&self, ctx: &mut VerifyContext<'_>) -> Vec<(egg::Id, Polarity)> {
+        match &self.block_cube {
+            Some(cube) => pc_lits_raw(ctx, self, cube),
+            None => Vec::new(),
+        }
     }
     pub(crate) fn push_perm(&mut self, perm: ChunkPerm, def: vmir::PermInst) {
         self.perms.push(perm);
@@ -259,7 +281,28 @@ pub(crate) fn format_inst(
 /// caller-supplied ctx heap of a resource body lives at
 /// `state.heaps[0]` by convention (mirroring how params occupy the
 /// initial `vals` slots).
-pub(crate) fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
+///
+/// The heap is seen from `pc` (see [`Heap::at`]): a heap used outside the
+/// region it was built in (an `old[L]` whose label does not dominate the read)
+/// holds its chunks only where that region was reached. A read passes its
+/// effective pc; an instruction that builds a new heap passes
+/// [`EvalState::region`], so the result's region is the block's cube.
+pub(crate) fn get_heap(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    hv: &HeapVal,
+    pc: &[(egg::Id, Polarity)],
+) -> Heap {
+    match hv {
+        HeapVal::Empty => Heap::empty(),
+        HeapVal::Temp(n) => state.heaps[*n].at(ctx, pc),
+    }
+}
+
+/// The heap `hv` names exactly as it was built, its chunk guards relative to
+/// its own region. Only for a consumer that rehomes it itself (a join merge,
+/// which appends the arm literal) or does not reason with it (display).
+pub(crate) fn get_heap_unrehomed(state: &EvalState, hv: &HeapVal) -> Heap {
     match hv {
         HeapVal::Empty => Heap::empty(),
         HeapVal::Temp(n) => state.heaps[*n].clone(),
@@ -282,7 +325,7 @@ pub(crate) fn display_heaps(
             | HeapInst::Inhale { base, .. }
             | HeapInst::Exhale { base, .. },
         ) => {
-            let mut res = vec![(base.to_string(), get_heap(state, base))];
+            let mut res = vec![(base.to_string(), get_heap_unrehomed(state, base))];
             if heaps_before < state.heaps.len() {
                 res.push((
                     format!("h{heaps_before}"),
@@ -413,7 +456,7 @@ pub(crate) fn eval_pure_inst(
             (id, recipe)
         }
         PureInst::Deref(hv, loc) => {
-            let heap = get_heap(state, hv);
+            let heap = get_heap(ctx, state, hv, pc_lits);
             // In a certificate walk the read names its value by the address
             // recipe and records holder agreements under the recipe-space pc.
             // A pc guard without a recipe leaves the pc `None`: the read then
@@ -644,7 +687,7 @@ pub(crate) fn eval_pure_inst(
                     "purify: perm in a function or resource body",
                 ));
             }
-            let heap = get_heap(state, hv);
+            let heap = get_heap(ctx, state, hv, pc_lits);
             let id = match state.loc(ctx, loc) {
                 Some(l) => heap.perm(ctx, &l, pc_lits)?,
                 None => expr!(ctx, 0 / 1),

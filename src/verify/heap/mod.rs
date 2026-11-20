@@ -359,6 +359,26 @@ fn cube_entails(
     })
 }
 
+/// Whether `cube` holds wherever `pc` does: each literal is in `pc` or proven
+/// under it (a fact assumed earlier on the path). The semantic counterpart of
+/// [`cube_entails`], for cubes `reach.rs` minimised differently.
+fn cube_holds(
+    ctx: &mut VerifyContext<'_>,
+    pc: &[(egg::Id, Polarity)],
+    cube: &[(egg::Id, Polarity)],
+) -> bool {
+    cube.iter().all(|&(id, pol)| {
+        if cube_entails(ctx, pc, &[(id, pol)]) {
+            return true;
+        }
+        let goal = match pol {
+            Polarity::Positive => id,
+            Polarity::Negative => expr!(ctx, { id } == false),
+        };
+        ctx.prove_under_pc(goal, pc)
+    })
+}
+
 /// Set-equality of two guard cubes under canonical e-classes (order-insensitive;
 /// guards are small).
 fn cube_eq(ctx: &VerifyContext<'_>, a: &[(egg::Id, Polarity)], b: &[(egg::Id, Polarity)]) -> bool {
@@ -604,8 +624,9 @@ struct QuantChunk {
     pub(crate) inv: Rc<[crate::verify::lang::FuncId]>,
     /// The path condition of the inhale. With `guard`, what the body is
     /// evaluated and reasoned about under ([`QuantChunk::eval_pc`]); it does
-    /// not gate the set's permission: a heap belongs to the path it was built
-    /// on, so the set is held wherever that heap is used.
+    /// not gate the set's permission: every use of the heap inside the region
+    /// it was built in establishes it, and a use outside that region is
+    /// rehomed by [`Heap::at`], which extends `guard` instead.
     pub(crate) pc: HeapPc,
     /// Presence guard, same role as `Chunk::guard`: the branch literals under
     /// which this set is held, empty at the inhale and extended per join by
@@ -762,6 +783,10 @@ impl QuantChunk {
 /// A chunk's reachability is carried by its own [`Chunk::guard`] (a flat cube),
 /// not by a heap-level path condition — the join merge appends the branch literal
 /// per chunk, and the consume sites gate against `guard ∧` the instruction pc.
+/// The guard is relative to the heap's [`Heap::region`]: the cube of the block
+/// it was built in. A heap used outside that region goes through [`Heap::at`]
+/// first, which folds the region literals the use does not establish into every
+/// guard.
 #[derive(Debug, Clone)]
 pub struct Heap {
     /// Unseeded hasher: iteration order (and so the order join/consume code mints
@@ -770,13 +795,91 @@ pub struct Heap {
 
     // Quantified permission parts
     qps: im::HashMap<LocationKind, Rc<[QuantChunk]>, rustc_hash::FxBuildHasher>,
+
+    /// Where this heap exists: the cube of the block it was built in (empty in
+    /// a body without blocks, and for the empty heap, which is the same
+    /// everywhere). Every chunk guard and chunk set guard is relative to it: a
+    /// chunk is present on `region ∧ guard`. Derived heaps (a produce, a
+    /// consume, a write) inherit it; the walk rehomes a heap into the block
+    /// that uses it ([`Heap::at`]) before building on it, so a result's region
+    /// is that block's cube.
+    region: HeapPc,
 }
 
 impl Heap {
+    /// The empty heap. Its region is empty: holding nothing, it is the same
+    /// heap wherever it is used.
     pub fn empty() -> Self {
         Self {
             groups: im::HashMap::default(),
             qps: im::HashMap::default(),
+            region: Rc::from([]),
+        }
+    }
+
+    /// The empty heap of the region `region`: the start of a heap built for a
+    /// block, such as a join's merge.
+    fn empty_in(region: &[(egg::Id, Polarity)]) -> Self {
+        Self {
+            region: Rc::from(region),
+            ..Self::empty()
+        }
+    }
+
+    /// This heap as seen from a state whose path condition is `pc`, with `pc`
+    /// as its region.
+    ///
+    /// A heap's chunk guards are relative to the block it was built in: a chunk
+    /// with an empty guard is present wherever *that block* was reached, not
+    /// everywhere. A heap used where its region is not established (an
+    /// `old[L]` read whose label `L` does not dominate the read) must not see
+    /// its chunks as held there, so every literal of `region` that `pc` does
+    /// not establish is pushed onto each chunk's and chunk set's presence
+    /// guard. This is the rehoming a join already does for its arms (appending
+    /// the arm literal, see `merge_heaps`), done for an arbitrary use.
+    ///
+    /// When `pc` establishes the whole region (every use from a block the heap's
+    /// block dominates) only the region changes: `pc` implies the old one, so
+    /// every guard means the same relative to it.
+    pub(crate) fn at(&self, ctx: &mut VerifyContext<'_>, pc: &[(egg::Id, Polarity)]) -> Heap {
+        let region: HeapPc = Rc::from(pc);
+        let missing: Vec<(egg::Id, Polarity)> = self
+            .region
+            .iter()
+            .copied()
+            .filter(|&lit| !cube_holds(ctx, pc, &[lit]))
+            .collect();
+        if missing.is_empty() {
+            return Heap {
+                region,
+                ..self.clone()
+            };
+        }
+        let mut groups = self.groups.clone();
+        for (kind, chunks) in self.groups.iter() {
+            let rehomed: Vec<Chunk> = chunks
+                .iter()
+                .map(|c| {
+                    let guard = missing
+                        .iter()
+                        .fold(c.guard_pc(), |g, &lit| cube_push(ctx, &g, lit));
+                    c.clone().with_guard(guard)
+                })
+                .collect();
+            groups = groups.update(kind.clone(), rehomed.into());
+        }
+        let mut qps = self.qps.clone();
+        for (kind, sets) in self.qps.iter() {
+            let rehomed: Vec<QuantChunk> = sets
+                .iter()
+                .map(|s| missing.iter().fold(s.clone(), |s, &lit| s.under(ctx, lit)))
+                .collect();
+            qps = qps.update(kind.clone(), rehomed.into());
+        }
+        Heap {
+            groups,
+            qps,
+            region,
         }
     }
 
@@ -808,6 +911,7 @@ impl Heap {
         Self {
             groups: self.groups.update(kind.clone(), v.into()),
             qps: self.qps.clone(),
+            region: self.region.clone(),
         }
     }
 
@@ -818,6 +922,7 @@ impl Heap {
         Self {
             groups: self.groups.clone(),
             qps: self.qps.update(kind.clone(), v.into()),
+            region: self.region.clone(),
         }
     }
 
@@ -827,6 +932,7 @@ impl Heap {
         Self {
             groups: self.groups.clone(),
             qps: self.qps.update(kind.clone(), v.into()),
+            region: self.region.clone(),
         }
     }
 
@@ -836,6 +942,7 @@ impl Heap {
         Self {
             groups: self.groups.clone(),
             qps: self.qps.update(kind.clone(), v.into()),
+            region: self.region.clone(),
         }
     }
 
@@ -853,6 +960,7 @@ impl Heap {
         Self {
             groups,
             qps: self.qps.clone(),
+            region: self.region.clone(),
         }
     }
 

@@ -1,0 +1,10 @@
+// Must FAIL.
+field f: Int
+
+method m(a: Ref, d: Bool)
+  requires acc(a.f)
+  ensures acc(a.f) && a.f == 5
+{
+  if (d) { a.f := 5; label L }
+  a.f := old[L](a.f)
+}
