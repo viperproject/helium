@@ -4,7 +4,7 @@ use super::*;
 use crate::verify::{
     context::VerifyContext,
     error::VerifyError,
-    heap::{Chunk, ChunkPerm, Heap, LocationKind},
+    heap::{Chunk, ChunkPerm, Cube, Heap, LocationKind, Shape},
     lang::Symbolic,
 };
 use crate::vmir::{BinOp, Polarity};
@@ -93,8 +93,8 @@ fn normalize_guard_for_consume(
     ctx: &mut VerifyContext<'_>,
     existing: Option<Chunk>,
     pc_lits: &[(egg::Id, Polarity)],
-) -> (Option<Chunk>, crate::verify::heap::HeapPc) {
-    let empty: crate::verify::heap::HeapPc = std::rc::Rc::from(Vec::new());
+) -> (Option<Chunk>, Cube) {
+    let empty = Cube::empty();
     let Some(c) = existing else {
         return (None, empty);
     };
@@ -298,7 +298,7 @@ fn debit_direct(
     kind: &LocationKind,
     existing: &Chunk,
     chunk2: &Chunk,
-    kept: crate::verify::heap::HeapPc,
+    kept: Cube,
 ) -> Heap {
     ctx.union(existing.value, chunk2.value);
     // Remainder stays structural (leaves get `SubR`); never an `ite` in the graph.
@@ -349,7 +349,7 @@ fn debit_wildcard(
     existing: &Chunk,
     chunk2: &Chunk,
     pc_lits: &[(egg::Id, Polarity)],
-    kept: crate::verify::heap::HeapPc,
+    kept: Cube,
 ) -> Result<Heap, VerifyError> {
     // Walk the DEMAND's branch structure: a gated `exhale b ==> acc(x.f, wildcard)`
     // takes a share only where `b` holds, and states nothing where it does not.
@@ -404,10 +404,12 @@ fn debit_wildcard_walk(
     needed_value: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> (ChunkPerm, egg::Id, Option<VerifyError>) {
-    match needed {
-        ChunkPerm::Leaf { id, .. } => {
+    match needed.shape() {
+        // Nothing demanded on this arm: no obligation, no fact, no debit.
+        Shape::Zero => (held.clone(), held_value, None),
+        Shape::Leaf { id, .. } => {
             // Nothing demanded on this arm: no obligation, no fact, no debit.
-            let nonpos = expr!(ctx, not ((0/1) <r {*id}));
+            let nonpos = expr!(ctx, not((0 / 1) < r { id }));
             if ctx.prove_under_pc(nonpos, pc_lits) {
                 return (held.clone(), held_value, None);
             }
@@ -429,17 +431,17 @@ fn debit_wildcard_walk(
             ctx.assume_all_guarded([lt], pc_lits);
             (ChunkPerm::wild_leaf(remainder), held_value, None)
         }
-        ChunkPerm::Select { cond, then, els } => {
-            let ht = ChunkPerm::restrict(ctx, *cond, held.clone(), true);
+        Shape::Branch { cond, then, els } => {
+            let ht = ChunkPerm::restrict(ctx, cond, held.clone(), true);
             let mut pc_t = pc_lits.to_vec();
-            pc_t.push((*cond, Polarity::Positive));
+            pc_t.push((cond, Polarity::Positive));
             let (t, value, e1) =
-                debit_wildcard_walk(ctx, &ht, then, held_value, needed_value, &pc_t);
-            let he = ChunkPerm::restrict(ctx, *cond, held.clone(), false);
+                debit_wildcard_walk(ctx, &ht, &then, held_value, needed_value, &pc_t);
+            let he = ChunkPerm::restrict(ctx, cond, held.clone(), false);
             let mut pc_e = pc_lits.to_vec();
-            pc_e.push((*cond, Polarity::Negative));
-            let (e, _, e2) = debit_wildcard_walk(ctx, &he, els, held_value, needed_value, &pc_e);
-            (ChunkPerm::select(ctx, *cond, t, e), value, e1.or(e2))
+            pc_e.push((cond, Polarity::Negative));
+            let (e, _, e2) = debit_wildcard_walk(ctx, &he, &els, held_value, needed_value, &pc_e);
+            (ChunkPerm::select(ctx, cond, t, e), value, e1.or(e2))
         }
     }
 }
@@ -588,7 +590,7 @@ fn pc_alias_set(
     existing: Option<&Chunk>,
     partners: &[egg::Id],
     pc_lits: &[(egg::Id, Polarity)],
-) -> (Vec<(Chunk, crate::verify::heap::HeapPc)>, ChunkPerm) {
+) -> (Vec<(Chunk, Cube)>, ChunkPerm) {
     let members: Vec<Chunk> = existing
         .cloned()
         .into_iter()
@@ -615,12 +617,9 @@ fn pc_alias_set(
             Some(t) => perm_add(ctx, &t, &amount),
         });
     }
-    let cube: crate::verify::heap::HeapPc = std::rc::Rc::from(pc_lits.to_vec());
+    let cube = Cube::from(pc_lits);
     let set = members.into_iter().map(|c| (c, cube.clone())).collect();
-    (
-        set,
-        total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1))),
-    )
+    (set, total.unwrap_or(ChunkPerm::Zero))
 }
 
 /// Consume `chunk2` against a **summarized** location: a set of chunks that each sit
@@ -661,7 +660,7 @@ fn heap_subtract_summarized(
     ctx: &mut VerifyContext<'_>,
     out: Heap,
     kind: &LocationKind,
-    set: &[(Chunk, crate::verify::heap::HeapPc)],
+    set: &[(Chunk, Cube)],
     total: ChunkPerm,
     chunk2: Chunk,
     chunk2_perm: egg::Id,

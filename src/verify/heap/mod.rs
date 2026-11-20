@@ -1,5 +1,6 @@
 // The heap's internals: only `interface` is used from outside.
 mod algebra;
+mod cond;
 mod holders;
 mod interface;
 mod quantified_permissions;
@@ -7,6 +8,7 @@ mod quantified_permissions;
 pub(crate) use interface::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, ReadRecipe, Value};
 pub(crate) use quantified_permissions::InverseAxioms;
 
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -16,11 +18,7 @@ use crate::verify::context::VerifyContext;
 use crate::verify::lang::Symbolic;
 use crate::vmir;
 use crate::vmir::{Bound, Literal, Polarity, Type};
-
-/// A path condition in verify space: a single conjunctive cube of e-class
-/// literals (the analog of a block's `PathConds`, already minimized by
-/// `reach.rs` at lowering). Shared `Rc` so cloning a `Heap` per-inst stays O(1).
-type HeapPc = Rc<[(egg::Id, Polarity)]>;
+use cond::{Cube, Lit};
 
 /// S0 merge instrumentation (gated by `SILVER_OXIDE_TRACE_MERGE`). Counts the
 /// join-merge structures the pc-hoist plan aims to flatten: `Select` nodes
@@ -92,27 +90,27 @@ impl MergeTrace {
     }
 }
 
-impl ChunkPerm {
-    /// The `Select`-nesting depth of this perm tree (a `Leaf` is 0). Diagnostic.
-    fn depth(&self) -> u32 {
-        match self {
-            ChunkPerm::Leaf { .. } => 0,
-            ChunkPerm::Select { then, els, .. } => 1 + then.depth().max(els.depth()),
-        }
-    }
-}
-
-/// A chunk's permission as an explicit term, held OUTSIDE the union-find so a
-/// branch structure collapses without saturation. `Leaf` is an e-class id (a
-/// literal `1/1`, a symbolic real, a wildcard) and is treated as OPAQUE — never
-/// structurally decomposed. A `Select` comes from either of two places, both via
-/// the [`ChunkPerm::select`] smart constructor: a control-flow **join** merge, and
-/// a **gated `acc`** — `Sink::gate_perm` keeps a path condition as a `PermInst::Ite`
-/// structure rather than folding it into the amount, so `build_perm` lands it here.
-/// An ungated frontend perm is still a `Leaf`, for which [`ChunkPerm::to_id`] is
-/// the identity.
+/// A permission amount as an explicit term, held OUTSIDE the union-find so a
+/// branch structure collapses without saturation. Every condition on an amount
+/// lives in this tree; there is no zero amount hiding behind a guard elsewhere.
+///
+/// - `Zero` is no permission. Structural: it becomes an e-node (`0/1`) only when
+///   lowered by [`ChunkPerm::to_id`], so absence costs nothing to build or test.
+/// - `Leaf` is an e-class id (a literal `1/1`, a symbolic real, a wildcard),
+///   treated as OPAQUE: never structurally decomposed.
+/// - `Gate` is `when ? then : 0` over a flat cube: a presence guard, an address
+///   gate, a gated `acc`. Built only by [`ChunkPerm::gate`] (or by
+///   [`ChunkPerm::select`] when one arm is zero), so `when` is never empty and
+///   `then` is never zero. Its literals are a chain read **last-outermost**: it
+///   means what `select(lₙ, … select(l₁, then, 0) …, 0)` does.
+/// - `Select` is a genuine two-sided branch: a control-flow **join** whose arms
+///   hold different amounts, or a gated `acc` with a non-zero else arm.
+///
+/// Recursive operations over the tree should not match on `Gate` themselves:
+/// [`ChunkPerm::shape`] presents it as the branch on its outermost literal.
 #[derive(Debug, Clone)]
 pub enum ChunkPerm {
+    Zero,
     Leaf {
         id: egg::Id,
         /// Whether this amount **came from** a `wildcard` — origin, not sign. A
@@ -123,10 +121,31 @@ pub enum ChunkPerm {
         /// merge side sees two amounts their provenance is otherwise gone.
         wild: bool,
     },
+    Gate {
+        when: Cube,
+        then: Box<ChunkPerm>,
+    },
     Select {
         cond: egg::Id,
         then: Box<ChunkPerm>,
         els: Box<ChunkPerm>,
+    },
+}
+
+/// One node of a [`ChunkPerm`] seen as at most a single branch: a `Gate` is
+/// peeled to the branch on its outermost literal, with `Zero` on the other arm.
+/// What recursive operations match on, so they handle a `Gate` exactly as the
+/// `Select` chain it stands for.
+pub(super) enum Shape<'a> {
+    Zero,
+    Leaf {
+        id: egg::Id,
+        wild: bool,
+    },
+    Branch {
+        cond: egg::Id,
+        then: Cow<'a, ChunkPerm>,
+        els: Cow<'a, ChunkPerm>,
     },
 }
 
@@ -142,36 +161,104 @@ impl ChunkPerm {
         ChunkPerm::Leaf { id, wild: true }
     }
 
+    /// This node as at most one branch (see [`Shape`]).
+    pub(super) fn shape(&self) -> Shape<'_> {
+        match self {
+            ChunkPerm::Zero => Shape::Zero,
+            ChunkPerm::Leaf { id, wild } => Shape::Leaf {
+                id: *id,
+                wild: *wild,
+            },
+            ChunkPerm::Select { cond, then, els } => Shape::Branch {
+                cond: *cond,
+                then: Cow::Borrowed(then),
+                els: Cow::Borrowed(els),
+            },
+            ChunkPerm::Gate { when, then } => {
+                let (&(cond, pol), rest) = when.split_last().expect("a gate's cube is never empty");
+                let inner = if rest.is_empty() {
+                    Cow::Borrowed(&**then)
+                } else {
+                    Cow::Owned(ChunkPerm::Gate {
+                        when: Cube::from(rest),
+                        then: then.clone(),
+                    })
+                };
+                let zero = Cow::Owned(ChunkPerm::Zero);
+                match pol {
+                    Polarity::Positive => Shape::Branch {
+                        cond,
+                        then: inner,
+                        els: zero,
+                    },
+                    Polarity::Negative => Shape::Branch {
+                        cond,
+                        then: zero,
+                        els: inner,
+                    },
+                }
+            }
+        }
+    }
+
+    /// The branch nesting depth of this perm tree (a leaf is 0). Diagnostic.
+    fn depth(&self) -> u32 {
+        match self {
+            ChunkPerm::Zero | ChunkPerm::Leaf { .. } => 0,
+            ChunkPerm::Gate { when, then } => when.len() as u32 + then.depth(),
+            ChunkPerm::Select { then, els, .. } => 1 + then.depth().max(els.depth()),
+        }
+    }
+
     /// Whether any leaf of this tree came from a `wildcard`.
     pub(crate) fn has_wild(&self) -> bool {
         match self {
+            ChunkPerm::Zero => false,
             ChunkPerm::Leaf { wild, .. } => *wild,
+            ChunkPerm::Gate { then, .. } => then.has_wild(),
             ChunkPerm::Select { then, els, .. } => then.has_wild() || els.has_wild(),
         }
     }
 
+    /// Whether this is no permission: `Zero`, or a leaf whose class const-folds
+    /// to `0`. Const-fold only, no prover.
+    pub(super) fn is_zero(&self, ctx: &VerifyContext<'_>) -> bool {
+        match self {
+            ChunkPerm::Zero => true,
+            ChunkPerm::Leaf { id, .. } => matches!(
+                ctx.egraph[ctx.egraph.find(*id)].data.known(),
+                Some(Literal::Real(r)) if *r == num::BigRational::from(num::BigInt::from(0))
+            ),
+            ChunkPerm::Gate { .. } | ChunkPerm::Select { .. } => false,
+        }
+    }
+
     /// Structural equality with LEAVES compared by e-class `find` (so a `1/1`
-    /// from either arm counts as equal). O(size), no saturation.
+    /// from either arm counts as equal), a `Gate` compared as the chain it
+    /// stands for, and every zero equal to every other. O(size), no saturation.
     fn same(ctx: &VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) -> bool {
-        match (a, b) {
-            (ChunkPerm::Leaf { id: x, .. }, ChunkPerm::Leaf { id: y, .. }) => {
-                ctx.egraph.find(*x) == ctx.egraph.find(*y)
+        if a.is_zero(ctx) || b.is_zero(ctx) {
+            return a.is_zero(ctx) && b.is_zero(ctx);
+        }
+        match (a.shape(), b.shape()) {
+            (Shape::Leaf { id: x, .. }, Shape::Leaf { id: y, .. }) => {
+                ctx.egraph.find(x) == ctx.egraph.find(y)
             }
             (
-                ChunkPerm::Select {
+                Shape::Branch {
                     cond: c1,
                     then: t1,
                     els: e1,
                 },
-                ChunkPerm::Select {
+                Shape::Branch {
                     cond: c2,
                     then: t2,
                     els: e2,
                 },
             ) => {
-                ctx.egraph.find(*c1) == ctx.egraph.find(*c2)
-                    && Self::same(ctx, t1, t2)
-                    && Self::same(ctx, e1, e2)
+                ctx.egraph.find(c1) == ctx.egraph.find(c2)
+                    && Self::same(ctx, &t1, &t2)
+                    && Self::same(ctx, &e1, &e2)
             }
             _ => false,
         }
@@ -184,6 +271,9 @@ impl ChunkPerm {
     /// its matching branch survives. CFG lowering makes many joins in one match
     /// arm share the arm's reach `cond`, so without this the perm accretes a
     /// redundant `Select` layer per such join.
+    ///
+    /// A `Gate` mentioning `cond` anywhere in its cube is decided too: under the
+    /// literal's own polarity it drops out, under the other the gate is `Zero`.
     fn collapse_same_cond(
         ctx: &VerifyContext<'_>,
         cond_c: egg::Id,
@@ -197,6 +287,29 @@ impl ChunkPerm {
                 els,
             } if ctx.egraph.find(c2) == cond_c => {
                 let inner = if take_then { *then } else { *els };
+                Self::collapse_same_cond(ctx, cond_c, inner, take_then)
+            }
+            ChunkPerm::Gate { when, then } => {
+                let Some(k) = when.iter().position(|(i, _)| ctx.egraph.find(*i) == cond_c) else {
+                    return ChunkPerm::Gate { when, then };
+                };
+                if (when[k].1 == Polarity::Positive) != take_then {
+                    return ChunkPerm::Zero;
+                }
+                let rest: Vec<Lit> = when
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != k)
+                    .map(|(_, l)| *l)
+                    .collect();
+                let inner = if rest.is_empty() {
+                    *then
+                } else {
+                    ChunkPerm::Gate {
+                        when: Cube::from(rest),
+                        then,
+                    }
+                };
                 Self::collapse_same_cond(ctx, cond_c, inner, take_then)
             }
             other => other,
@@ -216,11 +329,51 @@ impl ChunkPerm {
         Self::collapse_same_cond(ctx, ctx.egraph.find(cond), arm, take_then)
     }
 
+    /// `when ? perm : 0`, the gate smart constructor. Literals are applied in
+    /// order, each becoming the new outermost one, and each is simplified the way
+    /// [`Self::select`] simplifies a branch: a literal already decided inside
+    /// `perm` is collapsed, a zero amount stays `Zero`, and a literal that
+    /// const-folds drops (true) or zeroes the whole gate (false). With an empty
+    /// cube this is `perm` unchanged.
+    pub(crate) fn gate(ctx: &VerifyContext<'_>, when: &[Lit], perm: ChunkPerm) -> ChunkPerm {
+        when.iter()
+            .fold(perm, |acc, &lit| Self::gate_lit(ctx, lit, acc))
+    }
+
+    fn gate_lit(ctx: &VerifyContext<'_>, (id, pol): Lit, perm: ChunkPerm) -> ChunkPerm {
+        let c = ctx.egraph.find(id);
+        let positive = pol == Polarity::Positive;
+        let perm = Self::collapse_same_cond(ctx, c, perm, positive);
+        if perm.is_zero(ctx) {
+            return ChunkPerm::Zero;
+        }
+        match ctx.egraph[c].data.known() {
+            Some(Literal::Bool(b)) if *b == positive => return perm,
+            Some(Literal::Bool(_)) => return ChunkPerm::Zero,
+            _ => {}
+        }
+        match perm {
+            ChunkPerm::Gate { when, then } => {
+                let mut lits = when.to_vec();
+                lits.push((id, pol));
+                ChunkPerm::Gate {
+                    when: Cube::from(lits),
+                    then,
+                }
+            }
+            other => ChunkPerm::Gate {
+                when: Cube::from(vec![(id, pol)]),
+                then: Box::new(other),
+            },
+        }
+    }
+
     /// The join-select smart constructor. `cond` is the then-edge reach value.
     /// Applies, in order: (0) `ite`-idempotence flattening of arms that branch on
     /// the same `cond`; (i) same-amount collapse (`then ≡ els ⇒ then`, the
     /// give-back / untouched kill); (ii) dead-arm drop when `cond` const-folds to
-    /// a boolean literal; (iii) otherwise a `Select`. Deterministic, bounded.
+    /// a boolean literal; (iii) a `Gate` when one arm is zero; (iv) otherwise a
+    /// `Select`. Deterministic, bounded.
     pub fn select(
         ctx: &mut VerifyContext<'_>,
         cond: egg::Id,
@@ -238,6 +391,12 @@ impl ChunkPerm {
             Some(Literal::Bool(false)) => return els,
             _ => {}
         }
+        if els.is_zero(ctx) {
+            return Self::gate_lit(ctx, (cond, Polarity::Positive), then);
+        }
+        if then.is_zero(ctx) {
+            return Self::gate_lit(ctx, (cond, Polarity::Negative), els);
+        }
         let out = ChunkPerm::Select {
             cond,
             then: Box::new(then),
@@ -249,11 +408,24 @@ impl ChunkPerm {
 
     /// Lower to an e-graph id — ONLY where the prover needs an e-class
     /// (sufficiency, bound/non-alias axioms, `perm > 0` framing). For a `Leaf`
-    /// this is the identity (no node added), so with the flag off the migrated
-    /// heap ops are byte-identical to Stage 3.
+    /// this is the identity (no node added). A `Gate` lowers to exactly the
+    /// `ite(l, …, 0)` chain it stands for.
     pub fn to_id(&self, ctx: &mut VerifyContext<'_>) -> egg::Id {
         match self {
+            ChunkPerm::Zero => expr!(ctx, 0 / 1),
             ChunkPerm::Leaf { id, .. } => *id,
+            ChunkPerm::Gate { when, then } => {
+                let mut acc = then.to_id(ctx);
+                for &(lit, pol) in when.iter() {
+                    let zero = expr!(ctx, 0 / 1);
+                    let arms = match pol {
+                        Polarity::Positive => [lit, acc, zero],
+                        Polarity::Negative => [lit, zero, acc],
+                    };
+                    acc = ctx.add(Symbolic::Ite(arms));
+                }
+                acc
+            }
             ChunkPerm::Select { cond, then, els } => {
                 let t = then.to_id(ctx);
                 let e = els.to_id(ctx);
@@ -266,26 +438,28 @@ impl ChunkPerm {
     pub fn as_leaf(&self) -> Option<egg::Id> {
         match self {
             ChunkPerm::Leaf { id, .. } => Some(*id),
-            ChunkPerm::Select { .. } => None,
+            _ => None,
         }
     }
 
-    /// Visit every leaf amount id **with the branch conditions that reach it** —
-    /// the `Select` conditions on the path from the root, each with the polarity
-    /// of the arm taken.
+    /// Visit every non-zero leaf amount id **with the branch conditions that
+    /// reach it** — the conditions on the path from the root, outermost first,
+    /// each with the polarity of the arm taken.
     ///
     /// A leaf only describes the permission *under its own arm*, so any fact
-    /// stated about it must be gated by that cube. [`Self::for_each_leaf`] drops
-    /// this, which is sound only while every leaf independently satisfies the
-    /// fact being stated.
-    fn for_each_leaf_under(&self, f: &mut impl FnMut(egg::Id, &[(egg::Id, Polarity)])) {
-        fn go(
-            p: &ChunkPerm,
-            path: &mut Vec<(egg::Id, Polarity)>,
-            f: &mut impl FnMut(egg::Id, &[(egg::Id, Polarity)]),
-        ) {
+    /// stated about it must be gated by that cube. `Zero` arms hold nothing and
+    /// are skipped.
+    fn for_each_leaf_under(&self, f: &mut impl FnMut(egg::Id, &[Lit])) {
+        fn go(p: &ChunkPerm, path: &mut Vec<Lit>, f: &mut impl FnMut(egg::Id, &[Lit])) {
             match p {
+                ChunkPerm::Zero => {}
                 ChunkPerm::Leaf { id, .. } => f(*id, path),
+                ChunkPerm::Gate { when, then } => {
+                    let n = path.len();
+                    path.extend(when.iter().rev());
+                    go(then, path, f);
+                    path.truncate(n);
+                }
                 ChunkPerm::Select { cond, then, els } => {
                     path.push((*cond, Polarity::Positive));
                     go(then, path, f);
@@ -300,132 +474,23 @@ impl ChunkPerm {
     }
 
     /// A representative e-class id for debug display, WITHOUT mutating the graph
-    /// (a `Leaf`'s id, or a `Select`'s condition). Viz only — not a real perm id.
-    fn repr_id(&self) -> egg::Id {
+    /// (a `Leaf`'s id, or a branch's condition); `None` for `Zero`, which has no
+    /// e-class until lowered. Viz and tests only — not a real perm id.
+    fn repr_id(&self) -> Option<egg::Id> {
         match self {
-            ChunkPerm::Leaf { id, .. } => *id,
-            ChunkPerm::Select { cond, .. } => *cond,
+            ChunkPerm::Zero => None,
+            ChunkPerm::Leaf { id, .. } => Some(*id),
+            ChunkPerm::Gate { when, .. } => when.last().map(|&(c, _)| c),
+            ChunkPerm::Select { cond, .. } => Some(*cond),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Guard cube algebra
-//
-// A presence guard is a flat conjunctive cube of e-class literals ([`HeapPc`]).
-// These four operations are the whole vocabulary over it. They live here, beside
-// the private [`Chunk::guard`] field they read, so the encapsulation the accessors
-// below establish is not leaked back out to every caller that needs to compare or
-// extend a cube.
-// ---------------------------------------------------------------------------
-
-/// The conjunction of two presence cubes, or `None` when they are **disjoint** —
-/// some literal occurs in both with opposite polarity, so the two chunks are
-/// never held in the same state and no joint fact about them may be stated.
-///
-/// Decided in Rust by e-class identity rather than left to saturation: the
-/// complementary pair (`[c+]` and `[c−]`, the two one-sided chunks of a single
-/// join) is exactly the case that must be dropped, and dropping it must not
-/// depend on an `ite`-idempotence rewrite firing.
-fn cube_meet(
-    ctx: &VerifyContext<'_>,
-    a: &[(egg::Id, Polarity)],
-    b: &[(egg::Id, Polarity)],
-) -> Option<Vec<(egg::Id, Polarity)>> {
-    let mut out: Vec<(egg::Id, Polarity)> = a.to_vec();
-    for (id, pol) in b {
-        let c = ctx.egraph.find(*id);
-        match out.iter().find(|(i, _)| ctx.egraph.find(*i) == c) {
-            Some((_, p)) if p == pol => {}
-            Some(_) => return None,
-            None => out.push((*id, *pol)),
-        }
-    }
-    Some(out)
-}
-
-/// Whether `cube` entails `sub`: every literal of `sub` already appears in `cube`
-/// with the same polarity, so `sub` holds wherever `cube` does. Syntactic on
-/// e-classes, like [`cube_eq`] — no prove, no saturation.
-fn cube_entails(
-    ctx: &VerifyContext<'_>,
-    cube: &[(egg::Id, Polarity)],
-    sub: &[(egg::Id, Polarity)],
-) -> bool {
-    sub.iter().all(|(id, pol)| {
-        let c = ctx.egraph.find(*id);
-        cube.iter()
-            .any(|(i, p)| p == pol && ctx.egraph.find(*i) == c)
-    })
-}
-
-/// Whether `cube` holds wherever `pc` does: each literal is in `pc` or proven
-/// under it (a fact assumed earlier on the path). The semantic counterpart of
-/// [`cube_entails`], for cubes `reach.rs` minimised differently.
-fn cube_holds(
-    ctx: &mut VerifyContext<'_>,
-    pc: &[(egg::Id, Polarity)],
-    cube: &[(egg::Id, Polarity)],
-) -> bool {
-    cube.iter().all(|&(id, pol)| {
-        if cube_entails(ctx, pc, &[(id, pol)]) {
-            return true;
-        }
-        let goal = match pol {
-            Polarity::Positive => id,
-            Polarity::Negative => expr!(ctx, { id } == false),
-        };
-        ctx.prove_under_pc(goal, pc)
-    })
-}
-
-/// Set-equality of two guard cubes under canonical e-classes (order-insensitive;
-/// guards are small).
-fn cube_eq(ctx: &VerifyContext<'_>, a: &[(egg::Id, Polarity)], b: &[(egg::Id, Polarity)]) -> bool {
-    a.len() == b.len()
-        && a.iter().all(|(ia, pa)| {
-            let ca = ctx.egraph.find(*ia);
-            b.iter()
-                .any(|(ib, pb)| pa == pb && ctx.egraph.find(*ib) == ca)
-        })
-}
-
-/// Append `lit` to a guard cube (idempotent under canonical e-classes).
-fn cube_push(
-    ctx: &VerifyContext<'_>,
-    base: &[(egg::Id, Polarity)],
-    lit: (egg::Id, Polarity),
-) -> HeapPc {
-    let c = ctx.egraph.find(lit.0);
-    if base
-        .iter()
-        .any(|(i, p)| *p == lit.1 && ctx.egraph.find(*i) == c)
-    {
-        return Rc::from(base.to_vec());
-    }
-    let mut v = base.to_vec();
-    v.push(lit);
-    Rc::from(v)
-}
-
-/// Materialize `guard ? perm : 0`. With an empty guard this is `perm` unchanged
-/// (no node minted), which is why the unconditional hot path pays nothing for
-/// gating. Prefer [`Chunk::gated_perm`]; this free form is for the two callers
-/// that hold a [`ChunkPerm`] without its chunk.
-fn gate_perm_by_guard(
-    ctx: &mut VerifyContext<'_>,
-    perm: &ChunkPerm,
-    guard: &[(egg::Id, Polarity)],
-) -> ChunkPerm {
-    let mut acc = perm.clone();
-    for (id, pol) in guard {
-        let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-        acc = match pol {
-            Polarity::Positive => ChunkPerm::select(ctx, *id, acc, zero),
-            Polarity::Negative => ChunkPerm::select(ctx, *id, zero, acc),
-        };
-    }
-    acc
+/// `guard ? perm : 0`, as a [`ChunkPerm::Gate`]. With an empty guard this is
+/// `perm` unchanged. Prefer [`Chunk::gated_perm`]; this free form is for the
+/// callers that hold a [`ChunkPerm`] without its chunk.
+fn gate_perm_by_guard(ctx: &VerifyContext<'_>, perm: &ChunkPerm, guard: &[Lit]) -> ChunkPerm {
+    ChunkPerm::gate(ctx, guard, perm.clone())
 }
 
 /// The **kind** of a heap location: a field/predicate group, the held value
@@ -479,7 +544,7 @@ pub(crate) struct Chunk {
     /// Private for the same reason as `perm`: the two are only meaningful
     /// together. Read it through [`Chunk::guard`], and prefer the derived
     /// [`Chunk::presence_cube`] / [`Chunk::pc_entails_guard`] where they fit.
-    guard: HeapPc,
+    guard: Cube,
     /// Recipe provenance of `value` — the recipe-space temp a certificate walk
     /// (function/resource verification) associates with the held value, so a
     /// later `Deref` purifies to the pure term this chunk was produced from.
@@ -504,7 +569,7 @@ impl Chunk {
             addr,
             perm,
             value,
-            guard: Rc::from(Vec::new()),
+            guard: Cube::empty(),
             recipe: None,
         }
     }
@@ -515,19 +580,19 @@ impl Chunk {
     }
 
     /// This chunk's residual presence guard (relative to the heap `pc`).
-    fn guard(&self) -> &[(egg::Id, Polarity)] {
+    fn guard(&self) -> &Cube {
         &self.guard
     }
 
-    /// This chunk's guard as a shared [`HeapPc`], for re-attaching to a chunk
+    /// This chunk's guard as a shared [`Cube`], for re-attaching to a chunk
     /// derived from it ([`Chunk::with_guard`]). `Rc` clone — O(1), unlike
     /// rebuilding one from [`Chunk::guard`].
-    fn guard_pc(&self) -> HeapPc {
+    fn guard_pc(&self) -> Cube {
         self.guard.clone()
     }
 
     /// Return this chunk with residual presence guard `guard` (structural share).
-    fn with_guard(mut self, guard: HeapPc) -> Self {
+    fn with_guard(mut self, guard: Cube) -> Self {
         self.guard = guard;
         self
     }
@@ -571,24 +636,20 @@ impl Chunk {
     /// The cube this chunk is actually present under here: `pc ∧ guard`, or
     /// `None` when the two are disjoint — the chunk is unreachable in this state
     /// and states nothing.
-    fn presence_cube(
-        &self,
-        ctx: &VerifyContext<'_>,
-        pc: &[(egg::Id, Polarity)],
-    ) -> Option<Vec<(egg::Id, Polarity)>> {
-        cube_meet(ctx, pc, &self.guard)
+    fn presence_cube(&self, ctx: &VerifyContext<'_>, pc: &[Lit]) -> Option<Vec<Lit>> {
+        self.guard.within(ctx, pc)
     }
 
     /// Whether `pc` already entails this chunk's guard, i.e. the consume happens
     /// inside the very region the chunk is present in — so gating would be a
     /// no-op and the flat cube should be carried through untouched.
-    fn pc_entails_guard(&self, ctx: &VerifyContext<'_>, pc: &[(egg::Id, Polarity)]) -> bool {
-        cube_entails(ctx, pc, &self.guard)
+    fn pc_entails_guard(&self, ctx: &VerifyContext<'_>, pc: &[Lit]) -> bool {
+        self.guard.entailed_by(ctx, pc)
     }
 
     /// A representative e-class id for this chunk's amount, WITHOUT mutating the
     /// graph. Debug/tests only — not a real permission id.
-    pub(crate) fn perm_repr_id(&self) -> egg::Id {
+    pub(crate) fn perm_repr_id(&self) -> Option<egg::Id> {
         self.perm.repr_id()
     }
 }
@@ -627,11 +688,11 @@ struct QuantChunk {
     /// not gate the set's permission: every use of the heap inside the region
     /// it was built in establishes it, and a use outside that region is
     /// rehomed by [`Heap::at`], which extends `guard` instead.
-    pub(crate) pc: HeapPc,
+    pub(crate) pc: Cube,
     /// Presence guard, same role as `Chunk::guard`: the branch literals under
     /// which this set is held, empty at the inhale and extended per join by
     /// `merge_heaps`. It gates the set's permission.
-    pub(crate) guard: HeapPc,
+    pub(crate) guard: Cube,
     /// What was exhaled from this set, each under its own presence guard:
     /// whole chunk sets and single locations. A lookup
     /// subtracts their permission at the address from this set's own, so the
@@ -695,7 +756,7 @@ enum Taken {
     Single {
         addr: egg::Id,
         perm: ChunkPerm,
-        guard: HeapPc,
+        guard: Cube,
     },
     /// This set's share of an exhaled set `demand` that no single holder
     /// covered: the exhale split it greedily over every holder of `before`
@@ -709,20 +770,20 @@ enum Taken {
         demand: QuantChunk,
         before: Heap,
         holder: usize,
-        pc: HeapPc,
-        guard: HeapPc,
+        pc: Cube,
+        guard: Cube,
     },
 }
 
 impl QPTaken {
     /// This exhale, counted only where `lit` also holds. Still the same exhale.
-    fn under(&self, ctx: &VerifyContext<'_>, lit: (egg::Id, Polarity)) -> QPTaken {
+    fn under(&self, ctx: &VerifyContext<'_>, lit: Lit) -> QPTaken {
         let what = match &self.what {
             Taken::Set(s) => Taken::Set(s.under(ctx, lit)),
             Taken::Single { addr, perm, guard } => Taken::Single {
                 addr: *addr,
                 perm: perm.clone(),
-                guard: cube_push(ctx, guard, lit),
+                guard: guard.with(ctx, lit),
             },
             Taken::Share {
                 demand,
@@ -735,7 +796,7 @@ impl QPTaken {
                 before: before.clone(),
                 holder: *holder,
                 pc: pc.clone(),
-                guard: cube_push(ctx, guard, lit),
+                guard: guard.with(ctx, lit),
             },
         };
         QPTaken { id: self.id, what }
@@ -758,14 +819,14 @@ impl QuantChunk {
 
     /// What this set's body is evaluated under: the inhale's path condition
     /// and the branch literals it is held under since.
-    fn eval_pc(&self) -> Vec<(egg::Id, Polarity)> {
+    fn eval_pc(&self) -> Vec<Lit> {
         self.pc.iter().chain(self.guard.iter()).copied().collect()
     }
 
     /// This set, held only where `lit` also holds.
-    fn under(&self, ctx: &VerifyContext<'_>, lit: (egg::Id, Polarity)) -> QuantChunk {
+    fn under(&self, ctx: &VerifyContext<'_>, lit: Lit) -> QuantChunk {
         QuantChunk {
-            guard: cube_push(ctx, &self.guard, lit),
+            guard: self.guard.with(ctx, lit),
             ..self.clone()
         }
     }
@@ -803,7 +864,7 @@ pub struct Heap {
     /// consume, a write) inherit it; the walk rehomes a heap into the block
     /// that uses it ([`Heap::at`]) before building on it, so a result's region
     /// is that block's cube.
-    region: HeapPc,
+    region: Cube,
 }
 
 impl Heap {
@@ -813,15 +874,15 @@ impl Heap {
         Self {
             groups: im::HashMap::default(),
             qps: im::HashMap::default(),
-            region: Rc::from([]),
+            region: Cube::empty(),
         }
     }
 
     /// The empty heap of the region `region`: the start of a heap built for a
     /// block, such as a join's merge.
-    fn empty_in(region: &[(egg::Id, Polarity)]) -> Self {
+    fn empty_in(region: &[Lit]) -> Self {
         Self {
-            region: Rc::from(region),
+            region: Cube::from(region),
             ..Self::empty()
         }
     }
@@ -841,13 +902,13 @@ impl Heap {
     /// When `pc` establishes the whole region (every use from a block the heap's
     /// block dominates) only the region changes: `pc` implies the old one, so
     /// every guard means the same relative to it.
-    pub(crate) fn at(&self, ctx: &mut VerifyContext<'_>, pc: &[(egg::Id, Polarity)]) -> Heap {
-        let region: HeapPc = Rc::from(pc);
-        let missing: Vec<(egg::Id, Polarity)> = self
+    pub(crate) fn at(&self, ctx: &mut VerifyContext<'_>, pc: &[Lit]) -> Heap {
+        let region = Cube::from(pc);
+        let missing: Vec<Lit> = self
             .region
             .iter()
             .copied()
-            .filter(|&lit| !cube_holds(ctx, pc, &[lit]))
+            .filter(|&lit| !cond::lit_holds_under(ctx, pc, lit))
             .collect();
         if missing.is_empty() {
             return Heap {
@@ -862,7 +923,7 @@ impl Heap {
                 .map(|c| {
                     let guard = missing
                         .iter()
-                        .fold(c.guard_pc(), |g, &lit| cube_push(ctx, &g, lit));
+                        .fold(c.guard_pc(), |g, &lit| g.with(ctx, lit));
                     c.clone().with_guard(guard)
                 })
                 .collect();

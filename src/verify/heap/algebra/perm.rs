@@ -1,6 +1,10 @@
 //! Permission amounts: arithmetic over [`ChunkPerm`] and the proofs about it (sufficient, positive, write).
 
-use crate::verify::{context::VerifyContext, heap::ChunkPerm, lang::Symbolic};
+use crate::verify::{
+    context::VerifyContext,
+    heap::{ChunkPerm, Shape},
+    lang::Symbolic,
+};
 use crate::vmir::{BinOp, Bound, Literal, Polarity};
 
 /// [`perm_add`], but a leaf whose sum mentions a `wildcard` becomes a **fresh
@@ -51,9 +55,12 @@ pub(super) fn perm_add_wildcard(
     a: &ChunkPerm,
     b: &ChunkPerm,
 ) -> ChunkPerm {
-    match (a, b) {
-        (ChunkPerm::Leaf { id: x, wild: wx }, ChunkPerm::Leaf { id: y, wild: wy }) => {
-            let (x, y, wild) = (*x, *y, *wx || *wy);
+    match (a.shape(), b.shape()) {
+        // Nothing to add: the other summand is the sum.
+        (Shape::Zero, _) => b.clone(),
+        (_, Shape::Zero) => a.clone(),
+        (Shape::Leaf { id: x, wild: wx }, Shape::Leaf { id: y, wild: wy }) => {
+            let wild = wx || wy;
             let (xpos, ypos) = (perm_known_positive(ctx, x), perm_known_positive(ctx, y));
             if !wild || !(xpos || ypos) {
                 return ChunkPerm::Leaf {
@@ -78,20 +85,20 @@ pub(super) fn perm_add_wildcard(
             ctx.assume_all_guarded(facts, &[]);
             ChunkPerm::wild_leaf(s)
         }
-        // Descend on `a` (this arm also covers `Select`/`Select`).
-        (ChunkPerm::Select { cond, then, els }, other) => {
-            let ot = ChunkPerm::restrict(ctx, *cond, other.clone(), true);
-            let oe = ChunkPerm::restrict(ctx, *cond, other.clone(), false);
-            let t = perm_add_wildcard(ctx, then, &ot);
-            let e = perm_add_wildcard(ctx, els, &oe);
-            ChunkPerm::select(ctx, *cond, t, e)
+        // Descend on `a` (this arm also covers `Branch`/`Branch`).
+        (Shape::Branch { cond, then, els }, _) => {
+            let ot = ChunkPerm::restrict(ctx, cond, b.clone(), true);
+            let oe = ChunkPerm::restrict(ctx, cond, b.clone(), false);
+            let t = perm_add_wildcard(ctx, &then, &ot);
+            let e = perm_add_wildcard(ctx, &els, &oe);
+            ChunkPerm::select(ctx, cond, t, e)
         }
-        (other, ChunkPerm::Select { cond, then, els }) => {
-            let ot = ChunkPerm::restrict(ctx, *cond, other.clone(), true);
-            let oe = ChunkPerm::restrict(ctx, *cond, other.clone(), false);
-            let t = perm_add_wildcard(ctx, &ot, then);
-            let e = perm_add_wildcard(ctx, &oe, els);
-            ChunkPerm::select(ctx, *cond, t, e)
+        (_, Shape::Branch { cond, then, els }) => {
+            let ot = ChunkPerm::restrict(ctx, cond, a.clone(), true);
+            let oe = ChunkPerm::restrict(ctx, cond, a.clone(), false);
+            let t = perm_add_wildcard(ctx, &ot, &then);
+            let e = perm_add_wildcard(ctx, &oe, &els);
+            ChunkPerm::select(ctx, cond, t, e)
         }
     }
 }
@@ -195,17 +202,21 @@ fn prove_perm_leaves(
     pc_lits: &[(egg::Id, Polarity)],
     mk: &dyn Fn(&mut VerifyContext<'_>, egg::Id, &[(egg::Id, Polarity)]) -> bool,
 ) -> bool {
-    match perm {
-        ChunkPerm::Leaf { id, .. } => mk(ctx, *id, pc_lits),
-        ChunkPerm::Select { cond, then, els } => {
+    match perm.shape() {
+        Shape::Zero => {
+            let zero = expr!(ctx, 0 / 1);
+            mk(ctx, zero, pc_lits)
+        }
+        Shape::Leaf { id, .. } => mk(ctx, id, pc_lits),
+        Shape::Branch { cond, then, els } => {
             let mut pc_t = pc_lits.to_vec();
-            pc_t.push((*cond, Polarity::Positive));
-            if !prove_perm_leaves(ctx, then, &pc_t, mk) {
+            pc_t.push((cond, Polarity::Positive));
+            if !prove_perm_leaves(ctx, &then, &pc_t, mk) {
                 return false;
             }
             let mut pc_e = pc_lits.to_vec();
-            pc_e.push((*cond, Polarity::Negative));
-            prove_perm_leaves(ctx, els, &pc_e, mk)
+            pc_e.push((cond, Polarity::Negative));
+            prove_perm_leaves(ctx, &els, &pc_e, mk)
         }
     }
 }
@@ -254,32 +265,33 @@ pub(in crate::verify::heap) fn prove_sufficient_aligned(
     needed: &ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> bool {
-    match needed {
-        ChunkPerm::Leaf { id: n, .. } => {
-            // Nothing demanded on this arm: every held amount is ≥ 0.
-            if let Some(r) = known_real(ctx, *n) {
+    match needed.shape() {
+        // Nothing demanded on this arm: every held amount is ≥ 0.
+        Shape::Zero => true,
+        Shape::Leaf { id: n, .. } => {
+            if let Some(r) = known_real(ctx, n) {
                 if r <= num::BigRational::from(num::BigInt::from(0)) {
                     return true;
                 }
             }
-            prove_sufficient(ctx, held, *n, pc_lits)
+            prove_sufficient(ctx, held, n, pc_lits)
         }
-        ChunkPerm::Select { cond, then, els } => {
+        Shape::Branch { cond, then, els } => {
             // The demand's own branch, taken both ways: `held ≥ needed` follows by
             // case analysis. `restrict` aligns the held side — it takes the matching
             // arm when held branches on the same condition class and carries the
             // whole tree in when it does not, so an unrelated held structure degrades
             // to today's behaviour rather than being mishandled.
-            let ht = ChunkPerm::restrict(ctx, *cond, held.clone(), true);
+            let ht = ChunkPerm::restrict(ctx, cond, held.clone(), true);
             let mut pc_t = pc_lits.to_vec();
-            pc_t.push((*cond, Polarity::Positive));
-            if !prove_sufficient_aligned(ctx, &ht, then, &pc_t) {
+            pc_t.push((cond, Polarity::Positive));
+            if !prove_sufficient_aligned(ctx, &ht, &then, &pc_t) {
                 return false;
             }
-            let he = ChunkPerm::restrict(ctx, *cond, held.clone(), false);
+            let he = ChunkPerm::restrict(ctx, cond, held.clone(), false);
             let mut pc_e = pc_lits.to_vec();
-            pc_e.push((*cond, Polarity::Negative));
-            prove_sufficient_aligned(ctx, &he, els, &pc_e)
+            pc_e.push((cond, Polarity::Negative));
+            prove_sufficient_aligned(ctx, &he, &els, &pc_e)
         }
     }
 }
@@ -424,27 +436,28 @@ pub(in crate::verify::heap) fn perm_add(
     a: &ChunkPerm,
     b: &ChunkPerm,
 ) -> ChunkPerm {
-    match (a, b) {
-        (ChunkPerm::Leaf { id: x, wild: wx }, ChunkPerm::Leaf { id: y, wild: wy }) => {
-            ChunkPerm::Leaf {
-                id: ctx.add(Symbolic::Binary(BinOp::AddR, [*x, *y])),
-                wild: *wx || *wy,
-            }
+    match (a.shape(), b.shape()) {
+        // Nothing to add: the other summand is the sum.
+        (Shape::Zero, _) => b.clone(),
+        (_, Shape::Zero) => a.clone(),
+        (Shape::Leaf { id: x, wild: wx }, Shape::Leaf { id: y, wild: wy }) => ChunkPerm::Leaf {
+            id: ctx.add(Symbolic::Binary(BinOp::AddR, [x, y])),
+            wild: wx || wy,
+        },
+        // Descend on `a` (this arm also covers `Branch`/`Branch`).
+        (Shape::Branch { cond, then, els }, _) => {
+            let ot = ChunkPerm::restrict(ctx, cond, b.clone(), true);
+            let oe = ChunkPerm::restrict(ctx, cond, b.clone(), false);
+            let t = perm_add(ctx, &then, &ot);
+            let e = perm_add(ctx, &els, &oe);
+            ChunkPerm::select(ctx, cond, t, e)
         }
-        // Descend on `a` (this arm also covers `Select`/`Select`).
-        (ChunkPerm::Select { cond, then, els }, other) => {
-            let ot = ChunkPerm::restrict(ctx, *cond, other.clone(), true);
-            let oe = ChunkPerm::restrict(ctx, *cond, other.clone(), false);
-            let t = perm_add(ctx, then, &ot);
-            let e = perm_add(ctx, els, &oe);
-            ChunkPerm::select(ctx, *cond, t, e)
-        }
-        (other, ChunkPerm::Select { cond, then, els }) => {
-            let ot = ChunkPerm::restrict(ctx, *cond, other.clone(), true);
-            let oe = ChunkPerm::restrict(ctx, *cond, other.clone(), false);
-            let t = perm_add(ctx, &ot, then);
-            let e = perm_add(ctx, &oe, els);
-            ChunkPerm::select(ctx, *cond, t, e)
+        (_, Shape::Branch { cond, then, els }) => {
+            let ot = ChunkPerm::restrict(ctx, cond, a.clone(), true);
+            let oe = ChunkPerm::restrict(ctx, cond, a.clone(), false);
+            let t = perm_add(ctx, &ot, &then);
+            let e = perm_add(ctx, &oe, &els);
+            ChunkPerm::select(ctx, cond, t, e)
         }
     }
 }
@@ -456,17 +469,23 @@ pub(super) fn perm_sub(
     held: &ChunkPerm,
     needed: egg::Id,
 ) -> ChunkPerm {
-    match held {
+    match held.shape() {
+        // Taken from nothing: what is left is `0 - needed`, which is `0` exactly
+        // where nothing was needed.
+        Shape::Zero => {
+            let zero = expr!(ctx, 0 / 1);
+            ChunkPerm::leaf(ctx.add(Symbolic::Binary(BinOp::SubR, [zero, needed])))
+        }
         // The demand is concrete on this path (a wildcard demand goes to
         // `debit_wildcard`), so the remainder's provenance is the held side's.
-        ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
-            id: ctx.add(Symbolic::Binary(BinOp::SubR, [*id, needed])),
-            wild: *wild,
+        Shape::Leaf { id, wild } => ChunkPerm::Leaf {
+            id: ctx.add(Symbolic::Binary(BinOp::SubR, [id, needed])),
+            wild,
         },
-        ChunkPerm::Select { cond, then, els } => {
-            let t = perm_sub(ctx, then, needed);
-            let e = perm_sub(ctx, els, needed);
-            ChunkPerm::select(ctx, *cond, t, e)
+        Shape::Branch { cond, then, els } => {
+            let t = perm_sub(ctx, &then, needed);
+            let e = perm_sub(ctx, &els, needed);
+            ChunkPerm::select(ctx, cond, t, e)
         }
     }
 }
@@ -492,15 +511,17 @@ pub(in crate::verify::heap) fn perm_sub_aligned(
     held: &ChunkPerm,
     needed: &ChunkPerm,
 ) -> ChunkPerm {
-    match needed {
+    match needed.shape() {
+        // Nothing demanded on this arm: the held amount is untouched.
+        Shape::Zero => held.clone(),
         // Demand is flat: nothing to align against, so this is `perm_sub`.
-        ChunkPerm::Leaf { id: n, .. } => perm_sub(ctx, held, *n),
-        ChunkPerm::Select { cond, then, els } => {
-            let ht = ChunkPerm::restrict(ctx, *cond, held.clone(), true);
-            let he = ChunkPerm::restrict(ctx, *cond, held.clone(), false);
-            let t = perm_sub_aligned(ctx, &ht, then);
-            let e = perm_sub_aligned(ctx, &he, els);
-            ChunkPerm::select(ctx, *cond, t, e)
+        Shape::Leaf { id: n, .. } => perm_sub(ctx, held, n),
+        Shape::Branch { cond, then, els } => {
+            let ht = ChunkPerm::restrict(ctx, cond, held.clone(), true);
+            let he = ChunkPerm::restrict(ctx, cond, held.clone(), false);
+            let t = perm_sub_aligned(ctx, &ht, &then);
+            let e = perm_sub_aligned(ctx, &he, &els);
+            ChunkPerm::select(ctx, cond, t, e)
         }
     }
 }
@@ -509,10 +530,9 @@ pub(in crate::verify::heap) fn perm_sub_aligned(
 /// every branch, so it can be dropped). Const-fold only, no `Select` in the graph.
 pub(super) fn perm_all_zero(ctx: &VerifyContext<'_>, perm: &ChunkPerm) -> bool {
     match perm {
-        ChunkPerm::Leaf { id, .. } => matches!(
-            ctx.egraph[ctx.egraph.find(*id)].data.known(),
-            Some(Literal::Real(r)) if *r == num::BigRational::from(num::BigInt::from(0))
-        ),
+        ChunkPerm::Zero | ChunkPerm::Leaf { .. } => perm.is_zero(ctx),
+        // A gate is zero off its cube, so it is all zero exactly when its body is.
+        ChunkPerm::Gate { then, .. } => perm_all_zero(ctx, then),
         ChunkPerm::Select { then, els, .. } => perm_all_zero(ctx, then) && perm_all_zero(ctx, els),
     }
 }

@@ -120,7 +120,8 @@ mod tests {
         let expected_perm = ctx.add(Symbolic::Binary(BinOp::AddR, [p1, p2]));
         ctx.saturate();
         assert_eq!(
-            ctx.egraph.find(chunk.perm_repr_id()),
+            ctx.egraph
+                .find(chunk.perm_repr_id().expect("chunk holds no permission")),
             ctx.egraph.find(expected_perm)
         );
         // Both fractions positive (1, 2) → agreement axiom fuses the values.
@@ -190,7 +191,8 @@ mod tests {
             .expect("merged chunk missing");
         ctx.saturate();
         assert_eq!(
-            ctx.egraph.find(chunk.perm_repr_id()),
+            ctx.egraph
+                .find(chunk.perm_repr_id().expect("chunk holds no permission")),
             ctx.egraph.find(one),
             "(1 - p) + p must collapse back to the full permission"
         );
@@ -364,7 +366,8 @@ mod tests {
         let expected_perm = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         ctx.egraph.rebuild();
         assert_eq!(
-            ctx.egraph.find(chunk.perm_repr_id()),
+            ctx.egraph
+                .find(chunk.perm_repr_id().expect("chunk holds no permission")),
             ctx.egraph.find(expected_perm)
         );
         assert_eq!(ctx.egraph.find(v1), ctx.egraph.find(v2));
