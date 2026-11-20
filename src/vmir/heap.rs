@@ -233,6 +233,15 @@ pub enum HeapInst {
         a: HeapVal,
         b: HeapVal,
     },
+    /// `h := label <base>` — `base` unchanged, named as the heap **of this
+    /// block**: emitted at `label L`, so `old[L]` reads a temp defined where `L`
+    /// is. A heap temp exists only where its defining block is reached (its
+    /// region), and `label L`'s entry heap is usually a predecessor's temp,
+    /// defined on a wider region. Read through that temp, `old[L]` would see the
+    /// label heap as held on paths that never reached `L`.
+    Label {
+        base: HeapVal,
+    },
 }
 
 impl HeapInst {
@@ -431,6 +440,7 @@ impl<'a> Display for VmirDisplay<'a, &'a HeapInst> {
                 els_h,
             } => write!(f, "merge {cond} ? {then_h} : {els_h}"),
             HeapInst::Union { a, b } => write!(f, "union {a} {b}"),
+            HeapInst::Label { base } => write!(f, "label {base}"),
 
             HeapInst::SubForall { base, q } => write!(f, "{base} - {}", self.with(&**q)),
         }

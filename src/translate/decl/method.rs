@@ -618,11 +618,6 @@ pub(crate) fn lower_method(
             h_in
         };
 
-        // `label L` captures the heap at block entry for later `old[L]`.
-        if let Some(l) = cfg.blocks[bid].label {
-            labeled.insert(l, h_in);
-        }
-
         // --- body phase: lower the block's statements and terminator under pc ---
         let blk = &cfg.blocks[bid];
         let body_mark = sink.insts.len();
@@ -631,6 +626,13 @@ pub(crate) fn lower_method(
         // elided from each `Inst.pc`, which is a delta over it. `Block.cube` below
         // is the single place it is recorded.
         let (new_heap, cond): (HeapVal, Option<Val>) = sink.with_ambient_cube(&pc, |sink| {
+            // `label L` captures the heap at block entry for later `old[L]`, as
+            // a temp of this block (see `HeapInst::Label`): a read of it then
+            // holds its chunks only where this block was reached.
+            if let Some(l) = blk.label {
+                let h_l = sink.emit_heap(HeapInst::Label { base: h_in });
+                labeled.insert(l, h_l);
+            }
             let mut heap = h_in;
             for stmt in &blk.stmts {
                 heap = lower_stmt(b, &mut env, sink, heap, baseline, &mut labeled, stmt)?;

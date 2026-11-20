@@ -1,0 +1,19 @@
+// Control for `failing/old_label_not_reached`: `L` sits in the `d` arm, and so do
+// its reads, inside the same arm and in a nested branch of it. Rehoming the label
+// heap onto those blocks must change nothing.
+//
+// Must VERIFY.
+field f: Int
+
+method m(a: Ref, d: Bool, e: Bool)
+  requires acc(a.f)
+  ensures acc(a.f)
+{
+  if (d) {
+    a.f := 5
+    label L
+    a.f := 6
+    if (e) { assert old[L](a.f) == 5 } else { a.f := old[L](a.f) + 1 }
+    assert old[L](a.f) == 5
+  }
+}

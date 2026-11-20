@@ -1,7 +1,8 @@
 use crate::dhash::HashMap;
 use crate::verify::eval::{
     EvalState, OPERAND_RECIPE, collect_pc_lits, display_heaps, eval_perm, eval_perm_inst,
-    eval_perm_structural, eval_pure_inst, format_inst, get_heap, pc_lits_raw, perm_recipe,
+    eval_perm_structural, eval_pure_inst, format_inst, get_heap, get_heap_unrehomed, pc_lits_raw,
+    perm_recipe,
 };
 use crate::verify::heap::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
 use std::rc::Rc;
@@ -183,8 +184,9 @@ fn eval_heap_inst(
         // location add and values there must agree. Contrast `Merge`, which
         // selects between mutually exclusive predecessor states.
         HeapInst::Union { a, b } => {
-            let ha = get_heap(state, a).clone();
-            let hb = get_heap(state, b).clone();
+            let region = state.region(ctx);
+            let ha = get_heap(ctx, state, a, &region);
+            let hb = get_heap(ctx, state, b, &region);
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
@@ -194,6 +196,12 @@ fn eval_heap_inst(
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
             Ok(ha.union(ctx, &hb, &pc_lits))
+        }
+        // The heap at a `label`: unchanged, but defined in the label's block,
+        // so its region is that block's cube (see `HeapInst::Label`).
+        HeapInst::Label { base } => {
+            let region = state.region(ctx);
+            Ok(get_heap(ctx, state, base, &region))
         }
         // Block-IR heap join: structural per-chunk SELECT of the two predecessor
         // exit heaps. Emitted at every CFG join by the block lowering.
@@ -206,14 +214,23 @@ fn eval_heap_inst(
             // `bb_unreach` after `inhale false`) is dropped outright — selecting
             // a `0`-leaf against it would need an exhaustiveness case split.
             match state.join_arms_dead.unwrap_or((false, false)) {
-                (false, true) => return Ok(get_heap(state, then_h)),
-                (true, false) => return Ok(get_heap(state, els_h)),
+                (false, true) => {
+                    let region = state.region(ctx);
+                    return Ok(get_heap(ctx, state, then_h, &region));
+                }
+                (true, false) => {
+                    let region = state.region(ctx);
+                    return Ok(get_heap(ctx, state, els_h, &region));
+                }
                 _ => {}
             }
             let cond_id = state.get_val(ctx, cond);
-            let h_then = get_heap(state, then_h);
-            let h_els = get_heap(state, els_h);
-            Ok(Heap::merge(ctx, cond_id, &h_then, &h_els))
+            // Unrehomed: the merge rehomes each arm itself, appending the arm
+            // literal to every chunk that arm holds.
+            let h_then = get_heap_unrehomed(state, then_h);
+            let h_els = get_heap_unrehomed(state, els_h);
+            let region = state.region(ctx);
+            Ok(Heap::merge(ctx, cond_id, &h_then, &h_els, &region))
         }
         // `base + acc(loc, perm)` / `base - acc(loc, perm)`.
         HeapInst::Add {
@@ -227,7 +244,8 @@ fn eval_heap_inst(
                 HeapInst::Add { bind, .. } => Some(bind),
                 _ => None,
             };
-            let base_h = get_heap(state, base);
+            let region = state.region(ctx);
+            let base_h = get_heap(ctx, state, base, &region);
             let l = state
                 .loc(ctx, loc)
                 .expect("acc location must be Addr-typed");
@@ -341,7 +359,8 @@ fn eval_heap_inst(
                 }
             };
             let pc_lits = pc_lits_raw(ctx, state, pc);
-            get_heap(state, base).produce(ctx, Access::Set(spec), value, &pc_lits)
+            let region = state.region(ctx);
+            get_heap(ctx, state, base, &region).produce(ctx, Access::Set(spec), value, &pc_lits)
         }
         // Exhale a chunk set: one held set must cover it.
         HeapInst::SubForall { base, q } => {
@@ -352,7 +371,8 @@ fn eval_heap_inst(
             }
             let spec = quant_spec_of(state, q, Injectivity::Check);
             let pc_lits = pc_lits_raw(ctx, state, pc);
-            let base_h = get_heap(state, base);
+            let region = state.region(ctx);
+            let base_h = get_heap(ctx, state, base, &region);
             Ok(base_h
                 .consume(ctx, Access::Set(spec), ConsumeMode::Take, &pc_lits)?
                 .0)
@@ -369,7 +389,8 @@ fn eval_heap_inst(
                 .expect("assign location must be Addr-typed");
             let new_val = state.get_val(ctx, val);
             let pc_lits = pc_lits_raw(ctx, state, pc);
-            get_heap(state, heap).write(ctx, &l, new_val, &pc_lits)
+            let region = state.region(ctx);
+            get_heap(ctx, state, heap, &region).write(ctx, &l, new_val, &pc_lits)
         }
     }
 }
@@ -1039,7 +1060,8 @@ fn eval_sub_yield(
     else {
         unreachable!("eval_sub_yield called on a non-yielding-Sub instruction");
     };
-    let base_h = get_heap(state, base);
+    let region = state.region(ctx);
+    let base_h = get_heap(ctx, state, base, &region);
     let l = state
         .loc(ctx, loc)
         .expect("acc location must be Addr-typed");
@@ -1133,10 +1155,11 @@ fn eval_resource_op(
             ..
         }
     );
-    let base_h = get_heap(state, base);
+    let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
+    let region = state.region(ctx);
+    let base_h = get_heap(ctx, state, base, &region);
     let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
     let scale = eval_perm(ctx, state, perm);
-    let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
     // Inhale: produce fresh chunks, assume the bool guarded by `0 < scale`
     // (it carries no path condition — the branch lives in the perm scale).
     // Exhale: consume the held chunks, assert the bool under `pc`.
@@ -2095,6 +2118,7 @@ pub(crate) fn verify_method(
             )),
             _ => None,
         };
+        state.block_cube = Some(block.cube.clone());
         walk_body(
             &mut ctx,
             program,
@@ -2544,7 +2568,7 @@ fn inst_obligations(
         InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
             let perm = state.loc(ctx, loc).map(|l| {
                 // A chunk set's body evaluated once already, at its inhale.
-                get_heap(state, heap)
+                get_heap(ctx, state, heap, pc_lits)
                     .framing_perm(ctx, &l, pc_lits)
                     .unwrap_or_else(|e| {
                         panic!("quantified chunk body failed to re-evaluate: {e:?}")

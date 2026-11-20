@@ -1,0 +1,9 @@
+// Must FAIL.
+field f: Int
+
+method m(a: Ref)
+  requires acc(a.f)
+{
+  if (false) { a.f := 5; label L }
+  assert old[L](a.f) == 5
+}

@@ -3,7 +3,7 @@
 use super::*;
 use crate::dhash::HashSet;
 use crate::verify::heap::quantified_permissions::same_footprint;
-use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken, cube_entails};
+use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken, cube_holds};
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_push},
@@ -38,8 +38,9 @@ pub(in crate::verify::heap) fn merge_heaps(
     cond: egg::Id,
     h_then: &Heap,
     h_els: &Heap,
+    region: &[(egg::Id, Polarity)],
 ) -> Heap {
-    let mut out = Heap::empty();
+    let mut out = Heap::empty_in(region);
     let mut kinds: Vec<LocationKind> = h_then.kinds().cloned().collect();
     for k in h_els.kinds() {
         if !kinds.contains(k) {
@@ -447,24 +448,5 @@ fn give_back(
         recipe,
         restored: restored.into(),
         ..x.clone()
-    })
-}
-
-/// Whether `cube` holds wherever `pc` does: each literal is in `pc` or proven
-/// under it (a fact assumed earlier on the path).
-fn cube_holds(
-    ctx: &mut VerifyContext<'_>,
-    pc: &[(egg::Id, Polarity)],
-    cube: &[(egg::Id, Polarity)],
-) -> bool {
-    cube.iter().all(|&(id, pol)| {
-        if cube_entails(ctx, pc, &[(id, pol)]) {
-            return true;
-        }
-        let goal = match pol {
-            Polarity::Positive => id,
-            Polarity::Negative => expr!(ctx, { id } == false),
-        };
-        ctx.prove_under_pc(goal, pc)
     })
 }

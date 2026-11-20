@@ -362,13 +362,16 @@ impl Heap {
 
     /// The heap after a branch: `then` where `cond` holds, `els` elsewhere.
     /// Chunk sets are kept from both arms, each under its arm's literal.
+    /// `region` is the join block's cube. The arms are taken as built, not
+    /// rehomed: appending each arm's literal is the rehoming.
     pub(crate) fn merge(
         ctx: &mut VerifyContext<'_>,
         cond: egg::Id,
         then: &Heap,
         els: &Heap,
+        region: &[(egg::Id, Polarity)],
     ) -> Heap {
-        merge_heaps(ctx, cond, then, els)
+        merge_heaps(ctx, cond, then, els, region)
     }
 
     /// The sum of two heaps held at once.
