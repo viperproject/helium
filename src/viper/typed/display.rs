@@ -131,7 +131,6 @@ impl ShowExt for FuncEnsuresExt {
     fn fmt_ext(&self, f: &mut Formatter<'_>, interner: &Interner) -> fmt::Result {
         match self {
             FuncEnsuresExt::Heap(node) => fmt_heap_node(node, f, interner),
-            FuncEnsuresExt::Result => write!(f, "result"),
             FuncEnsuresExt::Old(e) => write!(f, "old({})", Show::new(e, interner)),
             FuncEnsuresExt::Forall(q) => fmt_forall(q, f, interner),
         }

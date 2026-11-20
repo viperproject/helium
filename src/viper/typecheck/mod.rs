@@ -356,7 +356,6 @@ trait PureExt: Sized {
         known_labels: &HashSet<Spur>,
         interner: &Interner,
     ) -> Result<Self, TypeError>;
-    fn lower_result() -> Result<Self, TypeError>;
     fn lower_perm(resource: ResourceExp<Self>) -> Result<Self, TypeError>;
     /// Lift a heap-reading construct (`e.f`, `function` call, `unfolding`) into
     /// this context's extension. A pure context (`!`) rejects it.
@@ -413,9 +412,6 @@ impl PureExt for typed::AxiomExt {
     ) -> Result<Self, TypeError> {
         Err(TypeError::IllegalOldUsage)
     }
-    fn lower_result() -> Result<Self, TypeError> {
-        Err(TypeError::IllegalResultUsage)
-    }
     fn lower_perm(_resource: ResourceExp<Self>) -> Result<Self, TypeError> {
         Err(TypeError::PermissionInPureContext)
     }
@@ -448,9 +444,6 @@ impl PureExt for ! {
     ) -> Result<!, TypeError> {
         Err(TypeError::IllegalOldUsage)
     }
-    fn lower_result() -> Result<!, TypeError> {
-        Err(TypeError::IllegalResultUsage)
-    }
     fn lower_perm(_resource: ResourceExp<!>) -> Result<!, TypeError> {
         Err(TypeError::PermissionInPureContext)
     }
@@ -469,9 +462,6 @@ impl PureExt for typed::HeapExt {
         _interner: &Interner,
     ) -> Result<typed::HeapExt, TypeError> {
         Err(TypeError::IllegalOldUsage)
-    }
-    fn lower_result() -> Result<typed::HeapExt, TypeError> {
-        Err(TypeError::IllegalResultUsage)
     }
     fn lower_perm(_resource: ResourceExp<typed::HeapExt>) -> Result<typed::HeapExt, TypeError> {
         Err(TypeError::PermissionInPureContext)
@@ -504,9 +494,6 @@ impl PureExt for FuncEnsuresExt {
             None => Ok(FuncEnsuresExt::Old(inner)),
         }
     }
-    fn lower_result() -> Result<FuncEnsuresExt, TypeError> {
-        Ok(FuncEnsuresExt::Result)
-    }
     fn lower_perm(_resource: ResourceExp<FuncEnsuresExt>) -> Result<FuncEnsuresExt, TypeError> {
         Err(TypeError::PermissionInPureContext)
     }
@@ -537,9 +524,6 @@ impl PureExt for MethodEnsuresExt {
             Some(_) => Err(TypeError::IllegalLabeledOldUsage),
             None => Ok(MethodEnsuresExt::Old(inner)),
         }
-    }
-    fn lower_result() -> Result<MethodEnsuresExt, TypeError> {
-        Err(TypeError::IllegalResultUsage)
     }
     fn lower_perm(_resource: ResourceExp<MethodEnsuresExt>) -> Result<MethodEnsuresExt, TypeError> {
         Err(TypeError::PermissionInPureContext)
@@ -575,9 +559,6 @@ impl PureExt for MethodBodyExt {
             }
         }
         Ok(MethodBodyExt::Old(label, inner))
-    }
-    fn lower_result() -> Result<MethodBodyExt, TypeError> {
-        Err(TypeError::IllegalResultUsage)
     }
     fn lower_perm(resource: ResourceExp<MethodBodyExt>) -> Result<MethodBodyExt, TypeError> {
         Ok(MethodBodyExt::Perm(resource))
@@ -1529,7 +1510,14 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
 
             ExpKind::Ident(ident) => Ok(PureExpKind::Ident(lower_ident(ident))),
 
-            ExpKind::Result => Ok(PureExpKind::Ext(Ext::lower_result()?)),
+            // Typecheck admitted `result` only in a function postcondition,
+            // where translation binds it like a parameter.
+            ExpKind::Result => Ok(PureExpKind::Ident(Ident(
+                self.env
+                    .interner
+                    .get("result")
+                    .expect("interned by `finalize`"),
+            ))),
 
             ExpKind::Old(label, inner) => {
                 let inner_exp = self.lower_pure::<Ext>(inner)?;
@@ -3198,10 +3186,10 @@ method m(i: Int) returns (r: Int)
     }
 
     #[test]
-    fn forall_body_rejects_heap_old_result() {
-        // Quantifier innards are AxiomExt-typed in every host: heap derefs,
-        // `old`, and `result` inside a forall body are errors, not silently
-        // erased.
+    fn forall_body_rejects_heap_old() {
+        // Quantifier innards are AxiomExt-typed in every host: heap derefs and
+        // `old` inside a forall body are errors, not silently erased. `result`
+        // is an identifier, captured like any other.
         let field = run_pipeline(
             r#"
 field f: Int
@@ -3228,15 +3216,28 @@ method m(i: Int) ensures forall x: Int :: old(i) == x { }
 
         let res = run_pipeline(
             r#"
-function g(i: Int): Int ensures forall x: Int :: result == x { i }
+function h(x: Int): Int
+function g(i: Int): Int ensures forall x: Int :: {h(x)} h(x) == result { i }
 "#,
         );
-        assert!(
-            res.as_ref().is_err_and(|es| es
-                .iter()
-                .any(|e| matches!(e, TypeError::IllegalResultUsage))),
-            "expected IllegalResultUsage, got: {res:?}"
-        );
+        assert!(res.is_ok(), "expected Ok, got: {res:?}");
+    }
+
+    #[test]
+    fn axiom_rejects_result() {
+        // Only a function postcondition binds `result`; a domain axiom, bare or
+        // inside a `forall`, still rejects it.
+        for axiom in ["result == 0", "forall x: Int :: {foo(x)} foo(x) == result"] {
+            let res = run_pipeline(&format!(
+                "domain D {{ function foo(x: Int): Int  axiom {{ {axiom} }} }}"
+            ));
+            assert!(
+                res.as_ref().is_err_and(|es| es
+                    .iter()
+                    .any(|e| matches!(e, TypeError::IllegalResultUsage))),
+                "expected IllegalResultUsage for `{axiom}`, got: {res:?}"
+            );
+        }
     }
 
     #[test]

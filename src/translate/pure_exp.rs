@@ -31,10 +31,6 @@ pub(crate) struct HeapCtx<'a> {
     pub value: HeapVal,
     pub perm: HeapVal,
     pub old: Option<&'a OldHeaps<'a>>,
-    /// The function result `Val`, available only while lowering a function
-    /// postcondition (`FuncEnsuresExt::Result`); `None` everywhere else. Held by
-    /// reference so `HeapCtx` stays `Copy` (`Val` is not `Copy`).
-    pub result: Option<&'a Val>,
     /// Set while lowering a `forall` body. There is no heap in there (`value` and
     /// `perm` are the inert `Empty`) and there cannot be one: the body is compiled
     /// into a recipe the verifier rebuilds inside a rewrite rule, which can
@@ -50,7 +46,6 @@ impl<'a> HeapCtx<'a> {
             value: heap,
             perm: heap,
             old: Some(old),
-            result: None,
             in_quantifier: false,
         }
     }
@@ -1014,7 +1009,6 @@ fn lower_forall(
         value: HeapVal::Empty,
         perm: HeapVal::Empty,
         old: None,
-        result: None,
         in_quantifier: true,
     };
     let res = lower(b, &inner_env, &mut inner, hctx, &q.body)?;
@@ -1429,11 +1423,6 @@ impl PureExt for typed::FuncEnsuresExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::FuncEnsuresExt::Heap(node) => lower_heap_node(b, env, sink, hctx, ty, node),
-            // `result`: the function's return value, supplied by the ensures
-            // function's caller in the last parameter slot.
-            typed::FuncEnsuresExt::Result => hctx.result.cloned().ok_or(
-                TranslationError::Unsupported("`result` outside a function postcondition"),
-            ),
             // A function is single-state: `old(e)` reads the same (only) heap the
             // postcondition is framed by, so it re-reads `e` against the current
             // context.
@@ -1499,8 +1488,7 @@ fn call_contract(sink: &mut Sink, func: vmir::MemberId, args: Vec<Val>) -> Val {
 /// body / contract-function definition). `val_base` is the first free pure-temp
 /// counter (params, plus `result`/snapshot slots for a postcondition /
 /// heap-dependent function, occupy the lower temps); `heap` is the context heap
-/// the body reads from (`HeapVal::Empty` for a heap-free body); `result` is
-/// `Some` only for a postcondition function. When `snap_entry` is `Some`, the
+/// the body reads from (`HeapVal::Empty` for a heap-free body). When `snap_entry` is `Some`, the
 /// body opens with its bound `inhale` — reconstructing the precondition heap from
 /// the snapshot parameter (implicitly assuming the resource bool) — and that
 /// heap replaces `heap` as the body's value/perm heap. When `contract` is
@@ -1513,7 +1501,6 @@ pub(crate) fn lower_function_body<Ext: PureExt>(
     exp: &typed::TypedPureExp<Ext>,
     val_base: usize,
     heap: HeapVal,
-    result: Option<Val>,
     contract: Option<FnContract>,
     snap_entry: Option<SnapEntry>,
 ) -> Result<vmir::FunctionBody, TranslationError> {
@@ -1544,7 +1531,6 @@ pub(crate) fn lower_function_body<Ext: PureExt>(
         value: heap,
         perm: heap,
         old: None,
-        result: result.as_ref(),
         in_quantifier: false,
     };
     // Entry: assume the precondition. (Heap-dependent bodies skip this — the
@@ -1595,7 +1581,6 @@ pub(crate) fn lower_axiom_body(
         value: HeapVal::Empty,
         perm: HeapVal::Empty,
         old: None,
-        result: None,
         in_quantifier: false,
     };
     let res = lower(b, env, &mut sink, hctx, exp)?;

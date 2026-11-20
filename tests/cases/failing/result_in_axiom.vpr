@@ -1,0 +1,14 @@
+// `result` is bound only in a function postcondition. A domain axiom has no
+// result, so `result` there is a type error ("`result` not allowed in this
+// context"), inside a `forall` or not. Counterpart of
+// `passing/result_in_quantifier.vpr`, which accepts `result` inside a `forall`
+// in a function postcondition.
+domain D {
+  function foo(x: Int): Int
+
+  axiom { forall x: Int :: { foo(x) } foo(x) == result }
+}
+
+method client() {
+  assert foo(1) == foo(2)
+}
