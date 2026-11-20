@@ -1,0 +1,15 @@
+// An obligation that holds vacuously (its condition `x == 2` contradicts `x ==
+// 1`) does not make the block dead. The first `if` builds the working graph
+// before the branch.
+//
+// Must FAIL (`assert false`).
+
+domain D { function f(x: Int): Int }
+
+method v1(x: Int, z: Int)
+  requires x == 1
+{
+  if (x == z) { assert f(x) == f(z) }
+  assert (x == 2) ==> false
+  assert false
+}

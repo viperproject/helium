@@ -1,0 +1,18 @@
+// A fact of an arm inside a loop body does not reach the rest of the body. The
+// first `if` builds the working graph before the branch.
+//
+// Must FAIL (the assert after the arm).
+
+domain D { function f(x: Int): Int }
+
+method l2(x: Int, z: Int, n: Int)
+{
+  var i: Int := 0
+  if (x == z) { assert f(x) == f(z) }
+  while (i < n) invariant 0 <= i
+  {
+    if (i == 3) { inhale x == 5; assert f(x) == f(5) }
+    assert x == 5
+    i := i + 1
+  }
+}

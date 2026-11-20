@@ -1,0 +1,20 @@
+// A call in an arm releases the function's definition there; after the join the
+// unfolding is usable under the arm's condition. The first `if` builds the
+// working graph before the branch.
+//
+// Must verify.
+
+domain D { function f(x: Int): Int }
+function g(x: Int): Int
+  requires x > 0
+{ x + 1 }
+
+method r1(x: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x > 0
+    assert g(x) == x + 1
+  }
+  assert c ==> g(x) == x + 1
+}

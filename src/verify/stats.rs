@@ -69,7 +69,7 @@ pub struct VerifyStats {
     pub saturations: u64,
     /// `reduce()` calls (terminating reductions only).
     pub reduces: u64,
-    /// Scratch full-rule-set (non-ground) saturations on a throwaway clone —
+    /// Scratch full-rule-set (non-ground) saturations on a throwaway probe —
     /// `probe`-tier goal probes and forall-WD checks (`run_probe`). Disjoint from
     /// `saturations` (which counts only live persistent-graph runs).
     pub probe_saturations: u64,
@@ -83,15 +83,21 @@ pub struct VerifyStats {
     /// Rule runs abandoned by a `Runner` hook — the goal was settled, or the graph
     /// went contradictory, before the fixpoint. Counts iterations *not* spent.
     pub probe_early_stops: u64,
-    /// Per-block scratch e-graph: ground clones taken to build a block scratch (one per block that reaches
-    /// the `probe` tier), full-rule-set saturations of that shared scratch, and the egg
-    /// iterations they cost. `block_scratch_freehits` counts obligations
-    /// discharged straight off the saturated scratch with no per-obligation
-    /// clone (their pc was already implied by the block cube). All non-gated.
+    /// The method's working graph (`context::prove::WorkGraph`): ground copies
+    /// taken to build one (at most one per method), full-rule-set saturations of it,
+    /// and the egg iterations they cost. `block_scratch_freehits` counts
+    /// obligations discharged straight off it with no probe (their pc was already
+    /// implied by the block cube). All non-gated; the `block_scratch_*` names are
+    /// kept for baseline compatibility.
     pub block_scratch_clones: u64,
     pub block_scratch_saturations: u64,
     pub block_scratch_iterations: u64,
     pub block_scratch_freehits: u64,
+    /// Scopes the working graph opened (one per method block whose facts must not
+    /// outlive it), and the ground facts it re-asserted when closing them.
+    /// Non-gated.
+    pub work_scopes: u64,
+    pub work_replayed_facts: u64,
     /// total egg `Runner` iterations across all saturations/reductions/probes.
     pub sat_iterations: u64,
     /// Rule runs stopped by a termination bound (iteration or growth limit)
@@ -138,7 +144,7 @@ pub struct VerifyStats {
     pub prove_ite_decompose: u64,
     /// Non-deterministic timing (excluded from `Eq` / the gated snapshot).
     pub timing: TimingTrend,
-    /// Per-e-graph wall clock (ground vs block scratch vs probes vs clones).
+    /// Per-e-graph wall clock (ground vs working graph vs probes vs copies).
     pub graph_timing: GraphTimingTrend,
     /// Z3 rung wall clock: problem building vs solving.
     pub z3_timing: Z3TimingTrend,
@@ -159,17 +165,18 @@ impl PartialEq for TimingTrend {
 impl Eq for TimingTrend {}
 
 /// Wall-clock seconds attributed to each e-graph a run maintains, so a
-/// two-egraph run can be read as "how much went to ground vs the block scratch".
+/// two-egraph run can be read as "how much went to ground vs the working graph".
 /// Non-deterministic — a trend, never gated.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GraphTiming {
     /// `saturate()` + `reduce()` on the persistent ground graph.
     pub ground: f64,
-    /// `saturate_scratch()` + `reduce_scratch()` on the per-block scratch.
+    /// `saturate_work()` + `reduce_work()` on the working graph.
     pub scratch: f64,
-    /// `run_probe()` — throwaway clones (`probe`-tier goal probes, WD checks).
+    /// `run_probe()` — probes rolled back afterwards (`probe`-tier goal probes, WD
+    /// checks).
     pub probe: f64,
-    /// Building a block scratch: the ground clone plus the cube unions/rebuild.
+    /// Building the working graph: the ground copy plus the cube unions/rebuild.
     pub scratch_clone: f64,
 }
 
@@ -309,6 +316,8 @@ impl VerifyStats {
             block_scratch_saturations,
             block_scratch_iterations,
             block_scratch_freehits,
+            work_scopes,
+            work_replayed_facts,
             sat_iterations,
             sat_bound_stops,
             inst_deferred,
@@ -344,6 +353,8 @@ impl VerifyStats {
             ("block_scratch_saturations", n(block_scratch_saturations)),
             ("block_scratch_iterations", n(block_scratch_iterations)),
             ("block_scratch_freehits", n(block_scratch_freehits)),
+            ("work_scopes", n(work_scopes)),
+            ("work_replayed_facts", n(work_replayed_facts)),
             ("sat_iterations", n(sat_iterations)),
             ("sat_bound_stops", n(sat_bound_stops)),
             ("inst_deferred", n(inst_deferred)),

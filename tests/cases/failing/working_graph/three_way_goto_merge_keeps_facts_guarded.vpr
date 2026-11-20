@@ -1,0 +1,21 @@
+// Three paths merged at one label: each path's fact holds after the merge
+// guarded by that path's condition (the first three asserts verify), none
+// unguarded. The first `if` builds the working graph before the branch.
+//
+// Must FAIL (the last assert).
+
+domain D { function f(x: Int): Int }
+
+method w1(x: Int, z: Int, a: Int)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (a == 0) { inhale x == 0; assert f(x) == f(0); goto L }
+  if (a == 1) { inhale x == 1; assert f(x) == f(1); goto L }
+  inhale x == 2
+  assert f(x) == f(2)
+  label L
+  assert a == 0 ==> x == 0
+  assert a == 1 ==> x == 1
+  assert (a != 0 && a != 1) ==> x == 2
+  assert x == 1
+}

@@ -1,0 +1,16 @@
+// An exhale that holds vacuously (its condition `x == 2` contradicts `x == 1`)
+// does not make the block dead. The first `if` builds the working graph before
+// the branch.
+//
+// Must FAIL (`assert false`).
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method v3(x: Int, z: Int, r: Ref)
+  requires x == 1 && acc(r.v)
+{
+  if (x == z) { assert f(x) == f(z) }
+  exhale (x == 2) ==> acc(r.v, 2/1)
+  assert false
+}

@@ -1,0 +1,21 @@
+// Proving `c ==> g(x) == g(y)` assumes `c` in a probe of the working graph,
+// where the closed then-arm's fact `c ==> x == y` then gives `x == y`. The
+// probe is rolled back, and what it derived with it, so the unconditional
+// assert after it does not see `x == y`.
+//
+// Must FAIL (the last assert).
+domain D {
+  function f(x: Int): Int
+  function g(x: Int): Int
+}
+
+method m(x: Int, y: Int, z: Int, c: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == y
+    assert f(x) == f(y)
+  }
+  assert c ==> g(x) == g(y)
+  assert g(x) == g(y)
+}

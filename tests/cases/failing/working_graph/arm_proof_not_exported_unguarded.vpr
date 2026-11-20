@@ -1,0 +1,19 @@
+// A proof made in an arm (`x > 3`, from `h(x)` in the nested `d` arm) is known
+// after the join only under the arm's condition. The first `if` builds the
+// working graph before the branch.
+//
+// Must FAIL (the assert after the join).
+
+domain D { function f(x: Int): Int }
+function h(x: Int): Bool
+{ x > 3 }
+
+method r3(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale h(x)
+    if (d) { assert x > 3 } else { assert x > 2 }
+  }
+  assert x > 3
+}
