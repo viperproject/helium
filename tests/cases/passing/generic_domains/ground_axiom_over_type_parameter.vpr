@@ -1,0 +1,17 @@
+// A ground axiom (no `forall`) over a generic domain's type parameter holds at
+// every `T`: it is triggered by the empty sequence, its smallest application
+// that fixes `T`.
+//
+// Nagini's prelude `__MSHelper.__toMS_def_1`
+// (`__toMS(Seq[T$]()) == Multiset[T$]()`) has this shape.
+domain D[T] {
+  function size(s: Seq[T]): Int
+
+  axiom {
+    size(Seq[T]()) == 0
+  }
+}
+
+method m() {
+  assert size(Seq[Int]()) == 0
+}

@@ -9,12 +9,10 @@ pub enum TranslationError {
     /// name. Typecheck rejects this first (`TypeError::AbstractPredicateNotFoldable`);
     /// this is the backstop that keeps the `ResourceCall` unbuildable.
     AbstractPredicateNotFoldable(String),
-    /// A generic domain's axiom (named) with a part whose type parameters nothing
-    /// fixes: a use of a parameter outside every `forall`, or a `forall` whose
-    /// trigger groups (with the types an enclosing `forall` already fixes) do not
-    /// bind every parameter it mentions. The verifier instantiates a generic
-    /// axiom only at the types its trigger matches fix, so such a part could
-    /// never be assumed.
+    /// A generic domain's axiom (named) mentioning a type parameter that no
+    /// application in it does (say, only as a binder's type): no trigger can fix
+    /// it, and the verifier instantiates a generic axiom only at the types its
+    /// trigger matches fix, so the axiom could never be assumed.
     UntypedGenericAxiom(String),
     /// A heap-dependent function called inside a `forall` body. Its snapshot
     /// (a frame-only `exhale`) would have to be taken *per instance*, over a footprint
@@ -37,7 +35,7 @@ impl fmt::Display for TranslationError {
             ),
             TranslationError::UntypedGenericAxiom(name) => write!(
                 f,
-                "axiom `{name}` uses a domain type parameter that no trigger fixes: every use must sit in a `forall` whose triggers (or an enclosing `forall`'s) bind it"
+                "axiom `{name}` uses a domain type parameter that no trigger fixes: no application in it has the parameter in its type arguments"
             ),
             TranslationError::HeapDepFunctionInQuantifier(name) => write!(
                 f,

@@ -1153,6 +1153,13 @@ fn translate_for_all(
     } else {
         Bool::and(&assumes).implies(&res)
     };
+    // A quantifier that binds only types (a generic axiom's root, see
+    // `vmir::Forall::ty_binders`) is, at ground `tys`, just its body: there is
+    // nothing left to quantify over, and its triggers (made of `Wild`s) only
+    // ever chose the type arguments.
+    if bounds.is_empty() {
+        return Some(body);
+    }
 
     // One multi-pattern per trigger group; the groups are alternatives. MBQI is
     // off, so these are the only way Z3 instantiates the quantifier.
@@ -1205,6 +1212,9 @@ fn trigger_to_z3(
         PreparedTerm::Bound(i) => Some(bounds[*i].clone()),
         PreparedTerm::Capture(i) => Some(caps[*i].clone()),
         PreparedTerm::Lit(lit) => Some(literal_to_z3(ctxt, lit)),
+        PreparedTerm::Wild => {
+            unreachable!("a `Wild` occurs only in a quantifier without value binders")
+        }
         PreparedTerm::App { head, args } => {
             let args: Vec<Dynamic> = args
                 .iter()

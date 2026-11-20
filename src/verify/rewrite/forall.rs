@@ -79,6 +79,8 @@ pub(crate) enum PreparedTerm {
     Bound(usize),
     Capture(usize),
     Lit(Literal),
+    /// Any e-class ([`vmir::TrigTerm::Wild`](crate::vmir::TrigTerm::Wild)).
+    Wild,
     App {
         head: TermHead,
         args: Vec<PreparedTerm>,
@@ -130,6 +132,7 @@ pub(super) fn match_term(
                 vec![]
             }
         }
+        PreparedTerm::Wild => vec![matched()],
         PreparedTerm::Lit(lit) => {
             if egraph[class]
                 .nodes

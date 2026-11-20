@@ -1,0 +1,36 @@
+// `ax_empty` mentions `T` outside every `forall`: it is wrapped in a `forall`
+// binding `T`, triggered by `empty<T>()`. `g_pos` is a sole `forall` whose
+// trigger fixes `T`, so it binds `T` itself. Both hold at every instance used.
+domain G[T] {
+  function g(x: T, y: Int): Int
+  function empty(): Seq[T]
+
+  axiom ax_empty {
+    |empty()| == 0
+  }
+  axiom g_pos {
+    forall n: Int, y: T :: { g(y, n) } g(y, n) > 0
+  }
+}
+
+method m(x: Int, b: Bool) {
+  var e: Seq[Int] := empty()
+  assert |e| == 0
+  var f: Seq[Bool] := empty()
+  assert |f| == 0
+  assert g(x, 3) > 0
+  assert g(b, x) > 0
+}
+
+// A conjunct over `T` next to a `forall`: the wrapper's trigger comes from the
+// inner `forall`'s trigger, with its binder a wildcard.
+domain H[T] {
+  function h(x: T): Int
+  function c(): Seq[T]
+
+  axiom conj { |c()| == 1 && forall x: T :: { h(x) } h(x) > |c()| }
+}
+
+method k(r: Ref) {
+  assert h(r) > 1
+}

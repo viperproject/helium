@@ -6,9 +6,11 @@
 //! Domains may be **generic**. A domain function is generic over only the
 //! domain parameters its signature mentions, renumbered `0..k` in order of first
 //! occurrence, so every call recovers its type arguments from its argument and
-//! result types. An axiom keeps the domain's own numbering; every use of a
-//! parameter in it must be fixable by a trigger match (`check_typed`), since that
-//! is how the verifier instantiates it.
+//! result types. An axiom is renumbered the same way over the parameters it
+//! mentions, and binds them in a root `forall`
+//! ([`vmir::Forall::ty_binders`]) whose triggers fix them: the axiom's own
+//! top-level `forall` when each of its trigger groups does, otherwise a wrapper
+//! that binds only types, with triggers inferred by [`generic_root`].
 
 use crate::dhash::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -21,6 +23,7 @@ use crate::translate::{DeclSlot, Declarator, Definer};
 use crate::translate::{Declared, Metaed, TranslationContext, TranslationError, pure_exp};
 use crate::viper::typed;
 use crate::vmir;
+use crate::vmir::{InstKind, PureInst, QuantTrigger, TrigHead, TrigTerm, Val};
 
 pub(crate) struct DomainTranslator<'a, P = Declared> {
     src: &'a typed::Domain,
@@ -95,10 +98,7 @@ impl<'a> DomainTranslator<'a, Declared> {
                 .iter()
                 .chain([&ret])
                 .for_each(|t| generics_in_order(t, &mut order));
-            let mut compact = vec![vmir::Type::Generic(0); domain_params.len()];
-            for (new, &old) in order.iter().enumerate() {
-                compact[old] = vmir::Type::Generic(new);
-            }
+            let compact = compaction(&order, domain_params.len());
             let id = ctx.name_map[&df.name.0];
             ctx.domain_fn_sigs.insert(
                 id,
@@ -185,16 +185,27 @@ impl DomainTranslator<'_, Metaed> {
                 Some(n) => ctx.interner.resolve(&n.0).to_string(),
                 None => format!("{name_str}#axiom{i}"),
             };
-            if !check_typed(&body, &HashSet::default()) {
-                result = Err(TranslationError::UntypedGenericAxiom(ax_name));
-                break;
-            }
+            // Bind only the parameters the axiom mentions, renumbered `0..k`
+            // in order of first occurrence, as for a domain function.
+            let mut order = Vec::new();
+            body.for_each_type(&mut |t| generics_in_order(t, &mut order));
+            let body = if order.is_empty() {
+                body
+            } else {
+                let body = body.subst_generics(&compaction(&order, declared));
+                match generic_root(body, order.len()) {
+                    Some(body) => body,
+                    None => {
+                        result = Err(TranslationError::UntypedGenericAxiom(ax_name));
+                        break;
+                    }
+                }
+            };
             let name = definer.intern_name(&ax_name);
             definer.define_axiom(
                 aslot,
                 vmir::Axiom {
                     name: Some(name),
-                    ty_params: declared.into(),
                     body,
                 },
             );
@@ -216,61 +227,267 @@ fn generics_in_order(ty: &vmir::Type, out: &mut Vec<usize>) {
     }
 }
 
-/// Whether every domain parameter `body` mentions is fixed when the verifier
-/// builds it: in `fixed` (what the enclosing `forall` instantiations determine;
-/// nothing at the top of an axiom), or — inside a `forall` — bound by the type
-/// arguments of **each** of its trigger groups, since any one group alone
-/// instantiates it. A binder's type does not fix anything: an e-class carries
-/// no type, only a matched application's payload does.
-fn check_typed(body: &vmir::FunctionBody, fixed: &HashSet<usize>) -> bool {
-    let mut mentioned = HashSet::default();
-    for inst in &body.insts {
-        let vmir::InstKind::Pure(ty, pi) = &inst.kind else {
-            continue;
-        };
-        ty.collect_generics(&mut mentioned);
-        match pi {
-            vmir::PureInst::FunctionCall(fc) => fc
-                .type_args
-                .iter()
-                .for_each(|t| t.collect_generics(&mut mentioned)),
-            vmir::PureInst::AdtCons { type_args, .. }
-            | vmir::PureInst::AdtProj { type_args, .. }
-            | vmir::PureInst::AdtIs { type_args, .. } => type_args
-                .iter()
-                .for_each(|t| t.collect_generics(&mut mentioned)),
-            vmir::PureInst::Coll { tys, .. } => {
-                tys.iter().for_each(|t| t.collect_generics(&mut mentioned))
-            }
-            vmir::PureInst::CollLit { elem_ty, .. } => elem_ty.collect_generics(&mut mentioned),
-            vmir::PureInst::Forall(q) => {
-                let mut own = HashSet::default();
-                q.bound.iter().for_each(|t| t.collect_generics(&mut own));
-                let typed_under =
-                    |fix: &HashSet<usize>| own.is_subset(fix) && check_typed(&q.body, fix);
-                let typed = q.triggers.iter().all(|g| {
-                    let mut fix = fixed.clone();
-                    g.terms.iter().for_each(|t| trig_generics(t, &mut fix));
-                    typed_under(&fix)
-                });
-                // `triggers` is never empty (typecheck-enforced).
-                if !typed {
-                    return false;
-                }
-            }
-            _ => {}
-        }
+/// The substitution renumbering the domain parameters `order` lists to
+/// `Generic(0..order.len())`, over a domain of `arity` parameters. A parameter
+/// not in `order` maps to `Generic(0)`: it does not occur, so it is never read.
+fn compaction(order: &[usize], arity: usize) -> Vec<vmir::Type> {
+    let mut compact = vec![vmir::Type::Generic(0); arity];
+    for (new, &old) in order.iter().enumerate() {
+        compact[old] = vmir::Type::Generic(new);
     }
-    mentioned.is_subset(fixed)
+    compact
 }
 
-/// Every parameter the type arguments of a trigger term's applications mention.
-fn trig_generics(term: &vmir::TrigTerm, out: &mut HashSet<usize>) {
-    if let vmir::TrigTerm::App {
-        type_args, args, ..
-    } = term
+/// The type parameters a trigger term fixes: those the type arguments of its
+/// applications mention.
+fn fixes(term: &TrigTerm) -> HashSet<usize> {
+    let mut out = HashSet::default();
+    term.collect_generics(&mut out);
+    out
+}
+
+/// Bind the `n` type parameters a generic axiom's (renumbered) `body` mentions
+/// in a root `forall` whose triggers fix all of them, or `None` when some
+/// parameter is mentioned by no application (nothing could ever fix it).
+///
+/// * **Flatten.** A body that is one `forall`, each of whose trigger groups
+///   fixes every parameter, binds them itself: its own triggers instantiate it
+///   at every type they match.
+/// * **Wrap** otherwise, in a `forall` binding only types, at temp 0 (the body
+///   keeps its numbering: it starts at the wrapper's `binder_base`, 0). Its
+///   triggers are inferred from the applications outside nested `forall`s and
+///   from the trigger terms of those `forall`s (and of the `forall`s nested in
+///   them, whose triggers may fix a type the outer ones leave open), which
+///   stand in for their bodies. A candidate keeps its head and type arguments; its value
+///   arguments become `Wild` (the wrapper binds no values, and an inner binder
+///   means nothing out here).
+///   - Each candidate whose type arguments alone fix every parameter, and that
+///     contains no smaller such candidate, is a trigger on its own (the
+///     triggers are alternatives).
+///   - With no such candidate, one multi-pattern is picked greedily: again and
+///     again the earliest candidate fixing the most parameters still open.
+fn generic_root(mut body: vmir::FunctionBody, n: usize) -> Option<vmir::FunctionBody> {
+    let all: HashSet<usize> = (0..n).collect();
+    let fixes_all = |t: &TrigTerm| all.is_subset(&fixes(t));
+    if let [inst] = &mut body.insts[..]
+        && let InstKind::Pure(_, PureInst::Forall(q)) = &mut inst.kind
+        && body.res == Val::Temp(q.binder_base)
+        && q.triggers.iter().all(|g| {
+            let mut fixed = HashSet::default();
+            g.terms.iter().for_each(|t| t.collect_generics(&mut fixed));
+            all.is_subset(&fixed)
+        })
     {
-        type_args.iter().for_each(|t| t.collect_generics(out));
-        args.iter().for_each(|a| trig_generics(a, out));
+        q.ty_binders = n.into();
+        return Some(body);
+    }
+
+    // Each candidate, with whether it contains a smaller candidate fixing every
+    // parameter (then it is not minimal).
+    let mut cands: Vec<(TrigTerm, bool)> = Vec::new();
+    // Per top-level temp: whether its value contains an application fixing
+    // every parameter.
+    let mut holds_full: Vec<bool> = Vec::new();
+    for inst in &body.insts {
+        let InstKind::Pure(_, pi) = &inst.kind else {
+            continue;
+        };
+        let full = if let PureInst::Forall(q) = pi {
+            forall_candidates(q, &fixes_all, &mut cands)
+        } else {
+            let mut inner = false;
+            pi.for_each_operand(&mut |v| {
+                inner |= matches!(v, Val::Temp(k) if holds_full[*k]);
+            });
+            match app_candidate(pi) {
+                Some(term) => {
+                    let full = fixes_all(&term);
+                    cands.push((term, inner));
+                    full || inner
+                }
+                None => inner,
+            }
+        };
+        holds_full.push(full);
+    }
+
+    let mut minimal: Vec<TrigTerm> = Vec::new();
+    for (term, inner) in &cands {
+        if !inner && fixes_all(term) && !minimal.contains(term) {
+            minimal.push(term.clone());
+        }
+    }
+    let triggers: Vec<QuantTrigger> = if !minimal.is_empty() {
+        minimal
+            .into_iter()
+            .map(|t| QuantTrigger {
+                terms: Box::new([t]),
+            })
+            .collect()
+    } else {
+        let mut open = all.clone();
+        let mut group: Vec<TrigTerm> = Vec::new();
+        while !open.is_empty() {
+            let mut best: Option<(&TrigTerm, usize)> = None;
+            for (t, _) in &cands {
+                let gain = fixes(t).intersection(&open).count();
+                if gain > best.map_or(0, |(_, g)| g) {
+                    best = Some((t, gain));
+                }
+            }
+            let (best, _) = best?;
+            fixes(best).iter().for_each(|i| {
+                open.remove(i);
+            });
+            group.push(best.clone());
+        }
+        vec![QuantTrigger {
+            terms: group.into(),
+        }]
+    };
+    let wrapper = vmir::Forall {
+        binder_base: 0,
+        ty_binders: n.into(),
+        bound: Box::new([]),
+        triggers: triggers.into(),
+        body,
+    };
+    Some(vmir::FunctionBody {
+        insts: vec![vmir::Inst::new(
+            Default::default(),
+            InstKind::Pure(vmir::Type::Bool, PureInst::Forall(Box::new(wrapper))),
+        )],
+        res: Val::Temp(0),
+    })
+}
+
+/// The trigger candidate of a body step that is a matchable application: its
+/// head and type arguments, every value argument `Wild`.
+fn app_candidate(pi: &PureInst) -> Option<TrigTerm> {
+    let wild = |n: usize| vec![TrigTerm::Wild; n].into_boxed_slice();
+    let (head, type_args, args) = match pi {
+        PureInst::FunctionCall(fc) => (
+            TrigHead::Func(fc.function),
+            fc.type_args.clone(),
+            wild(fc.args.iter().count()),
+        ),
+        PureInst::AdtCons {
+            adt,
+            type_args,
+            variant,
+            args,
+        } => (
+            TrigHead::AdtCons {
+                adt: *adt,
+                variant: *variant,
+            },
+            type_args.clone(),
+            wild(args.len()),
+        ),
+        PureInst::AdtProj {
+            adt,
+            type_args,
+            variant,
+            field,
+            ..
+        } => (
+            TrigHead::AdtProj {
+                adt: *adt,
+                variant: *variant,
+                field: *field,
+            },
+            type_args.clone(),
+            wild(1),
+        ),
+        PureInst::AdtIs {
+            adt,
+            type_args,
+            variant,
+            ..
+        } => (
+            TrigHead::AdtIs {
+                adt: *adt,
+                variant: *variant,
+            },
+            type_args.clone(),
+            wild(1),
+        ),
+        PureInst::Coll { tys, op, args } => (TrigHead::Coll(*op), tys.to_vec(), wild(args.len())),
+        PureInst::CollLit { kind, elem_ty, .. } => {
+            (TrigHead::CollLit(*kind), vec![elem_ty.clone()], wild(1))
+        }
+        _ => return None,
+    };
+    Some(TrigTerm::App {
+        head,
+        type_args,
+        args,
+    })
+}
+
+/// Push the candidates of the triggers of `q` and of every `forall` nested in
+/// its body (see [`trigger_candidates`]). Returns whether one of them
+/// satisfies `fixes_all`.
+fn forall_candidates(
+    q: &vmir::Forall,
+    fixes_all: &impl Fn(&TrigTerm) -> bool,
+    out: &mut Vec<(TrigTerm, bool)>,
+) -> bool {
+    let mut full = false;
+    for t in q.triggers.iter().flat_map(|g| g.terms.iter()) {
+        full |= trigger_candidates(t, fixes_all, out);
+    }
+    for inst in &q.body.insts {
+        if let InstKind::Pure(_, PureInst::Forall(inner)) = &inst.kind {
+            full |= forall_candidates(inner, fixes_all, out);
+        }
+    }
+    full
+}
+
+/// Push every application subterm of the trigger term `t` as a candidate, its
+/// variables made `Wild`, marked non-minimal when a proper subterm satisfies
+/// `fixes_all`. Returns whether `t` contains an application that does.
+fn trigger_candidates(
+    t: &TrigTerm,
+    fixes_all: &impl Fn(&TrigTerm) -> bool,
+    out: &mut Vec<(TrigTerm, bool)>,
+) -> bool {
+    let TrigTerm::App {
+        head,
+        type_args,
+        args,
+    } = t
+    else {
+        return false;
+    };
+    let mut inner = false;
+    for a in args.iter() {
+        inner |= trigger_candidates(a, fixes_all, out);
+    }
+    let term = TrigTerm::App {
+        head: head.clone(),
+        type_args: type_args.clone(),
+        args: args.iter().map(wild_vars).collect(),
+    };
+    let full = fixes_all(&term);
+    out.push((term, inner));
+    full || inner
+}
+
+/// `t` with every variable `Wild`.
+fn wild_vars(t: &TrigTerm) -> TrigTerm {
+    match t {
+        TrigTerm::Var(_) => TrigTerm::Wild,
+        TrigTerm::App {
+            head,
+            type_args,
+            args,
+        } => TrigTerm::App {
+            head: head.clone(),
+            type_args: type_args.clone(),
+            args: args.iter().map(wild_vars).collect(),
+        },
+        other => other.clone(),
     }
 }

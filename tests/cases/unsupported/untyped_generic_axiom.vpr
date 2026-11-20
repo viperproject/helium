@@ -1,15 +1,16 @@
-// A generic axiom is instantiated only at the types its trigger matches fix, and
-// `none_discr` has no quantifier, hence no trigger: it is rejected as unsupported
-// (`UntypedGenericAxiom`), and `m`, which depends on it, is skipped. Supporting it
-// would need an implicit trigger on its generic applications (`nothing<T>()`).
-domain Option[T] {
-  function discr(o: Option[T]): Int
-  function nothing(): Option[T]
+// A generic axiom is instantiated only at the types its trigger matches fix.
+// `loose` mentions `T` only in `g(x)` inside the `forall`, whose trigger `h(x)`
+// carries no type arguments, and the trigger stands in for the body: nothing
+// fixes `T`. It is rejected as unsupported (`UntypedGenericAxiom`), and `m`,
+// which depends on it, is skipped.
+domain D[T] {
+  function g(x: Int): D[T]
+  function h(x: Int): Int
 
-  axiom none_discr { discr(nothing()) == 0 }
+  axiom loose { forall x: Int :: { h(x) } g(x) == g(x) }
 }
 
 method m() {
-  assert discr((nothing(): Option[Bool])) == 0
-  assert discr((nothing(): Option[Ref])) == 0
+  assert h(0) == h(0)
+  assert (g(0): D[Int]) == g(0)
 }

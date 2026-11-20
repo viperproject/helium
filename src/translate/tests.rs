@@ -493,8 +493,8 @@ function len(l: List[Int]): Int
 #[test]
 fn generic_domain_members() {
     // A domain function is generic over only the domain parameters its signature
-    // mentions, renumbered from 0; an axiom keeps the domain's arity; a call
-    // carries its instantiation.
+    // mentions, renumbered from 0; so is an axiom, which binds them in its root
+    // `forall`; a call carries its instantiation.
     let p = run(r#"
 domain Two[A, B] {
     function second(x: B): B
@@ -520,33 +520,130 @@ method m() { assert second(true) == true }
     let vmir::Declaration::Axiom(ax) = decl("ax") else {
         panic!("ax")
     };
-    assert_eq!(ax.ty_params.count(), 2);
-    // `second(b)` in the axiom is instantiated at the domain's `B`, i.e. `Generic(1)`.
+    // The axiom mentions only `B`, renumbered to `Generic(0)`; its `forall`'s
+    // trigger fixes it, so the `forall` binds it itself (flattened).
     let vmir::InstKind::Pure(_, vmir::PureInst::Forall(q)) = &ax.body.insts[0].kind else {
         panic!("axiom body starts with its forall")
     };
+    assert_eq!(ax.body.insts.len(), 1);
+    assert_eq!(q.ty_binders.count(), 1);
+    assert_eq!(q.bound.len(), 1);
     let vmir::TrigTerm::App { type_args, .. } = &q.triggers[0].terms[0] else {
         panic!("trigger is an application")
     };
-    assert_eq!(type_args, &vec![vmir::Type::Generic(1)]);
+    assert_eq!(type_args, &vec![vmir::Type::Generic(0)]);
+}
+
+/// The root `forall` of a generic axiom that wraps its body, binding only
+/// types: its type-binder count and its trigger groups, printed.
+fn type_root(p: &vmir::Program, name: &str) -> (usize, Vec<String>) {
+    let q = axiom_forall(p, name);
+    assert!(q.bound.is_empty(), "{name} must bind only types");
+    let groups = q
+        .triggers
+        .iter()
+        .map(|g| {
+            g.terms
+                .iter()
+                .map(|t| {
+                    vmir::display::VmirDisplay::new(t, &p.decls, &p.interner, &p.groups).to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect();
+    (q.ty_binders.count(), groups)
+}
+
+#[test]
+fn generic_axiom_binds_its_types() {
+    // `ax_empty` mentions `T` outside every `forall`: it is wrapped in a
+    // `forall` binding only `T`, triggered by the call that fixes it. `g_pos` is
+    // a sole `forall` whose trigger fixes `T`: it binds `T` itself.
+    let p = run(r#"
+domain G[T] {
+    function g(x: T, y: Int): Int
+    function empty(): Seq[T]
+    axiom ax_empty { |empty()| == 0 }
+    axiom g_pos { forall n: Int, y: T :: { g(y, n) } g(y, n) > 0 }
+    axiom ground { 1 == 1 }
+}
+"#);
+    assert_eq!(type_root(&p, "ax_empty"), (1, vec!["empty<?0>()".into()]));
+    let g_pos = axiom_forall(&p, "g_pos");
+    assert_eq!(g_pos.ty_binders.count(), 1);
+    assert_eq!(g_pos.bound.len(), 2);
+    // An axiom mentioning no parameter stays ground.
+    let vmir::Declaration::Axiom(ground) = &p.decls[p.id("ground").unwrap()] else {
+        panic!("ground")
+    };
+    assert!(foralls(&ground.body.insts).is_empty());
+}
+
+#[test]
+fn inferred_type_trigger_is_minimal() {
+    // Both `size(Seq[T]())` and the empty sequence fix `T`; the trigger is the
+    // innermost application. `!full(emp())` likewise picks `emp()`.
+    let p = run(r#"
+domain D[T] {
+    function size(s: Seq[T]): Int
+    function emp(): D[T]
+    function full(b: D[T]): Bool
+    axiom sz { size(Seq[T]()) == 0 }
+    axiom closed { !full(emp()) }
+}
+"#);
+    assert_eq!(type_root(&p, "sz"), (1, vec!["seq.empty<?0>()".into()]));
+    assert_eq!(type_root(&p, "closed"), (1, vec!["emp<?0>()".into()]));
+}
+
+#[test]
+fn inferred_type_trigger_from_inner_forall() {
+    // Not a sole `forall`: the inner `forall`'s trigger stands in for its body,
+    // its binder made a wildcard.
+    let p = run(r#"
+domain D[T] {
+    function f(x: T): Int
+    function c(): Int
+    axiom conj { c() == 0 && forall x: T :: { f(x) } f(x) > c() }
+}
+"#);
+    assert_eq!(type_root(&p, "conj"), (1, vec!["f<?0>(_)".into()]));
+}
+
+#[test]
+fn inferred_type_trigger_from_nested_forall() {
+    // The outer trigger `f(a)` fixes only `A`, so the axiom is wrapped; the
+    // trigger of the `forall` nested in its body fixes both.
+    let p = run(r#"
+domain P[A, B] {
+    function f(a: A): Int
+    function g(a: A, b: B): Int
+    axiom nest { forall a: A :: { f(a) } forall b: B :: { g(a, b) } g(a, b) == f(a) }
+}
+"#);
+    assert_eq!(type_root(&p, "nest"), (2, vec!["g<?0, ?1>(_, _)".into()]));
+}
+
+#[test]
+fn inferred_type_trigger_covers_two_parameters() {
+    // No application fixes both `A` and `B`: one multi-pattern covers them.
+    let p = run(r#"
+domain P[A, B] {
+    function a(): Seq[A]
+    function b(): Seq[B]
+    axiom both { |a()| == |b()| }
+}
+"#);
+    assert_eq!(type_root(&p, "both"), (2, vec!["a<?0>(), b<?1>()".into()]));
 }
 
 #[test]
 fn untyped_generic_axiom_rejected() {
     // The verifier instantiates a generic axiom only at the types its trigger
-    // matches fix: a part that no trigger can type is refused.
-    let no_quantifier = r#"
-domain Box[T] {
-    function emp(): Box[T]
-    function full(b: Box[T]): Bool
-    axiom closed { !full(emp()) }
-}
-"#;
-    assert_eq!(
-        run_err(no_quantifier),
-        TranslationError::UntypedGenericAxiom("closed".to_string())
-    );
-    // `h(x)` carries no type arguments, so nothing fixes the `T` of `g(x)`.
+    // matches fix: an axiom whose parameter no application mentions is refused.
+    // `h(x)` carries no type arguments, and the `forall`'s trigger stands in for
+    // its body, so nothing fixes the `T` of `g(x)`.
     let trigger_misses_param = r#"
 domain D[T] {
     function g(x: Int): D[T]

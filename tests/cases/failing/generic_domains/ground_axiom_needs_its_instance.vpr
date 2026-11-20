@@ -1,0 +1,14 @@
+// `ax_empty` is instantiated at the types its trigger `empty<T>()` meets, and
+// says nothing about a sequence that is not `empty()`: `s` is an arbitrary
+// `Seq[Int]`, so its length stays unknown even though `empty<Int>()` occurs.
+domain G[T] {
+  function empty(): Seq[T]
+
+  axiom ax_empty { |empty()| == 0 }
+}
+
+method m(s: Seq[Int]) {
+  var e: Seq[Int] := empty()
+  assert |e| == 0
+  assert |s| == 0
+}

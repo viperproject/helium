@@ -1028,6 +1028,7 @@ fn lower_forall(
         vmir::Type::Bool,
         PureInst::Forall(Box::new(vmir::Forall {
             binder_base,
+            ty_binders: 0.into(),
             bound: bound.into(),
             triggers: triggers.into(),
             body,
