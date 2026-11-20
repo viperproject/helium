@@ -111,7 +111,7 @@ fn define_restored(
 
 /// The sum of the `holders`' shares: everything they hold at the address.
 pub(super) fn sum_perms(ctx: &mut VerifyContext<'_>, holders: &[Holder]) -> ChunkPerm {
-    let mut total = ChunkPerm::leaf(expr!(ctx, 0 / 1));
+    let mut total = ChunkPerm::Zero;
     for h in holders {
         total = perm_add(ctx, &total, &h.perm);
     }
@@ -343,7 +343,7 @@ pub(super) fn subtract_location(
                 Taken::Single {
                     addr: chunk.addr,
                     perm: needed,
-                    guard: std::rc::Rc::from([]),
+                    guard: crate::verify::heap::Cube::empty(),
                 },
             );
             return Ok(heap.with_qp_chunk_replaced(kind, i, set));

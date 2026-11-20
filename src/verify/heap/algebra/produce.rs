@@ -3,7 +3,7 @@
 use super::*;
 use crate::verify::{
     context::VerifyContext,
-    heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_meet},
+    heap::{Chunk, ChunkPerm, Cube, Heap, LocationKind, cond::meet},
     lang::Symbolic,
 };
 use crate::vmir::{Bound, Literal, Polarity};
@@ -56,21 +56,16 @@ fn merge_chunks(
     b: &Chunk,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Chunk {
-    // `cube_eq` (canonical e-class comparison), not the `Rc<[..]>` structural
+    // `Cube::same` (canonical e-class comparison), not the `Rc<[..]>` structural
     // equality `union_heaps` uses: a false negative is merely conservative — it
     // takes the gated path, still sound — but costs an `ite` per merge.
-    let (pa, pb, guard): (ChunkPerm, ChunkPerm, crate::verify::heap::HeapPc) =
-        if cube_eq(ctx, a.guard(), b.guard()) {
-            // Shared cube: amounts stay bare and the guard is re-attached below.
-            let g: HeapPc = a.guard_pc();
-            (a.ungated_perm().clone(), b.ungated_perm().clone(), g)
-        } else {
-            (
-                a.gated_perm(ctx),
-                b.gated_perm(ctx),
-                std::rc::Rc::from(Vec::new()),
-            )
-        };
+    let (pa, pb, guard): (ChunkPerm, ChunkPerm, Cube) = if a.guard().same(ctx, b.guard()) {
+        // Shared cube: amounts stay bare and the guard is re-attached below.
+        let g: Cube = a.guard_pc();
+        (a.ungated_perm().clone(), b.ungated_perm().clone(), g)
+    } else {
+        (a.gated_perm(ctx), b.gated_perm(ctx), Cube::empty())
+    };
     // Structural sum: `perm_add` distributes over the gates' `Select`s, so the
     // total keeps one concrete amount per branch (`Select(b, 1/1+1/2, 0+1/2)`)
     // rather than collapsing to an opaque `AddR` whose positivity nothing can
@@ -188,7 +183,7 @@ struct LocationChunk {
     /// [`Chunk::guard`] verbatim: the flat cube under which this chunk is present
     /// at all. `perm` is the **ungated** amount, so every axiom stated about it
     /// has to be gated by this cube — see [`assume_location_axioms`].
-    guard: crate::verify::heap::HeapPc,
+    guard: Cube,
 }
 
 /// Extract the location chunks of `h`: for each chunk whose canonical address has
@@ -283,10 +278,8 @@ pub(super) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
     // a block) meet the chunk's own residual merge guard. A contradiction means the
     // chunk is unreachable here, so it states nothing.
     let block: Vec<(egg::Id, Polarity)> = ctx.current_cube().to_vec();
-    let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> = chunks
-        .iter()
-        .map(|c| cube_meet(ctx, &block, &c.guard))
-        .collect();
+    let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> =
+        chunks.iter().map(|c| c.guard.within(ctx, &block)).collect();
 
     // Bound: perm ≤ b at each bounded location — assumed **per leaf** of the
     // (possibly branch-structured) perm, so a join `Select` never materializes.
@@ -311,7 +304,7 @@ pub(super) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
             let le = expr!(ctx, not({ b } < r { leaf }));
             // `cube ∧ arm ⇒ leaf ≤ b`; with both empty `implication` returns `le`
             // itself, so the unconditional hot path is the old `union(le, true_)`.
-            let Some(gate) = cube_meet(ctx, cube, &arm) else {
+            let Some(gate) = meet(ctx, cube, &arm) else {
                 // Arm contradicts the chunk's presence cube — that leaf describes no
                 // reachable state and states nothing.
                 continue;
@@ -361,7 +354,7 @@ pub(super) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
             let (Some(ci), Some(cj)) = (&cubes[i], &cubes[j]) else {
                 continue;
             };
-            let Some(guard) = cube_meet(ctx, ci, cj) else {
+            let Some(guard) = meet(ctx, ci, cj) else {
                 continue;
             };
             let b = ctx.add(Symbolic::Lit(Literal::Real(b.clone())));

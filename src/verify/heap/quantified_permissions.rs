@@ -469,8 +469,7 @@ pub(super) fn qp_perm_at(
     let inst = eval_qp_instance(ctx, &chunk.caps, &chunk.q, &binders, &chunk.eval_pc())?;
 
     let perm = gate_at(ctx, inst.perm, inst.addr, addr);
-    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    let mut perm = ChunkPerm::select(ctx, inst.cond, perm, zero);
+    let mut perm = ChunkPerm::select(ctx, inst.cond, perm, ChunkPerm::Zero);
     // What was exhaled from this set, each gated by its presence guard.
     for taken in chunk.taken.iter() {
         let p = match &taken.what {
@@ -509,8 +508,7 @@ fn gate_at(ctx: &mut VerifyContext<'_>, perm: ChunkPerm, at: Id, addr: Id) -> Ch
         return perm;
     }
     let eq = expr!(ctx, { at } == { addr });
-    let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
-    ChunkPerm::select(ctx, eq, perm, zero)
+    ChunkPerm::select(ctx, eq, perm, ChunkPerm::Zero)
 }
 
 /// Index of the first held set of `kind` that covers `exhale`
@@ -633,7 +631,7 @@ pub(super) fn take_spread(
                 demand: exhaled.clone(),
                 before: heap.clone(),
                 holder: i,
-                pc: pc.clone().into(),
+                pc: pc.as_slice().into(),
                 guard: exhaled.guard.clone(),
             },
         );
@@ -737,7 +735,7 @@ pub(super) fn quant_chunk_injective(
         caps,
         inv,
         pc: pc_lits.into(),
-        guard: Rc::from([]),
+        guard: crate::verify::heap::Cube::empty(),
         taken: Rc::from([]),
         value_map,
         recipe: None,

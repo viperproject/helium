@@ -249,7 +249,9 @@ fn heap_subgraph(ctx: &VerifyContext<'_>, idx: usize, label: &str, heap: &Heap) 
     for (_, chunk) in heap.entries() {
         let c_addr = ctx.egraph.find(chunk.addr);
         let c_val = ctx.egraph.find(chunk.value);
-        let c_perm = ctx.egraph.find(chunk.perm_repr_id());
+        let Some(c_perm) = chunk.perm_repr_id().map(|p| ctx.egraph.find(p)) else {
+            continue;
+        };
         let node = format!("chunk_{idx}_{}", usize::from(chunk.addr));
         s.push_str(&format!("    {node}[label=\"chunk\", shape=box]\n"));
         // Edges target an arbitrary node `.0` in the destination cluster.

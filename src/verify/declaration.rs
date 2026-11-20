@@ -113,12 +113,17 @@ fn scale_perm(
     perm: ChunkPerm,
 ) -> ChunkPerm {
     match perm {
+        ChunkPerm::Zero => ChunkPerm::Zero,
         // A wildcard *scale* (an `unfolding` inside a function body) makes every
         // scaled leaf wildcard-derived, whatever the slot's own amount was.
         ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
             id: ctx.add(Symbolic::Binary(BinOp::MulR, [pm, id])),
             wild: wild || pm_wild,
         },
+        ChunkPerm::Gate { when, then } => {
+            let t = scale_perm(ctx, pm, pm_wild, *then);
+            ChunkPerm::gate(ctx, &when, t)
+        }
         ChunkPerm::Select { cond, then, els } => {
             let t = scale_perm(ctx, pm, pm_wild, *then);
             let e = scale_perm(ctx, pm, pm_wild, *els);

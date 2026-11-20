@@ -3,10 +3,10 @@
 use super::*;
 use crate::dhash::HashSet;
 use crate::verify::heap::quantified_permissions::same_footprint;
-use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken, cube_holds};
+use crate::verify::heap::{Cube, QPTaken, QuantChunk, Restored, Taken};
 use crate::verify::{
     context::VerifyContext,
-    heap::{Chunk, ChunkPerm, Heap, HeapPc, LocationKind, cube_eq, cube_push},
+    heap::{Chunk, ChunkPerm, Heap, LocationKind},
 };
 use crate::vmir::Polarity;
 use crate::vmir::Type;
@@ -65,7 +65,7 @@ pub(in crate::verify::heap) fn merge_heaps(
                     } else {
                         expr!(ctx, if {cond} then {a.value} else {b.value})
                     };
-                    if cube_eq(ctx, a.guard(), b.guard()) {
+                    if a.guard().same(ctx, b.guard()) {
                         // Same presence on both arms → carry with shared guard.
                         // Amount: congruent ⇒ bare; divergent ⇒ single Select.
                         let perm = if ChunkPerm::same(ctx, a.ungated_perm(), b.ungated_perm()) {
@@ -96,11 +96,11 @@ pub(in crate::verify::heap) fn merge_heaps(
                     }
                 }
                 (Some(a), None) => {
-                    let guard = cube_push(ctx, a.guard(), (cond, Polarity::Positive));
+                    let guard = a.guard().with(ctx, (cond, Polarity::Positive));
                     Some(a.with_guard(guard))
                 }
                 (None, Some(b)) => {
-                    let guard = cube_push(ctx, b.guard(), (cond, Polarity::Negative));
+                    let guard = b.guard().with(ctx, (cond, Polarity::Negative));
                     Some(b.with_guard(guard))
                 }
                 (None, None) => None,
@@ -178,7 +178,7 @@ fn merge_set(
     // Sets are never dropped from a heap and only a join changes a guard, so
     // copies of one inhale reach a join under the guard they were inhaled with.
     assert!(
-        cube_eq(ctx, &t.guard, &e.guard),
+        t.guard.same(ctx, &e.guard),
         "two copies of one chunk set reach a join under different guards"
     );
     let shared = t
@@ -299,20 +299,15 @@ pub(in crate::verify::heap) fn union_heaps(
             out = out.with_chunk(kind, cb.clone());
             continue;
         };
-        let (pa, pb, guard): (ChunkPerm, ChunkPerm, HeapPc) =
-            if cube_eq(ctx, ca.guard(), cb.guard()) {
-                (
-                    ca.ungated_perm().clone(),
-                    cb.ungated_perm().clone(),
-                    ca.guard_pc(),
-                )
-            } else {
-                (
-                    ca.gated_perm(ctx),
-                    cb.gated_perm(ctx),
-                    std::rc::Rc::from(Vec::new()),
-                )
-            };
+        let (pa, pb, guard): (ChunkPerm, ChunkPerm, Cube) = if ca.guard().same(ctx, cb.guard()) {
+            (
+                ca.ungated_perm().clone(),
+                cb.ungated_perm().clone(),
+                ca.guard_pc(),
+            )
+        } else {
+            (ca.gated_perm(ctx), cb.gated_perm(ctx), Cube::empty())
+        };
         // Decided against the *guard-gated* fractions: a chunk held only under its
         // guard is not held where the guard fails, however positive its bare amount.
         let a_held = prove_perm_positive(ctx, &pa, pc_lits);
@@ -400,11 +395,11 @@ fn give_back(
     y: &QuantChunk,
     pc: &[(egg::Id, Polarity)],
 ) -> Option<QuantChunk> {
-    if !y.taken.is_empty() || !cube_holds(ctx, pc, &y.guard) {
+    if !y.taken.is_empty() || !y.guard.holds_under(ctx, pc) {
         return None;
     }
     let k = x.taken.iter().position(|t| match &t.what {
-        Taken::Set(s) => cube_holds(ctx, pc, &s.guard) && same_footprint(ctx, s, y),
+        Taken::Set(s) => s.guard.holds_under(ctx, pc) && same_footprint(ctx, s, y),
         _ => false,
     })?;
     let Taken::Set(region) = &x.taken[k].what else {

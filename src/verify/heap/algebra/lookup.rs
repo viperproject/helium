@@ -3,7 +3,7 @@
 use super::*;
 use crate::verify::{
     context::VerifyContext,
-    heap::{Chunk, ChunkPerm},
+    heap::{Chunk, ChunkPerm, Cube},
     lang::Symbolic,
 };
 use crate::vmir::{Literal, Polarity};
@@ -19,12 +19,12 @@ pub(in crate::verify::heap) fn chunk_share_at(
     c: &Chunk,
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> Option<(ChunkPerm, crate::verify::heap::HeapPc)> {
+) -> Option<(ChunkPerm, Cube)> {
     let canon = ctx.egraph.find(addr);
     let held = c.gated_perm(ctx);
     // Ground match: no address gate at all (and no `Eq` node minted).
-    let share: (ChunkPerm, crate::verify::heap::HeapPc) = if ctx.egraph.find(c.addr) == canon {
-        (held, std::rc::Rc::from(Vec::new()))
+    let share: (ChunkPerm, Cube) = if ctx.egraph.find(c.addr) == canon {
+        (held, Cube::empty())
     } else {
         let eq = expr!(ctx, { c.addr } == { addr });
         // Disproven aliasing contributes nothing — skip before minting the gate.
@@ -48,10 +48,9 @@ pub(in crate::verify::heap) fn chunk_share_at(
             // still open. Kept as a `Select`, `perm_add` distributes it,
             // and each leaf is proven under its own gate polarities.
             let cube = vec![(eq, Polarity::Positive)];
-            let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
             (
-                ChunkPerm::select(ctx, eq, held, zero),
-                std::rc::Rc::from(cube),
+                ChunkPerm::select(ctx, eq, held, ChunkPerm::Zero),
+                Cube::from(cube),
             )
         }
     };
@@ -115,9 +114,9 @@ pub(in crate::verify::heap) fn summarize_perm_at(
     chunks: &[Chunk],
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, Vec<(Chunk, crate::verify::heap::HeapPc)>) {
+) -> (ChunkPerm, Vec<(Chunk, Cube)>) {
     let mut total: Option<ChunkPerm> = None;
-    let mut set: Vec<(Chunk, crate::verify::heap::HeapPc)> = Vec::new();
+    let mut set: Vec<(Chunk, Cube)> = Vec::new();
     for c in chunks {
         let Some((amount, cube)) = chunk_share_at(ctx, c, addr, pc_lits) else {
             continue;
@@ -128,10 +127,7 @@ pub(in crate::verify::heap) fn summarize_perm_at(
             Some(t) => perm_add(ctx, &t, &amount),
         });
     }
-    (
-        total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1))),
-        set,
-    )
+    (total.unwrap_or(ChunkPerm::Zero), set)
 }
 
 /// Resolve which of `chunks` sits at address `addr`, consulting aliasing
