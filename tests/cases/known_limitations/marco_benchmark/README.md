@@ -42,7 +42,6 @@ is enough; general heap-dependent quantifiers are not needed.
 | `unfolding_in_quantifier.vpr` | `unfolding` not allowed in a domain axiom | 1 | linkedlists `test02` |
 | `field_read_in_quantifier.vpr` | field access not allowed in a domain axiom | 1 | quickselect |
 | `sibling_scope_redeclaration.vpr` | name already declared in this scope | 1 | Nagini SIF `lookup` |
-| `new_star.vpr` | unsupported construct: `new(*)` | 1 | RingBufferRd |
 
 ## Reasoning gaps (reduced from single benchmark files)
 

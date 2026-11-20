@@ -2174,17 +2174,18 @@ fn lower_rhs_against_lhs(
             }
             if lhs_types[0] != Type::Ref {
                 return Err(TypeError::Other(format!(
-                    "new(*) requires a Ref target, found {:?}",
+                    "new(..) requires a Ref target, found {:?}",
                     lhs_types[0]
                 )));
             }
-            let star_or_fields = match fields {
-                viper::StarOrNames::Star => typed::StarOrFields::Star,
-                viper::StarOrNames::Names(names) => {
-                    typed::StarOrFields::Fields(names.iter().map(|n| Ident(n.id())).collect())
+            // `new(*)` is write access to every field the program declares.
+            let fields = match fields {
+                viper::StarOrNames::Star => {
+                    ctx.globals.field_names().into_iter().map(Ident).collect()
                 }
+                viper::StarOrNames::Names(names) => names.iter().map(|n| Ident(n.id())).collect(),
             };
-            Ok(typed::AssignRhs::New(star_or_fields))
+            Ok(typed::AssignRhs::New(fields))
         }
 
         viper::AssignRhs::Call(call) => {

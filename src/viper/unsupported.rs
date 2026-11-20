@@ -91,13 +91,6 @@ impl<'a> AstWalker<'a> for Scan {
         stmt.walk_children(self);
     }
 
-    fn walk_assign_rhs(&mut self, rhs: &'a AssignRhs) {
-        if let AssignRhs::New(StarOrNames::Star) = rhs {
-            self.hit("new(*)");
-        }
-        rhs.walk_children(self);
-    }
-
     fn walk_const(&mut self, c: &'a ConstKind) {
         if matches!(c, ConstKind::Epsilon) {
             // Lowering `epsilon` to any concrete fraction changes what the

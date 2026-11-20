@@ -14,8 +14,8 @@ use crate::viper::typed::{
     AssignLhs, AssignRhs, AxiomExt, BinOp, BuiltinCollection, Call, Declaration, Domain,
     DomainFunction, Field, Forall, FuncEnsuresExt, Function, HeapExt, HeapNode, Ident, Literal,
     Method, MethodBodyExt, MethodEnsuresExt, Predicate, PredicateWithPerm, Program, PureExpKind,
-    ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, StarOrFields, Statement, StmtBlock,
-    Type, TypedIdent, TypedPureExp, UnOp,
+    ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, Statement, StmtBlock, Type,
+    TypedIdent, TypedPureExp, UnOp,
 };
 
 /// Interner-aware formatting wrapper.
@@ -435,19 +435,16 @@ impl<'a> Display for Show<'a, &'a AssignLhs> {
 impl<'a> Display for Show<'a, &'a AssignRhs> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self.item {
-            AssignRhs::New(s) => match s {
-                StarOrFields::Star => write!(f, "new(*)"),
-                StarOrFields::Fields(fields) => {
-                    write!(f, "new(")?;
-                    for (i, fld) in fields.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        write!(f, "{}", self.name(*fld))?;
+            AssignRhs::New(fields) => {
+                write!(f, "new(")?;
+                for (i, fld) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
                     }
-                    write!(f, ")")
+                    write!(f, "{}", self.name(*fld))?;
                 }
-            },
+                write!(f, ")")
+            }
             AssignRhs::MethodCall(call) => write!(f, "{}", self.with(call)),
             AssignRhs::Exp(e) => write!(f, "{}", self.with(e)),
         }

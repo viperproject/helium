@@ -378,16 +378,11 @@ pub enum AssignLhs {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignRhs {
-    /// E.g., `new(*)` or `new(f1, f2)`
-    New(StarOrFields),
+    /// `new(f1, f2)`. The typechecker expands `new(*)` to every declared
+    /// field, so the list is always explicit here.
+    New(Vec<Ident>),
     MethodCall(Call<MethodBodyExt>),
     Exp(PureMethodExp),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StarOrFields {
-    Star,
-    Fields(Vec<Ident>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

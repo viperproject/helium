@@ -343,6 +343,19 @@ impl Globals {
             .get(&id)
             .map(|&mid| ResolvedSymbol { globals: self, mid })
     }
+
+    /// Every declared field name, in declaration order (`MemberId`s are
+    /// handed out in registration order; `symbol_table` iteration is not).
+    pub fn field_names(&self) -> Vec<Spur> {
+        let mut fields: Vec<(MemberId, Spur)> = self
+            .symbol_table
+            .iter()
+            .filter(|&(_, &mid)| self.signatures[mid].as_field().is_some())
+            .map(|(&name, &mid)| (mid, name))
+            .collect();
+        fields.sort_by_key(|&(mid, _)| usize::from(mid));
+        fields.into_iter().map(|(_, name)| name).collect()
+    }
 }
 
 #[derive(Debug, Clone)]
