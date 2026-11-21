@@ -281,9 +281,9 @@ pub enum AxiomExt {
 ///
 /// Triggers and body are [`AxiomExt`]-typed in **every** host position
 /// (axioms, contracts, predicate bodies, method statements): quantifier
-/// bodies are pure and heap-free, so heap derefs, `unfolding`, `old`,
-/// `result`, and `perm` inside a `forall` are rejected by `AxiomExt`'s rules.
-/// Free variables of the enclosing scope are permitted — translation turns
+/// bodies are pure and heap-free, so heap derefs, `unfolding`, `old`, and
+/// `perm` inside a `forall` are rejected by `AxiomExt`'s rules. Free variables
+/// of the enclosing scope, `result` among them, are permitted — translation turns
 /// them into capture parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Forall {
@@ -292,11 +292,11 @@ pub struct Forall {
     pub body: TypedPureExp<AxiomExt>,
 }
 
-/// Extensions allowed in function postconditions: heap access + `result`.
+/// Extensions allowed in function postconditions: heap access. `result` is an
+/// ordinary identifier, bound by translation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FuncEnsuresExt {
     Heap(HeapNode<FuncEnsuresExt>),
-    Result,
     Old(TypedPureExp<FuncEnsuresExt>),
     /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
     Forall(Box<Forall>),
@@ -378,16 +378,11 @@ pub enum AssignLhs {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignRhs {
-    /// E.g., `new(*)` or `new(f1, f2)`
-    New(StarOrFields),
+    /// `new(f1, f2)`. The typechecker expands `new(*)` to every declared
+    /// field, so the list is always explicit here.
+    New(Vec<Ident>),
     MethodCall(Call<MethodBodyExt>),
     Exp(PureMethodExp),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StarOrFields {
-    Star,
-    Fields(Vec<Ident>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

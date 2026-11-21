@@ -36,12 +36,10 @@ is enough; general heap-dependent quantifiers are not needed.
 |---|---|---|---|
 | `axiom_without_trigger.vpr` | `forall` needs an explicit trigger | 14 | Nagini prelude, Gobra |
 | `inhale_exhale_expression.vpr`, `forperm.vpr` | inhale-exhale `[A, B]`, `forperm` | 9 | Nagini obligations |
-| `result_in_quantifier.vpr` | `result` not allowed in this context | 6 | Nagini `int___unbox__`, VerCors `toBag` |
 | `acc_in_let.vpr` | unsupported pure expression: `Acc(..)` | 2 | Gobra struct allocation |
 | `unfolding_in_quantifier.vpr` | `unfolding` not allowed in a domain axiom | 1 | linkedlists `test02` |
 | `field_read_in_quantifier.vpr` | field access not allowed in a domain axiom | 1 | quickselect |
 | `sibling_scope_redeclaration.vpr` | name already declared in this scope | 1 | Nagini SIF `lookup` |
-| `new_star.vpr` | unsupported construct: `new(*)` | 1 | RingBufferRd |
 
 ## Reasoning gaps (reduced from single benchmark files)
 
