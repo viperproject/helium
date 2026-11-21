@@ -31,7 +31,7 @@ use crate::verify::eval::{
 };
 use crate::verify::heap::holders::{HolderAt, greedy_takes, holders_at, sum_perms};
 use crate::verify::heap::{
-    Chunk, Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard,
+    Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard, holder::SetBody,
 };
 use crate::vmir;
 
@@ -497,7 +497,7 @@ pub(super) fn qp_perm_at(
         };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
-    Ok(gate_perm_by_guard(ctx, &perm, &chunk.guard))
+    Ok(chunk.gate(ctx, perm))
 }
 
 /// `perm` where the address `at` is `addr`, `0` elsewhere; no gate when they are
@@ -615,14 +615,11 @@ pub(super) fn take_spread(
     let mut out = heap.clone();
     for (i, c) in heap.chunks_of(kind).iter().enumerate() {
         let take = share_at(ctx, &exhaled, heap, HolderAt::Chunk(i), c.addr, &pc)?;
-        let take = gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), &exhaled.guard);
-        let rest = crate::verify::heap::algebra::perm_sub_aligned(ctx, c.ungated_perm(), &take);
-        out = out.with_chunk(
-            kind,
-            Chunk::new_perm(c.addr, rest, c.value)
-                .with_recipe(c.recipe.clone())
-                .with_guard(c.guard_pc()),
-        );
+        let take = exhaled.gate(ctx, ChunkPerm::leaf(take));
+        // Taken from the bare amount, the remainder keeping the chunk's presence.
+        let rest =
+            c.map_perm(|held| crate::verify::heap::algebra::perm_sub_aligned(ctx, held, &take));
+        out = out.with_chunk(kind, rest);
     }
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
         let set = set.with_taken(
@@ -632,7 +629,7 @@ pub(super) fn take_spread(
                 before: heap.clone(),
                 holder: i,
                 pc: pc.as_slice().into(),
-                guard: exhaled.guard.clone(),
+                guard: exhaled.presence().clone(),
             },
         );
         out = out.with_qp_chunk_replaced(kind, i, set);
@@ -658,13 +655,9 @@ pub(super) fn take_from_qp(
     if emptied_by(ctx, held, &exhaled) {
         return heap.with_qp_chunk_removed(kind, i);
     }
-    let held = held.with_taken(
-        ctx,
-        Taken::Set(QuantChunk {
-            value_map: held.value_map,
-            ..exhaled
-        }),
-    );
+    let mut exhaled = exhaled;
+    exhaled.value_map = held.value_map;
+    let held = held.with_taken(ctx, Taken::Set(exhaled));
     heap.with_qp_chunk_replaced(kind, i, held)
 }
 
@@ -729,16 +722,15 @@ pub(super) fn quant_chunk_injective(
 ) -> Result<QuantChunk, VerifyError> {
     // One binding per location: assume the inverse axiom that names it.
     let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
-    Ok(QuantChunk {
+    Ok(QuantChunk::unconditional(SetBody {
         origin: SetId::fresh(ctx),
         q: q.clone(),
         caps,
         inv,
         pc: pc_lits.into(),
-        guard: crate::verify::heap::Cube::empty(),
         taken: Rc::from([]),
         value_map,
         recipe: None,
         restored: Rc::from([]),
-    })
+    }))
 }

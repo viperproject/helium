@@ -38,7 +38,7 @@ use crate::verify::heap::quantified_permissions::{
     check_qp_nonnegative, covered_by_sum, find_covering_qp, quant_chunk_from_caps,
     quant_chunk_injective, take_from_qp, take_spread,
 };
-use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind, QuantChunk};
+use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind};
 use crate::verify::lang::Symbolic;
 use crate::vmir::{self, Polarity, Type, Val};
 
@@ -232,13 +232,9 @@ impl Heap {
                         quant_chunk_injective(ctx, &spec.q, spec.caps, pc, value.id)?
                     }
                 };
-                Ok(self.with_qp_chunk(
-                    &kind,
-                    QuantChunk {
-                        recipe: value.recipe,
-                        ..set
-                    },
-                ))
+                let mut set = set;
+                set.recipe = value.recipe;
+                Ok(self.with_qp_chunk(&kind, set))
             }
         }
     }
@@ -313,10 +309,11 @@ impl Heap {
         pc: &[(egg::Id, Polarity)],
     ) -> Result<Heap, VerifyError> {
         // The common case: one chunk sits exactly at `loc` with write permission.
-        if let Some(c) = self.chunk(&loc.kind, loc.addr).cloned() {
+        if let Some(mut c) = self.chunk(&loc.kind, loc.addr).cloned() {
             let perm = c.gated_perm(ctx);
             if prove_perm_write(ctx, &perm, &loc.kind.bound, pc) {
-                return Ok(self.with_chunk(&loc.kind, Chunk { value, ..c }));
+                c.value = value;
+                return Ok(self.with_chunk(&loc.kind, c));
             }
         }
         let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
@@ -328,31 +325,29 @@ impl Heap {
         for h in &holders {
             match h.at {
                 HolderAt::Chunk(i) => {
-                    let c = self.chunks_of(&loc.kind)[i].clone();
+                    let mut c = self.chunks_of(&loc.kind)[i].clone();
                     let new = if ctx.egraph.find(c.addr) == ctx.egraph.find(loc.addr) {
                         value
                     } else {
                         let eq = expr!(ctx, { c.addr } == { loc.addr });
                         ctx.add(Symbolic::Ite([eq, value, c.value]))
                     };
-                    heap = heap.with_chunk(&loc.kind, Chunk { value: new, ..c });
+                    c.value = new;
+                    heap = heap.with_chunk(&loc.kind, c);
                 }
                 HolderAt::Set(i) => {
                     // Outside the set's domain its map is never read, so the
                     // store is unconditional.
-                    let set = heap.qp_chunks_of(&loc.kind)[i].clone();
+                    let mut set = heap.qp_chunks_of(&loc.kind)[i].clone();
                     let store = ctx.alloc.value_map(&loc.kind).store;
                     let map = ctx.add(Symbolic::FuncApp(
                         store,
                         Box::new([]),
                         Box::new([set.value_map, loc.addr, value]),
                     ));
-                    let set = QuantChunk {
-                        value_map: map,
-                        // The old map's recipe no longer names the new map.
-                        recipe: None,
-                        ..set
-                    };
+                    set.value_map = map;
+                    // The old map's recipe no longer names the new map.
+                    set.recipe = None;
                     heap = heap.with_qp_chunk_replaced(&loc.kind, i, set);
                 }
             }

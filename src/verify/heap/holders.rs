@@ -334,7 +334,8 @@ pub(super) fn subtract_location(
             "exhaling a wildcard location from a quantified permission",
         ));
     }
-    let needed = chunk.ungated_perm().clone();
+    // The demand is unconditional, so its gated amount is its bare one.
+    let needed = chunk.gated_perm(ctx);
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
         let held = qp_perm_at(ctx, set, chunk.addr)?;
         if prove_sufficient_aligned(ctx, &held, &needed, pc_lits) {

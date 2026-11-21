@@ -68,48 +68,6 @@ pub(in crate::verify::heap) enum Demand {
     Wildcard,
 }
 
-/// Put the found chunk into the form the consume works on, and report the guard the
-/// remainder should be stored back under.
-///
-/// A stored chunk keeps a FLAT presence guard and a guard-free amount, so there are
-/// two ways to make it consumable, and which one applies is decided by the pc:
-///
-/// - **pc does not entail the guard** — fold `guard ? perm : 0` into the amount and
-///   hand back a chunk that is unconditional by construction. Sufficiency and the
-///   remainder are then proven against a perm that is present only where the guard
-///   holds. The residual guard is empty: the conditionality now lives in the amount.
-/// - **pc already entails the guard** — the consume happens inside the very region
-///   the chunk is present in, so the gate is a no-op (the pc decides the `ite` arms
-///   anyway) and folding it in is actively *harmful*. The remainder is stored as a
-///   bare amount, so folding would **destroy** the flat cube on the first consume at
-///   the location, leaving the chunk's conditionality visible only as `ite`s buried
-///   in its arithmetic. A later join-level consume then has no structure to
-///   case-split on — precisely how the `&mut` reborrow shape lost its proof. Keep
-///   the amount bare and carry the cube through untouched.
-///
-/// Returns the chunk to consume against and the guard to re-attach to the remainder
-/// (empty in the first case, the chunk's own cube in the second).
-fn normalize_guard_for_consume(
-    ctx: &mut VerifyContext<'_>,
-    existing: Option<Chunk>,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> (Option<Chunk>, Cube) {
-    let empty = Cube::empty();
-    let Some(c) = existing else {
-        return (None, empty);
-    };
-    if c.guard().is_empty() {
-        return (Some(c), empty);
-    }
-    if c.pc_entails_guard(ctx, pc_lits) {
-        let kept = c.guard_pc();
-        (Some(c), kept)
-    } else {
-        let gated = c.gated_perm(ctx);
-        (Some(c.with_perm(gated).with_guard(empty.clone())), empty)
-    }
-}
-
 /// Consume `chunk2` from `h1`. The body is a **ladder, cheapest rung first**, and the
 /// order is load-bearing for cost rather than for correctness — every rung below the
 /// first is reached only by an obligation that would otherwise fail, so a consume
@@ -143,8 +101,12 @@ fn heap_subtract_inner(
     pass: ConsumePass,
 ) -> Result<Heap, VerifyError> {
     let (out, existing) = find_chunk_consolidated(ctx, h1, kind, chunk2.addr, pc_lits, true);
-    let (existing, kept) = normalize_guard_for_consume(ctx, existing, pc_lits);
-    let chunk2_perm = chunk2.ungated_perm().to_id(ctx);
+    // In the form the consume works on: presence kept flat when the pc entails it,
+    // folded into the amount otherwise (see `Chunk::normalized_for`).
+    let existing = existing.map(|c| c.normalized_for(ctx, pc_lits));
+    // The demand is unconditional, so its gated amount is its bare one.
+    let needed = chunk2.gated_perm(ctx);
+    let chunk2_perm = needed.to_id(ctx);
     let Some(existing) = existing else {
         // No chunk at `addr`. Subtracting a provably-zero permission (e.g. a
         // conditional footprint slot whose guard is false — a nested predicate
@@ -240,13 +202,13 @@ fn heap_subtract_inner(
     };
 
     if demand == Demand::Wildcard {
-        return debit_wildcard(ctx, out, kind, &existing, &chunk2, pc_lits, kept);
+        return debit_wildcard(ctx, out, kind, &existing, &chunk2, pc_lits);
     }
 
     // Sufficiency `held ≥ needed`, proven per-leaf over the (possibly
     // branch-structured) held perm — the `Select` never enters the graph.
     let proven =
-        prove_sufficient_aligned(ctx, existing.ungated_perm(), chunk2.ungated_perm(), pc_lits);
+        prove_sufficient_aligned(ctx, &existing.perm_under(ctx, pc_lits), &needed, pc_lits);
     if !proven {
         // Invariant 7 — consume under **pc-implied aliasing**. `acc(x.f,1/2)` and
         // `acc(y.f,1/2)` are distinct chunks on ground, but under an in-branch
@@ -276,11 +238,12 @@ fn heap_subtract_inner(
         return r;
     }
 
-    Ok(debit_direct(ctx, out, kind, &existing, &chunk2, kept))
+    Ok(debit_direct(ctx, out, kind, &existing, &chunk2))
 }
 
-/// Take `chunk2_perm` off a single chunk whose sufficiency is already proven, and
-/// store the remainder back under `kept`.
+/// Take `chunk2`'s amount off the single chunk `existing` (normalized for the
+/// consume, see `Chunk::normalized_for`) whose sufficiency is already proven. The
+/// remainder keeps `existing`'s presence.
 ///
 /// The value union is **unconditional**, unlike the guarded rule [`union_heaps`] and
 /// [`merge_chunks`] use. Sound here because the two sides are not symmetric:
@@ -298,14 +261,14 @@ fn debit_direct(
     kind: &LocationKind,
     existing: &Chunk,
     chunk2: &Chunk,
-    kept: Cube,
 ) -> Heap {
     ctx.union(existing.value, chunk2.value);
     // Remainder stays structural (leaves get `SubR`); never an `ite` in the graph.
     // Aligned against the *demand's* structure too, so a guarded consume cancels per
     // arm (`c ? 0 : 1/1`) rather than leaving `1/1 - (c ? 1/1 : 0/1)` in every leaf --
     // which is what lets `perm_all_zero` below see the emptied branch.
-    let remainder = perm_sub_aligned(ctx, existing.ungated_perm(), chunk2.ungated_perm());
+    let needed = chunk2.gated_perm(ctx);
+    let rest = existing.map_perm(|held| perm_sub_aligned(ctx, held, &needed));
     // Whether to drop the emptied chunk is a statement about the *heap*, so it has
     // to hold at the heap's scope — **unconditionally**, not under this
     // instruction's `pc`.
@@ -320,18 +283,13 @@ fn debit_direct(
     // stay O(1) — asking the prover runs once per chunk per consume and dominated
     // everything (93s vs 4s). Keeping a chunk we merely failed to prove empty is
     // sound: a zero-permission chunk is inert (`perm > 0` gates every use).
-    if perm_all_zero(ctx, &remainder) {
+    if rest.is_emptied(ctx) {
         out.without_chunk(kind, existing.addr)
     } else {
         // The value (and so its recipe provenance) is unchanged by a subtract, and
-        // so is the presence guard when the pc entailed it: the chunk is still held
-        // exactly where it was, just for less.
-        out.with_chunk(
-            kind,
-            Chunk::new_perm(existing.addr, remainder, existing.value)
-                .with_recipe(existing.recipe.clone())
-                .with_guard(kept),
-        )
+        // so is the presence: the chunk is still held exactly where it was, just
+        // for less.
+        out.with_chunk(kind, rest)
     }
 }
 
@@ -349,30 +307,26 @@ fn debit_wildcard(
     existing: &Chunk,
     chunk2: &Chunk,
     pc_lits: &[(egg::Id, Polarity)],
-    kept: Cube,
 ) -> Result<Heap, VerifyError> {
     // Walk the DEMAND's branch structure: a gated `exhale b ==> acc(x.f, wildcard)`
     // takes a share only where `b` holds, and states nothing where it does not.
     // Flat, the rule read only `chunk2.value` and constrained the remainder
     // `r < held` on both arms — including the arm where nothing was demanded, which
     // is imprecise rather than unsound but throws away permission the program kept.
-    let (perm, value, err) = debit_wildcard_walk(
-        ctx,
-        existing.ungated_perm(),
-        chunk2.ungated_perm(),
-        existing.value,
-        chunk2.value,
-        pc_lits,
-    );
+    let needed = chunk2.gated_perm(ctx);
+    let mut value = existing.value;
+    let mut err = None;
+    let mut rest = existing.map_perm(|held| {
+        let (perm, v, e) =
+            debit_wildcard_walk(ctx, held, &needed, existing.value, chunk2.value, pc_lits);
+        (value, err) = (v, e);
+        perm
+    });
     if let Some(e) = err {
         return Err(e);
     }
-    Ok(out.with_chunk(
-        kind,
-        Chunk::new_perm(existing.addr, perm, value)
-            .with_recipe(existing.recipe.clone())
-            .with_guard(kept),
-    ))
+    rest.value = value;
+    Ok(out.with_chunk(kind, rest))
 }
 
 /// One arm of a wildcard consume, recursing on the demand.
@@ -534,7 +488,7 @@ fn subtract_miss_trace(
     match existing {
         Some(existing) => {
             if crate::verify::viz::dump_perm_enabled() {
-                let existing_perm = existing.ungated_perm().to_id(ctx);
+                let existing_perm = existing.gated_perm(ctx).to_id(ctx);
                 eprintln!(
                     "[perm-dump] insufficient at subtract in group {:?}\n\
                      held.perm:\n{}needed.perm:\n{}",
@@ -560,21 +514,6 @@ fn subtract_miss_trace(
     }
 }
 
-/// A chunk's amount as it counts under `pc`: bare when the pc already entails the
-/// chunk's presence guard (the common case, and it keeps the term small), gated
-/// `guard ? perm : 0` otherwise.
-fn present_amount(
-    ctx: &mut VerifyContext<'_>,
-    c: &Chunk,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> ChunkPerm {
-    if c.guard().is_empty() || c.pc_entails_guard(ctx, pc_lits) {
-        c.ungated_perm().clone()
-    } else {
-        c.gated_perm(ctx)
-    }
-}
-
 /// Build the pc-alias flavour of a [`heap_subtract_summarized`] set: `existing` (when
 /// a chunk did match on ground) followed by the pc-alias `partners`, every member
 /// gated by the *same* cube — the pc.
@@ -582,7 +521,7 @@ fn present_amount(
 /// The returned total is not gated by the pc: the sufficiency proof runs under the
 /// pc anyway ([`VerifyContext::prove_under_pc`]), so gating each addend would only
 /// grow the term. Each addend is gated by its own presence guard, though (see
-/// [`present_amount`]).
+/// `Chunk::perm_under`).
 fn pc_alias_set(
     ctx: &mut VerifyContext<'_>,
     h1: &Heap,
@@ -611,7 +550,7 @@ fn pc_alias_set(
     // counted permission on the arm where the chunk does not exist.
     let mut total: Option<ChunkPerm> = None;
     for c in &members {
-        let amount = present_amount(ctx, c, pc_lits);
+        let amount = c.perm_under(ctx, pc_lits);
         total = Some(match total {
             None => amount,
             Some(t) => perm_add(ctx, &t, &amount),
@@ -698,14 +637,16 @@ fn heap_subtract_summarized(
         // absent member (its guard false) must neither be debited nor retire any
         // of the demand, or a present member is left holding permission it had
         // in fact given away.
-        let hold = present_amount(ctx, &chunk, pc_lits).to_id(ctx);
+        let hold = chunk.perm_under(ctx, pc_lits).to_id(ctx);
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
         // fractions fold it away.
         // `min(hold, remaining)` — a symbolic hold needs the `ite`; concrete
         // fractions fold it away.
         let take = expr!(ctx, if ({hold} <r {remaining}) then {hold} else {remaining});
         let gated = gate_amount_by_pc(ctx, take, &cube);
-        let rest = perm_sub(ctx, chunk.ungated_perm(), gated);
+        // Taken from the bare amount: the take is gated by the member's own
+        // `cube` already, and the remainder keeps the member's presence.
+        let rest = chunk.map_perm(|held| perm_sub(ctx, held, gated));
         // Debit `remaining` by what was actually taken — the **gated** amount, not
         // `take`. With one shared cube (the pc-alias caller) the two coincide on-path
         // and both are `0` off-path, so this is that path unchanged. With per-chunk
@@ -716,7 +657,7 @@ fn heap_subtract_summarized(
         remaining = ctx.add(Symbolic::Binary(BinOp::SubR, [remaining, gated]));
         // Same hygiene as the plain path: drop a chunk only when the remainder is
         // *unconditionally* zero (off-path the permission was never given up).
-        if perm_all_zero(ctx, &rest) {
+        if rest.is_emptied(ctx) {
             out = out.without_chunk(kind, chunk.addr);
         } else {
             // The member's own presence guard is carried through untouched: unlike
@@ -726,12 +667,7 @@ fn heap_subtract_summarized(
             // was what destroyed the flat cube on the first consume at a location
             // and left every later one with conditionality it could only see as
             // `ite`s inside the arithmetic.
-            out = out.with_chunk(
-                kind,
-                Chunk::new_perm(chunk.addr, rest, chunk.value)
-                    .with_recipe(chunk.recipe.clone())
-                    .with_guard(chunk.guard_pc()),
-            );
+            out = out.with_chunk(kind, rest);
         }
     }
     Ok(out)

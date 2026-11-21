@@ -36,9 +36,9 @@ pub(in crate::verify::heap) fn chunk_share_at(
         }
         // Equal wherever this chunk is held: no address gate, and the
         // condition on the contribution is the guard `held` already carries.
-        let presence = c.presence_cube(ctx, pc_lits)?;
-        if !c.guard().is_empty() && ctx.prove_under_pc(eq, &presence) {
-            (held, c.guard_pc())
+        let presence = c.presence_within(ctx, pc_lits)?;
+        if !c.presence().is_empty() && ctx.prove_under_pc(eq, &presence) {
+            (held, c.presence().clone())
         } else {
             // Structural, not folded into the term. Gating the amount as
             // `ite(eq, held, 0)` collapses the whole summary to one flat

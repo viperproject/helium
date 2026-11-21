@@ -3,7 +3,7 @@
 use super::*;
 use crate::dhash::HashSet;
 use crate::verify::heap::quantified_permissions::same_footprint;
-use crate::verify::heap::{Cube, QPTaken, QuantChunk, Restored, Taken};
+use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken};
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, LocationKind},
@@ -65,44 +65,21 @@ pub(in crate::verify::heap) fn merge_heaps(
                     } else {
                         expr!(ctx, if {cond} then {a.value} else {b.value})
                     };
-                    if a.guard().same(ctx, b.guard()) {
-                        // Same presence on both arms → carry with shared guard.
-                        // Amount: congruent ⇒ bare; divergent ⇒ single Select.
-                        let perm = if ChunkPerm::same(ctx, a.ungated_perm(), b.ungated_perm()) {
-                            a.ungated_perm().clone()
-                        } else {
-                            ChunkPerm::select(
-                                ctx,
-                                cond,
-                                a.ungated_perm().clone(),
-                                b.ungated_perm().clone(),
-                            )
-                        };
-                        Some(
-                            Chunk::new_perm(a.addr, perm, value)
-                                .with_guard(a.guard_pc())
-                                .with_recipe(a.recipe.clone()),
-                        )
-                    } else {
-                        // Guards differ: genuine disjunction. Fall back to the
-                        // legacy gated encoding — `guard? p : 0` on each side under
-                        // `cond` — with an empty residual guard (conditionality
-                        // lives in the amount here).
+                    // Same presence on both arms → kept, and the amounts are
+                    // bare: congruent ⇒ one, divergent ⇒ a single Select.
+                    // Presences differ → a genuine disjunction: each folded
+                    // into its amount, under `cond`.
+                    if !a.presence().same(ctx, b.presence()) {
                         crate::verify::heap::MergeTrace::bump_zero();
-                        let pa = a.gated_perm(ctx);
-                        let pb = b.gated_perm(ctx);
-                        let perm = ChunkPerm::select(ctx, cond, pa, pb);
-                        Some(Chunk::new_perm(a.addr, perm, value).with_recipe(a.recipe.clone()))
                     }
+                    let (mut merged, ()) = Chunk::zip(ctx, &a, &b, |ctx, pa, pb| {
+                        (ChunkPerm::select(ctx, cond, pa.clone(), pb.clone()), ())
+                    });
+                    merged.value = value;
+                    Some(merged)
                 }
-                (Some(a), None) => {
-                    let guard = a.guard().with(ctx, (cond, Polarity::Positive));
-                    Some(a.with_guard(guard))
-                }
-                (None, Some(b)) => {
-                    let guard = b.guard().with(ctx, (cond, Polarity::Negative));
-                    Some(b.with_guard(guard))
-                }
+                (Some(a), None) => Some(a.under(ctx, (cond, Polarity::Positive))),
+                (None, Some(b)) => Some(b.under(ctx, (cond, Polarity::Negative))),
                 (None, None) => None,
             };
             if let Some(chunk) = chunk {
@@ -111,11 +88,7 @@ pub(in crate::verify::heap) fn merge_heaps(
         }
     }
     // Chunk sets: one held on both arms is kept once (see `merge_sets`).
-    let kinds = h_then
-        .qps
-        .keys()
-        .chain(h_els.qps.keys())
-        .collect::<HashSet<_>>();
+    let kinds = h_then.kinds().chain(h_els.kinds()).collect::<HashSet<_>>();
     for kind in kinds {
         let sets = merge_sets(
             ctx,
@@ -178,7 +151,7 @@ fn merge_set(
     // Sets are never dropped from a heap and only a join changes a guard, so
     // copies of one inhale reach a join under the guard they were inhaled with.
     assert!(
-        t.guard.same(ctx, &e.guard),
+        t.presence().same(ctx, e.presence()),
         "two copies of one chunk set reach a join under different guards"
     );
     let shared = t
@@ -230,13 +203,12 @@ fn merge_set(
             restored.push(r.clone());
         }
     }
-    QuantChunk {
-        taken,
-        value_map,
-        recipe,
-        restored: restored.into(),
-        ..t.clone()
-    }
+    let mut out = t.clone();
+    out.taken = taken;
+    out.value_map = value_map;
+    out.recipe = recipe;
+    out.restored = restored.into();
+    out
 }
 
 /// The **sum** of two heaps held simultaneously (`HeapInst::Union`).
@@ -299,56 +271,13 @@ pub(in crate::verify::heap) fn union_heaps(
             out = out.with_chunk(kind, cb.clone());
             continue;
         };
-        let (pa, pb, guard): (ChunkPerm, ChunkPerm, Cube) = if ca.guard().same(ctx, cb.guard()) {
-            (
-                ca.ungated_perm().clone(),
-                cb.ungated_perm().clone(),
-                ca.guard_pc(),
-            )
-        } else {
-            (ca.gated_perm(ctx), cb.gated_perm(ctx), Cube::empty())
-        };
-        // Decided against the *guard-gated* fractions: a chunk held only under its
-        // guard is not held where the guard fails, however positive its bare amount.
-        let a_held = prove_perm_positive(ctx, &pa, pc_lits);
-        let b_held = prove_perm_positive(ctx, &pb, pc_lits);
-        let (ia, ib) = (pa.to_id(ctx), pb.to_id(ctx));
-        let value = match (a_held, b_held) {
-            // Both definitely held: the values agree outright, so collapse the
-            // classes. No ternary, no implication — the cheap common case.
-            (true, true) => {
-                ctx.union(ca.value, cb.value);
-                ca.value
-            }
-            // One side definitely held: take its value and make the agreement
-            // conditional on the *other* fraction. Equivalent to what `merge_values`
-            // would build (its ternary reduces once the positive side is known), but
-            // without minting the `Ite` — worth it, because a loop under a path
-            // condition hits this on every exit.
-            (true, false) => {
-                assume_values_agree(ctx, ib, ca.value, cb.value, pc_lits);
-                ca.value
-            }
-            (false, true) => {
-                assume_values_agree(ctx, ia, cb.value, ca.value, pc_lits);
-                cb.value
-            }
-            (false, false) => merge_values(ctx, ia, ca.value, ib, cb.value, pc_lits),
-        };
-        // Structural sum, the same dispatch [`merge_chunks`] makes: `perm_add`
-        // distributes over the operands' `Select`s, so two arm-wise perms cancel per
-        // branch. Flattening first left `ite(c, 1/1, 0) + ite(c, 0, 1/1)` — a full
-        // permission the graph cannot see is one, since deciding it needs a case
-        // split. That is exactly a loop's frame restore under a path condition: the
-        // invariant's footprint on one arm, the frame's residual on the other.
-        let sum = if ctx.has_wildcard && (pa.has_wild() || pb.has_wild()) {
-            perm_add_wildcard(ctx, &pa, &pb)
-        } else {
-            perm_add(ctx, &pa, &pb)
-        };
-        let merged = Chunk::new_perm(ca.addr, sum, value)
-            .with_guard(guard)
-            .with_recipe(ca.recipe.clone().or_else(|| cb.recipe.clone()));
+        // Under one shared presence the amounts are bare; otherwise each is gated
+        // by its own (see `Chunk::zip`).
+        let (mut merged, value) = Chunk::zip(ctx, &ca, cb, |ctx, pa, pb| {
+            union_amounts(ctx, pa, pb, ca.value, cb.value, pc_lits)
+        });
+        merged.value = value;
+        merged.recipe = ca.recipe.clone().or_else(|| cb.recipe.clone());
         out = out.with_chunk(kind, merged);
     }
 
@@ -356,8 +285,8 @@ pub(in crate::verify::heap) fn union_heaps(
     // was taken from cancels that take ([`give_back`]): at a loop exit the
     // frame's set took the invariant's at the head, and the invariant hands it
     // back. Every other set is kept as is.
-    for (kind, sets) in b.qps.iter() {
-        for set in sets.iter() {
+    for kind in b.kinds() {
+        for set in b.qp_chunks_of(kind) {
             let mut hit = None;
             for (j, held) in out.qp_chunks_of(kind).iter().enumerate() {
                 if let Some(c) = give_back(ctx, kind, set, held, pc_lits)
@@ -375,6 +304,59 @@ pub(in crate::verify::heap) fn union_heaps(
     }
     ctx.egraph.rebuild();
     out
+}
+
+/// The sum of two amounts held at once at one location, `pa` (value `va`) and
+/// `pb` (value `vb`), and the location's value. See [`union_heaps`] for the
+/// value rule.
+fn union_amounts(
+    ctx: &mut VerifyContext<'_>,
+    pa: &ChunkPerm,
+    pb: &ChunkPerm,
+    va: egg::Id,
+    vb: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> (ChunkPerm, egg::Id) {
+    // Decided against the *presence-gated* fractions: a chunk held only under
+    // its presence is not held where it fails, however positive its bare amount
+    // (`Chunk::zip` hands over bare amounts only under one shared presence).
+    let a_held = prove_perm_positive(ctx, pa, pc_lits);
+    let b_held = prove_perm_positive(ctx, pb, pc_lits);
+    let (ia, ib) = (pa.to_id(ctx), pb.to_id(ctx));
+    let value = match (a_held, b_held) {
+        // Both definitely held: the values agree outright, so collapse the
+        // classes. No ternary, no implication — the cheap common case.
+        (true, true) => {
+            ctx.union(va, vb);
+            va
+        }
+        // One side definitely held: take its value and make the agreement
+        // conditional on the *other* fraction. Equivalent to what `merge_values`
+        // would build (its ternary reduces once the positive side is known), but
+        // without minting the `Ite` — worth it, because a loop under a path
+        // condition hits this on every exit.
+        (true, false) => {
+            assume_values_agree(ctx, ib, va, vb, pc_lits);
+            va
+        }
+        (false, true) => {
+            assume_values_agree(ctx, ia, vb, va, pc_lits);
+            vb
+        }
+        (false, false) => merge_values(ctx, ia, va, ib, vb, pc_lits),
+    };
+    // Structural sum, the same dispatch [`merge_chunks`] makes: `perm_add`
+    // distributes over the operands' `Select`s, so two arm-wise perms cancel per
+    // branch. Flattening first left `ite(c, 1/1, 0) + ite(c, 0, 1/1)` — a full
+    // permission the graph cannot see is one, since deciding it needs a case
+    // split. That is exactly a loop's frame restore under a path condition: the
+    // invariant's footprint on one arm, the frame's residual on the other.
+    let sum = if ctx.has_wildcard && (pa.has_wild() || pb.has_wild()) {
+        perm_add_wildcard(ctx, pa, pb)
+    } else {
+        perm_add(ctx, pa, pb)
+    };
+    (sum, value)
 }
 
 /// `x` with `y` given back, or `None` when `y` is not something `x` gave away.
@@ -395,11 +377,11 @@ fn give_back(
     y: &QuantChunk,
     pc: &[(egg::Id, Polarity)],
 ) -> Option<QuantChunk> {
-    if !y.taken.is_empty() || !y.guard.holds_under(ctx, pc) {
+    if !y.taken.is_empty() || !y.presence().holds_under(ctx, pc) {
         return None;
     }
     let k = x.taken.iter().position(|t| match &t.what {
-        Taken::Set(s) => s.guard.holds_under(ctx, pc) && same_footprint(ctx, s, y),
+        Taken::Set(s) => s.presence().holds_under(ctx, pc) && same_footprint(ctx, s, y),
         _ => false,
     })?;
     let Taken::Set(region) = &x.taken[k].what else {
@@ -410,10 +392,8 @@ fn give_back(
     taken.remove(k);
     let mut restored = x.restored.to_vec();
     restored.extend(y.restored.iter().cloned());
-    let own = QuantChunk {
-        taken: Rc::from([]),
-        ..x.clone()
-    };
+    let mut own = x.clone();
+    own.taken = Rc::from([]);
     let (value_map, recipe) = if ctx.egraph.find(x.value_map) == ctx.egraph.find(y.value_map) {
         (x.value_map, x.recipe.clone())
     } else if same_footprint(ctx, &own, &region) {
@@ -437,11 +417,10 @@ fn give_back(
         });
         (map, None)
     };
-    Some(QuantChunk {
-        taken: taken.into(),
-        value_map,
-        recipe,
-        restored: restored.into(),
-        ..x.clone()
-    })
+    let mut out = x.clone();
+    out.taken = taken.into();
+    out.value_map = value_map;
+    out.recipe = recipe;
+    out.restored = restored.into();
+    Some(out)
 }
