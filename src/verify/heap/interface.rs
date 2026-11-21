@@ -11,6 +11,13 @@
 //! | field write               | [`Heap::write`]        |
 //! | branch join, heap sum     | [`Heap::merge`], [`Heap::union`] |
 //!
+//! Every method here takes the `pc` of the instruction that uses the heap, which
+//! inside a block is only the delta past the block's cube. Each one first makes
+//! it the **effective** pc, the heap's region and `pc` ([`Heap::effective_pc`]),
+//! and everything below works under that: a fact the heap states under the
+//! delta alone would hold in every block, also where this heap does not exist
+//! (`failing/value_from_chunk_without_permission/summary_cross_branch_leak.vpr`).
+//!
 //! [`Heap::produce`] and [`Heap::consume`] take an [`Access`]: one location
 //! (`acc(e.f, p)`) or a quantified chunk set (`forall xs :: c ==> acc(e.f, p)`).
 //! A read's value ([`Heap::read`]) and the permission that frames it
@@ -162,6 +169,7 @@ impl Heap {
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<ChunkPerm, VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
         Ok(self.view(pc).shares(ctx, &loc.kind, loc.addr)?.total(ctx))
     }
 
@@ -177,8 +185,9 @@ impl Heap {
         pc: &[(egg::Id, Polarity)],
         read_recipe: Option<&ReadRecipe>,
     ) -> Result<Option<Value>, VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
         let shares = self.view(pc).shares(ctx, &loc.kind, loc.addr)?;
-        Ok(shares.value(ctx, pc, read_recipe))
+        Ok(shares.value(ctx, read_recipe))
     }
 
     /// `perm(loc)`: exactly the permission this heap holds at `loc`, the sum
@@ -189,6 +198,7 @@ impl Heap {
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<egg::Id, VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
         let total = self
             .view(pc)
             .all_shares(ctx, &loc.kind, loc.addr)?
@@ -205,6 +215,7 @@ impl Heap {
         value: Value,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<Heap, VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
         match access {
             Access::Single { loc, perm } => {
                 let chunk = Chunk::new_perm(loc.addr, perm, value.id).with_recipe(value.recipe);
@@ -237,6 +248,7 @@ impl Heap {
         mode: ConsumeMode,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<(Heap, Value), VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
         match access {
             Access::Single { loc, perm } => match mode {
                 ConsumeMode::Take => self.take_single(ctx, &loc, perm, pc),
@@ -296,11 +308,12 @@ impl Heap {
         value: egg::Id,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<Heap, VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
         // The common case: one chunk sits exactly at `loc` with write permission.
         if let Some(mut c) = self.chunk(&loc.kind, loc.addr).cloned() {
             let perm = c.gated_perm(ctx);
             if prove_perm_write(ctx, &perm, &loc.kind.bound, pc) {
-                c.value = value;
+                c.set_value(value);
                 return Ok(self.with_chunk(&loc.kind, c));
             }
         }
@@ -321,9 +334,9 @@ impl Heap {
                         value
                     } else {
                         let eq = expr!(ctx, { c.addr } == { loc.addr });
-                        ctx.add(Symbolic::Ite([eq, value, c.value]))
+                        ctx.add(Symbolic::Ite([eq, value, c.stored_value()]))
                     };
-                    c.value = new;
+                    c.set_value(new);
                     heap = heap.with_chunk(&loc.kind, c);
                 }
                 HolderAt::Set(i) => {
@@ -369,12 +382,13 @@ impl Heap {
         other: &Heap,
         pc: &[(egg::Id, Polarity)],
     ) -> Heap {
+        let pc = &self.effective_pc(ctx, pc)[..];
         union_heaps(ctx, self, other, pc)
     }
 
-    /// [`Heap::consume`] of one location: the value is read from the holders
-    /// first, then the permission is taken (from the single chunks, else from
-    /// one chunk set).
+    /// [`Heap::consume`] of one location: the permission is taken (from the
+    /// single chunks, else from the chunk sets) and the value handed back is
+    /// the one the take resolved from the holders it took from.
     fn take_single(
         &self,
         ctx: &mut VerifyContext<'_>,
@@ -382,27 +396,12 @@ impl Heap {
         perm: ChunkPerm,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<(Heap, Value), VerifyError> {
-        // Single chunks only: the chunk at the address (canonically), else a
-        // fresh value the consume below binds to whatever it takes. With chunk
-        // sets, the value their holders agree on.
-        let value = if self.qp_chunks_of(&loc.kind).is_empty() {
-            self.chunk_canon(ctx, &loc.kind, loc.addr).map(|c| Value {
-                id: c.value,
-                recipe: c.recipe.clone(),
-            })
-        } else {
-            self.read(ctx, loc, pc, None)?
-        };
-        let value =
-            value.unwrap_or_else(|| Value::plain(ctx.fresh_symbolic_value(loc.kind.value.clone())));
         let demand = if perm.has_wild() {
             Demand::Wildcard
         } else {
             Demand::Concrete
         };
-        let chunk = Chunk::new_perm(loc.addr, perm, value.id).with_recipe(value.recipe.clone());
-        let heap = subtract_location(ctx, self, &loc.kind, chunk, pc, demand)?;
-        Ok((heap, value))
+        subtract_location(ctx, self, &loc.kind, loc.addr, perm, pc, demand)
     }
 
     /// [`Heap::consume`] of one location in [`ConsumeMode::Frame`]: `presence`
@@ -422,13 +421,6 @@ impl Heap {
         // The chunk at the address on ground, when there is one: `guard ⇒ 0 <
         // held`, proven per leaf (the held `Select` is never materialized).
         let (_, existing) = find_chunk_consolidated(ctx, self, &loc.kind, loc.addr, pc, true);
-        let mut value = existing.as_ref().map(|c| Value {
-            id: c.value,
-            recipe: c.recipe.clone(),
-        });
-        if value.is_none() && !self.qp_chunks_of(&loc.kind).is_empty() {
-            value = self.read(ctx, loc, pc, None)?;
-        }
         let framed = match existing {
             Some(c) => {
                 let held = c.gated_perm(ctx);
@@ -450,8 +442,12 @@ impl Heap {
         if !framed {
             return Err(VerifyError::InsufficientPermission);
         }
-        let value =
-            value.unwrap_or_else(|| Value::plain(ctx.fresh_symbolic_value(loc.kind.value.clone())));
+        // The value of the location as its holders resolve it, as for a read: a
+        // chunk that matched on ground but holds nothing here does not name it.
+        let value = self
+            .view(pc)
+            .shares(ctx, &loc.kind, loc.addr)?
+            .resolve(ctx, None);
         Ok((self.clone(), value))
     }
 }

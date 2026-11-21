@@ -1,0 +1,14 @@
+// Must FAIL.
+field f: Int
+
+method zero_residue_exhale(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    exhale acc(y.f)
+    inhale acc(y.f) && y.f == 5
+    exhale acc(x.f)
+    assert false
+  }
+}

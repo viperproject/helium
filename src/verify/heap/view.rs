@@ -13,6 +13,19 @@
 //! ladder only decides *which* shares to take from (the chunk on ground, the
 //! chunks the pc makes alias, every chunk that may alias, the chunk sets), and
 //! the proof and the debit are the same for all of them.
+//!
+//! # A value only comes out of shares
+//!
+//! A holder's value is the location's only where the holder holds a positive
+//! share of it: a chunk drained to zero on some path (a pc-gated debit leaves
+//! `1 - (b ? 1 : 0)`, which does not fold away) stays in the heap with the value
+//! it had. So no value is read off a holder directly. [`Shares::value`]
+//! resolves the location's value from the shares it was asked of, each value
+//! counting only where its share is positive, and [`Shares::take`] hands back
+//! the value of what it took, resolved the same way; a consume is never handed a
+//! value to bind. A [`Shares`] also carries the pc of the [`View`] it came from,
+//! and every fact it states is stated under that pc: the holders exist only on
+//! paths where it holds.
 
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
@@ -67,6 +80,10 @@ pub(super) struct Share {
     /// aliases under. A debit from it and an agreement with it hold only there.
     when: Cube,
     pub(super) value: egg::Id,
+    /// Whether `perm` is already known positive here (so the value counts
+    /// without a proof): the sole chunk a read resolved to, or the one holder a
+    /// take of a positive amount proved covers it.
+    known: bool,
     source: ShareSource,
     pub(super) at: HolderAt,
 }
@@ -81,15 +98,20 @@ enum ShareSource {
     Set(Option<Val>),
 }
 
-/// Everything a heap holds at one address, in heap order (single chunks first).
+/// Everything a heap holds at one address, in heap order (single chunks first),
+/// as seen under one pc.
 pub(super) struct Shares {
     kind: LocationKind,
     shares: Vec<Share>,
+    /// The pc of the [`View`] these came from: the paths on which these holders
+    /// exist. Every fact stated about them is guarded by it.
+    pc: Vec<Lit>,
     /// The shares are exactly one single chunk that *is* the location under the
-    /// pc, and no chunk set of its kind is held (other single chunks of the
-    /// kind may be: a location that one chunk holds outright is not held by
-    /// another, see the non-aliasing axiom). Its value is the location's, with
-    /// no agreement to state and no positivity to prove.
+    /// pc and is known to hold a positive share of it, and no chunk set of its
+    /// kind is held (other single chunks of the kind may be: a location that
+    /// one chunk holds a positive share of outright is not held by another
+    /// beyond the bound, see the non-aliasing axiom). Its value is the
+    /// location's, with no agreement to state.
     sole: bool,
 }
 
@@ -98,10 +120,13 @@ impl<'a> View<'a> {
     ///
     /// When the kind has no chunk sets and one single chunk sits at the address
     /// under the pc ([`chunk_under_pc`]: on ground, else in a probe that assumes
-    /// the pc), that chunk alone: it is the location. Otherwise every single
-    /// chunk that may sit there ([`chunk_share_at`], its aliasing gate folded
-    /// in) and every chunk set that can name it ([`qp_perm_at`], its presence
-    /// folded in, what was exhaled from it subtracted).
+    /// the pc) **and holds a positive share there**, that chunk alone: it is the
+    /// location. Otherwise every single chunk that may sit there
+    /// ([`chunk_share_at`], its aliasing gate folded in) and every chunk set that
+    /// can name it ([`qp_perm_at`], its presence folded in, what was exhaled from
+    /// it subtracted). A chunk that sits there but may hold nothing is not the
+    /// location: its value is stale wherever it is empty, and another holder
+    /// (a pc alias) may hold the location there.
     pub(super) fn shares(
         &self,
         ctx: &mut VerifyContext<'_>,
@@ -120,12 +145,17 @@ impl<'a> View<'a> {
                 Cube::from(self.pc)
             };
             let perm = c.gated_perm(ctx);
-            let hold = c.perm_under(ctx, self.pc);
-            return Ok(Shares {
-                kind: kind.clone(),
-                shares: vec![chunk_share(c, perm, hold, when)],
-                sole: true,
-            });
+            if prove_perm_positive(ctx, &perm, self.pc) {
+                let hold = c.perm_under(ctx, self.pc);
+                let mut share = chunk_share(c, perm, hold, when);
+                share.known = true;
+                return Ok(Shares {
+                    kind: kind.clone(),
+                    shares: vec![share],
+                    pc: self.pc.to_vec(),
+                    sole: true,
+                });
+            }
         }
         self.all_shares(ctx, kind, addr)
     }
@@ -202,6 +232,7 @@ impl<'a> View<'a> {
         Shares {
             kind: kind.clone(),
             shares,
+            pc: self.pc.to_vec(),
             sole: false,
         }
     }
@@ -218,6 +249,7 @@ impl<'a> View<'a> {
         Ok(Shares {
             kind: kind.clone(),
             shares: vec![set_share(ctx, kind, set, i, addr)?],
+            pc: self.pc.to_vec(),
             sole: false,
         })
     }
@@ -243,7 +275,8 @@ fn chunk_share(c: &Chunk, perm: ChunkPerm, hold: ChunkPerm, when: Cube) -> Share
         perm,
         hold,
         when,
-        value: c.value,
+        value: c.stored_value(),
+        known: false,
         source: ShareSource::Chunk(c.clone()),
         at: HolderAt::Chunk(c.addr),
     }
@@ -273,6 +306,7 @@ fn set_share(
         perm,
         when: Cube::empty(),
         value,
+        known: false,
         source: ShareSource::Set(set.recipe.clone()),
         at: HolderAt::Set(i),
     })
@@ -312,6 +346,7 @@ impl Shares {
         Shares {
             kind: kind.clone(),
             shares: vec![chunk_share(c, perm.clone(), perm, Cube::empty())],
+            pc: pc.to_vec(),
             sole: false,
         }
     }
@@ -336,6 +371,7 @@ impl Shares {
         Shares {
             kind: kind.clone(),
             shares,
+            pc: pc.to_vec(),
             sole: false,
         }
     }
@@ -348,21 +384,15 @@ impl Shares {
         self.shares.is_empty()
     }
 
-    /// Take `needed` at `addr` from these holders in `out`, the demand's value
-    /// being `value`; `Err(InsufficientPermission)` when they are not shown to
-    /// hold enough under `pc`, and then nothing has been changed.
+    /// Take `needed` at `addr` from these holders in `out`, and hand back the
+    /// value of what was taken; `Err(InsufficientPermission)` when they are not
+    /// shown to hold enough under the pc, and then nothing has been changed.
     ///
     /// - **One holder, outright at the address** — `held ≥ needed` is proven
     ///   aligned with both amounts' branch structure, and exactly `needed` is
     ///   taken. A single chunk's remainder is aligned against the demand's arms
     ///   too, so a guarded consume cancels per arm (`c ? 0 : 1/1`) rather than
-    ///   leaving `1/1 - (c ? 1/1 : 0/1)` in every leaf. Its value is unioned with
-    ///   the demand's outright: the demand's value is minted for this consume (or
-    ///   read from these very holders) and carries no prior meaning, so the union
-    ///   constrains only it. It is not implied by the sufficiency proof
-    ///   (`held ≥ needed` permits `needed == 0`, so a conditional exhale binds the
-    ///   value off-path); probed with complementary conditional exhales, both
-    ///   correctly rejected.
+    ///   leaving `1/1 - (c ? 1/1 : 0/1)` in every leaf.
     /// - **Otherwise** — the total is proven to cover `needed`, per leaf (a holder
     ///   present on one arm only contributes a branch on its literal, and each leaf
     ///   is discharged with it in the pc: flattening to one goal was the whole of
@@ -373,33 +403,40 @@ impl Shares {
     ///   nothing. No holder is merged — where `when` fails the locations are
     ///   distinct. Distributing (rather than parking the debit on one holder)
     ///   drives every holder to its true remainder, so a later consume needs no
-    ///   second alias probe. A single chunk's value agrees with the demand's only
-    ///   under its `when` and where its share there is positive.
+    ///   second alias probe.
+    ///
+    /// The value is [`Shares::value`] of these holders, resolved *before* the
+    /// debit: each holder's value counts only where its share is positive, under
+    /// the pc. A holder that sits at the address but is empty on this path (a
+    /// pc-gated debit's residue) contributes nothing, so its stale value never
+    /// becomes the location's. When the one outright holder covers a demand
+    /// known positive, its share is known positive too and no proof is spent.
     ///
     /// A single chunk emptied on every branch (const-fold, not a proof: heap
     /// hygiene must stay O(1), and keeping an empty chunk is sound) is dropped;
     /// otherwise it keeps its presence, the remainder taken from its bare amount.
-    /// A chunk set records what was taken at `addr` ([`Taken::Single`]); a
-    /// chunk set's value at the address is not bound.
+    /// A chunk set records what was taken at `addr` ([`Taken::Single`]).
     pub(super) fn take(
         &self,
         ctx: &mut VerifyContext<'_>,
         out: Heap,
         addr: egg::Id,
         needed: &ChunkPerm,
-        value: egg::Id,
-        pc: &[Lit],
-    ) -> Result<Heap, VerifyError> {
+    ) -> Result<(Heap, Value), VerifyError> {
         let kind = &self.kind;
+        let pc = &self.pc[..];
         if let [s] = &self.shares[..]
             && s.when.is_empty()
         {
             if !prove_sufficient_aligned(ctx, &s.hold, needed, pc) {
                 return Err(VerifyError::InsufficientPermission);
             }
-            return Ok(match &s.source {
+            // `held ≥ needed > 0`: the holder holds a positive share.
+            let mut covered = self.clone_shares();
+            covered.shares[0].known = demand_positive(ctx, needed);
+            let value = covered.resolve(ctx, None);
+            let out = match &s.source {
                 ShareSource::Chunk(c) => {
-                    ctx.union(c.value, value);
                     let rest = c.map_perm(|held| perm_sub_aligned(ctx, held, needed));
                     with_remainder(ctx, out, kind, rest)
                 }
@@ -410,7 +447,8 @@ impl Shares {
                     };
                     take_from_set(ctx, out, kind, s.at, what)
                 }
-            });
+            };
+            return Ok((out, value));
         }
 
         let needed = needed.to_id(ctx);
@@ -429,15 +467,7 @@ impl Shares {
             }
             return Err(VerifyError::InsufficientPermission);
         }
-        for s in &self.shares {
-            if let ShareSource::Chunk(c) = &s.source {
-                // Where it sits at the address *and holds a share there*. Sitting
-                // there is not enough: a chunk emptied on this path keeps its old
-                // value.
-                let perm = s.perm.to_id(ctx);
-                assume_agree(ctx, c.value, value, &[perm], &s.when);
-            }
-        }
+        let value = self.resolve(ctx, None);
         let mut out = out;
         let mut remaining = needed;
         for s in &self.shares {
@@ -463,7 +493,27 @@ impl Shares {
                 }
             };
         }
-        Ok(out)
+        Ok((out, value))
+    }
+
+    fn clone_shares(&self) -> Shares {
+        Shares {
+            kind: self.kind.clone(),
+            shares: self.shares.clone(),
+            pc: self.pc.clone(),
+            sole: self.sole,
+        }
+    }
+
+    /// [`Shares::value`] for a consume: a fresh value when nothing is known to
+    /// hold the location (it states nothing).
+    pub(super) fn resolve(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        read_recipe: Option<&ReadRecipe>,
+    ) -> Value {
+        self.value(ctx, read_recipe)
+            .unwrap_or_else(|| Value::plain(ctx.fresh_symbolic_value(self.kind.value.clone())))
     }
 
     pub(super) fn iter(&self) -> std::slice::Iter<'_, Share> {
@@ -511,9 +561,9 @@ impl Shares {
     pub(super) fn value(
         &self,
         ctx: &mut VerifyContext<'_>,
-        pc_lits: &[Lit],
         read_recipe: Option<&ReadRecipe>,
     ) -> Option<Value> {
+        let pc_lits = &self.pc[..];
         let holders = &self.shares[..];
         if self.sole {
             let s = &holders[0];
@@ -536,9 +586,7 @@ impl Shares {
                 pc_lits,
             )));
         }
-        let k = holders
-            .iter()
-            .position(|h| prove_perm_positive(ctx, &h.perm, pc_lits))?;
+        let k = holders.iter().position(|h| h.positive(ctx, pc_lits))?;
         let addr_r = read_recipe.and_then(|r| r.addr.as_ref());
         let recipe = holder_recipe(ctx, &self.kind, &holders[k], addr_r);
         record_agreements(
@@ -555,6 +603,24 @@ impl Shares {
             recipe,
         })
     }
+}
+
+impl Share {
+    /// Whether this share is positive under `pc`: known, or proven per leaf.
+    fn positive(&self, ctx: &mut VerifyContext<'_>, pc: &[Lit]) -> bool {
+        self.known || prove_perm_positive(ctx, &self.perm, pc)
+    }
+}
+
+/// Whether a demand is positive by its own terms (a positive literal amount):
+/// then a holder that covers it holds a positive share, with no proof.
+fn demand_positive(ctx: &VerifyContext<'_>, needed: &ChunkPerm) -> bool {
+    needed.as_leaf().is_some_and(|id| {
+        matches!(
+            ctx.egraph[ctx.egraph.find(id)].data.known(),
+            Some(Literal::Real(r)) if *r > num::BigRational::from(num::BigInt::from(0))
+        )
+    })
 }
 
 /// `out` with the single chunk `rest` in place of the one at its address, or
@@ -599,9 +665,7 @@ fn value_at(ctx: &mut VerifyContext<'_>, holders: &[Share], ty: &Type, pc_lits: 
         .iter()
         .map(|&p| expr!(ctx, (0 / 1) < r { p }))
         .collect();
-    let known = holders
-        .iter()
-        .position(|h| prove_perm_positive(ctx, &h.perm, pc_lits));
+    let known = holders.iter().position(|h| h.positive(ctx, pc_lits));
     let (mut value, upto) = match known {
         Some(k) => (holders[k].value, k),
         None => (ctx.fresh_symbolic_value(ty.clone()), holders.len()),
@@ -669,7 +733,7 @@ fn record_agreements(
         if ctx.egraph.find(vk) == ctx.egraph.find(h.value) {
             continue;
         }
-        if !prove_perm_positive(ctx, &h.perm, pc_lits) {
+        if !h.positive(ctx, pc_lits) {
             continue;
         }
         // Both are known positive here, so only the pc conditions it.

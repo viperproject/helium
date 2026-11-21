@@ -248,7 +248,7 @@ fn heap_subgraph(ctx: &VerifyContext<'_>, idx: usize, label: &str, heap: &Heap) 
     let mut edges = String::new();
     for (_, chunk) in heap.entries() {
         let c_addr = ctx.egraph.find(chunk.addr);
-        let c_val = ctx.egraph.find(chunk.value);
+        let c_val = ctx.egraph.find(chunk.stored_value());
         // `None` for a structural `Zero` amount, which has no e-class: the chunk
         // is still held (and drawn), with no permission edge.
         let c_perm = chunk.perm_repr_id().map(|p| ctx.egraph.find(p));

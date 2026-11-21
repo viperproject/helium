@@ -735,6 +735,19 @@ impl Heap {
         Heap { groups, region }
     }
 
+    /// The path condition a use of this heap under `pc` stands for: the heap's
+    /// region, the paths it exists on, and `pc`, region first (the ambient cube
+    /// before the delta, as for any instruction's effective pc). An instruction
+    /// passes its own pc, which inside a block is only the delta past the
+    /// block's cube; everything the heap proves or states is relative to the
+    /// effective pc instead, so that no fact about this heap holds on a path
+    /// where it does not exist.
+    pub(crate) fn effective_pc(&self, ctx: &VerifyContext<'_>, pc: &[Lit]) -> Vec<Lit> {
+        // Disjoint: the use is unreachable, and the conjunction says so.
+        cond::meet(ctx, &self.region, pc)
+            .unwrap_or_else(|| self.region.iter().chain(pc).copied().collect())
+    }
+
     fn group(&self, kind: &LocationKind) -> Option<&Group> {
         self.groups.get(kind)
     }

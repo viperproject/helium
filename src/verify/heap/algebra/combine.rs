@@ -61,11 +61,12 @@ pub(in crate::verify::heap) fn merge_heaps(
             let ce = h_els.chunk_canon(ctx, kind, addr).cloned();
             let chunk = match (ct, ce) {
                 (Some(a), Some(b)) => {
-                    let value = if ctx.egraph.find(a.value) == ctx.egraph.find(b.value) {
-                        a.value
-                    } else {
-                        expr!(ctx, if {cond} then {a.value} else {b.value})
-                    };
+                    let value =
+                        if ctx.egraph.find(a.stored_value()) == ctx.egraph.find(b.stored_value()) {
+                            a.stored_value()
+                        } else {
+                            expr!(ctx, if {cond} then {a.stored_value()} else {b.stored_value()})
+                        };
                     // Same presence on both arms → kept, and the amounts are
                     // bare: congruent ⇒ one, divergent ⇒ a single Select.
                     // Presences differ → a genuine disjunction: each folded
@@ -76,7 +77,7 @@ pub(in crate::verify::heap) fn merge_heaps(
                     let (mut merged, ()) = Chunk::zip(ctx, &a, &b, |ctx, pa, pb| {
                         (ChunkPerm::select(ctx, cond, pa.clone(), pb.clone()), ())
                     });
-                    merged.value = value;
+                    merged.set_value(value);
                     Some(merged)
                 }
                 (Some(a), None) => Some(a.under(ctx, (cond, Polarity::Positive))),
@@ -275,9 +276,9 @@ pub(in crate::verify::heap) fn union_heaps(
         // Under one shared presence the amounts are bare; otherwise each is gated
         // by its own (see `Chunk::zip`).
         let (mut merged, value) = Chunk::zip(ctx, &ca, cb, |ctx, pa, pb| {
-            union_amounts(ctx, pa, pb, ca.value, cb.value, pc_lits)
+            union_amounts(ctx, pa, pb, ca.stored_value(), cb.stored_value(), pc_lits)
         });
-        merged.value = value;
+        merged.set_value(value);
         merged.recipe = ca.recipe.clone().or_else(|| cb.recipe.clone());
         out = out.with_chunk(kind, merged);
     }

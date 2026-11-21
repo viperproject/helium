@@ -1,0 +1,19 @@
+// Must FAIL.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method setP5(r: Ref)
+  requires P(r)
+  ensures P(r) && (unfolding P(r) in r.f == 5)
+
+method zero_residue_unfold(x: Ref, y: Ref, b: Bool)
+  requires P(x) && (unfolding P(x) in x.f == 4)
+{
+  if (b) {
+    assume y == x
+    setP5(y)
+    unfold P(x)
+    assert x.f == 4
+  }
+}

@@ -43,8 +43,9 @@ pub(super) fn assume_agree(
 /// agreement between them assumed. `known` says which amounts are already
 /// known positive there:
 ///
-/// - **both** — the values are one: the classes are collapsed outright, the
-///   cheap common case (a loop frame restore carrying a value across a cut).
+/// - **both** — the values are one where `pc` holds: the classes are collapsed
+///   outright when `pc` is empty, the cheap common case (a loop frame restore
+///   carrying a value across a cut), and agree under `pc` otherwise.
 /// - **one** — its value, agreeing with the other's wherever that one is held.
 /// - **neither** — `0 < pa ? va : vb` (intentionally asymmetric: where `pa` is
 ///   empty the value is `vb`'s), agreeing wherever both are held.
@@ -56,8 +57,15 @@ pub(super) fn joint_value(
     pc: &[Lit],
 ) -> egg::Id {
     match known {
-        (true, true) => {
+        // Collapsed outright only when that is true on every path: the amounts
+        // were shown positive under `pc`, and on a path outside it these two
+        // chunks may not exist. There the agreement is guarded like any other.
+        (true, true) if pc.is_empty() => {
             ctx.union(va, vb);
+            va
+        }
+        (true, true) => {
+            assume_agree(ctx, va, vb, &[], pc);
             va
         }
         (true, false) => {
