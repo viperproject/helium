@@ -6,7 +6,7 @@ use super::*;
 use crate::verify::{
     context::VerifyContext,
     error::VerifyError,
-    heap::view::{HolderAt, Shares},
+    heap::view::Shares,
     heap::{Chunk, ChunkPerm, Heap, LocationKind, Shape},
 };
 use crate::vmir::Polarity;
@@ -320,7 +320,8 @@ fn debit_wildcard_walk(
         // Nothing demanded on this arm: no obligation, no fact, no debit.
         Shape::Zero => (held.clone(), held_value, None),
         Shape::Leaf { id, .. } => {
-            // Nothing demanded on this arm: no obligation, no fact, no debit.
+            // A demand that is provably not positive on this arm is nothing
+            // demanded: no obligation, no fact, no debit.
             let nonpos = expr!(ctx, not((0 / 1) < r { id }));
             if ctx.prove_under_pc(nonpos, pc_lits) {
                 return (held.clone(), held_value, None);
@@ -526,12 +527,21 @@ pub(in crate::verify::heap) fn subtract_location(
         ));
     }
     let needed = chunk.gated_perm(ctx);
-    let shares = heap.view(pc_lits).all_shares(ctx, kind, chunk.addr)?;
-    let is_set = |at| matches!(at, HolderAt::Set(_));
-    if let Some(h) =
-        shares.take_from_one(ctx, heap, chunk.addr, &needed, chunk.value, pc_lits, is_set)
-    {
-        return Ok(h);
+    let view = heap.view(pc_lits);
+    // One set by itself first: it costs one `qp_perm_at` per set, where every
+    // holder together costs an alias probe per chunk as well.
+    for i in 0..heap.qp_chunks_of(kind).len() {
+        let one = view.set_shares(ctx, kind, i, chunk.addr)?;
+        if let Ok(h) = one.take(ctx, heap.clone(), chunk.addr, &needed, chunk.value, pc_lits) {
+            return Ok(h);
+        }
     }
-    shares.take(ctx, heap.clone(), chunk.addr, &needed, chunk.value, pc_lits)
+    view.all_shares(ctx, kind, chunk.addr)?.take(
+        ctx,
+        heap.clone(),
+        chunk.addr,
+        &needed,
+        chunk.value,
+        pc_lits,
+    )
 }

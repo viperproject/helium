@@ -86,8 +86,10 @@ pub(super) struct Shares {
     kind: LocationKind,
     shares: Vec<Share>,
     /// The shares are exactly one single chunk that *is* the location under the
-    /// pc, and nothing else of its kind is held: its value is the location's,
-    /// with no agreement to state and no positivity to prove.
+    /// pc, and no chunk set of its kind is held (other single chunks of the
+    /// kind may be: a location that one chunk holds outright is not held by
+    /// another, see the non-aliasing axiom). Its value is the location's, with
+    /// no agreement to state and no positivity to prove.
     sole: bool,
 }
 
@@ -202,6 +204,22 @@ impl<'a> View<'a> {
             shares,
             sole: false,
         }
+    }
+
+    /// The chunk set `i` of `kind` alone, as a holder of `addr`.
+    pub(super) fn set_shares(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        kind: &LocationKind,
+        i: usize,
+        addr: egg::Id,
+    ) -> Result<Shares, VerifyError> {
+        let set = &self.heap.qp_chunks_of(kind)[i];
+        Ok(Shares {
+            kind: kind.clone(),
+            shares: vec![set_share(ctx, kind, set, i, addr)?],
+            sole: false,
+        })
     }
 
     /// Every holder that may hold `addr` (of `kind`), without the sole-chunk
@@ -322,15 +340,6 @@ impl Shares {
         }
     }
 
-    /// Only the `i`-th share.
-    fn only(&self, i: usize) -> Shares {
-        Shares {
-            kind: self.kind.clone(),
-            shares: vec![self.shares[i].clone()],
-            sole: false,
-        }
-    }
-
     pub(super) fn len(&self) -> usize {
         self.shares.len()
     }
@@ -365,7 +374,7 @@ impl Shares {
     ///   distinct. Distributing (rather than parking the debit on one holder)
     ///   drives every holder to its true remainder, so a later consume needs no
     ///   second alias probe. A single chunk's value agrees with the demand's only
-    ///   under its `when`.
+    ///   under its `when` and where its share there is positive.
     ///
     /// A single chunk emptied on every branch (const-fold, not a proof: heap
     /// hygiene must stay O(1), and keeping an empty chunk is sound) is dropped;
@@ -422,9 +431,11 @@ impl Shares {
         }
         for s in &self.shares {
             if let ShareSource::Chunk(c) = &s.source {
-                // Where it sits at the address it is the location: no amount to
-                // be positive, only `when` to hold.
-                assume_agree(ctx, c.value, value, &[], &s.when);
+                // Where it sits at the address *and holds a share there*. Sitting
+                // there is not enough: a chunk emptied on this path keeps its old
+                // value.
+                let perm = s.perm.to_id(ctx);
+                assume_agree(ctx, c.value, value, &[perm], &s.when);
             }
         }
         let mut out = out;
@@ -453,27 +464,6 @@ impl Shares {
             };
         }
         Ok(out)
-    }
-
-    /// [`Shares::take`] from one of these holders alone, the first that holds
-    /// enough by itself, trying only those `pick` selects.
-    pub(super) fn take_from_one(
-        &self,
-        ctx: &mut VerifyContext<'_>,
-        out: &Heap,
-        addr: egg::Id,
-        needed: &ChunkPerm,
-        value: egg::Id,
-        pc: &[Lit],
-        pick: impl Fn(HolderAt) -> bool,
-    ) -> Option<Heap> {
-        (0..self.shares.len())
-            .filter(|&i| pick(self.shares[i].at))
-            .find_map(|i| {
-                self.only(i)
-                    .take(ctx, out.clone(), addr, needed, value, pc)
-                    .ok()
-            })
     }
 
     pub(super) fn iter(&self) -> std::slice::Iter<'_, Share> {
