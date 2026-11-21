@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{FunctionBody, Type, Val};
+use crate::vmir::{FunctionBody, InstKind, PureInst, TyParams, Type, Val};
 use std::fmt::{self, Display, Formatter};
 
 /// A pure `forall`, **inline** in the enclosing instruction stream (it is an
@@ -39,11 +39,20 @@ pub struct Forall {
     /// passed around alone (recipe interning, well-definedness checking) with no
     /// access to its host.
     pub binder_base: usize,
-    /// The binder types; binder `i` is `Val::Temp(binder_base + i)`.
+    /// The **type** binders: this quantifier binds `Generic(0..ty_binders)`, and
+    /// an instantiation fixes them by the type arguments of the trigger terms it
+    /// matches. Non-zero only on the root quantifier of a generic axiom (Viper
+    /// has no nested type quantifiers), so `Generic(i)` always names that root's
+    /// binder `i`; a nested `forall` mentioning one leaves it open for the
+    /// enclosing instantiation to fix. Printed `?i: Type` before the binders.
+    pub ty_binders: TyParams,
+    /// The binder types; binder `i` is `Val::Temp(binder_base + i)`. Empty for
+    /// a quantifier that binds only types.
     pub bound: Box<[Type]>,
     /// The trigger groups, in source order — **alternatives**: a match of *any*
-    /// one of them instantiates the quantifier. Never empty and never inferred:
-    /// a `forall` without a usable trigger is a type error.
+    /// one of them instantiates the quantifier. Never empty. Written by the user,
+    /// except on a generic axiom's root quantifier that binds only types, whose
+    /// triggers translation infers (`translate::decl::domain`).
     pub triggers: Box<[QuantTrigger]>,
     pub body: FunctionBody,
 }
@@ -84,6 +93,116 @@ impl Forall {
         }
         out
     }
+
+    /// Visit every type this quantifier mentions: its binder types, its
+    /// triggers' type arguments, and every type of its body, nested quantifiers
+    /// included.
+    pub fn for_each_type(&self, f: &mut impl FnMut(&Type)) {
+        self.bound.iter().for_each(&mut *f);
+        for term in self.triggers.iter().flat_map(|g| g.terms.iter()) {
+            term.for_each_type(f);
+        }
+        self.body.for_each_type(f);
+    }
+
+    fn for_each_type_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        self.bound.iter_mut().for_each(&mut *f);
+        for term in self.triggers.iter_mut().flat_map(|g| g.terms.iter_mut()) {
+            term.for_each_type_mut(f);
+        }
+        self.body.for_each_type_mut(f);
+    }
+}
+
+impl FunctionBody {
+    /// Visit every type of this **pure** body: each step's result type and the
+    /// type arguments it carries, nested quantifiers included. Panics on a heap
+    /// or permission step: only quantifier and axiom bodies are walked, and those
+    /// are pure.
+    pub fn for_each_type(&self, f: &mut impl FnMut(&Type)) {
+        for inst in &self.insts {
+            match &inst.kind {
+                InstKind::Pure(ty, pi) => {
+                    f(ty);
+                    match pi {
+                        PureInst::FunctionCall(fc) => fc.type_args.iter().for_each(&mut *f),
+                        PureInst::AdtCons { type_args, .. }
+                        | PureInst::AdtProj { type_args, .. }
+                        | PureInst::AdtIs { type_args, .. } => type_args.iter().for_each(&mut *f),
+                        PureInst::Coll { tys, .. } => tys.iter().for_each(&mut *f),
+                        PureInst::CollLit { elem_ty, .. } => f(elem_ty),
+                        PureInst::Forall(q) => q.for_each_type(f),
+                        _ => {}
+                    }
+                }
+                InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {}
+                InstKind::Heap(_) | InstKind::Perm(_) => {
+                    panic!(
+                        "a quantifier or axiom body is pure, but has {:?}",
+                        inst.kind
+                    )
+                }
+            }
+        }
+    }
+
+    fn for_each_type_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        for inst in &mut self.insts {
+            match &mut inst.kind {
+                InstKind::Pure(ty, pi) => {
+                    f(ty);
+                    match pi {
+                        PureInst::FunctionCall(fc) => fc.type_args.iter_mut().for_each(&mut *f),
+                        PureInst::AdtCons { type_args, .. }
+                        | PureInst::AdtProj { type_args, .. }
+                        | PureInst::AdtIs { type_args, .. } => {
+                            type_args.iter_mut().for_each(&mut *f)
+                        }
+                        PureInst::Coll { tys, .. } => tys.iter_mut().for_each(&mut *f),
+                        PureInst::CollLit { elem_ty, .. } => f(elem_ty),
+                        PureInst::Forall(q) => q.for_each_type_mut(f),
+                        _ => {}
+                    }
+                }
+                InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {}
+                InstKind::Heap(_) | InstKind::Perm(_) => {
+                    panic!(
+                        "a quantifier or axiom body is pure, but has {:?}",
+                        inst.kind
+                    )
+                }
+            }
+        }
+    }
+
+    /// Record every `Generic(i)` this pure body mentions (see
+    /// [`FunctionBody::for_each_type`]).
+    pub fn collect_generics(&self, out: &mut crate::dhash::HashSet<usize>) {
+        self.for_each_type(&mut |t| t.collect_generics(out));
+    }
+
+    /// This pure body with every `Generic(i)` replaced by `tys[i]`, nested
+    /// quantifiers included. Panics on a quantifier that binds types: its
+    /// `Generic`s are its own, not the ones being substituted.
+    pub fn subst_generics(&self, tys: &[Type]) -> FunctionBody {
+        self.assert_no_type_binders();
+        let mut out = self.clone();
+        out.for_each_type_mut(&mut |t| *t = t.subst_generics(tys));
+        out
+    }
+
+    fn assert_no_type_binders(&self) {
+        for inst in &self.insts {
+            if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
+                assert_eq!(
+                    q.ty_binders.count(),
+                    0,
+                    "only a generic axiom's root quantifier binds types"
+                );
+                q.body.assert_no_type_binders();
+            }
+        }
+    }
 }
 
 impl TrigTerm {
@@ -92,9 +211,36 @@ impl TrigTerm {
     pub fn for_each_var(&self, f: &mut impl FnMut(&Val)) {
         match self {
             TrigTerm::Var(k) => f(&Val::Temp(*k)),
-            TrigTerm::Lit(_) => {}
+            TrigTerm::Lit(_) | TrigTerm::Wild => {}
             TrigTerm::App { args, .. } => args.iter().for_each(|a| a.for_each_var(f)),
         }
+    }
+
+    /// Visit the type arguments of every application in the pattern.
+    pub fn for_each_type(&self, f: &mut impl FnMut(&Type)) {
+        if let TrigTerm::App {
+            type_args, args, ..
+        } = self
+        {
+            type_args.iter().for_each(&mut *f);
+            args.iter().for_each(|a| a.for_each_type(f));
+        }
+    }
+
+    fn for_each_type_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        if let TrigTerm::App {
+            type_args, args, ..
+        } = self
+        {
+            type_args.iter_mut().for_each(&mut *f);
+            args.iter_mut().for_each(|a| a.for_each_type_mut(f));
+        }
+    }
+
+    /// Every `Generic(i)` the type arguments of the pattern's applications
+    /// mention: the type parameters a match of it fixes.
+    pub fn collect_generics(&self, out: &mut crate::dhash::HashSet<usize>) {
+        self.for_each_type(&mut |t| t.collect_generics(out));
     }
 }
 
@@ -113,11 +259,15 @@ pub struct QuantTrigger {
 /// below it is a free occurrence, which the match must reproduce. A `Lit`
 /// requires the literal, and an `App` requires an application of that head whose
 /// arguments recursively match, so a trigger may nest arbitrarily
-/// (`{f(g(x), c)}`).
+/// (`{f(g(x), c)}`). A `Wild` matches anything and binds nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TrigTerm {
     Var(usize),
     Lit(crate::vmir::Literal),
+    /// Any value. Only in an inferred trigger of a quantifier that binds only
+    /// types: it has no value binders to bind, and its trigger needs only the
+    /// head and type arguments of an application to fix its types. Printed `_`.
+    Wild,
     App {
         head: TrigHead,
         type_args: Vec<Type>,
@@ -164,6 +314,7 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
         match term {
             TrigTerm::Var(k) => write!(f, "e{k}"),
             TrigTerm::Lit(lit) => write!(f, "{lit}"),
+            TrigTerm::Wild => write!(f, "_"),
             TrigTerm::App {
                 head,
                 type_args,
@@ -225,12 +376,13 @@ impl<'a> Display for VmirDisplay<'a, &'a Forall> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let q = self.item;
         write!(f, "forall ")?;
-        for (k, ty) in q.bound.iter().enumerate() {
-            if k > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "e{}: {}", q.binder_base + k, self.with(ty))?;
-        }
+        let tys = (0..q.ty_binders.count()).map(|i| format!("?{i}: Type"));
+        let vals = q
+            .bound
+            .iter()
+            .enumerate()
+            .map(|(k, ty)| format!("e{}: {}", q.binder_base + k, self.with(ty)));
+        write!(f, "{}", tys.chain(vals).collect::<Vec<_>>().join(", "))?;
         // Trigger groups, alternatives side by side: `{f(e1), g(e1)}{h(e1)}`.
         write!(f, " :: ")?;
         for group in q.triggers.iter() {

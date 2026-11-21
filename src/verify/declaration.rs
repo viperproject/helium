@@ -2061,10 +2061,11 @@ fn decls_use_coll(
 /// about to be verified. An axiom body is evaluated into the e-graph and its
 /// boolean merged with `true` up front; quantification over *values* is a
 /// `forall` in the body, which becomes its own lazy-instantiation rule below.
-/// A **generic** axiom is evaluated the same way: outside its `forall`s it is
-/// ground (translation-enforced), and each `forall` node carries its type
-/// parameters open in its payload, fixed per instance by the trigger terms it
-/// matches (`rewrite::forall_rule`) — there is no up-front type instantiation.
+/// A **generic** axiom is evaluated the same way: its body is one root `forall`
+/// binding its types ([`vmir::Forall::ty_binders`]; a wrapper binding only types
+/// when translation inferred its triggers), stated with them open in the node's
+/// payload and fixed per instance by the trigger terms it matches
+/// (`rewrite::forall_rule`) — there is no up-front type instantiation.
 /// Axiom bodies are trusted — no obligations (div-by-zero, deref permission) are
 /// checked on them.
 ///
@@ -2217,6 +2218,7 @@ pub(crate) fn prepare_trig_term(
         vmir::TrigTerm::Var(k) if *k >= binder_base => PreparedTerm::Bound(k - binder_base),
         vmir::TrigTerm::Var(k) => PreparedTerm::Capture(slot[k]),
         vmir::TrigTerm::Lit(lit) => PreparedTerm::Lit(lit.clone()),
+        vmir::TrigTerm::Wild => PreparedTerm::Wild,
         vmir::TrigTerm::App {
             head,
             type_args,

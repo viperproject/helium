@@ -1,0 +1,14 @@
+// `none_discr` has no quantifier: translation wraps it in a `forall` binding
+// only `T`, triggered by `nothing<T>()`, so it holds at each instance the
+// program builds, here `Bool` and `Ref`.
+domain Option[T] {
+  function discr(o: Option[T]): Int
+  function nothing(): Option[T]
+
+  axiom none_discr { discr(nothing()) == 0 }
+}
+
+method m() {
+  assert discr((nothing(): Option[Bool])) == 0
+  assert discr((nothing(): Option[Ref])) == 0
+}

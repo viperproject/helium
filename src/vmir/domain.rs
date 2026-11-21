@@ -7,8 +7,8 @@ use lasso::Spur;
 /// A domain — a namespace of uninterpreted functions, generic over `ty_params`
 /// types. Its functions and axioms are free-standing declarations: a function is
 /// generic over the domain parameters its signature mentions (renumbered, see
-/// [`Function::ty_params`](crate::vmir::Function::ty_params)), an axiom over all
-/// of them (the domain's own numbering).
+/// [`Function::ty_params`](crate::vmir::Function::ty_params)); an axiom binds
+/// the ones it mentions itself (see [`Axiom`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Domain {
     pub name: Spur,
@@ -25,16 +25,15 @@ pub struct Domain {
 /// checked on them. Quantification over *values* is an inline
 /// [`Forall`](crate::vmir::Forall) step in the body.
 ///
-/// A **generic** axiom (`ty_params > 0`, the parameters of the domain it came
-/// from, as `Generic(i)`) holds at every instantiation. There is no type
-/// quantifier: every `Generic` in the body occurs inside a `forall`, and the
-/// types are fixed when that `forall` is instantiated, by the type arguments of
-/// the trigger terms it matched (or by an enclosing instantiation). Outside any
-/// `forall` the body is ground (translation-enforced).
+/// A **generic** axiom quantifies over its types explicitly: its body is a
+/// single `forall` step whose [`ty_binders`](crate::vmir::Forall::ty_binders)
+/// bind every `Generic(i)` the axiom mentions, and whose triggers fix them —
+/// either the axiom's own top-level `forall` (when each of its trigger groups
+/// fixes every type), or a wrapper binding only types, with inferred triggers
+/// (`translate::decl::domain`). Outside that root the body is ground.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Axiom {
     pub name: Option<Spur>,
-    pub ty_params: TyParams,
     pub body: FunctionBody,
 }
 
@@ -51,7 +50,7 @@ impl<'a> Display for VmirDisplay<'a, &'a Axiom> {
         if let Some(n) = &self.item.name {
             write!(f, " {}", self.interner.resolve(n))?;
         }
-        writeln!(f, "{} {{", self.item.ty_params)?;
+        writeln!(f, " {{")?;
         write!(
             f,
             "{}",

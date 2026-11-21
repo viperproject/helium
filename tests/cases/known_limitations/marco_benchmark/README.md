@@ -35,7 +35,6 @@ is enough; general heap-dependent quantifiers are not needed.
 | Case | Error | Files | Source |
 |---|---|---|---|
 | `axiom_without_trigger.vpr` | `forall` needs an explicit trigger | 14 | Nagini prelude, Gobra |
-| `ground_axiom_over_type_parameter.vpr` | domain type parameter no trigger fixes | 12 | Nagini `__MSHelper` |
 | `inhale_exhale_expression.vpr`, `forperm.vpr` | inhale-exhale `[A, B]`, `forperm` | 9 | Nagini obligations |
 | `result_in_quantifier.vpr` | `result` not allowed in this context | 6 | Nagini `int___unbox__`, VerCors `toBag` |
 | `acc_in_let.vpr` | unsupported pure expression: `Acc(..)` | 2 | Gobra struct allocation |
