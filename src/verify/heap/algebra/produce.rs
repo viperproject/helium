@@ -260,7 +260,7 @@ fn gate_bool_by_cube(
 /// `Chunk.perm` is the **ungated** amount: since the guard-hoisted merge a
 /// conditionally-held chunk keeps a bare `Leaf` amount and carries its
 /// conditionality in its presence, so reading the amount raw reports a
-/// conditional footprint as fully held (the same hazard [`summarize_perm_at`]
+/// conditional footprint as fully held (the same hazard `View::point_shares`
 /// documents). Neither axiom is valid off-guard:
 /// - the bound would constrain an amount at a location that is not held there,
 ///   and an off-guard residual folding above `b` makes the whole unit

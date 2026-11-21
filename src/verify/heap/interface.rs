@@ -29,9 +29,8 @@ use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::algebra::{
     Demand, find_chunk_consolidated, heap_union, merge_heaps, perm_value, prove_perm_positive,
-    prove_perm_write, union_heaps,
+    prove_perm_write, subtract_location, union_heaps,
 };
-use crate::verify::heap::holders::subtract_location;
 use crate::verify::heap::quantified_permissions::{
     check_qp_nonnegative, covered_by_sum, find_covering_qp, quant_chunk_from_caps,
     quant_chunk_injective, take_from_qp, take_spread,
@@ -307,8 +306,11 @@ impl Heap {
         let mut heap = self.clone();
         for h in holders.iter() {
             match h.at {
-                HolderAt::Chunk(i) => {
-                    let mut c = self.chunks_of(&loc.kind)[i].clone();
+                HolderAt::Chunk(at) => {
+                    let mut c = self
+                        .chunk(&loc.kind, at)
+                        .expect("a share's chunk is held")
+                        .clone();
                     let new = if ctx.egraph.find(c.addr) == ctx.egraph.find(loc.addr) {
                         value
                     } else {

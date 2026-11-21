@@ -231,7 +231,7 @@ pub(super) fn known_real(ctx: &VerifyContext<'_>, id: egg::Id) -> Option<num::Bi
 }
 
 /// `held ≥ needed` over a structured `held`, per leaf (no `Select` in the graph).
-pub(super) fn prove_sufficient(
+pub(in crate::verify::heap) fn prove_sufficient(
     ctx: &mut VerifyContext<'_>,
     held: &ChunkPerm,
     needed: egg::Id,
@@ -464,7 +464,7 @@ pub(in crate::verify::heap) fn perm_add(
 
 /// `held − needed`, kept structural (leaves get `SubR`, the tree stays a
 /// `Select` via the smart constructor so it never materializes as an `ite`).
-pub(super) fn perm_sub(
+pub(in crate::verify::heap) fn perm_sub(
     ctx: &mut VerifyContext<'_>,
     held: &ChunkPerm,
     needed: egg::Id,

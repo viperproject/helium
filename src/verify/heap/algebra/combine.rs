@@ -2,8 +2,9 @@
 
 use super::*;
 use crate::dhash::HashSet;
+use crate::verify::heap::holder::Debit;
 use crate::verify::heap::quantified_permissions::same_footprint;
-use crate::verify::heap::{QPTaken, QuantChunk, Restored, Taken};
+use crate::verify::heap::{QuantChunk, Restored};
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Heap, LocationKind},
@@ -30,7 +31,7 @@ use std::rc::Rc;
 ///   (rare — counted via `MergeTrace`).
 ///
 /// The presence guard is reconstructed into the exact `guard?perm:0` obligation
-/// **transiently at each consume site** (`gate_perm_by_guard`), so merges stay
+/// **transiently at each consume site** (`Holder::gate`), so merges stay
 /// flat while sufficiency/remainder keep the pre-hoist semantics. Runs only when
 /// both arms are live, so an absent side is a genuine conditional footprint.
 pub(in crate::verify::heap) fn merge_heaps(
@@ -160,14 +161,14 @@ fn merge_set(
         .zip(e.taken.iter())
         .take_while(|(a, b)| a.id == b.id)
         .count();
-    let taken: Rc<[QPTaken]> = if shared == t.taken.len() && shared == e.taken.len() {
+    let taken: Rc<[Debit]> = if shared == t.taken.len() && shared == e.taken.len() {
         t.taken.clone()
     } else {
         let then_only = t.taken[shared..]
             .iter()
             .map(|x| x.under(ctx, (cond, Polarity::Positive)));
-        let then_only: Vec<QPTaken> = then_only.collect();
-        let els_only: Vec<QPTaken> = e.taken[shared..]
+        let then_only: Vec<Debit> = then_only.collect();
+        let els_only: Vec<Debit> = e.taken[shared..]
             .iter()
             .map(|x| x.under(ctx, (cond, Polarity::Negative)))
             .collect();
@@ -219,7 +220,7 @@ fn merge_set(
 ///   under that shared guard.
 /// - **present in both, guards differ** — the presence condition is a genuine
 ///   disjunction, which `Chunk.guard` (a flat cube) cannot express. Push both
-///   guards into the *amounts* via [`gate_perm_by_guard`] and sum those, leaving
+///   presences into the *amounts* (`Chunk::zip`) and sum those, leaving
 ///   the merged chunk unguarded — the same fallback `merge_heaps` uses.
 ///
 /// Dropping one side instead would be sound but asymmetric in `a`/`b`: at a loop
@@ -380,14 +381,11 @@ fn give_back(
     if !y.taken.is_empty() || !y.presence().holds_under(ctx, pc) {
         return None;
     }
-    let k = x.taken.iter().position(|t| match &t.what {
-        Taken::Set(s) => s.presence().holds_under(ctx, pc) && same_footprint(ctx, s, y),
-        _ => false,
+    let k = x.taken.iter().position(|t| match t.as_set() {
+        Some(s) => s.presence().holds_under(ctx, pc) && same_footprint(ctx, &s, y),
+        None => false,
     })?;
-    let Taken::Set(region) = &x.taken[k].what else {
-        unreachable!("matched a taken set above")
-    };
-    let region = region.clone();
+    let region = x.taken[k].as_set().expect("matched a taken set above");
     let mut taken = x.taken.to_vec();
     taken.remove(k);
     let mut restored = x.restored.to_vec();

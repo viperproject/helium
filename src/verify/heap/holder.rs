@@ -92,6 +92,15 @@ impl<F: Clone> Holder<F> {
         self.presence.entailed_by(ctx, pc)
     }
 
+    /// `body`, held exactly where this is: a record derived from this holder
+    /// (what an exhale of it took) that must count only where it does.
+    pub(super) fn with_body<G>(&self, body: G) -> Holder<G> {
+        Holder {
+            presence: self.presence.clone(),
+            body,
+        }
+    }
+
     /// `presence ? perm : 0`: an amount computed from this holder's body, as
     /// it is actually held.
     pub(super) fn gate(&self, ctx: &VerifyContext<'_>, perm: ChunkPerm) -> ChunkPerm {
@@ -282,7 +291,7 @@ pub(crate) struct SetBody {
     /// whole chunk sets and single locations. A lookup subtracts their
     /// permission at the address from this set's own, so the set's permission
     /// is never rebuilt.
-    pub(super) taken: Rc<[QPTaken]>,
+    pub(super) taken: Rc<[Debit]>,
     /// The value map associated with that chunk
     pub(super) value_map: egg::Id,
     /// Recipe provenance of `value_map`, same role as [`Point::recipe`]: in a
@@ -298,13 +307,28 @@ pub(crate) struct SetBody {
 pub(crate) type QuantChunk = Holder<SetBody>;
 
 impl QuantChunk {
-    /// This set with `what` recorded as taken from it, as a new exhale.
+    /// This set with `what` recorded as taken from it, as a new exhale of an
+    /// unconditional demand (a single location).
     pub(super) fn with_taken(&self, ctx: &mut VerifyContext<'_>, what: Taken) -> QuantChunk {
+        let id = TakeId::fresh(ctx);
+        self.with_debit(Holder::unconditional(QPTaken { id, what }))
+    }
+
+    /// This set with `what` recorded as taken from it, as a new exhale of the
+    /// holder `by` (an exhaled chunk set): it counts where `by` is held.
+    pub(super) fn with_taken_by<G: Clone>(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        by: &Holder<G>,
+        what: Taken,
+    ) -> QuantChunk {
+        let id = TakeId::fresh(ctx);
+        self.with_debit(by.with_body(QPTaken { id, what }))
+    }
+
+    fn with_debit(&self, debit: Debit) -> QuantChunk {
         let mut taken = self.taken.to_vec();
-        taken.push(QPTaken {
-            id: TakeId::fresh(ctx),
-            what,
-        });
+        taken.push(debit);
         let mut out = self.clone();
         out.taken = taken.into();
         out
@@ -318,5 +342,26 @@ impl QuantChunk {
             .chain(self.presence.iter())
             .copied()
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What was taken from a chunk set
+// ---------------------------------------------------------------------------
+
+/// One exhale recorded against a chunk set (its `taken` list), held under the
+/// presence it counts under. A join extends it like any holder's
+/// ([`Holder::under`]), and its amount at an address is gated through
+/// [`Holder::gate`].
+pub(crate) type Debit = Holder<QPTaken>;
+
+impl Debit {
+    /// A whole set this exhale took, as the set it is: held under this debit's
+    /// presence. `None` for any other take.
+    pub(super) fn as_set(&self) -> Option<QuantChunk> {
+        match &self.what {
+            Taken::Set(body) => Some(self.with_body(body.clone())),
+            _ => None,
+        }
     }
 }

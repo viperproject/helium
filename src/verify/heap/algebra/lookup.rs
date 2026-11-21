@@ -1,6 +1,5 @@
 //! Who sits at an address: a chunk's share there, the summary over a group, and the chunks a path condition makes alias it.
 
-use super::*;
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Cube},
@@ -13,7 +12,7 @@ use crate::vmir::{Literal, Polarity};
 /// chunk's guard when the equality holds wherever it is held, else the address
 /// equality itself). `None` when it provably contributes nothing (aliasing
 /// disproven, or its guard contradicts the pc). One summand of
-/// [`summarize_perm_at`].
+/// the Σ-ite summary (`View::point_shares`).
 pub(in crate::verify::heap) fn chunk_share_at(
     ctx: &mut VerifyContext<'_>,
     c: &Chunk,
@@ -55,79 +54,6 @@ pub(in crate::verify::heap) fn chunk_share_at(
         }
     };
     Some(share)
-}
-
-/// The **Σ-ite summary** of a location: the permission held at `addr`, summed over
-/// *every* chunk of the group, each gated by whether it sits at that address.
-///
-/// ```text
-/// perm(addr) = Σ_c  ite(c.addr == addr, guard(c) ? c.perm : 0, 0)
-/// ```
-///
-/// Two gates compose per chunk, and they are different things:
-/// - the **presence guard** (`guard ? perm : 0`, [`gate_perm_by_guard`]) — the
-///   guard-hoisted merge stores a conditionally-held chunk as a flat cube over a
-///   guard-free amount, so reading `Chunk.perm` raw reports a conditional footprint
-///   as fully held;
-/// - the **address gate** (`c.addr == addr`) — whether this chunk is *at* the
-///   location at all.
-///
-/// The address gate is resolved by the engine, not by Rust-side `find` at walk
-/// time. That distinction is the point: an inhaled `a == b` merges the two address
-/// classes only once the `eq-true-union` rewrite fires during saturation, so a
-/// walk-time `find` reads the pre-merge graph and silently drops the aliasing chunk.
-/// Leaving the condition in the term lets whatever saturation the obligation runs
-/// settle it.
-///
-/// Cheap in the common case, because the gate is decided structurally where it can be:
-/// - **ground-equal address** — ungated, contributing exactly the term the old
-///   ground-match sum built, so the fast path mints no extra nodes;
-/// - **provably distinct** — skipped outright, minting nothing. This prune is what
-///   keeps the sum from growing the `ite` tower recorded in
-///   `project_perm_collapse_root_cause`;
-/// - **equal under the chunk's own presence cube** — ungated too, see below;
-/// - **otherwise** — gated, and the cube it was gated by is returned alongside, so a
-///   consume can gate its debit by the very same condition.
-///
-/// # The address gate is decided under the chunk's presence cube
-///
-/// A chunk's address means nothing where the chunk is not held, so the question is
-/// never "is `c.addr == addr` valid?" but "is it valid **wherever `c` exists**?" —
-/// i.e. under `pc ∧ c.guard`. Deciding it on ground instead is what left the `&mut`
-/// reborrow shape unprovable: the arm mints a fresh reference whose pointee equals
-/// the parameter's, so the two `p_C(..)` addresses coincide — but only through a
-/// chain released under the arm's own reach literal, which is exactly the literal
-/// the chunk's guard carries. Ground `find` cannot see it; a probe under the guard
-/// settles it immediately.
-///
-/// When the probe succeeds the address gate is dropped entirely and the returned
-/// cube is the chunk's **guard**: the contribution is conditional on presence, not
-/// on an equality, and `held` already encodes that condition. One `prove_under_pc`,
-/// paid only by a chunk that missed on ground and was not disproven — the same
-/// budget the disproof check above already spends.
-///
-/// The total is returned **structural** ([`perm_add`]), not flattened: a
-/// conditionally-present chunk contributes a `Select` on its guard literal, and
-/// [`prove_sufficient`] discharges the sum per leaf with that literal in the pc.
-pub(in crate::verify::heap) fn summarize_perm_at(
-    ctx: &mut VerifyContext<'_>,
-    chunks: &[Chunk],
-    addr: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, Vec<(Chunk, Cube)>) {
-    let mut total: Option<ChunkPerm> = None;
-    let mut set: Vec<(Chunk, Cube)> = Vec::new();
-    for c in chunks {
-        let Some((amount, cube)) = chunk_share_at(ctx, c, addr, pc_lits) else {
-            continue;
-        };
-        set.push((c.clone(), cube));
-        total = Some(match total {
-            None => amount,
-            Some(t) => perm_add(ctx, &t, &amount),
-        });
-    }
-    (total.unwrap_or(ChunkPerm::Zero), set)
 }
 
 /// Resolve which of `chunks` sits at address `addr`, consulting aliasing
@@ -235,7 +161,7 @@ pub(super) fn pc_alias_partners(
 /// heap records a pc-alias consume as a **guarded** debit (invariant 7) — the
 /// full amount comes off the demanded chunk where the pc holds, and nothing comes
 /// off where it does not (there the chunks are distinct and nothing was given up).
-pub(super) fn gate_amount_by_pc(
+pub(in crate::verify::heap) fn gate_amount_by_pc(
     ctx: &mut VerifyContext<'_>,
     amount: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
