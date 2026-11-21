@@ -1,6 +1,7 @@
 //! Producing: adding a chunk to a heap, merging it with one already at its address, value agreement and the location axioms.
 
 use super::*;
+use crate::verify::heap::agree::joint_value;
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Cube, Heap, LocationKind, cond::meet},
@@ -39,7 +40,7 @@ use crate::vmir::{Bound, Literal, Polarity};
 ///   guard into its own amount (`guard ? p : 0`) and hand back an honestly
 ///   unconditional chunk, with the conditionality inside the total.
 ///
-/// The gated amounts flow into [`merge_values`] too, which is what the fix is
+/// The gated amounts flow into [`joint_value`] too, which is what the fix is
 /// worth beyond the bound: its `p0 > 0 && p1 > 0 ==> v0 == v1` reads "both
 /// genuinely held" only when the fractions are gated. Ungated, it equated the
 /// values of two chunks that are never held at the same time.
@@ -60,7 +61,8 @@ fn merge_chunks(
     // equality `union_heaps` uses: a false negative is merely conservative — it
     // takes the gated path, still sound — but costs an `ite` per merge.
     let (mut merged, value) = Chunk::zip(ctx, a, b, |ctx, pa, pb| {
-        sum_amounts(ctx, pa, pb, a.value, b.value, pc_lits)
+        // Neither amount is asked about: an inhale merges at once.
+        sum_at_location(ctx, pa, pb, (a.value, b.value), (false, false), pc_lits)
     });
     merged.addr = addr;
     merged.value = value;
@@ -69,14 +71,16 @@ fn merge_chunks(
     merged
 }
 
-/// `pa + pb` for two amounts at one location, and the location's value (see
-/// [`merge_values`]).
-fn sum_amounts(
+/// `pa + pb` for two amounts held at once at one location (values `va`, `vb`),
+/// and the location's value with the agreement between the two assumed
+/// ([`joint_value`]; `known` says which amounts are known positive). Shared by
+/// the inhale merge ([`merge_chunks`]) and the heap sum ([`union_heaps`]).
+pub(super) fn sum_at_location(
     ctx: &mut VerifyContext<'_>,
     pa: &ChunkPerm,
     pb: &ChunkPerm,
-    va: egg::Id,
-    vb: egg::Id,
+    (va, vb): (egg::Id, egg::Id),
+    known: (bool, bool),
     pc_lits: &[(egg::Id, Polarity)],
 ) -> (ChunkPerm, egg::Id) {
     // Structural sum: `perm_add` distributes over the gates' `Select`s, so the
@@ -95,75 +99,8 @@ fn sum_amounts(
     } else {
         perm_add(ctx, pa, pb)
     };
-    let value = merge_values(ctx, p0, va, p1, vb, pc_lits);
+    let value = joint_value(ctx, (p0, va), (p1, vb), known, pc_lits);
     (perm, value)
-}
-
-/// The value of a location covered by two chunks, when it is **not** already
-/// known that both are held.
-///
-/// Yields `p0 > 0 ? v0 : v1` and assumes `(PC ∧ p0 > 0 ∧ p1 > 0) ==> v0 == v1`.
-/// Shared by the inhale path ([`merge_chunks`]) and the loop frame restore
-/// ([`union_heaps`]); the two used to disagree, and the latter's unconditional
-/// `union(v0, v1)` was unsound — see the note there.
-///
-/// Silicon's `combineSnapshots` splits the same three ways and, when neither
-/// fraction is definitely positive, mints a *fresh* snapshot constrained by both
-/// implications, with the comment "it is not sound to use t1 or t2 and constrain
-/// it". The asymmetric ternary is the same statement made total: the value is
-/// case-analysed on `p0 > 0` rather than left unconstrained, which is strictly
-/// more precise and needs no fresh symbol.
-/// Assume `(PC ∧ p > 0) ==> v == other`, where `v` is the value of a chunk already
-/// known to be held and `p` is the *other* chunk's fraction.
-///
-/// The one-sided half of [`merge_values`], for when one side's positivity is
-/// settled: the ternary would reduce to `v` anyway, so only the conditional
-/// agreement is left to state. Silicon's `combineSnapshots` cases `(True, b2)` and
-/// `(b1, True)` are exactly this.
-pub(super) fn assume_values_agree(
-    ctx: &mut VerifyContext<'_>,
-    p: egg::Id,
-    v: egg::Id,
-    other: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) {
-    let p_pos = expr!(ctx, (0 / 1) < r { p });
-    let eq = expr!(ctx, { v } == { other });
-    let antecedents = [(p_pos, Polarity::Positive)]
-        .into_iter()
-        .chain(pc_lits.iter().rev().copied());
-    let imp = ctx.implication(eq, antecedents);
-    let true_ = expr!(ctx, true);
-    ctx.union(imp, true_);
-}
-
-pub(super) fn merge_values(
-    ctx: &mut VerifyContext<'_>,
-    p0: egg::Id,
-    v0: egg::Id,
-    p1: egg::Id,
-    v1: egg::Id,
-    pc_lits: &[(egg::Id, Polarity)],
-) -> egg::Id {
-    let zero = ctx.add(Symbolic::Lit(Literal::Real(num::BigRational::from(
-        num::BigInt::from(0),
-    ))));
-    let p0_pos = expr!(ctx, { zero } < r { p0 });
-    let p1_pos = expr!(ctx, { zero } < r { p1 });
-
-    let value = expr!(ctx, if {p0_pos} then {v0} else {v1});
-
-    // `(PC ∧ p0 > 0 ∧ p1 > 0) ==> (v0 == v1)` as the golden-rule ITE chain.
-    // Fold innermost-first: p1_pos, p0_pos, then PC literals in reverse.
-    let true_ = expr!(ctx, true);
-    let eq = expr!(ctx, { v0 } == { v1 });
-    let antecedents = [(p1_pos, Polarity::Positive), (p0_pos, Polarity::Positive)]
-        .into_iter()
-        .chain(pc_lits.iter().rev().copied());
-    let imp = ctx.implication(eq, antecedents);
-    ctx.union(imp, true_);
-
-    value
 }
 
 /// A location chunk extracted from a heap for the location axioms: its

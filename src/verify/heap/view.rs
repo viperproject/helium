@@ -16,6 +16,7 @@
 
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
+use crate::verify::heap::agree::assume_agree;
 use crate::verify::heap::algebra::{
     chunk_share_at, chunk_under_pc, gate_amount_by_pc, perm_add, perm_sub, perm_sub_aligned,
     prove_perm_positive, prove_sufficient, prove_sufficient_aligned,
@@ -266,22 +267,17 @@ fn define_restored(
     rest: &Restored,
     addr: egg::Id,
 ) -> Result<(), VerifyError> {
-    let positive = |ctx: &mut VerifyContext<'_>, set: &QuantChunk| {
-        let perm = qp_perm_at(ctx, set, addr)?.to_id(ctx);
-        Ok::<_, VerifyError>(expr!(ctx, (0 / 1) < r { perm }))
-    };
-    let inside = positive(ctx, &rest.region)?;
-    let kept = positive(ctx, &rest.kept)?;
+    let region = qp_perm_at(ctx, &rest.region, addr)?.to_id(ctx);
+    let kept = qp_perm_at(ctx, &rest.kept, addr)?.to_id(ctx);
+    let inside = expr!(ctx, (0 / 1) < r { region });
     let lookup = ctx.alloc.value_map(kind).lookup;
     let [read, new, old] = [rest.map, rest.new, rest.old]
         .map(|m| ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([m, addr]))));
     let value = ctx.add(Symbolic::Ite([inside, new, old]));
     let fact = expr!(ctx, { read } == { value });
     ctx.assume_guarded(fact, std::iter::empty());
-    let eq = expr!(ctx, { new } == { old });
-    let both = [(kept, Polarity::Positive), (inside, Polarity::Positive)];
-    let agree = ctx.implication(eq, both.into_iter());
-    ctx.assume_guarded(agree, std::iter::empty());
+    // Where the set given back to held a share too, the values did not change.
+    assume_agree(ctx, new, old, &[kept, region], &[]);
     Ok(())
 }
 
@@ -426,8 +422,9 @@ impl Shares {
         }
         for s in &self.shares {
             if let ShareSource::Chunk(c) = &s.source {
-                let agree = expr!(ctx, { c.value } == { value });
-                ctx.assume_guarded(agree, s.when.iter().rev().copied());
+                // Where it sits at the address it is the location: no amount to
+                // be positive, only `when` to hold.
+                assume_agree(ctx, c.value, value, &[], &s.when);
             }
         }
         let mut out = out;
@@ -601,30 +598,17 @@ fn take_from_set(
 /// behind an `ite` on each holder before it that may be positive; fresh when no
 /// holder is known positive.
 fn value_at(ctx: &mut VerifyContext<'_>, holders: &[Share], ty: &Type, pc_lits: &[Lit]) -> egg::Id {
-    let positive: Vec<egg::Id> = holders
-        .iter()
-        .map(|h| {
-            let p = h.perm.to_id(ctx);
-            expr!(ctx, (0 / 1) < r { p })
-        })
-        .collect();
+    let perms: Vec<egg::Id> = holders.iter().map(|h| h.perm.to_id(ctx)).collect();
     for i in 0..holders.len() {
         for j in i + 1..holders.len() {
             let (vi, vj) = (holders[i].value, holders[j].value);
-            if ctx.egraph.find(vi) == ctx.egraph.find(vj) {
-                continue;
-            }
-            // Inside the fact, not as guards: a scratch graph assumes the fact
-            // without its guards (see `assume_guarded`).
-            let eq = expr!(ctx, { vi } == { vj });
-            let both = [
-                (positive[j], Polarity::Positive),
-                (positive[i], Polarity::Positive),
-            ];
-            let agree = ctx.implication(eq, both.into_iter());
-            ctx.assume_guarded(agree, pc_lits.iter().rev().copied());
+            assume_agree(ctx, vi, vj, &[perms[j], perms[i]], pc_lits);
         }
     }
+    let positive: Vec<egg::Id> = perms
+        .iter()
+        .map(|&p| expr!(ctx, (0 / 1) < r { p }))
+        .collect();
     let known = holders
         .iter()
         .position(|h| prove_perm_positive(ctx, &h.perm, pc_lits));
@@ -698,8 +682,8 @@ fn record_agreements(
         if !prove_perm_positive(ctx, &h.perm, pc_lits) {
             continue;
         }
-        let eq = expr!(ctx, { vk } == { h.value });
-        ctx.assume_guarded(eq, pc_lits.iter().rev().copied());
+        // Both are known positive here, so only the pc conditions it.
+        assume_agree(ctx, vk, h.value, &[], pc_lits);
         let (Some(named_r), Some(pc_r)) = (named_r, pc_r) else {
             continue;
         };
