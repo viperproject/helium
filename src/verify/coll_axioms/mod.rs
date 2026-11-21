@@ -26,7 +26,9 @@
 //!
 //! Separately, an axiom may have a guard, the recipe's [`Guard`]: an estimate
 //! of when an instance is worth building, not part of what the axiom says. An
-//! instance is built only where the guard is already known `true`. Today every
+//! instance is built only where the guard is already known `true`, by a
+//! literal or by the integer ranges of its operands (an index the program has
+//! bounded below a length it has bounded above it). Today every
 //! axiom with a condition is guarded by that condition, as an instance where it
 //! is not yet known says nothing yet but adds terms the next round matches.
 //!

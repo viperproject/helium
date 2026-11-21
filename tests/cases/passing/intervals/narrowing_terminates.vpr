@@ -1,0 +1,29 @@
+// Narrowing on a cyclic e-graph must stop. `x == x - 1` puts `x` and `x - 1` in
+// one class, so each re-evaluation of `x - 1` narrows the class's upper bound by
+// one more, forever; `x < y && y < x` does the same through two comparisons, and
+// `x == 2 * x` through a product. Each chain is cut off once it is longer than
+// the number of e-node ids (`analysis::Depth`). These states are contradictory —
+// a chain that never ends leaves no value behind — so nothing is lost but the
+// contradiction itself; this file only pins that verification terminates and
+// the rest of each method still verifies.
+
+method minus_one(x: Int)
+  requires x <= 100
+{
+  if (x == x - 1) { assert x - 1 == x }
+  assert x <= 100
+}
+
+method two_comparisons(x: Int, y: Int)
+  requires 0 <= x && x <= 1000 && 0 <= y && y <= 1000
+{
+  if (x < y && y < x) { assert x <= 1000 }
+  assert x + y <= 2000
+}
+
+method doubling(x: Int)
+  requires 1 <= x && x <= 1000000
+{
+  if (x == 2 * x) { assert 2 * x == x }
+  assert x >= 1
+}
