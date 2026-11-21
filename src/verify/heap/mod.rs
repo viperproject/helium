@@ -5,6 +5,7 @@ mod holder;
 mod holders;
 mod interface;
 mod quantified_permissions;
+mod view;
 
 pub(crate) use interface::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, ReadRecipe, Value};
 pub(crate) use quantified_permissions::InverseAxioms;
@@ -560,7 +561,7 @@ impl TakeId {
 /// back to, as it was before) held a share too, the values cannot have changed.
 ///
 /// `map` is fresh, so this only defines it. It is assumed per address, where
-/// a read meets it (`holders::holders_at`): the region is a chunk set, which no
+/// a read meets it (`View::shares`): the region is a chunk set, which no
 /// ground term names.
 #[derive(Debug, Clone)]
 struct Restored {
@@ -598,7 +599,7 @@ enum Taken {
     /// This set's share of an exhaled set `demand` that no single holder
     /// covered: the exhale split it greedily over every holder of `before`
     /// (the heap just before it), each giving `min(what it holds, what is still
-    /// needed)` in `holders_at` order. This set is `before`'s set number
+    /// needed)` in `View::all_shares` order. This set is `before`'s set number
     /// `holder`; at an address its share is recomputed from `before` there.
     ///
     /// `pc` is the exhale's path condition, under which the split is

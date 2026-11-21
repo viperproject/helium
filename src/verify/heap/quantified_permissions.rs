@@ -29,7 +29,7 @@ use egg::Id;
 use crate::verify::eval::{
     EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
 };
-use crate::verify::heap::holders::{HolderAt, greedy_takes, holders_at, sum_perms};
+use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{
     Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard, holder::SetBody,
 };
@@ -557,7 +557,7 @@ pub(super) fn same_footprint(ctx: &mut VerifyContext<'_>, a: &QuantChunk, b: &Qu
 
 /// Whether the exhaled set is covered by everything `heap` holds together: at
 /// each location it names, its amount is at most the sum over all holders
-/// there ([`holders_at`]). The fallback when no single held set covers it.
+/// there ([`View::all_shares`]). The fallback when no single held set covers it.
 pub(super) fn covered_by_sum(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
@@ -571,15 +571,12 @@ pub(super) fn covered_by_sum(
         q,
         &pc,
         &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &pc),
-        &mut |ctx, addr| {
-            let holders = holders_at(ctx, heap, kind, addr, &pc)?;
-            Ok(sum_perms(ctx, &holders))
-        },
+        &mut |ctx, addr| Ok(heap.view(&pc).all_shares(ctx, kind, addr)?.total(ctx)),
     )
 }
 
 /// What the holder `at` of `before` gives up at `addr` when `demand` is split
-/// greedily over all holders there ([`greedy_takes`]); `0` when `demand` does
+/// greedily over all holders there (`Shares::greedy_takes`); `0` when `demand` does
 /// not name `addr` or `at` does not hold it. Evaluated under `guard`, the
 /// exhale's path condition.
 fn share_at(
@@ -593,16 +590,16 @@ fn share_at(
     let zero = expr!(ctx, 0 / 1);
     let d = qp_perm_at(ctx, demand, addr)?.to_id(ctx);
     let kind = LocationKind::from_addr_type(&demand.q.loc_ty).expect("QP loc_ty must be Addr");
-    let holders = holders_at(ctx, before, &kind, addr, guard)?;
-    let takes = greedy_takes(ctx, &holders, d);
-    Ok(holders
+    let shares = before.view(guard).all_shares(ctx, &kind, addr)?;
+    let takes = shares.greedy_takes(ctx, d);
+    Ok(shares
         .iter()
         .position(|h| h.at == at)
         .map_or(zero, |i| takes[i]))
 }
 
 /// Take the exhaled set from all holders together, after [`covered_by_sum`]
-/// proved they hold enough. The split is greedy in `holders_at` order: a
+/// proved they hold enough. The split is greedy in `View::all_shares` order: a
 /// single chunk gives up its share at its own address at once; a held set
 /// records a [`Taken::Share`], evaluated at each later lookup.
 pub(super) fn take_spread(
