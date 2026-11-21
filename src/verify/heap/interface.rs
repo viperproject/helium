@@ -28,16 +28,15 @@ use std::rc::Rc;
 use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::algebra::{
-    Demand, chunk_under_pc, find_chunk_consolidated, heap_union, merge_heaps, perm_value,
-    prove_perm_positive, prove_perm_write, summarize_perm_at, union_heaps,
+    Demand, find_chunk_consolidated, heap_union, merge_heaps, perm_value, prove_perm_positive,
+    prove_perm_write, union_heaps,
 };
-use crate::verify::heap::holders::{
-    HolderAt, holders_at, pick_value, subtract_location, sum_perms,
-};
+use crate::verify::heap::holders::subtract_location;
 use crate::verify::heap::quantified_permissions::{
     check_qp_nonnegative, covered_by_sum, find_covering_qp, quant_chunk_from_caps,
     quant_chunk_injective, take_from_qp, take_spread,
 };
+use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind};
 use crate::verify::lang::Symbolic;
 use crate::vmir::{self, Polarity, Type, Val};
@@ -148,10 +147,9 @@ pub(crate) enum ConsumeMode {
 }
 
 impl Heap {
-    /// A permission that frames `loc`: the matched chunk's when one single
-    /// chunk sits there under the pc and no chunk set could also hold it,
-    /// otherwise the sum over every holder. Enough to decide a read (its value
-    /// is [`Heap::read`], decided by the same holders); for the exact amount see
+    /// A permission that frames `loc`: what the holders `View::shares` finds
+    /// there hold together. Enough to decide a read (its value is
+    /// [`Heap::read`], decided by the same holders); for the exact amount see
     /// [`Heap::perm`].
     pub(crate) fn framing_perm(
         &self,
@@ -159,17 +157,7 @@ impl Heap {
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<ChunkPerm, VerifyError> {
-        // fast route
-        if self.qp_chunks_of(&loc.kind).is_empty() {
-            if let Some(c) = chunk_under_pc(ctx, self.chunks_of(&loc.kind), loc.addr, pc).cloned() {
-                return Ok(c.gated_perm(ctx));
-            }
-            // Nothing matches under the pc: every chunk that may alias it.
-            let chunks = self.chunks_of(&loc.kind).to_vec();
-            return Ok(summarize_perm_at(ctx, &chunks, loc.addr, pc).0);
-        }
-        let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
-        Ok(sum_perms(ctx, &holders))
+        Ok(self.view(pc).shares(ctx, &loc.kind, loc.addr)?.total(ctx))
     }
 
     /// The value at `loc`, `None` when nothing is known to hold it. Decided by
@@ -184,15 +172,8 @@ impl Heap {
         pc: &[(egg::Id, Polarity)],
         read_recipe: Option<&ReadRecipe>,
     ) -> Result<Option<Value>, VerifyError> {
-        if self.qp_chunks_of(&loc.kind).is_empty() {
-            let chunk = chunk_under_pc(ctx, self.chunks_of(&loc.kind), loc.addr, pc);
-            return Ok(chunk.map(|c| Value {
-                id: c.value,
-                recipe: c.recipe.clone(),
-            }));
-        }
-        let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
-        Ok(pick_value(ctx, &loc.kind, &holders, pc, read_recipe))
+        let shares = self.view(pc).shares(ctx, &loc.kind, loc.addr)?;
+        Ok(shares.value(ctx, pc, read_recipe))
     }
 
     /// `perm(loc)`: exactly the permission this heap holds at `loc`, the sum
@@ -203,8 +184,10 @@ impl Heap {
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
     ) -> Result<egg::Id, VerifyError> {
-        let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
-        let total = sum_perms(ctx, &holders);
+        let total = self
+            .view(pc)
+            .all_shares(ctx, &loc.kind, loc.addr)?
+            .total(ctx);
         Ok(perm_value(ctx, total))
     }
 
@@ -316,13 +299,13 @@ impl Heap {
                 return Ok(self.with_chunk(&loc.kind, c));
             }
         }
-        let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
-        let total = sum_perms(ctx, &holders);
+        let holders = self.view(pc).all_shares(ctx, &loc.kind, loc.addr)?;
+        let total = holders.total(ctx);
         if !prove_perm_write(ctx, &total, &loc.kind.bound, pc) {
             return Err(VerifyError::InsufficientPermission);
         }
         let mut heap = self.clone();
-        for h in &holders {
+        for h in holders.iter() {
             match h.at {
                 HolderAt::Chunk(i) => {
                     let mut c = self.chunks_of(&loc.kind)[i].clone();
@@ -452,8 +435,8 @@ impl Heap {
         // Last resort: every holder that may sit at the address, chunk sets
         // included. Reached only by a check that would otherwise fail.
         let framed = framed || {
-            let holders = holders_at(ctx, self, &loc.kind, loc.addr, pc)?;
-            let total = sum_perms(ctx, &holders);
+            let holders = self.view(pc).all_shares(ctx, &loc.kind, loc.addr)?;
+            let total = holders.total(ctx);
             !holders.is_empty() && prove_perm_positive(ctx, &total, &under_guard)
         };
         if !framed {

@@ -368,7 +368,7 @@ fn union_amounts(
 /// it) and `x`'s elsewhere: `y`'s map when the region is all of `x`, `x`'s when
 /// the two maps are already one, and otherwise a fresh map defined by a
 /// [`Restored`] entry. That one is defined only at addresses read through
-/// `x` (`holders::holders_at`), so where it leaves as a snapshot its values are
+/// `x` (`View::shares`), so where it leaves as a snapshot its values are
 /// unknown: sound, but incomplete.
 fn give_back(
     ctx: &mut VerifyContext<'_>,
