@@ -1394,8 +1394,15 @@ fn debit_wildcard_walk(
     match needed {
         ChunkPerm::Leaf { id, .. } => {
             // Nothing demanded on this arm: no obligation, no fact, no debit.
+            // A demand already known positive (a bare wildcard is, by construction)
+            // folds `nonpos` to `false`: proving it would only ask whether the path
+            // is dead, which every tier — Z3 included — fails on a live one.
             let nonpos = expr!(ctx, not ((0/1) <r {*id}));
-            if ctx.prove_under_pc(nonpos, pc_lits) {
+            let known_pos = matches!(
+                ctx.egraph[nonpos].data.known(),
+                Some(crate::vmir::Literal::Bool(false))
+            );
+            if !known_pos && ctx.prove_under_pc(nonpos, pc_lits) {
                 return (held.clone(), held_value, None);
             }
             let held_id = held.to_id(ctx);
