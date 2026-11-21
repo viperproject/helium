@@ -59,13 +59,26 @@ fn merge_chunks(
     // `Cube::same` (canonical e-class comparison), not the `Rc<[..]>` structural
     // equality `union_heaps` uses: a false negative is merely conservative — it
     // takes the gated path, still sound — but costs an `ite` per merge.
-    let (pa, pb, guard): (ChunkPerm, ChunkPerm, Cube) = if a.guard().same(ctx, b.guard()) {
-        // Shared cube: amounts stay bare and the guard is re-attached below.
-        let g: Cube = a.guard_pc();
-        (a.ungated_perm().clone(), b.ungated_perm().clone(), g)
-    } else {
-        (a.gated_perm(ctx), b.gated_perm(ctx), Cube::empty())
-    };
+    let (mut merged, value) = Chunk::zip(ctx, a, b, |ctx, pa, pb| {
+        sum_amounts(ctx, pa, pb, a.value, b.value, pc_lits)
+    });
+    merged.addr = addr;
+    merged.value = value;
+    // A merged value is no single chunk's: it has no recipe.
+    merged.recipe = None;
+    merged
+}
+
+/// `pa + pb` for two amounts at one location, and the location's value (see
+/// [`merge_values`]).
+fn sum_amounts(
+    ctx: &mut VerifyContext<'_>,
+    pa: &ChunkPerm,
+    pb: &ChunkPerm,
+    va: egg::Id,
+    vb: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> (ChunkPerm, egg::Id) {
     // Structural sum: `perm_add` distributes over the gates' `Select`s, so the
     // total keeps one concrete amount per branch (`Select(b, 1/1+1/2, 0+1/2)`)
     // rather than collapsing to an opaque `AddR` whose positivity nothing can
@@ -78,12 +91,12 @@ fn merge_chunks(
     // with fresh shares carrying the facts instead. Gated on `has_wildcard` first,
     // so a wildcard-free program builds byte-identical terms for one `bool` test.
     let perm = if ctx.has_wildcard && (pa.has_wild() || pb.has_wild()) {
-        perm_add_wildcard(ctx, &pa, &pb)
+        perm_add_wildcard(ctx, pa, pb)
     } else {
-        perm_add(ctx, &pa, &pb)
+        perm_add(ctx, pa, pb)
     };
-    let value = merge_values(ctx, p0, a.value, p1, b.value, pc_lits);
-    Chunk::new_perm(addr, perm, value).with_guard(guard)
+    let value = merge_values(ctx, p0, va, p1, vb, pc_lits);
+    (perm, value)
 }
 
 /// The value of a location covered by two chunks, when it is **not** already
@@ -159,7 +172,7 @@ pub(super) fn merge_values(
 ///
 /// # The one place that deliberately holds an ungated amount
 ///
-/// [`Chunk`] keeps `perm`/`guard` private precisely so the two cannot drift apart
+/// [`Chunk`] keeps its amount and presence private precisely so the two cannot drift apart
 /// ([`Chunk::gated_perm`]). This struct is the deliberate exception: both axioms
 /// need the amount *structural* — the bound is assumed per `Leaf` and
 /// non-aliasing sums two bare leaves — so folding the guard into the amount here
@@ -180,7 +193,7 @@ struct LocationChunk {
     /// never over decomposed address arguments — see [`assume_location_axioms`].
     addr: egg::Id,
     bound: Bound,
-    /// [`Chunk::guard`] verbatim: the flat cube under which this chunk is present
+    /// The chunk's presence verbatim: the flat cube under which this chunk is present
     /// at all. `perm` is the **ungated** amount, so every axiom stated about it
     /// has to be gated by this cube — see [`assume_location_axioms`].
     guard: Cube,
@@ -197,12 +210,13 @@ fn location_chunks(ctx: &VerifyContext<'_>, h: &Heap) -> Vec<LocationChunk> {
         // no inference. The address is the chunk's own identity, so unlike the
         // old argument decomposition there is nothing to recover and nothing that
         // can be missing.
+        let (perm, presence) = chunk.amount_and_presence();
         out.push(LocationChunk {
-            perm: chunk.ungated_perm().clone(),
+            perm: perm.clone(),
             group: kind.group,
             bound: kind.bound.clone(),
             addr: ctx.egraph.find(chunk.addr),
-            guard: chunk.guard_pc(),
+            guard: presence.clone(),
         });
     }
     out
@@ -245,7 +259,7 @@ fn gate_bool_by_cube(
 ///
 /// `Chunk.perm` is the **ungated** amount: since the guard-hoisted merge a
 /// conditionally-held chunk keeps a bare `Leaf` amount and carries its
-/// conditionality in [`Chunk::guard`], so reading `perm` raw reports a
+/// conditionality in its presence, so reading the amount raw reports a
 /// conditional footprint as fully held (the same hazard [`summarize_perm_at`]
 /// documents). Neither axiom is valid off-guard:
 /// - the bound would constrain an amount at a location that is not held there,

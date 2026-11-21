@@ -1,6 +1,7 @@
 // The heap's internals: only `interface` is used from outside.
 mod algebra;
 mod cond;
+mod holder;
 mod holders;
 mod interface;
 mod quantified_permissions;
@@ -16,9 +17,9 @@ use lasso::Spur;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::lang::Symbolic;
-use crate::vmir;
 use crate::vmir::{Bound, Literal, Polarity, Type};
 use cond::{Cube, Lit};
+use holder::{Chunk, QuantChunk};
 
 /// S0 merge instrumentation (gated by `SILVER_OXIDE_TRACE_MERGE`). Counts the
 /// join-merge structures the pc-hoist plan aims to flatten: `Select` nodes
@@ -522,138 +523,6 @@ impl LocationKind {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct Chunk {
-    /// The address e-class this chunk sits at (its identity within a group).
-    pub(crate) addr: egg::Id,
-    /// The **ungated** amount. Private: a chunk's real permission is
-    /// `guard ? perm : 0`, and reading this raw reports a conditionally-held
-    /// chunk as fully held. Go through [`Chunk::gated_perm`] unless the call site
-    /// re-attaches the guard itself — see [`Chunk::ungated_perm`].
-    perm: ChunkPerm,
-    pub(crate) value: egg::Id,
-    /// Reachability guard: the flat cube of branch literals under which this
-    /// chunk is present (empty = unconditional). A held-on-one-arm conditional
-    /// footprint carries its arm's reach cube here (appended per join by
-    /// `merge_heaps`), instead of nesting a `?:0` `Select` into `perm` — so
-    /// `perm` stays a guard-free amount and no `0` leaf is ever built. Presence is
-    /// `guard ∧` the consuming instruction's pc; the amount holds unconditionally
-    /// under it, and the consume sites reconstruct the `guard?perm:0` obligation
-    /// transiently ([`Chunk::gated_perm`]).
-    ///
-    /// Private for the same reason as `perm`: the two are only meaningful
-    /// together. Read it through [`Chunk::guard`], and prefer the derived
-    /// [`Chunk::presence_cube`] / [`Chunk::pc_entails_guard`] where they fit.
-    guard: Cube,
-    /// Recipe provenance of `value` — the recipe-space temp a certificate walk
-    /// (function/resource verification) associates with the held value, so a
-    /// later `Deref` purifies to the pure term this chunk was produced from.
-    /// `None` in method bodies (no recipe is built) and for values without a
-    /// pure recipe (fresh, merged).
-    pub(crate) recipe: Option<crate::vmir::Val>,
-}
-
-impl Chunk {
-    /// Build a chunk from a bare permission id, wrapped as a concrete
-    /// `ChunkPerm::Leaf`. Test-only: production code builds the permission as a
-    /// [`ChunkPerm`] first, so that a wildcard's origin and a gate's branch
-    /// structure are not lost on the way in.
-    #[cfg(test)]
-    pub fn new(addr: egg::Id, perm: egg::Id, value: egg::Id) -> Self {
-        Self::new_perm(addr, ChunkPerm::leaf(perm), value)
-    }
-
-    /// Build a chunk from an explicit permission term (the join merge's select).
-    fn new_perm(addr: egg::Id, perm: ChunkPerm, value: egg::Id) -> Self {
-        Self {
-            addr,
-            perm,
-            value,
-            guard: Cube::empty(),
-            recipe: None,
-        }
-    }
-
-    fn with_recipe(mut self, recipe: Option<crate::vmir::Val>) -> Self {
-        self.recipe = recipe;
-        self
-    }
-
-    /// This chunk's residual presence guard (relative to the heap `pc`).
-    fn guard(&self) -> &Cube {
-        &self.guard
-    }
-
-    /// This chunk's guard as a shared [`Cube`], for re-attaching to a chunk
-    /// derived from it ([`Chunk::with_guard`]). `Rc` clone — O(1), unlike
-    /// rebuilding one from [`Chunk::guard`].
-    fn guard_pc(&self) -> Cube {
-        self.guard.clone()
-    }
-
-    /// Return this chunk with residual presence guard `guard` (structural share).
-    fn with_guard(mut self, guard: Cube) -> Self {
-        self.guard = guard;
-        self
-    }
-
-    /// Return this chunk holding permission `perm` (guard and value unchanged).
-    fn with_perm(mut self, perm: ChunkPerm) -> Self {
-        self.perm = perm;
-        self
-    }
-
-    /// **The permission this chunk actually holds**: `guard ? perm : 0`. With an
-    /// empty guard this is the bare amount and mints no node, so the
-    /// unconditional path is free.
-    ///
-    /// This is the default reading. A conditionally-held chunk keeps a flat cube
-    /// and a guard-free amount, so anything that states a *fact* about the
-    /// permission — a bound, a disequality, a sufficiency proof, a framing check —
-    /// must ask for it this way or it will treat a conditional footprint as fully
-    /// held. That mistake has produced two soundness bugs
-    /// (`tests/cases/failing/guarded_nonaliasing_two_arms.vpr`,
-    /// `guarded_merge_chunks.vpr`).
-    fn gated_perm(&self, ctx: &mut VerifyContext<'_>) -> ChunkPerm {
-        gate_perm_by_guard(ctx, &self.perm, &self.guard)
-    }
-
-    /// The **raw** amount, guard NOT folded in.
-    ///
-    /// Valid only when the call site discharges the guard itself, in one of two
-    /// ways, and says which in a comment:
-    /// (a) it re-attaches this chunk's guard to whatever it builds
-    ///     ([`Chunk::with_guard`]), so the conditionality is preserved, or
-    /// (b) it gates the result by a cube that entails the guard — including the
-    ///     case where the instruction's `pc` already does
-    ///     ([`Chunk::pc_entails_guard`]), which makes the gate a no-op.
-    ///
-    /// If neither holds, use [`Chunk::gated_perm`].
-    fn ungated_perm(&self) -> &ChunkPerm {
-        &self.perm
-    }
-
-    /// The cube this chunk is actually present under here: `pc ∧ guard`, or
-    /// `None` when the two are disjoint — the chunk is unreachable in this state
-    /// and states nothing.
-    fn presence_cube(&self, ctx: &VerifyContext<'_>, pc: &[Lit]) -> Option<Vec<Lit>> {
-        self.guard.within(ctx, pc)
-    }
-
-    /// Whether `pc` already entails this chunk's guard, i.e. the consume happens
-    /// inside the very region the chunk is present in — so gating would be a
-    /// no-op and the flat cube should be carried through untouched.
-    fn pc_entails_guard(&self, ctx: &VerifyContext<'_>, pc: &[Lit]) -> bool {
-        self.guard.entailed_by(ctx, pc)
-    }
-
-    /// A representative e-class id for this chunk's amount, WITHOUT mutating the
-    /// graph. Debug/tests only — not a real permission id.
-    pub(crate) fn perm_repr_id(&self) -> Option<egg::Id> {
-        self.perm.repr_id()
-    }
-}
-
 /// The identity of a chunk set: minted where the set is created (its inhale,
 /// or a produced footprint slot) and kept by every later version of it (a
 /// take, a write, a join). Two sets with one origin are copies of one inhale.
@@ -671,42 +540,10 @@ impl SetId {
     }
 }
 
-#[derive(Debug, Clone)]
-struct QuantChunk {
-    /// Which inhale this set is a version of (see [`SetId`]).
-    pub(crate) origin: SetId,
-    /// The body, still in vmir temp space.
-    pub(crate) q: Rc<vmir::QuantChunks>,
-    /// `free_temps()` resolved at inhale: enclosing temp -> its e-class then.
-    pub(crate) caps: Rc<[(usize, egg::Id)]>,
-    /// The inverse functions minted at inhale, one per binder, each from the
-    /// arguments of the location's address call to that binder (see
-    /// `quantified_permissions::mint_and_assume_inverse_axiom`).
-    pub(crate) inv: Rc<[crate::verify::lang::FuncId]>,
-    /// The path condition of the inhale. With `guard`, what the body is
-    /// evaluated and reasoned about under ([`QuantChunk::eval_pc`]); it does
-    /// not gate the set's permission: every use of the heap inside the region
-    /// it was built in establishes it, and a use outside that region is
-    /// rehomed by [`Heap::at`], which extends `guard` instead.
-    pub(crate) pc: Cube,
-    /// Presence guard, same role as `Chunk::guard`: the branch literals under
-    /// which this set is held, empty at the inhale and extended per join by
-    /// `merge_heaps`. It gates the set's permission.
-    pub(crate) guard: Cube,
-    /// What was exhaled from this set, each under its own presence guard:
-    /// whole chunk sets and single locations. A lookup
-    /// subtracts their permission at the address from this set's own, so the
-    /// set's permission is never rebuilt.
-    pub(crate) taken: Rc<[QPTaken]>,
-    /// The value map associated with that chunk
-    pub(crate) value_map: egg::Id,
-    /// Recipe provenance of `value_map`, same role as `Chunk::recipe`: in a
-    /// resource body the footprint seed `SlotValue(i)`, so a read through
-    /// this set purifies to `lookup(seed, addr)`. `None` in a method body.
-    pub(crate) recipe: Option<crate::vmir::Val>,
-    /// The maps minted when a taken set was given back to this one (see
-    /// [`Restored`]); each is defined at an address where it is read.
-    pub(crate) restored: Rc<[Restored]>,
+impl TakeId {
+    pub(crate) fn fresh(ctx: &mut VerifyContext<'_>) -> TakeId {
+        TakeId(ctx.fresh_heap_id())
+    }
 }
 
 /// A value map minted when a set taken from a chunk set came back (a loop
@@ -803,67 +640,63 @@ impl QPTaken {
     }
 }
 
-impl QuantChunk {
-    /// This set with `what` recorded as taken from it, as a new exhale.
-    fn with_taken(&self, ctx: &mut VerifyContext<'_>, what: Taken) -> QuantChunk {
-        let mut taken = self.taken.to_vec();
-        taken.push(QPTaken {
-            id: TakeId(ctx.fresh_heap_id()),
-            what,
-        });
-        QuantChunk {
-            taken: taken.into(),
-            ..self.clone()
+/// Everything a heap holds at one location kind: the single chunks and the
+/// quantified chunk sets. Each part is an `Rc<[..]>` so cloning a heap
+/// (frequent — one per instruction) shares them; changing one copies just that
+/// slice (copy-on-write).
+#[derive(Debug, Clone)]
+struct Group {
+    /// Identity is the chunk's `addr` e-class: at most one chunk per address.
+    points: Rc<[Chunk]>,
+    sets: Rc<[QuantChunk]>,
+}
+
+impl Group {
+    fn empty() -> Self {
+        Group {
+            points: Rc::from([]),
+            sets: Rc::from([]),
         }
     }
 
-    /// What this set's body is evaluated under: the inhale's path condition
-    /// and the branch literals it is held under since.
-    fn eval_pc(&self) -> Vec<Lit> {
-        self.pc.iter().chain(self.guard.iter()).copied().collect()
+    fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.sets.is_empty()
     }
 
-    /// This set, held only where `lit` also holds.
-    fn under(&self, ctx: &VerifyContext<'_>, lit: Lit) -> QuantChunk {
-        QuantChunk {
-            guard: self.guard.with(ctx, lit),
-            ..self.clone()
+    /// Both parts, each holder passed through `f`.
+    fn map(
+        &self,
+        mut point: impl FnMut(&Chunk) -> Chunk,
+        mut set: impl FnMut(&QuantChunk) -> QuantChunk,
+    ) -> Group {
+        Group {
+            points: self.points.iter().map(&mut point).collect(),
+            sets: self.sets.iter().map(&mut set).collect(),
         }
     }
 }
 
-/// Symbolic heap: chunks partitioned by [`LocationKind`]. Each group is an
-/// `Rc<[Chunk]>` so cloning a heap (frequent — one per instruction) shares the
-/// group slices; mutating one group copies just that slice (copy-on-write). The
-/// outer `im::HashMap` is itself structurally shared.
+/// Symbolic heap: holders partitioned by [`LocationKind`], one [`Group`] per
+/// kind. The outer `im::HashMap` is structurally shared.
 ///
-/// Within a group, identity is the chunk's `addr` e-class — today at most one
-/// chunk per address (the same-address merge happens in `declaration.rs`); the vec
-/// shape is a prerequisite for the lazy Σ-ite permission model.
-///
-/// A chunk's reachability is carried by its own [`Chunk::guard`] (a flat cube),
-/// not by a heap-level path condition — the join merge appends the branch literal
-/// per chunk, and the consume sites gate against `guard ∧` the instruction pc.
-/// The guard is relative to the heap's [`Heap::region`]: the cube of the block
-/// it was built in. A heap used outside that region goes through [`Heap::at`]
-/// first, which folds the region literals the use does not establish into every
-/// guard.
+/// Every holder's reachability is its own presence cube (see
+/// [`holder::Holder`]), relative to the heap's [`Heap::region`]: the cube of
+/// the block it was built in. A heap used outside that region goes through
+/// [`Heap::at`] first, which folds the region literals the use does not
+/// establish into every presence.
 #[derive(Debug, Clone)]
 pub struct Heap {
     /// Unseeded hasher: iteration order (and so the order join/consume code mints
     /// terms in) must be a function of the heap alone, not of the process.
-    groups: im::HashMap<LocationKind, Rc<[Chunk]>, rustc_hash::FxBuildHasher>,
-
-    // Quantified permission parts
-    qps: im::HashMap<LocationKind, Rc<[QuantChunk]>, rustc_hash::FxBuildHasher>,
+    groups: im::HashMap<LocationKind, Group, rustc_hash::FxBuildHasher>,
 
     /// Where this heap exists: the cube of the block it was built in (empty in
     /// a body without blocks, and for the empty heap, which is the same
-    /// everywhere). Every chunk guard and chunk set guard is relative to it: a
-    /// chunk is present on `region ∧ guard`. Derived heaps (a produce, a
-    /// consume, a write) inherit it; the walk rehomes a heap into the block
-    /// that uses it ([`Heap::at`]) before building on it, so a result's region
-    /// is that block's cube.
+    /// everywhere). Every presence is relative to it: a holder is held on
+    /// `region ∧ presence`. Derived heaps (a produce, a consume, a write)
+    /// inherit it; the walk rehomes a heap into the block that uses it
+    /// ([`Heap::at`]) before building on it, so a result's region is that
+    /// block's cube.
     region: Cube,
 }
 
@@ -873,7 +706,6 @@ impl Heap {
     pub fn empty() -> Self {
         Self {
             groups: im::HashMap::default(),
-            qps: im::HashMap::default(),
             region: Cube::empty(),
         }
     }
@@ -890,18 +722,18 @@ impl Heap {
     /// This heap as seen from a state whose path condition is `pc`, with `pc`
     /// as its region.
     ///
-    /// A heap's chunk guards are relative to the block it was built in: a chunk
-    /// with an empty guard is present wherever *that block* was reached, not
+    /// A heap's presences are relative to the block it was built in: a holder
+    /// with an empty presence is held wherever *that block* was reached, not
     /// everywhere. A heap used where its region is not established (an
     /// `old[L]` read whose label `L` does not dominate the read) must not see
-    /// its chunks as held there, so every literal of `region` that `pc` does
-    /// not establish is pushed onto each chunk's and chunk set's presence
-    /// guard. This is the rehoming a join already does for its arms (appending
-    /// the arm literal, see `merge_heaps`), done for an arbitrary use.
+    /// its holders as held there, so every literal of `region` that `pc` does
+    /// not establish is added to each holder's presence. This is the rehoming
+    /// a join already does for its arms (appending the arm literal, see
+    /// `merge_heaps`), done for an arbitrary use.
     ///
     /// When `pc` establishes the whole region (every use from a block the heap's
     /// block dominates) only the region changes: `pc` implies the old one, so
-    /// every guard means the same relative to it.
+    /// every presence means the same relative to it.
     pub(crate) fn at(&self, ctx: &mut VerifyContext<'_>, pc: &[Lit]) -> Heap {
         let region = Cube::from(pc);
         let missing: Vec<Lit> = self
@@ -916,40 +748,48 @@ impl Heap {
                 ..self.clone()
             };
         }
-        let mut groups = self.groups.clone();
-        for (kind, chunks) in self.groups.iter() {
-            let rehomed: Vec<Chunk> = chunks
-                .iter()
-                .map(|c| {
-                    let guard = missing
-                        .iter()
-                        .fold(c.guard_pc(), |g, &lit| g.with(ctx, lit));
-                    c.clone().with_guard(guard)
-                })
-                .collect();
-            groups = groups.update(kind.clone(), rehomed.into());
-        }
-        let mut qps = self.qps.clone();
-        for (kind, sets) in self.qps.iter() {
-            let rehomed: Vec<QuantChunk> = sets
-                .iter()
-                .map(|s| missing.iter().fold(s.clone(), |s, &lit| s.under(ctx, lit)))
-                .collect();
-            qps = qps.update(kind.clone(), rehomed.into());
-        }
-        Heap {
+        let ctx = &*ctx;
+        let groups = self
+            .groups
+            .iter()
+            .map(|(kind, group)| {
+                let group = group.map(
+                    |c| missing.iter().fold(c.clone(), |c, &lit| c.under(ctx, lit)),
+                    |s| missing.iter().fold(s.clone(), |s, &lit| s.under(ctx, lit)),
+                );
+                (kind.clone(), group)
+            })
+            .collect();
+        Heap { groups, region }
+    }
+
+    fn group(&self, kind: &LocationKind) -> Option<&Group> {
+        self.groups.get(kind)
+    }
+
+    /// This heap with `kind`'s group replaced by `f` of it (dropped when it
+    /// comes back empty).
+    fn with_group(&self, kind: &LocationKind, f: impl FnOnce(Group) -> Group) -> Self {
+        let group = f(self.group(kind).cloned().unwrap_or_else(Group::empty));
+        let groups = if group.is_empty() {
+            self.groups.without(kind)
+        } else {
+            self.groups.update(kind.clone(), group)
+        };
+        Self {
             groups,
-            qps,
-            region,
+            region: self.region.clone(),
         }
     }
 
-    /// The chunks of one location kind (empty slice if none held).
+    /// The single chunks of one location kind (empty slice if none held).
     fn chunks_of(&self, kind: &LocationKind) -> &[Chunk] {
-        self.groups.get(kind).map(|r| &r[..]).unwrap_or(&[])
+        self.group(kind).map_or(&[], |g| &g.points[..])
     }
+
+    /// The chunk sets of one location kind (empty slice if none held).
     fn qp_chunks_of(&self, kind: &LocationKind) -> &[QuantChunk] {
-        self.qps.get(kind).map_or(&[], |v| &v[..])
+        self.group(kind).map_or(&[], |g| &g.sets[..])
     }
 
     /// The chunk held at `addr` within `kind`'s group (exact e-class match).
@@ -958,81 +798,81 @@ impl Heap {
     }
 
     /// Insert `chunk` into `kind`'s group, replacing any chunk already at the
-    /// same `addr` (preserving today's one-chunk-per-address semantics).
+    /// same `addr` (one chunk per address).
     fn with_chunk(&self, kind: &LocationKind, chunk: Chunk) -> Self {
-        let mut v: Vec<Chunk> = self
-            .groups
-            .get(kind)
-            .map(|r| r.to_vec())
-            .unwrap_or_default();
-        match v.iter_mut().find(|c| c.addr == chunk.addr) {
-            Some(slot) => *slot = chunk,
-            None => v.push(chunk),
+        self.with_group(kind, |g| {
+            let mut v = g.points.to_vec();
+            match v.iter_mut().find(|c| c.addr == chunk.addr) {
+                Some(slot) => *slot = chunk,
+                None => v.push(chunk),
+            }
+            Group {
+                points: v.into(),
+                ..g
+            }
+        })
+    }
+
+    /// Drop the chunk at `addr` in `kind`'s group.
+    fn without_chunk(&self, kind: &LocationKind, addr: egg::Id) -> Self {
+        if self.group(kind).is_none() {
+            return self.clone();
         }
-        Self {
-            groups: self.groups.update(kind.clone(), v.into()),
-            qps: self.qps.clone(),
-            region: self.region.clone(),
-        }
+        self.with_group(kind, |g| Group {
+            points: g
+                .points
+                .iter()
+                .filter(|c| c.addr != addr)
+                .cloned()
+                .collect(),
+            ..g
+        })
     }
 
     /// Replace the `i`-th chunk set of `kind` (as in [`Self::qp_chunks_of`]).
-    fn with_qp_chunk_replaced(&self, kind: &LocationKind, i: usize, chunk: QuantChunk) -> Self {
-        let mut v: Vec<QuantChunk> = self.qp_chunks_of(kind).to_vec();
-        v[i] = chunk;
-        Self {
-            groups: self.groups.clone(),
-            qps: self.qps.update(kind.clone(), v.into()),
-            region: self.region.clone(),
-        }
+    fn with_qp_chunk_replaced(&self, kind: &LocationKind, i: usize, set: QuantChunk) -> Self {
+        self.with_group(kind, |g| {
+            let mut v = g.sets.to_vec();
+            v[i] = set;
+            Group {
+                sets: v.into(),
+                ..g
+            }
+        })
     }
 
+    /// Drop the `i`-th chunk set of `kind`.
     fn with_qp_chunk_removed(&self, kind: &LocationKind, i: usize) -> Self {
-        let mut v: Vec<QuantChunk> = self.qp_chunks_of(kind).to_vec();
-        v.remove(i);
-        Self {
-            groups: self.groups.clone(),
-            qps: self.qps.update(kind.clone(), v.into()),
-            region: self.region.clone(),
-        }
+        self.with_group(kind, |g| {
+            let mut v = g.sets.to_vec();
+            v.remove(i);
+            Group {
+                sets: v.into(),
+                ..g
+            }
+        })
     }
 
-    fn with_qp_chunk(&self, kind: &LocationKind, chunk: QuantChunk) -> Self {
-        let mut v: Vec<QuantChunk> = self.qps.get(kind).map(|r| r.to_vec()).unwrap_or_default();
-        v.push(chunk);
-        Self {
-            groups: self.groups.clone(),
-            qps: self.qps.update(kind.clone(), v.into()),
-            region: self.region.clone(),
-        }
+    /// Add the chunk set `set` to `kind`'s group.
+    fn with_qp_chunk(&self, kind: &LocationKind, set: QuantChunk) -> Self {
+        self.with_group(kind, |g| {
+            let mut v = g.sets.to_vec();
+            v.push(set);
+            Group {
+                sets: v.into(),
+                ..g
+            }
+        })
     }
 
-    /// Drop the chunk at `addr` in `kind`'s group (removing the group if empty).
-    fn without_chunk(&self, kind: &LocationKind, addr: egg::Id) -> Self {
-        let Some(group) = self.groups.get(kind) else {
-            return self.clone();
-        };
-        let v: Vec<Chunk> = group.iter().filter(|c| c.addr != addr).cloned().collect();
-        let groups = if v.is_empty() {
-            self.groups.without(kind)
-        } else {
-            self.groups.update(kind.clone(), v.into())
-        };
-        Self {
-            groups,
-            qps: self.qps.clone(),
-            region: self.region.clone(),
-        }
-    }
-
-    /// Every chunk in the heap, paired with its location kind.
+    /// Every single chunk in the heap, paired with its location kind.
     pub fn entries(&self) -> impl Iterator<Item = (&LocationKind, &Chunk)> {
         self.groups
             .iter()
-            .flat_map(|(k, cs)| cs.iter().map(move |c| (k, c)))
+            .flat_map(|(k, g)| g.points.iter().map(move |c| (k, c)))
     }
 
-    /// The location kinds (group keys) present in the heap.
+    /// The location kinds the heap holds anything of.
     fn kinds(&self) -> impl Iterator<Item = &LocationKind> {
         self.groups.keys()
     }
@@ -1040,7 +880,7 @@ impl Heap {
     /// The chunk at `addr` within `kind`'s group, matched by **canonical**
     /// e-class (`ctx.egraph.find`) so an address that only aliases the stored
     /// key under the currently-assumed context still resolves. Used by the
-    /// Stage-4 join merge (a chunk held on both arms must line up by identity).
+    /// join merge (a chunk held on both arms must line up by identity).
     fn chunk_canon(
         &self,
         ctx: &VerifyContext<'_>,

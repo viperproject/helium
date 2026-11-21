@@ -528,7 +528,7 @@ pub(in crate::verify::heap) fn perm_sub_aligned(
 
 /// Whether every leaf of `perm` const-folds to `0` (the chunk is emptied on
 /// every branch, so it can be dropped). Const-fold only, no `Select` in the graph.
-pub(super) fn perm_all_zero(ctx: &VerifyContext<'_>, perm: &ChunkPerm) -> bool {
+pub(in crate::verify::heap) fn perm_all_zero(ctx: &VerifyContext<'_>, perm: &ChunkPerm) -> bool {
     match perm {
         ChunkPerm::Zero | ChunkPerm::Leaf { .. } => perm.is_zero(ctx),
         // A gate is zero off its cube, so it is all zero exactly when its body is.
