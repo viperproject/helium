@@ -18,10 +18,16 @@
 //! back the value it took, so a value always comes from the holders whose
 //! permission was checked.
 //!
-//! How a location is held (single chunks, chunk sets, aliasing, the value
-//! agreement between holders) is the business of the modules behind this one:
-//! `algebra` for single chunks, `quantified_permissions` for chunk sets and
-//! `holders` for looking at both together.
+//! How a location is held is the business of the modules behind this one:
+//!
+//! | module                   | what                                              |
+//! |--------------------------|---------------------------------------------------|
+//! | `cond`                   | conditions: [`Cube`](super::cond::Cube)s of literals |
+//! | `holder`                 | what a heap holds: a body under a presence cube (single chunks, chunk sets, what was taken from a set) |
+//! | `view`                   | a heap under a pc: who holds a location (`Shares`), the total, the value, taking from them |
+//! | `agree`                  | a location has one value: the agreement between holders |
+//! | `algebra`                | amounts (`perm`), the consume ladder, produce, join and sum of heaps, location axioms |
+//! | `quantified_permissions` | chunk sets: injectivity, inverses, a set's amount at an address, containment |
 
 use std::rc::Rc;
 

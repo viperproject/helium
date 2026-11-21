@@ -1,4 +1,5 @@
 // The heap's internals: only `interface` is used from outside.
+mod agree;
 mod algebra;
 mod cond;
 mod holder;

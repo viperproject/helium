@@ -248,7 +248,7 @@ fn merge_set(
 ///   loop across a cut whose invariant never mentions it. [`prove_perm_positive`]
 ///   decides it per leaf, so a join `Select` never materializes, and its
 ///   `known_real` fast path settles literal fractions without a prove call.
-/// - **otherwise** — [`merge_values`]: `permₐ > 0 ? valueₐ : value_b`, plus the
+/// - **otherwise** — [`joint_value`]: `permₐ > 0 ? valueₐ : value_b`, plus the
 ///   guarded equality, which still fuses the two once saturation establishes both
 ///   fractions positive.
 ///
@@ -321,43 +321,13 @@ fn union_amounts(
     // Decided against the *presence-gated* fractions: a chunk held only under
     // its presence is not held where it fails, however positive its bare amount
     // (`Chunk::zip` hands over bare amounts only under one shared presence).
-    let a_held = prove_perm_positive(ctx, pa, pc_lits);
-    let b_held = prove_perm_positive(ctx, pb, pc_lits);
-    let (ia, ib) = (pa.to_id(ctx), pb.to_id(ctx));
-    let value = match (a_held, b_held) {
-        // Both definitely held: the values agree outright, so collapse the
-        // classes. No ternary, no implication — the cheap common case.
-        (true, true) => {
-            ctx.union(va, vb);
-            va
-        }
-        // One side definitely held: take its value and make the agreement
-        // conditional on the *other* fraction. Equivalent to what `merge_values`
-        // would build (its ternary reduces once the positive side is known), but
-        // without minting the `Ite` — worth it, because a loop under a path
-        // condition hits this on every exit.
-        (true, false) => {
-            assume_values_agree(ctx, ib, va, vb, pc_lits);
-            va
-        }
-        (false, true) => {
-            assume_values_agree(ctx, ia, vb, va, pc_lits);
-            vb
-        }
-        (false, false) => merge_values(ctx, ia, va, ib, vb, pc_lits),
-    };
-    // Structural sum, the same dispatch [`merge_chunks`] makes: `perm_add`
-    // distributes over the operands' `Select`s, so two arm-wise perms cancel per
-    // branch. Flattening first left `ite(c, 1/1, 0) + ite(c, 0, 1/1)` — a full
-    // permission the graph cannot see is one, since deciding it needs a case
-    // split. That is exactly a loop's frame restore under a path condition: the
-    // invariant's footprint on one arm, the frame's residual on the other.
-    let sum = if ctx.has_wildcard && (pa.has_wild() || pb.has_wild()) {
-        perm_add_wildcard(ctx, pa, pb)
-    } else {
-        perm_add(ctx, pa, pb)
-    };
-    (sum, value)
+    // Asked here, unlike an inhale: a loop under a path condition meets this on
+    // every exit, and a side known held saves the `ite` (see `joint_value`).
+    let known = (
+        prove_perm_positive(ctx, pa, pc_lits),
+        prove_perm_positive(ctx, pb, pc_lits),
+    );
+    sum_at_location(ctx, pa, pb, (va, vb), known, pc_lits)
 }
 
 /// `x` with `y` given back, or `None` when `y` is not something `x` gave away.
