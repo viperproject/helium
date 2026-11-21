@@ -2,7 +2,6 @@
 mod algebra;
 mod cond;
 mod holder;
-mod holders;
 mod interface;
 mod quantified_permissions;
 mod view;
@@ -20,7 +19,7 @@ use crate::verify::context::VerifyContext;
 use crate::verify::lang::Symbolic;
 use crate::vmir::{Bound, Literal, Polarity, Type};
 use cond::{Cube, Lit};
-use holder::{Chunk, QuantChunk};
+use holder::{Chunk, QuantChunk, SetBody};
 
 /// S0 merge instrumentation (gated by `SILVER_OXIDE_TRACE_MERGE`). Counts the
 /// join-merge structures the pc-hoist plan aims to flatten: `Select` nodes
@@ -488,13 +487,6 @@ impl ChunkPerm {
     }
 }
 
-/// `guard ? perm : 0`, as a [`ChunkPerm::Gate`]. With an empty guard this is
-/// `perm` unchanged. Prefer [`Chunk::gated_perm`]; this free form is for the
-/// callers that hold a [`ChunkPerm`] without its chunk.
-fn gate_perm_by_guard(ctx: &VerifyContext<'_>, perm: &ChunkPerm, guard: &[Lit]) -> ChunkPerm {
-    ChunkPerm::gate(ctx, guard, perm.clone())
-}
-
 /// The **kind** of a heap location: a field/predicate group, the held value
 /// type, and the permission bound. This is exactly the content of a location's
 /// `Type::Addr` — the chunks of one kind share a group in the heap. Sourced
@@ -573,7 +565,9 @@ struct Restored {
 }
 
 /// One exhale recorded against a [`QuantChunk`] (its `taken` list): what was
-/// taken, and which exhale took it.
+/// taken, and which exhale took it. Recorded as a [`holder::Debit`], under the
+/// presence it counts under: empty for a single location, the exhaled set's
+/// own otherwise, and extended per join like any holder's.
 #[derive(Debug, Clone)]
 struct QPTaken {
     /// Which exhale this is. Copies of one set share the entries recorded
@@ -582,63 +576,31 @@ struct QPTaken {
     pub(crate) what: Taken,
 }
 
-/// What an exhale took from a chunk set (see [`QPTaken`]).
+/// What an exhale took from a chunk set (see [`QPTaken`]). Its presence is the
+/// debit's ([`holder::Debit`]), so none of these carry one.
 #[derive(Debug, Clone)]
 enum Taken {
     /// A whole chunk set exhaled from this one. It applies the same address
-    /// function; its `pc` is the exhale's path condition.
-    Set(QuantChunk),
-    /// `perm` exhaled at the single location `addr`, present under `guard`
-    /// (empty at the exhale, extended per join). Counts only at an address
+    /// function; its `pc` is the exhale's path condition. Read back as a set
+    /// held under the debit's presence ([`holder::Debit::as_set`]).
+    Set(SetBody),
+    /// `perm` exhaled at the single location `addr`. Counts only at an address
     /// equal to `addr`.
-    Single {
-        addr: egg::Id,
-        perm: ChunkPerm,
-        guard: Cube,
-    },
+    Single { addr: egg::Id, perm: ChunkPerm },
     /// This set's share of an exhaled set `demand` that no single holder
     /// covered: the exhale split it greedily over every holder of `before`
     /// (the heap just before it), each giving `min(what it holds, what is still
     /// needed)` in `View::all_shares` order. This set is `before`'s set number
     /// `holder`; at an address its share is recomputed from `before` there.
     ///
-    /// `pc` is the exhale's path condition, under which the split is
-    /// recomputed; `guard` its presence, as for `Single`.
+    /// `pc` is the exhale's path condition, under which (with the debit's
+    /// presence) the split is recomputed.
     Share {
         demand: QuantChunk,
         before: Heap,
         holder: usize,
         pc: Cube,
-        guard: Cube,
     },
-}
-
-impl QPTaken {
-    /// This exhale, counted only where `lit` also holds. Still the same exhale.
-    fn under(&self, ctx: &VerifyContext<'_>, lit: Lit) -> QPTaken {
-        let what = match &self.what {
-            Taken::Set(s) => Taken::Set(s.under(ctx, lit)),
-            Taken::Single { addr, perm, guard } => Taken::Single {
-                addr: *addr,
-                perm: perm.clone(),
-                guard: guard.with(ctx, lit),
-            },
-            Taken::Share {
-                demand,
-                before,
-                holder,
-                pc,
-                guard,
-            } => Taken::Share {
-                demand: demand.clone(),
-                before: before.clone(),
-                holder: *holder,
-                pc: pc.clone(),
-                guard: guard.with(ctx, lit),
-            },
-        };
-        QPTaken { id: self.id, what }
-    }
 }
 
 /// Everything a heap holds at one location kind: the single chunks and the

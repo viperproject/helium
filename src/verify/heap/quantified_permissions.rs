@@ -30,9 +30,7 @@ use crate::verify::eval::{
     EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
 };
 use crate::verify::heap::view::HolderAt;
-use crate::verify::heap::{
-    Heap, LocationKind, QuantChunk, SetId, Taken, gate_perm_by_guard, holder::SetBody,
-};
+use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
 use crate::vmir;
 
 use crate::verify::analysis::ConstFold;
@@ -470,17 +468,19 @@ pub(super) fn qp_perm_at(
 
     let perm = gate_at(ctx, inst.perm, inst.addr, addr);
     let mut perm = ChunkPerm::select(ctx, inst.cond, perm, ChunkPerm::Zero);
-    // What was exhaled from this set, each gated by its presence guard.
-    for taken in chunk.taken.iter() {
-        let p = match &taken.what {
-            Taken::Set(set) => qp_perm_at(ctx, set, addr)?,
+    // What was exhaled from this set, each gated by its debit's presence.
+    for debit in chunk.taken.iter() {
+        let p = match &debit.what {
+            // A set, held under the debit's presence: `qp_perm_at` gates it.
+            Taken::Set(_) => {
+                let set = debit
+                    .as_set()
+                    .expect("a whole-set take reads back as a set");
+                qp_perm_at(ctx, &set, addr)?
+            }
             // A single location counts only where it is `addr`.
-            Taken::Single {
-                addr: at,
-                perm: p,
-                guard,
-            } => {
-                let p = gate_perm_by_guard(ctx, p, guard);
+            Taken::Single { addr: at, perm: p } => {
+                let p = debit.gate(ctx, p.clone());
                 gate_at(ctx, p, *at, addr)
             }
             Taken::Share {
@@ -488,11 +488,10 @@ pub(super) fn qp_perm_at(
                 before,
                 holder,
                 pc,
-                guard,
             } => {
-                let at_pc: Vec<_> = pc.iter().chain(guard.iter()).copied().collect();
+                let at_pc: Vec<_> = pc.iter().chain(debit.presence().iter()).copied().collect();
                 let take = share_at(ctx, demand, before, HolderAt::Set(*holder), addr, &at_pc)?;
-                gate_perm_by_guard(ctx, &ChunkPerm::leaf(take), guard)
+                debit.gate(ctx, ChunkPerm::leaf(take))
             }
         };
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
@@ -511,25 +510,51 @@ fn gate_at(ctx: &mut VerifyContext<'_>, perm: ChunkPerm, at: Id, addr: Id) -> Ch
     ChunkPerm::select(ctx, eq, perm, ChunkPerm::Zero)
 }
 
-/// Index of the first held set of `kind` that covers `exhale`
+/// Whether the set `sub` is within what `held_at` says is held: at every
+/// location `sub` names, its amount is at most that ([`check_qp_contained`]).
+/// Proven under `sub`'s own evaluation pc and `extra_pc`. Every containment
+/// question about chunk sets is this one, with a different `held_at`.
+fn set_within(
+    ctx: &mut VerifyContext<'_>,
+    sub: &QuantChunk,
+    extra_pc: &[(Id, Polarity)],
+    held_at: &mut HeldAt<'_>,
+) -> Result<bool, VerifyError> {
+    let pc: Vec<_> = sub
+        .eval_pc()
+        .into_iter()
+        .chain(extra_pc.iter().copied())
+        .collect();
+    check_qp_contained(
+        ctx,
+        &sub.q,
+        &pc,
+        &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &pc),
+        held_at,
+    )
+}
+
+/// [`set_within`] the set `held`.
+fn set_within_set(
+    ctx: &mut VerifyContext<'_>,
+    sub: &QuantChunk,
+    extra_pc: &[(Id, Polarity)],
+    held: &QuantChunk,
+) -> Result<bool, VerifyError> {
+    set_within(ctx, sub, extra_pc, &mut |ctx, addr| {
+        qp_perm_at(ctx, held, addr)
+    })
+}
+
+/// Index of the first held set of `kind` that covers `exhaled` by itself.
 pub(super) fn find_covering_qp(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
     kind: &LocationKind,
     exhaled: &QuantChunk,
 ) -> Result<Option<usize>, VerifyError> {
-    let vmir_chunk = &exhaled.q;
-    let pc = exhaled.eval_pc();
     for (i, held) in heap.qp_chunks_of(kind).iter().enumerate() {
-        let contained = check_qp_contained(
-            ctx,
-            vmir_chunk,
-            &pc,
-            &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, vmir_chunk, binders, &pc),
-            &mut |ctx, addr| qp_perm_at(ctx, held, addr),
-        )?;
-
-        if contained {
+        if set_within_set(ctx, exhaled, &[], held)? {
             return Ok(Some(i));
         }
     }
@@ -537,26 +562,19 @@ pub(super) fn find_covering_qp(
 }
 
 /// Whether `a` and `b` name the same locations with the same amounts, each
-/// contained in the other ([`check_qp_contained`]). What was taken from either
-/// counts, so a set that gave something away is not the same as its origin.
+/// within the other. What was taken from either counts, so a set that gave
+/// something away is not the same as its origin.
 pub(super) fn same_footprint(ctx: &mut VerifyContext<'_>, a: &QuantChunk, b: &QuantChunk) -> bool {
-    let within = |ctx: &mut VerifyContext<'_>, sub: &QuantChunk, held: &QuantChunk| {
-        let pc = sub.eval_pc();
-        check_qp_contained(
-            ctx,
-            &sub.q,
-            &pc,
-            &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &pc),
-            &mut |ctx, addr| qp_perm_at(ctx, held, addr),
-        )
-        // The bodies evaluated once already, at their inhales.
-        .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
+    let within = |ctx: &mut VerifyContext<'_>, sub, held| {
+        set_within_set(ctx, sub, &[], held)
+            // The bodies evaluated once already, at their inhales.
+            .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
     };
     within(ctx, a, b) && within(ctx, b, a)
 }
 
 /// Whether the exhaled set is covered by everything `heap` holds together: at
-/// each location it names, its amount is at most the sum over all holders
+/// each location it names, its amount is at most the total of all holders
 /// there ([`View::all_shares`]). The fallback when no single held set covers it.
 pub(super) fn covered_by_sum(
     ctx: &mut VerifyContext<'_>,
@@ -564,15 +582,10 @@ pub(super) fn covered_by_sum(
     kind: &LocationKind,
     exhaled: &QuantChunk,
 ) -> Result<bool, VerifyError> {
-    let q = &exhaled.q;
     let pc = exhaled.eval_pc();
-    check_qp_contained(
-        ctx,
-        q,
-        &pc,
-        &mut |ctx, binders| eval_qp_instance(ctx, &exhaled.caps, q, binders, &pc),
-        &mut |ctx, addr| Ok(heap.view(&pc).all_shares(ctx, kind, addr)?.total(ctx)),
-    )
+    set_within(ctx, exhaled, &[], &mut |ctx, addr| {
+        Ok(heap.view(&pc).all_shares(ctx, kind, addr)?.total(ctx))
+    })
 }
 
 /// What the holder `at` of `before` gives up at `addr` when `demand` is split
@@ -610,8 +623,8 @@ pub(super) fn take_spread(
 ) -> Result<Heap, VerifyError> {
     let pc = exhaled.eval_pc();
     let mut out = heap.clone();
-    for (i, c) in heap.chunks_of(kind).iter().enumerate() {
-        let take = share_at(ctx, &exhaled, heap, HolderAt::Chunk(i), c.addr, &pc)?;
+    for c in heap.chunks_of(kind) {
+        let take = share_at(ctx, &exhaled, heap, HolderAt::Chunk(c.addr), c.addr, &pc)?;
         let take = exhaled.gate(ctx, ChunkPerm::leaf(take));
         // Taken from the bare amount, the remainder keeping the chunk's presence.
         let rest =
@@ -619,14 +632,14 @@ pub(super) fn take_spread(
         out = out.with_chunk(kind, rest);
     }
     for (i, set) in heap.qp_chunks_of(kind).iter().enumerate() {
-        let set = set.with_taken(
+        let set = set.with_taken_by(
             ctx,
+            &exhaled,
             Taken::Share {
                 demand: exhaled.clone(),
                 before: heap.clone(),
                 holder: i,
                 pc: pc.as_slice().into(),
-                guard: exhaled.presence().clone(),
             },
         );
         out = out.with_qp_chunk_replaced(kind, i, set);
@@ -654,7 +667,7 @@ pub(super) fn take_from_qp(
     }
     let mut exhaled = exhaled;
     exhaled.value_map = held.value_map;
-    let held = held.with_taken(ctx, Taken::Set(exhaled));
+    let held = held.with_taken_by(ctx, &exhaled, Taken::Set(SetBody::clone(&exhaled)));
     heap.with_qp_chunk_replaced(kind, i, held)
 }
 
@@ -664,20 +677,9 @@ pub(super) fn take_from_qp(
 /// matters, as the heap is dropped from only there on, so the containment is
 /// proven under both guards.
 fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChunk) -> bool {
-    let pc: Vec<_> = held
-        .eval_pc()
-        .into_iter()
-        .chain(exhaled.eval_pc())
-        .collect();
-    check_qp_contained(
-        ctx,
-        &held.q,
-        &pc,
-        &mut |ctx, binders| eval_qp_instance(ctx, &held.caps, &held.q, binders, &pc),
-        &mut |ctx, addr| qp_perm_at(ctx, exhaled, addr),
-    )
-    // The body evaluated once already, at its inhale.
-    .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
+    set_within_set(ctx, held, &exhaled.eval_pc(), exhaled)
+        // The body evaluated once already, at its inhale.
+        .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
 }
 
 /// The chunk set of `q` with its captured temps already resolved to `caps`:
