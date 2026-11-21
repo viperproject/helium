@@ -1,0 +1,13 @@
+// QP medium: after exhaling half of a chunk set, a write to a member lacks
+// full permission (1 - 1/2 < 1).
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method inhale_exhale_half_then_write(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  a.f := 5
+}

@@ -1,0 +1,15 @@
+// QP medium: half of a full chunk set is exhaled; what remains is exactly 1/2
+// at every member.
+//
+// Must VERIFY.
+field f: Int
+
+method split_halves(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert perm(a.f) == 1/2
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert perm(a.f) == none
+}

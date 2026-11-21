@@ -1,0 +1,11 @@
+// QP medium: only the distinguished member `a` has write; `b != a` has 1/2.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method ternary_wrong_branch(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> (x == a ? acc(x.f) : acc(x.f, 1/2))
+  requires a in s && b in s && b != a
+{
+  b.f := 1
+}

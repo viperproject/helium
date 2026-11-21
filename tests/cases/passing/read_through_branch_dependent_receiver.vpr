@@ -1,0 +1,28 @@
+// Must VERIFY. Was a known limitation (`known_limitations/marco_benchmark/`):
+// "insufficient permission" on reading `y.f` after a join
+// where `y` was reassigned on one branch only.
+//
+// After the join, `y` is `b ? z : x` and the heap holds `acc(z.f)` under `b` and
+// `acc(x.f)` under `!b`, so `y.f` is held on every path. Helium does not find
+// a chunk for the merged receiver. Without the reassignment (inhaling at the
+// join instead), it verifies. The core is the same as
+//   if (b) { inhale acc(z.f) } else { inhale acc(x.f) }; v := (b ? z : x).f
+//
+// Reduced from `Ru1/prusti/verify/pass/paper-examples/routes.rs` (`m_length`,
+// also `.../quick/routes.rs`): Prusti v1 reassigns the place of a match arm
+// on one CFG path.
+//
+// Already verifies on branch `ramon/qp` (chunk lookup searching both chunk
+// kinds); promote this case to `passing/` when that branch lands.
+field f: Int
+
+method m(b: Bool, x: Ref, z: Ref) {
+  var y: Ref := x
+  if (b) {
+    y := z
+    inhale acc(y.f)
+  } else {
+    inhale acc(y.f)
+  }
+  var v: Int := y.f
+}

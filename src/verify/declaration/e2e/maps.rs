@@ -1,5 +1,5 @@
 //! Maps through the whole pipeline: the lookup side condition, `k in m` as
-//! `k in domain(m)`, and the map axioms (`verify::coll_axioms::map`).
+//! `k in domain(m)`, and the map axioms (`verify::builtin_axioms::map`).
 //! The corpus (`tests/cases/{passing,failing}/map`) has the broad coverage;
 //! these pin what the e-graph tiers decide on their own.
 

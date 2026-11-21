@@ -1,0 +1,13 @@
+// QP medium: a conditional body — the distinguished member gets write, the
+// rest 1/2 (`flatten_qp` splits on the ternary's guard).
+//
+// Must VERIFY.
+field f: Int
+
+method ternary_perm(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> (x == a ? acc(x.f) : acc(x.f, 1/2))
+  requires a in s && b in s && b != a
+{
+  a.f := 1
+  assert perm(b.f) == 1/2
+}

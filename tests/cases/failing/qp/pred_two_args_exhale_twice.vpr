@@ -1,0 +1,12 @@
+// A QP over a two-argument predicate: one instance cannot be exhaled twice.
+//
+// Must FAIL (insufficient permission).
+predicate P(x: Ref, y: Ref)
+
+method pred_two_args_exhale_twice(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref)
+  requires a in s && b in t
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+  exhale acc(P(a, b))
+  exhale acc(P(a, b))
+}

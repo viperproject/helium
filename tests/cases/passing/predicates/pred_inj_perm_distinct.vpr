@@ -1,0 +1,14 @@
+// `perm(P(x))` sums every chunk that may sit at `P(x)`. With `x != y` the
+// `P(y)` chunk's gate `P(y) == P(x)` must be refuted, which needs injectivity.
+//
+// Must VERIFY.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method test(x: Ref, y: Ref)
+  requires acc(P(x), 1/2) && acc(P(y), 1/2) && x != y
+{
+  assert perm(P(x)) == 1/2
+}

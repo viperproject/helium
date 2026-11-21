@@ -1,0 +1,8 @@
+// QP injectivity only concerns bindings that hold permission: with amount
+// `none` no binding does, so a constant receiver is vacuously injective.
+field f: Int
+
+method zero_perm_constant_receiver(s: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(r.f, none)
+}

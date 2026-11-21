@@ -1,0 +1,11 @@
+// A QP over a two-argument predicate: one instance taken out of the set leaves
+// the others in place.
+predicate P(x: Ref, y: Ref)
+
+method pred_two_args_exhale_single(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref, c: Ref)
+  requires a in s && b in t && c in t && b != c
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+  exhale acc(P(a, b))
+  exhale acc(P(a, c))
+}

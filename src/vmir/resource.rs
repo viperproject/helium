@@ -116,6 +116,13 @@ impl Resource {
                         field_types.push(Type::Option(value.clone()));
                     }
                 }
+                InstKind::Heap(HeapInst::AddForall {
+                    q,
+                    bind: Bind::SelfSlot,
+                    ..
+                }) => field_types.push(Type::Option(Box::new(Type::ValueMap(Box::new(
+                    q.loc_ty.clone(),
+                ))))),
                 _ => {}
             }
         }

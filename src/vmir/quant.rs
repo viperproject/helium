@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{FunctionBody, InstKind, PureInst, TyParams, Type, Val};
+use crate::vmir::{FunctionBody, InstKind, PermVal, PureInst, TyParams, Type, Val};
 use std::fmt::{self, Display, Formatter};
 
 /// A pure `forall`, **inline** in the enclosing instruction stream (it is an
@@ -73,25 +73,7 @@ impl Forall {
     /// `binder_base` — the two levels are filtered by the same rule, so an inner
     /// reference to an outer binder stops here rather than escaping further out.
     pub fn free_temps(&self) -> Vec<usize> {
-        let mut out = Vec::new();
-        let mut seen = crate::dhash::HashSet::default();
-        let mut visit = |v: &Val| {
-            if let Val::Temp(k) = v
-                && *k < self.binder_base
-                && seen.insert(*k)
-            {
-                out.push(*k);
-            }
-        };
-        for group in self.triggers.iter() {
-            for term in group.terms.iter() {
-                term.for_each_var(&mut visit);
-            }
-        }
-        for inst in &self.body.insts {
-            inst.for_each_operand(&mut visit);
-        }
-        out
+        free_temps_of(self.binder_base, &self.triggers, &self.body.insts, &[])
     }
 
     /// Visit every type this quantifier mentions: its binder types, its
@@ -111,6 +93,107 @@ impl Forall {
             term.for_each_type_mut(f);
         }
         self.body.for_each_type_mut(f);
+    }
+}
+
+/// The enclosing temps (`< binder_base`) a quantified scope mentions, in
+/// first-appearance order: triggers first, then the body's instructions, then
+/// `extra` (operands the scope's result carries outside its instruction
+/// stream). Shared by [`Forall`] and [`QuantChunks`], so the two capture rules
+/// cannot drift apart.
+fn free_temps_of(
+    binder_base: usize,
+    triggers: &[QuantTrigger],
+    insts: &[crate::vmir::Inst],
+    extra: &[Val],
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut seen = crate::dhash::HashSet::default();
+    let mut visit = |v: &Val| {
+        if let Val::Temp(k) = v
+            && *k < binder_base
+            && seen.insert(*k)
+        {
+            out.push(*k);
+        }
+    };
+    for group in triggers {
+        for term in group.terms.iter() {
+            term.for_each_var(&mut visit);
+        }
+    }
+    for inst in insts {
+        inst.for_each_operand(&mut visit);
+    }
+    extra.iter().for_each(&mut visit);
+    out
+}
+
+/// A quantified set of heap chunks, `{ loc(xs) @ perm(xs) | cond(xs) }` — the
+/// payload of a quantified permission. Scoped exactly like [`Forall`]: the body
+/// shares the enclosing temp space, binder `i` is `Val::Temp(binder_base + i)`,
+/// and a temp below `binder_base` is a free (captured) enclosing value.
+///
+/// Unlike a `Forall`, the hosting heap instruction defines no `Val` of its own,
+/// so `binder_base` is the enclosing stream's *next* temp and the stream resumes
+/// at that same number afterwards (the body is shadowed, never overlapped).
+///
+/// `cond` is kept apart from `perm` on purpose: it is the chunk set's domain,
+/// which lookup, inverse functions and injectivity all need. Only the
+/// *enclosing* branch conditions are folded into `perm`, as for a single `acc`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QuantChunks {
+    /// The first temp this scope owns; binder `i` is `Val::Temp(binder_base + i)`.
+    pub binder_base: usize,
+    /// The binder types.
+    pub bound: Box<[Type]>,
+    /// Trigger groups, as alternatives. Without user triggers, translation
+    /// uses the location's address call `f(e(xs))`; empty only when that
+    /// cannot serve as one either (e.g. a constant receiver).
+    pub triggers: Box<[QuantTrigger]>,
+    pub loc_ty: Type,
+    pub body: QuantBody,
+}
+
+/// The body of a [`QuantChunks`]: `Pure` and `Perm` instructions only, then the
+/// per-binding condition, location and permission.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QuantBody {
+    pub insts: Vec<crate::vmir::Inst>,
+    /// `Bool`: whether the binding contributes a chunk.
+    pub cond: Val,
+    /// `Addr<T>`: every instance has the same location kind.
+    pub loc: Val,
+    /// The amount; a `Temp` names a `Perm` instruction of *this body* (body
+    /// permission temps count from 0).
+    pub perm: PermVal,
+}
+
+impl QuantBody {
+    /// Returns true iff in any instruction a wildcard appears or the permission is a wildcard.
+    pub fn contains_wc_permission(&self) -> bool {
+        self.perm.is_wildcard()
+            || self
+                .insts
+                .iter()
+                .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()))
+    }
+}
+
+impl QuantChunks {
+    /// One past the last temp this scope owns for binders.
+    pub fn step_base(&self) -> usize {
+        self.binder_base + self.bound.len()
+    }
+
+    /// The enclosing temps this scope mentions (its capture list), triggers
+    /// first, then the body, then `cond`, `loc` and the permission amount.
+    pub fn free_temps(&self) -> Vec<usize> {
+        let mut extra = vec![self.body.cond.clone(), self.body.loc.clone()];
+        if let PermVal::Amount(a) = &self.body.perm {
+            extra.push(a.clone());
+        }
+        free_temps_of(self.binder_base, &self.triggers, &self.body.insts, &extra)
     }
 }
 
@@ -405,6 +488,56 @@ impl<'a> Display for VmirDisplay<'a, &'a Forall> {
             self.with_nested((q.step_base(), 0usize, 0usize, &q.body.insts[..]))
         )?;
         writeln!(f, "{body_indent}result: {}", q.body.res)?;
+        write!(f, "{}}}", self.indent())
+    }
+}
+
+/// A quantified chunk set, rendered as a nested block whose result is the
+/// guarded chunk `cond ? loc @ perm`:
+///
+/// ```text
+/// forall e2: Ref :: {
+///   e3: Bool := contains(e0, e2)
+///   e4: &[f] Int @ 1/1 := f(e2)
+///   result: e3 ? e4 @ 1/1
+/// }
+/// ```
+///
+/// Triggers are printed only when present (` :: {f(e2)}`).
+impl<'a> Display for VmirDisplay<'a, &'a QuantChunks> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let q = self.item;
+        write!(f, "forall ")?;
+        for (k, ty) in q.bound.iter().enumerate() {
+            if k > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "e{}: {}", q.binder_base + k, self.with(ty))?;
+        }
+        write!(f, " ::")?;
+        for group in q.triggers.iter() {
+            write!(f, " {{")?;
+            for (k, term) in group.terms.iter().enumerate() {
+                if k > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", self.with(term))?;
+            }
+            write!(f, "}}")?;
+        }
+        writeln!(f, " {{")?;
+        let body_indent = self.with_nested(()).indent();
+        // Body permission temps are local to the body, so they count from `p0`.
+        write!(
+            f,
+            "{}",
+            self.with_nested((q.step_base(), 0usize, 0usize, &q.body.insts[..]))
+        )?;
+        writeln!(
+            f,
+            "{body_indent}result: {} ? {} @ {}",
+            q.body.cond, q.body.loc, q.body.perm
+        )?;
         write!(f, "{}}}", self.indent())
     }
 }

@@ -1,5 +1,5 @@
 //! Multisets through the whole pipeline: `x in m` as a count, quantifiers
-//! triggered on it, and the multiset axioms (`verify::coll_axioms::multiset`).
+//! triggered on it, and the multiset axioms (`verify::builtin_axioms::multiset`).
 //! The corpus (`tests/cases/{passing,failing}/multiset`) has the broad
 //! coverage; these pin what the axioms give and what they must not.
 

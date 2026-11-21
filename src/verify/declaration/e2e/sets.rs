@@ -1,5 +1,5 @@
 //! Sets through the whole pipeline: quantifiers triggered on set operations,
-//! and the set axioms (`verify::coll_axioms::set`).
+//! and the set axioms (`verify::builtin_axioms::set`).
 
 use super::*;
 

@@ -4,7 +4,7 @@ use lasso::Spur;
 use rusttyc::{TcKey, TypeChecker, VarlessTypeChecker};
 
 use crate::viper::{
-    self,
+    self, IdnDeclTyped, QuantifierKind,
     globals::{DtorInfo, GlobalSignature, Globals},
     interner::Interner,
     typed::{
@@ -668,6 +668,58 @@ fn combine_spatial<Ext: PureExt>(
 // ==========================================
 
 impl<'a, 'g> ConstraintCtx<'a, 'g> {
+    /// Open a quantifier's binder scope: impose each binder's declared type like
+    /// a let-binder, constrain the trigger terms inside that scope, run `body`,
+    /// then restore the previous bindings. Shared by the pure `forall` and the
+    /// quantified permission in `constrain_spatial`.
+    ///
+    /// A binder may not shadow anything in scope, an enclosing binder or one of
+    /// its siblings included.
+    fn with_binders<R>(
+        &mut self,
+        bound_vars: &[IdnDeclTyped],
+        triggers: &mut [viper::Trigger],
+        body: impl FnOnce(&mut Self) -> Result<R, TypeError>,
+    ) -> Result<R, TypeError> {
+        let mut prev_bindings = Vec::with_capacity(bound_vars.len());
+        for bv in bound_vars.iter() {
+            let spur = bv.idn.0.id();
+            // (Siblings already bound are in `let_bindings`.)
+            if self.env.declared(spur) || self.let_bindings.contains_key(&spur) {
+                return Err(TypeError::ShadowedName(
+                    self.env.interner.resolve(&spur).to_string(),
+                ));
+            }
+            self.check_binder_type(&bv.ty)?;
+            let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
+            let ty = type_with_generics(&bv.ty, &rigid);
+            let bk = self.tc.new_term_key();
+            self.impose_type(bk, &ty, &HashMap::default())?;
+            let prev = self.let_bindings.insert(bv.idn.0.id(), bk);
+            prev_bindings.push((bv.idn.0.id(), prev));
+        }
+        // Constrain every trigger term inside the binder scope, so each
+        // gets a resolved type for later lowering (a dropped trigger
+        // would panic `resolved_ty`).
+        for trig in triggers.iter_mut() {
+            for e in trig.exp.iter_mut() {
+                self.constrain_pure(e)?;
+            }
+        }
+        let result = body(self);
+        for (spur, prev) in prev_bindings {
+            match prev {
+                Some(p) => {
+                    self.let_bindings.insert(spur, p);
+                }
+                None => {
+                    self.let_bindings.remove(&spur);
+                }
+            }
+        }
+        result
+    }
+
     /// Walk a pure expression, stamp its node with a fresh key, impose its rules, and
     /// return that key so callers can relate it to their own.
     fn constrain_pure(&mut self, exp: &mut viper::Exp) -> Result<TcKey, TypeError> {
@@ -819,46 +871,8 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
             }
 
             ExpKind::Quantifier(_, bound_vars, triggers, body) => {
-                // Treat quantifier binders like let-binders: impose their declared type,
-                // restore the previous bindings afterwards.
-                // A binder may not shadow anything in scope, an enclosing
-                // binder or one of its siblings included.
-                let mut prev_bindings = Vec::with_capacity(bound_vars.len());
-                for bv in bound_vars.iter() {
-                    let spur = bv.idn.0.id();
-                    // (Siblings already bound are in `let_bindings`.)
-                    if self.env.declared(spur) || self.let_bindings.contains_key(&spur) {
-                        return Err(TypeError::ShadowedName(
-                            self.env.interner.resolve(&spur).to_string(),
-                        ));
-                    }
-                    self.check_binder_type(&bv.ty)?;
-                    let rigid: Vec<Spur> = self.rigid_generics.iter().copied().collect();
-                    let ty = type_with_generics(&bv.ty, &rigid);
-                    let bk = self.tc.new_term_key();
-                    self.impose_type(bk, &ty, &HashMap::default())?;
-                    let prev = self.let_bindings.insert(bv.idn.0.id(), bk);
-                    prev_bindings.push((bv.idn.0.id(), prev));
-                }
-                // Constrain every trigger term inside the binder scope, so each
-                // gets a resolved type for later lowering (a dropped trigger
-                // would panic `resolved_ty`).
-                for trig in triggers.iter_mut() {
-                    for e in trig.exp.iter_mut() {
-                        self.constrain_pure(e)?;
-                    }
-                }
-                let body_key = self.constrain_pure(body)?;
-                for (spur, prev) in prev_bindings {
-                    match prev {
-                        Some(p) => {
-                            self.let_bindings.insert(spur, p);
-                        }
-                        None => {
-                            self.let_bindings.remove(&spur);
-                        }
-                    }
-                }
+                let body_key =
+                    self.with_binders(bound_vars, triggers, |this| this.constrain_pure(body))?;
                 self.tc
                     .impose(body_key.concretizes_explicit(ViperTcType::Bool))?;
                 self.tc
@@ -1494,6 +1508,15 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
                 self.constrain_spatial(then)?;
                 self.constrain_spatial(else_)
             }
+            // A quantified permission: the body is spatial (it holds the `acc`),
+            // constrained inside the binder scope. An `acc`-free `forall` is a
+            // pure fact and falls through to `constrain_pure`, which also gives
+            // the quantifier node itself the `Bool` key its lowering reads.
+            ExpKind::Quantifier(QuantifierKind::Forall, bound_vars, triggers, body)
+                if crate::viper::unsupported::mentions_acc(body) =>
+            {
+                self.with_binders(bound_vars, triggers, |this| this.constrain_spatial(body))
+            }
             _ => {
                 let pure_key = self.constrain_pure(exp)?;
                 self.tc
@@ -1812,6 +1835,89 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
         ))))
     }
 
+    /// Flatten the body of a quantified permission into its `acc` leaves, each
+    /// paired with the conjunction of the guards on its path:
+    ///
+    /// | body | action |
+    /// |---|---|
+    /// | `c ==> r` | push `c`, recurse into `r` |
+    /// | `c ? t : e` | push `c` for `t`, push `!c` for `e` |
+    /// | `l && r` | recurse into both |
+    /// | `acc(R, p)` / bare `P(..)` | one leaf, `cond = ⋀conds` (`true` if none) |
+    /// | anything else | rejected: pure conjuncts in a QP are not supported yet |
+    ///
+    /// Everything is lowered as [`typed::AxiomExt`], so a heap read in the
+    /// condition, receiver or amount (e.g. `n.next.f`) is rejected here.
+    #[allow(clippy::type_complexity)]
+    fn flatten_qp(
+        &self,
+        exp: &viper::Exp,
+        conds: &mut Vec<TypedPureExp<typed::AxiomExt>>,
+        out: &mut Vec<(
+            TypedPureExp<typed::AxiomExt>,
+            ResourceExp<typed::AxiomExt>,
+            TypedPureExp<typed::AxiomExt>,
+        )>,
+    ) -> Result<(), TypeError> {
+        use viper::ExpKind;
+        type A = typed::AxiomExt;
+        let conj = |conds: &[TypedPureExp<A>]| -> TypedPureExp<A> {
+            conds
+                .iter()
+                .cloned()
+                .reduce(|l, r| TypedPureExp {
+                    ty: Type::Bool,
+                    exp: Box::new(PureExpKind::Binary(BinOp::And, l, r)),
+                })
+                .unwrap_or(TypedPureExp {
+                    ty: Type::Bool,
+                    exp: Box::new(PureExpKind::Const(Literal::Bool(true))),
+                })
+        };
+        if let ExpKind::Call(call) = &*exp.kind
+            && matches!(call.kind, Some(viper::ExpCallKind::Predicate))
+        {
+            let res = self.lower_predicate_resource::<A>(call)?;
+            out.push((conj(conds), res, write_perm()));
+            return Ok(());
+        }
+        match &*exp.kind {
+            ExpKind::Acc(acc_exp) => {
+                let res = self.lower_resource::<A>(&acc_exp.loc)?;
+                let perm = self.lower_pure::<A>(&acc_exp.perm)?;
+                out.push((conj(conds), res, perm));
+                Ok(())
+            }
+            ExpKind::BinOp(viper::BinOp::And, l, r) => {
+                self.flatten_qp(l, conds, out)?;
+                self.flatten_qp(r, conds, out)
+            }
+            ExpKind::BinOp(viper::BinOp::Implies, c, r) => {
+                conds.push(self.lower_pure::<A>(c)?);
+                let res = self.flatten_qp(r, conds, out);
+                conds.pop();
+                res
+            }
+            ExpKind::Ternary(c, then, else_) => {
+                let c = self.lower_pure::<A>(c)?;
+                conds.push(c.clone());
+                let res = self.flatten_qp(then, conds, out);
+                conds.pop();
+                res?;
+                conds.push(TypedPureExp {
+                    ty: Type::Bool,
+                    exp: Box::new(PureExpKind::Unary(UnOp::Not, c)),
+                });
+                let res = self.flatten_qp(else_, conds, out);
+                conds.pop();
+                res
+            }
+            _ => Err(TypeError::Unsupported(
+                "pure conjunct inside a quantified permission",
+            )),
+        }
+    }
+
     fn lower_spatial<Ext: PureExt>(&self, exp: &viper::Exp) -> Result<SpatialExp<Ext>, TypeError> {
         use viper::ExpKind;
 
@@ -1855,6 +1961,54 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                     then: then_s,
                     else_: else_s,
                 })))
+            }
+            // A quantified permission. Binders and triggers lower exactly as
+            // for a pure `forall` (innards `AxiomExt`); the body is flattened
+            // into one `QuantPerm` per `acc` (see `flatten_qp`), joined by
+            // `Conj`. Unlike a pure `forall`, an empty trigger list is legal.
+            ExpKind::Quantifier(QuantifierKind::Forall, bound_vars, triggers, body)
+                if crate::viper::unsupported::mentions_acc(body) =>
+            {
+                let bound: Vec<TypedIdent> = bound_vars
+                    .iter()
+                    .map(|bv| TypedIdent {
+                        name: Ident(bv.idn.0.id()),
+                        ty: type_with_generics(&bv.ty, &self.rigid),
+                    })
+                    .collect();
+                let lowered_triggers: Vec<Vec<TypedPureExp<typed::AxiomExt>>> = triggers
+                    .iter()
+                    .map(|trig| {
+                        trig.exp
+                            .iter()
+                            .map(|e| self.lower_pure::<typed::AxiomExt>(e))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !lowered_triggers.is_empty() {
+                    check_triggers(&bound, &lowered_triggers, self.env.interner)?;
+                }
+                let mut leaves = Vec::new();
+                self.flatten_qp(body, &mut Vec::new(), &mut leaves)?;
+                leaves
+                    .into_iter()
+                    .map(|(cond, res, perm)| {
+                        SpatialExp(Box::new(SpatialExpKind::Forall(Box::new(
+                            typed::QuantPerm {
+                                bound: bound.clone(),
+                                location_trigger: lowered_triggers.is_empty()
+                                    && location_can_trigger(&bound, &res),
+                                triggers: lowered_triggers.clone(),
+                                cond,
+                                res,
+                                perm,
+                            },
+                        ))))
+                    })
+                    .tree_reduce(|l, r| SpatialExp(Box::new(SpatialExpKind::Conj(l, r))))
+                    .ok_or(TypeError::Unsupported(
+                        "quantified permission without an `acc`",
+                    ))
             }
 
             _ => {
@@ -2591,6 +2745,22 @@ fn check_triggers(
         }
     }
     Ok(())
+}
+
+/// Whether a quantified permission's location `f(e(xs))` can serve as its
+/// trigger (used when it has none, see `translate::spatial::lower_quant_chunks`):
+/// its arguments are matchable and cover every binder, as a trigger's must.
+/// Not an error when it cannot: e.g. a constant receiver must still reach the
+/// verifier's injectivity check.
+fn location_can_trigger(bound: &[TypedIdent], res: &ResourceExp<typed::AxiomExt>) -> bool {
+    let args = match &*res.0 {
+        ResourceExpKind::Field(e, _) => std::slice::from_ref(e),
+        ResourceExpKind::PredicateCall(c) => &c.args[..],
+    };
+    let mut covered: HashSet<Spur> = HashSet::default();
+    args.iter()
+        .all(|a| check_trigger_subterms(a, &mut covered).is_ok())
+        && bound.iter().all(|bv| covered.contains(&bv.name.0))
 }
 
 /// Whether a trigger term's root is an application — the only shape a trigger

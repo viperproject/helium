@@ -1,0 +1,14 @@
+// QP injectivity over a two-argument predicate with a body and a fixed second
+// argument: only the first argument varies, and it is the binder.
+field f: Int
+field g: Int
+
+// Owns the first argument's `f` and the second argument's `g`.
+predicate P(x: Ref, y: Ref) {
+  acc(x.f) && acc(y.g)
+}
+
+method pred_body_fixed_second_arg(s: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(P(x, r))
+}

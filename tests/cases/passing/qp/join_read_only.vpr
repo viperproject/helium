@@ -1,0 +1,19 @@
+// QP medium (branch join): neither branch touches the heap, but the join still
+// has to carry the chunk set through unchanged, value included.
+//
+// Must VERIFY.
+field f: Int
+
+method join_read_only(s: Set[Ref], a: Ref, c: Bool) returns (r: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3
+{
+  if (c) {
+    r := a.f
+  } else {
+    r := a.f + 1
+  }
+  assert a.f == 3
+  assert r == (c ? 3 : 4)
+  a.f := 0
+}

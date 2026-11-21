@@ -1,0 +1,16 @@
+// The state of passing/pred_inj_perm_sum_forces_equal_args.vpr is consistent:
+// both halves at one location is possible. Injectivity must not make it
+// contradictory.
+//
+// Must FAIL.
+
+field f: Int
+
+predicate Q(x: Ref, i: Int) { acc(x.f, 1/2) }
+
+method test(x: Ref, y: Ref, i: Int, j: Int)
+  requires acc(Q(x, i), 1/2) && acc(Q(y, j), 1/2)
+{
+  inhale perm(Q(x, i)) == 1/1
+  assert false
+}

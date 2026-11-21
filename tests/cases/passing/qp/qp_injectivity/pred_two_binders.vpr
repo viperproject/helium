@@ -1,0 +1,8 @@
+// QP injectivity over a two-argument predicate: both binders are arguments, so
+// equal instances `P(x1, y1) == P(x2, y2)` force `x1 == x2` and `y1 == y2`.
+predicate P(x: Ref, y: Ref)
+
+method pred_two_binders(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(x, y))
+}

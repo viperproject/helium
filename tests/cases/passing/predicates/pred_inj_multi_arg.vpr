@@ -1,0 +1,15 @@
+// Injectivity in a later argument: `Q(x, 0)` and `Q(x, 1)` share the receiver
+// and differ only in the index. `perm(Q(x, 0))` sums both chunks, and the gate
+// `Q(x, 1) == Q(x, 0)` must be refuted from `1 != 0`.
+//
+// Must VERIFY.
+
+field f: Int
+
+predicate Q(x: Ref, i: Int) { acc(x.f, 1/2) }
+
+method test(x: Ref)
+  requires acc(Q(x, 0), 1/2) && acc(Q(x, 1), 1/2)
+{
+  assert perm(Q(x, 0)) == 1/2
+}

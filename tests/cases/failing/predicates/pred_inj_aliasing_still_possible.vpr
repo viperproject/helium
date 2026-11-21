@@ -1,0 +1,15 @@
+// Injectivity runs from equal locations to equal arguments, never the other
+// way round: two halves of `P` at `x` and `y` are consistent with `x == y`
+// (one full `P(x)`), so `x != y` must not follow.
+//
+// Must FAIL.
+
+field f: Int
+
+predicate P(x: Ref) { acc(x.f) }
+
+method test(x: Ref, y: Ref)
+  requires acc(P(x), 1/2) && acc(P(y), 1/2)
+{
+  assert x != y
+}

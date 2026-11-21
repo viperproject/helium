@@ -1,0 +1,16 @@
+// QP medium: exhaling half of the union of two disjoint sets leaves the other
+// half in each, so members of both stay readable.
+//
+// Must VERIFY.
+field f: Int
+
+method union_halves_leave_rest(s1: Set[Ref], s2: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s1 ==> acc(x.f)
+  requires forall x: Ref :: x in s2 ==> acc(x.f)
+  requires (s1 intersection s2) == Set[Ref]()
+  requires a in s1 && b in s2
+{
+  exhale forall x: Ref :: x in (s1 union s2) ==> acc(x.f, 1/2)
+  assert perm(a.f) == 1/2
+  assert perm(b.f) == 1/2
+}

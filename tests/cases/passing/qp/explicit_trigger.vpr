@@ -1,0 +1,11 @@
+// QP easy: the same round trip as `frame_through`, with an explicit trigger
+// on the domain condition instead of an inferred one.
+//
+// Must VERIFY.
+field f: Int
+
+method explicit_trigger(s: Set[Ref])
+  requires forall x: Ref :: { x in s } x in s ==> acc(x.f)
+  ensures forall x: Ref :: { x in s } x in s ==> acc(x.f)
+{
+}

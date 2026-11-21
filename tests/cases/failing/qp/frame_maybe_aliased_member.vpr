@@ -1,0 +1,14 @@
+// QP medium: writing `a.f` may change `b.f` when `a` and `b` may be the same
+// reference.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method frame_maybe_aliased_member(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s
+{
+  var v: Int := b.f
+  a.f := 0
+  assert b.f == v
+}

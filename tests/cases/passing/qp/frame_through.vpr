@@ -1,0 +1,11 @@
+// QP easy: a quantified permission over a set is inhaled (precondition) and
+// exhaled again (postcondition) unchanged. The body does nothing.
+//
+// Must VERIFY.
+field f: Int
+
+method frame_through(s: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+{
+}

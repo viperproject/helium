@@ -1,0 +1,10 @@
+// QP injectivity: every binding names the same location `r.f`, so for a set
+// with two elements the inhale would hold two full permissions to it.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method constant_receiver(s: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(r.f)
+}

@@ -1,0 +1,23 @@
+// QP medium (branch join): each branch inhales a chunk set over a *different*
+// domain. A member in both domains is held after the join either way.
+//
+// Must VERIFY.
+field f: Int
+
+method join_inhale_different_sets(s: Set[Ref], t: Set[Ref], a: Ref, c: Bool)
+  requires a in s && a in t
+{
+  if (c) {
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+  } else {
+    inhale forall x: Ref :: x in t ==> acc(x.f)
+  }
+  a.f := 1
+  assert a.f == 1
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f)
+  } else {
+    exhale forall x: Ref :: x in t ==> acc(x.f)
+  }
+  assert perm(a.f) == none
+}

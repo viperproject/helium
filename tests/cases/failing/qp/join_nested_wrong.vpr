@@ -1,0 +1,19 @@
+// QP medium (branch join): with nested branches, the inner condition matters
+// too: `c` alone does not tell which member was written.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method join_nested_wrong(s: Set[Ref], a: Ref, b: Ref, c: Bool, d: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b && a.f == 0 && b.f == 0
+{
+  if (c) {
+    if (d) {
+      a.f := 1
+    } else {
+      b.f := 1
+    }
+  }
+  assert c ==> a.f == 1
+}

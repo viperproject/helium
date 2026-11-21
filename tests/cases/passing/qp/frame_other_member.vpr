@@ -1,0 +1,13 @@
+// QP medium: writing one member leaves another member's value unchanged.
+//
+// Must VERIFY.
+field f: Int
+
+method frame_other_member(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b
+{
+  var v: Int := b.f
+  a.f := 0
+  assert b.f == v
+}

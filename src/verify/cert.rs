@@ -11,8 +11,11 @@ use crate::verify::error::VerifyError;
 use crate::verify::heap::LocationKind;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{AxiomInst, AxiomPure};
+use crate::vmir;
 use crate::vmir::{MemberId, PermInst, PermVal, Polarity, Type, Val};
 use egg::{EGraph, Id};
+use std::rc::Rc;
+
 /// A (non-recursive) function's verified body as a **pure term recipe** — the
 /// definition `f(params) == <steps>[res]`, add-only. Unlike a certificate this
 /// imports **no e-classes**: the function unfold rule rebuilds `steps` at each
@@ -39,7 +42,7 @@ pub(crate) struct FunctionDefinition {
     /// value is never read (see [`RecipeBuilder::token_steps`]). Rebuilding a step
     /// only *adds* the node, which makes `g` materializable here; the unfold rule
     /// additionally releases each of these under the enclosing `f%pre` truth, so a
-    /// nested callee's axioms activate exactly when this body's own do, and only
+    /// nested callee's axioms activate exactly when this body's own do, and onlyg
     /// under the body-internal condition guarding the nested call.
     pub(crate) token_steps: Vec<TokenStep>,
     /// The **only** thing this function publishes to a caller:
@@ -116,6 +119,17 @@ pub(crate) enum SeedRef {
     /// unfold/from_snap). A value-dependent inner address (`list(this.next)`)
     /// references an earlier slot's value this way.
     SlotValue(usize),
+}
+
+impl SeedRef {
+    /// The seed's e-class at a graft site: a param resolves to `args`, a slot
+    /// value to the values `slots` supplied so far.
+    pub(crate) fn resolve(&self, args: &[Id], slots: &[Id]) -> Id {
+        match self {
+            SeedRef::Param(k) => args[*k],
+            SeedRef::SlotValue(j) => slots[*j],
+        }
+    }
 }
 
 /// A self-contained pure recipe rebuilt at a call site with
@@ -211,15 +225,31 @@ impl<A> PermRecipe<A> {
     }
 }
 
-/// One footprint slot of a [`ResourceDefinition`]: its location kind and element
-/// type, plus recipes for its address and permission (over the params and any
-/// earlier slot values — see [`SeedRef`]).
+/// One footprint slot of a [`ResourceDefinition`]: its location kind and the
+/// type of the slot's value, plus how to rebuild the slot at a call site.
 #[derive(Clone)]
 pub(crate) struct SlotRecipe {
     pub(crate) kind: LocationKind,
+    /// The type of `SlotValue(i)`: the field/predicate value for a single
+    /// slot, `ValueMap(loc_ty)` for a quantified one.
     pub(crate) elem: Type,
-    pub(crate) addr: BodyRecipe,
-    pub(crate) perm: PermRecipe,
+    pub(crate) shape: SlotShape<BodyRecipe, PermRecipe>,
+}
+
+/// What distinguishes a single `acc(e.f, p)` from a quantified
+/// `forall xs :: c ==> acc(e.f, p)`. Generic so that `RecipeBuilder` can hold
+/// the same shape over `Val`s while the walk is still running.
+#[derive(Clone)]
+pub(crate) enum SlotShape<R, P> {
+    /// One location: its address and permission.
+    Single { addr: R, perm: P },
+    /// A chunk set: the quantifier body (in vmir temp space) and a recipe for
+    /// each value it captures from the resource body (`q.free_temps()`),
+    /// keyed by the captured temp's index.
+    Quant {
+        q: Rc<vmir::QuantChunks>,
+        caps: Vec<(usize, R)>,
+    },
 }
 
 /// A resource's verified body as a **pure term recipe**. Each call site rebuilds
@@ -232,6 +262,13 @@ pub(crate) struct ResourceDefinition {
     pub(crate) footprint: Vec<SlotRecipe>,
     /// The body boolean over the params and every footprint slot value.
     pub(crate) bool: BodyRecipe,
+    /// Facts the walk learned that hold in every heap this resource describes
+    /// (see [`RecipeBuilder::record_side_fact`]), e.g. that two holders of one
+    /// location agree on its value. Each is a boolean over the params and slot
+    /// values with its own path condition folded in. Unlike [`Self::bool`]
+    /// these are never obligations: a graft site **assumes** them, consuming
+    /// and producing alike.
+    pub(crate) side_facts: Vec<BodyRecipe>,
 }
 
 /// One step of a [`RecipeBuilder`] stream: either a **seed** (a footprint
@@ -262,7 +299,7 @@ pub(crate) struct RecipeBuilder {
     /// the slot's location kind, element type, and the recipe temps of its
     /// address and permission (sliced into standalone [`SlotRecipe`]s at the
     /// end of the walk).
-    pub(crate) pending_slots: Vec<(LocationKind, Type, Val, PermRecipe<Val>)>,
+    pub(crate) pending_slots: Vec<(LocationKind, Type, SlotShape<Val, PermRecipe<Val>>)>,
     /// Orphan steps that must survive [`Self::slice`]'s backward closure: the
     /// `g%pre` precondition tokens emitted alongside a callee application. Their
     /// value is never consumed, so reachability-from-the-result would prune them
@@ -272,6 +309,12 @@ pub(crate) struct RecipeBuilder {
     /// every step via `into_function_parts`). Each carries the callee-internal pc
     /// of the call it accompanies (see [`TokenStep`]).
     token_steps: Vec<TokenStep>,
+    /// The walk's side-fact table: facts that hold in every heap the
+    /// certificate describes but that the walk only learned in its scratch
+    /// graph, so a graft site would otherwise never see them. Today: the
+    /// agreement of two holders a read saw at one location (see
+    /// [`Self::record_side_fact`]).
+    side_facts: Vec<Val>,
 }
 
 impl RecipeBuilder {
@@ -286,7 +329,22 @@ impl RecipeBuilder {
             post_contract: false,
             pending_slots: Vec::new(),
             token_steps: Vec::new(),
+            side_facts: Vec::new(),
         }
+    }
+
+    /// Record `fact`, a boolean in this stream with its path condition folded
+    /// in, in the side-fact table. Today the only producer is a read that saw
+    /// two holders with a positive share at one location: `fact` is then
+    /// `pc ==> v1 == v2` (see `heap::holders::record_agreements`).
+    pub(crate) fn record_side_fact(&mut self, fact: Val) {
+        self.side_facts.push(fact);
+    }
+
+    /// Slice each recorded side fact into a standalone recipe (see
+    /// [`ResourceDefinition::side_facts`]).
+    pub(crate) fn slice_side_facts(&self) -> Result<Vec<BodyRecipe>, VerifyError> {
+        self.side_facts.iter().map(|f| self.slice(f)).collect()
     }
 
     /// Mark the walked body as a postcondition (`f#ensures`).

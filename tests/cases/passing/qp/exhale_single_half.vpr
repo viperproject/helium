@@ -1,0 +1,14 @@
+// QP easy: exhaling half of one member as a single location leaves the other
+// half in the chunk set.
+//
+// Must VERIFY.
+field f: Int
+
+method exhale_single_half(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  exhale acc(a.f, 1/2)
+  assert perm(a.f) == 1/2
+  var v: Int := a.f
+}

@@ -1,0 +1,21 @@
+// QP medium (loop exit / heap sum): frame half + invariant half is exactly
+// write. Catches a sum that double counts (or keeps both halves and the
+// original set).
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method loop_split_half_overexhale(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  {
+    i := i + 1
+  }
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+  exhale acc(a.f, 1/2)
+}

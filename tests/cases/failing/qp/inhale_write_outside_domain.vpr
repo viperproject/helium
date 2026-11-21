@@ -1,0 +1,11 @@
+// QP easy: `a` is not known to be in the domain, so the chunk set may hold
+// no permission at `a.f`.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method inhale_write_outside_domain(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  a.f := 5
+}

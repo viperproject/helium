@@ -1,0 +1,13 @@
+// QP medium: exhaling a chunk set whose receiver `xs[i]` is a function of the
+// binder. The containment lookup cannot read the binder off the address, so
+// it goes through the held set's inverse function.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_exhale_seq_index(xs: Seq[Ref])
+{
+  inhale forall i: Int, k: Int :: { xs[i], xs[k] } 0 <= i && i < |xs| && 0 <= k && k < |xs| && i != k ==> xs[i] != xs[k]
+  inhale forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+  exhale forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f, 1/2)
+}

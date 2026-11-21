@@ -1,0 +1,14 @@
+// QP medium: two 1/2 chunk sets over the same domain add up to write
+// permission at every member.
+//
+// Must VERIFY.
+field f: Int
+
+method merge_halves(s: Set[Ref], a: Ref)
+  requires a in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  inhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  a.f := 3
+  assert a.f == 3
+}

@@ -1,0 +1,14 @@
+// QP medium: writing `xs[j].f` where the receiver `xs[i]` is a function of
+// the binder. The binder cannot be read off the address, so the lookup goes
+// through the inverse function; distinctness makes the receiver injective.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_write_seq_index(xs: Seq[Ref], j: Int)
+{
+  inhale forall i: Int, k: Int :: { xs[i], xs[k] } 0 <= i && i < |xs| && 0 <= k && k < |xs| && i != k ==> xs[i] != xs[k]
+  inhale forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+  inhale 0 <= j && j < |xs|
+  xs[j].f := 5
+}

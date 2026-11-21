@@ -1,0 +1,18 @@
+// QP medium (branch join): mirror of `join_dead_branch` where the *live*
+// branch exhales everything. Catches a join that keeps the heap of the
+// branch that did more (or the then side).
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method join_dead_branch_live_exhale(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (a in s) {
+    exhale forall x: Ref :: x in s ==> acc(x.f)
+  } else {
+    a.f := 1
+  }
+  a.f := 2
+}

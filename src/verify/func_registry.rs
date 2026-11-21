@@ -22,6 +22,7 @@ use crate::dhash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::verify::analysis::ConstFold;
+use crate::verify::heap::LocationKind;
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::rewrite::{accessor_rule, is_rule, proj_rule, variant_narrow_rule};
 use crate::vmir::{Declaration, MemberId, Program, Type};
@@ -61,6 +62,17 @@ pub struct SkolemSig {
     pub ret: Type,
 }
 
+/// The value-map functions of one location kind (see
+/// [`FuncRegistry::value_map`]): `lookup(m, a)` reads the value at address `a`
+/// of map `m`, `store(m, a, v)` is `m` with `a` set to `v`, and
+/// `join(c, m1, m2)` is `m1` where `c` holds and `m2` elsewhere (a branch join).
+#[derive(Debug, Clone, Copy)]
+pub struct ValueFunction {
+    pub lookup: FuncId,
+    pub store: FuncId,
+    pub join: FuncId,
+}
+
 /// Allocates and names the verifier ids for polymorphic ADT constructors /
 /// testers / projections, and accumulates their reduction rules.
 pub struct FuncRegistry {
@@ -92,6 +104,9 @@ pub struct FuncRegistry {
     /// released at the call under that call's pc, is what lets the function's
     /// facts fire. The one and only precondition token.
     fn_pre_token: HashMap<MemberId, FuncId>,
+    /// The value-map functions of each location kind a quantified permission
+    /// uses, minted on first use (see [`Self::value_map`]).
+    fn_value_map: HashMap<LocationKind, ValueFunction>,
     /// Display names for minted ids (which are outside the interner).
     names: HashMap<FuncId, String>,
     rules: Vec<Rule>,
@@ -129,7 +144,7 @@ pub struct FuncRegistry {
     skolems: Vec<SkolemSig>,
     /// Each collection kind's axiom skolem functions, minted with its
     /// recipes, by `CollKind` (`CollKind::ALL` order).
-    coll_skolems: [Option<crate::verify::coll_axioms::Skolems>; 4],
+    coll_skolems: [Option<crate::verify::builtin_axioms::Skolems>; 4],
 }
 
 // Builtin reserved operator ids (starting from the top of the usize space).
@@ -302,6 +317,7 @@ impl FuncRegistry {
             adt_is: HashMap::default(),
             limited: HashMap::default(),
             fn_pre_token: HashMap::default(),
+            fn_value_map: Default::default(),
             names,
             rules,
             shapes: HashMap::default(),
@@ -374,6 +390,72 @@ impl FuncRegistry {
         id
     }
 
+    /// Mint a fresh inverse function of a quantified permission, `params ->
+    /// ret` (see `heap::quantified_permissions`). A skolem like any other, so
+    /// the backends that know skolems need nothing new; fresh per call, since
+    /// one inverse belongs to one inhaled chunk set.
+    pub(crate) fn qp_inverse(&mut self, params: Vec<Type>, ret: Type) -> FuncId {
+        let name = format!("qp_inv#{}", self.skolems.len());
+        self.skolem(&name, SkolemSig { params, ret })
+    }
+
+    /// The value-map functions of location kind `kind` (minting them on first
+    /// use): the values of a quantified chunk set are one map of type
+    /// `ValueMap(Addr<kind>)`, read with `lookup` and written with `store`.
+    /// Skolems, so z3 and `skolem_ret_types` handle them as any other; their
+    /// read-over-write axiom is assumed separately.
+    pub(crate) fn value_map(&mut self, kind: &LocationKind) -> ValueFunction {
+        if let Some(&f) = self.fn_value_map.get(kind) {
+            return f;
+        }
+        let addr = Type::Addr {
+            group: kind.group,
+            value: Box::new(kind.value.clone()),
+            bound: kind.bound.clone(),
+        };
+        let map = Type::ValueMap(Box::new(addr.clone()));
+        let name = format!("vmap#g{}", lasso::Key::into_usize(kind.group));
+        let f = ValueFunction {
+            lookup: self.skolem(
+                &format!("{name}.lookup"),
+                SkolemSig {
+                    params: vec![map.clone(), addr.clone()],
+                    ret: kind.value.clone(),
+                },
+            ),
+            store: self.skolem(
+                &format!("{name}.store"),
+                SkolemSig {
+                    params: vec![map.clone(), addr, kind.value.clone()],
+                    ret: map.clone(),
+                },
+            ),
+            join: self.skolem(
+                &format!("{name}.join"),
+                SkolemSig {
+                    params: vec![Type::Bool, map.clone(), map.clone()],
+                    ret: map,
+                },
+            ),
+        };
+        self.fn_value_map.insert(kind.clone(), f);
+        f
+    }
+
+    /// The axioms of `kind`'s value map (see `verify::builtin_axioms::value_map`),
+    /// minting its functions and compiling them into the recipe table on first
+    /// use.
+    pub(crate) fn value_map_axioms(
+        &mut self,
+        kind: &LocationKind,
+    ) -> Vec<crate::verify::lang::RecipeId> {
+        let f = self.value_map(kind);
+        self.quant_table
+            .write()
+            .expect("recipe table lock")
+            .value_map_axioms(kind, f)
+    }
+
     /// The parameter and return types of the skolem function of kind
     /// `Skolem(index)`, applied at the type arguments `tys`.
     pub fn skolem_signature(&self, index: usize, tys: &[Type]) -> (Vec<Type>, Type) {
@@ -402,7 +484,7 @@ impl FuncRegistry {
     }
 
     /// The recipes of the built-in axioms of the collection `kind`
-    /// (`verify::coll_axioms`), compiled into the recipe table on the first
+    /// (`verify::builtin_axioms`), compiled into the recipe table on the first
     /// call, with the skolem functions their witnesses are terms of.
     pub(crate) fn coll_axioms(
         &mut self,
@@ -410,8 +492,9 @@ impl FuncRegistry {
     ) -> Vec<crate::verify::lang::RecipeId> {
         let slot = kind as usize;
         if self.coll_skolems[slot].is_none() {
-            let s =
-                crate::verify::coll_axioms::Skolems::mint(kind, |name, sig| self.skolem(name, sig));
+            let s = crate::verify::builtin_axioms::Skolems::mint(kind, |name, sig| {
+                self.skolem(name, sig)
+            });
             self.coll_skolems[slot] = Some(s);
         }
         let skolems = self.coll_skolems[slot].as_ref().expect("just minted");
@@ -425,7 +508,7 @@ impl FuncRegistry {
     // `Option[T]` is a builtin parametric type (`vmir::Type::Option`). These are
     // the dedicated way to request its monomorphic instance, rather than open-
     // coding `cons`/`proj`. (`Seq`/`Set`/`Map`/`Multiset` are `Type::Coll`,
-    // axiomatized in `verify::coll_axioms`.)
+    // axiomatized in `verify::builtin_axioms`.)
 
     /// `Option[elem]` as a vmir type (the builtin parametric `Type::Option`).
     pub fn option_type(&self, elem: Type) -> Type {

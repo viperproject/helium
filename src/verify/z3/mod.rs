@@ -208,41 +208,6 @@ pub(crate) fn assert_fact(solver: &Solver, fact: &Bool) {
     });
 }
 
-/// Parameter and return types of function declaration `func` at instantiation
-/// `tys`. Every declared `FuncId` is a `vmir::Function`: ordinary, domain, and
-/// field/predicate address functions alike.
-fn function_signature(ctxt: &VerifyContext, func: MemberId, tys: &[Type]) -> (Vec<Type>, Type) {
-    match &ctxt.decls[func] {
-        vmir::Declaration::Domain(_) => {
-            unreachable!(
-                "the domain declaration only holds the name of the declaration. It can never be a function."
-            )
-        }
-        vmir::Declaration::Axiom(_) => {
-            unreachable!("the axiom declaration only holds the axiom. It can never be a function.")
-        }
-        vmir::Declaration::Function(fun) => {
-            let params = fun.params.iter().map(|t| t.subst_generics(tys)).collect();
-            (params, fun.ret.subst_generics(tys))
-        }
-        vmir::Declaration::Method(_) => {
-            unreachable!("methods are lowered to exhale/inhale. A method is never called.")
-        }
-        vmir::Declaration::Resource(r) => {
-            let params = r.params.iter().map(|t| t.subst_generics(tys)).collect();
-            let group = ctxt
-                .groups
-                .get(ctxt.interner.resolve(&r.name))
-                .expect("predicate group tag");
-            let ret = r.derive_location(func, group).ret;
-            (params, ret)
-        }
-        vmir::Declaration::Adt(_) => {
-            unreachable!("adt are lowered to specific pure instructions and not to a function call")
-        }
-    }
-}
-
 /// The type of e-class `id` (translation.typ, "Class sorts"), or `None` when no
 /// node of the class has a certain type. Unlike `types::infer_type` this never
 /// guesses: without a sort the class cannot be declared to Z3, so its facts are
@@ -319,7 +284,7 @@ fn local_node_type(ctxt: &VerifyContext, node: &Symbolic) -> Option<Type> {
         Symbolic::Forall(..) => Some(Type::Bool),
         Symbolic::Ite(_) => None,
         Symbolic::FuncApp(f, tys, _) => match ctxt.alloc.kind(f) {
-            FuncKind::Decl(m) | FuncKind::Limited(m) => Some(function_signature(ctxt, m, tys).1),
+            FuncKind::Decl(m) | FuncKind::Limited(m) => Some(ctxt.function_signature(m, tys).1),
             FuncKind::PreToken(_) => Some(Type::Bool),
             FuncKind::Cons { head, .. } => Some(adt_type(ctxt, head, tys)),
             FuncKind::Proj {
@@ -428,7 +393,7 @@ fn unique_ret_type(ctxt: &VerifyContext, f: FuncId, tys: &[Type]) -> Type {
     let FuncKind::Decl(member) = ctxt.alloc.kind(&f) else {
         panic!("unique function fn{} is not a declared function", f.0);
     };
-    let (params, ret) = function_signature(ctxt, member, tys);
+    let (params, ret) = ctxt.function_signature(member, tys);
     assert!(
         params.is_empty(),
         "unique function fn{} must be nullary",
@@ -773,6 +738,7 @@ pub(crate) fn sort(ctxt: &mut VerifyContext, ty: &Type) -> Sort {
         Type::Generic(_) => unreachable!("generics are currently not supported"),
         // Uninterpreted, as are its operations (see `coll_apply`).
         Type::Coll(..) => Sort::uninterpreted(ty.to_string().into()),
+        Type::ValueMap(t) => Sort::uninterpreted(format!("vmap@[{t}]").into()),
     };
     ctxt.z3translator.sorts.insert(ty.clone(), sort.clone());
     sort
@@ -1327,7 +1293,7 @@ fn uninterpreted_app(
 fn param_types(ctxt: &VerifyContext, f_id: &FuncId, ty: &[Type]) -> Vec<Type> {
     match ctxt.alloc.kind(f_id) {
         FuncKind::Decl(m) | FuncKind::Limited(m) | FuncKind::PreToken(m) => {
-            function_signature(ctxt, m, ty).0
+            ctxt.function_signature(m, ty).0
         }
         FuncKind::Cons { head, variant } => field_types(ctxt, head, variant, ty),
         FuncKind::Proj { head, .. } | FuncKind::IsVariant { head, .. } => {
@@ -1388,7 +1354,7 @@ fn apply_function(
         // or a resource function
         // function: all are `vmir::Function`s.
         FuncKind::Decl(id) => {
-            let (params, ret) = function_signature(ctxt, id, ty);
+            let (params, ret) = ctxt.function_signature(id, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &ret, args)
         }
         // ADT construction
@@ -1425,12 +1391,12 @@ fn apply_function(
         // `f#lim`: same signature as `f`, only the id (and so the name) differs.
         // `f(x) == f#lim(x)` reaches Z3 only where the e-graph already has it.
         FuncKind::Limited(func) => {
-            let (params, ret) = function_signature(ctxt, func, ty);
+            let (params, ret) = ctxt.function_signature(func, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &ret, args)
         }
         // `f%pre`: over `f`'s own parameters, returning `Bool`.
         FuncKind::PreToken(func) => {
-            let (params, _) = function_signature(ctxt, func, ty);
+            let (params, _) = ctxt.function_signature(func, ty);
             uninterpreted_app(ctxt, *f_id, ty, &params, &Type::Bool, args)
         }
         // A skolem function is uninterpreted: its axioms reach Z3 only as the

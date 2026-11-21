@@ -1,0 +1,17 @@
+// QP injectivity through a domain function: `slot(a, i)` is injective in `i`
+// by the `index` axiom, so `slot(a, i1) == slot(a, i2)` gives `i1 == i2`.
+field f: Int
+
+domain Array {
+  function slot(a: Array, i: Int): Ref
+  function index(r: Ref): Int
+
+  axiom slot_index {
+    forall a: Array, i: Int :: { slot(a, i) } index(slot(a, i)) == i
+  }
+}
+
+method domain_slot(a: Array, n: Int)
+{
+  inhale forall i: Int :: 0 <= i && i < n ==> acc(slot(a, i).f)
+}

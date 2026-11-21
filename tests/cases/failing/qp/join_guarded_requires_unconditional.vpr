@@ -1,0 +1,15 @@
+// QP medium (branch join): the chunk set is held only under `c`, but the write
+// happens unconditionally after a join.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method join_guarded_requires_unconditional(s: Set[Ref], a: Ref, c: Bool)
+  requires c ==> (forall x: Ref :: x in s ==> acc(x.f))
+  requires a in s
+{
+  if (c) {
+    a.f := 1
+  }
+  a.f := 2
+}

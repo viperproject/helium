@@ -1,0 +1,13 @@
+// QP medium: two 1/2 chunk sets over *different* domains; `a` is only known
+// to be in the first, so it may have just 1/2.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method halves_over_different_sets(s: Set[Ref], t: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in s
+{
+  a.f := 1
+}

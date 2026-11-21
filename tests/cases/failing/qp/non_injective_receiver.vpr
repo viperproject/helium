@@ -1,0 +1,10 @@
+// QP medium: the receiver `xs[i]` is not known to be injective (the sequence
+// may contain duplicates), so the quantified permission is ill-formed.
+//
+// Must FAIL (receiver might not be injective).
+field f: Int
+
+method non_injective_receiver(xs: Seq[Ref])
+  requires forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+{
+}

@@ -1,0 +1,17 @@
+// QP medium: a callee that takes the whole member may change its value.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method callee(a: Ref)
+  requires acc(a.f)
+  ensures acc(a.f)
+
+method callee_full_changes_value(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  a.f := 5
+  callee(a)
+  assert a.f == 5
+}

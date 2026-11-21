@@ -1,0 +1,18 @@
+// QP medium (branch join): each branch writes a different member. The whole
+// chunk set must still be exhalable as one after the join.
+//
+// Must VERIFY.
+field f: Int
+
+method join_then_exhale_all(s: Set[Ref], a: Ref, b: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s
+{
+  if (c) {
+    a.f := 1
+  } else {
+    b.f := 2
+  }
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+  assert perm(a.f) == none
+}

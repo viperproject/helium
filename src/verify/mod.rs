@@ -6,11 +6,12 @@ use crate::vmir;
 mod expr;
 
 mod analysis;
+mod builtin_axioms;
 mod cert;
-mod coll_axioms;
 mod context;
 mod declaration;
 mod error;
+mod eval;
 mod func_registry;
 mod heap;
 pub mod lang;

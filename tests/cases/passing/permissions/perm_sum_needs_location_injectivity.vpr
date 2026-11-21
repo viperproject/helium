@@ -1,0 +1,22 @@
+// Holding `1/2` at `x` and `1/2` at `y`, a total of `1/1` at x's location forces the
+// two locations to coincide. `perm(x.f)` is the Σ-ite summary
+// `1/2 + ite(y@addr == x@addr, 1/2, 0)`, so assuming it equals `1/1` pins the gate
+// `y@addr == x@addr` to true. Getting from there to `x == y` needs **location
+// injectivity** — `f@addr(p) == f@addr(q) <==> p == q` — which
+// `rewrite::address_injectivity_rule` states for every field and predicate address
+// function: the address equality's class holds `y == x`, so it is true too.
+//
+// Was a known limitation (found 2026-08-09, when `perm()` started summing over the
+// whole location group) until that rule landed. The state is consistent, which
+// failing/permissions/perm_sum_is_consistent.vpr pins: it asserts `false` in exactly
+// this state and must fail.
+//
+// Must VERIFY.
+
+field f: Int
+
+method test(x: Ref, y: Ref) {
+    inhale acc(x.f, 1/2) && acc(y.f, 1/2)
+    inhale perm(x.f) == 1/1
+    assert x == y
+}

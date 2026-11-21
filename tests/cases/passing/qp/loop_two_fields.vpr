@@ -1,0 +1,25 @@
+// QP medium (loop exit / heap sum): the frame keeps a chunk set on `g`, the
+// invariant carries one on `f`. Both sides of the sum hold chunk sets, of
+// different location kinds.
+//
+// Must VERIFY.
+field f: Int
+field g: Int
+
+method loop_two_fields(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: x in s ==> acc(x.g)
+  requires a in s && a.g == 5 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+  {
+    a.f := i
+    i := i + 1
+  }
+  assert a.g == 5
+  a.f := 1
+  a.g := 1
+}

@@ -1,0 +1,24 @@
+// QP medium (branch join): nested branches, each level changing the chunk set
+// differently (writes to two members inside, a partial exhale outside).
+//
+// Must VERIFY.
+field f: Int
+
+method join_nested(s: Set[Ref], a: Ref, b: Ref, c: Bool, d: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b && a.f == 0 && b.f == 0
+{
+  if (c) {
+    if (d) {
+      a.f := 1
+    } else {
+      b.f := 1
+    }
+  } else {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  }
+  assert c && d ==> a.f == 1 && b.f == 0
+  assert c && !d ==> a.f == 0 && b.f == 1
+  assert !c ==> a.f == 0 && b.f == 0
+  assert perm(a.f) == (c ? write : 1/2)
+}

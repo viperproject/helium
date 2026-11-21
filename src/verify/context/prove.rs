@@ -792,6 +792,7 @@ impl<'a> VerifyContext<'a> {
     pub(crate) fn with_scratch_graph<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         let _scope = crate::verify::rewrite::ScratchScope::enter();
         let live = self.egraph.clone();
+        let inverse_axioms = self.inverse_axioms.clone();
         let clean = self.clean;
         let scratch = self.scratch.take();
         let in_block = std::mem::replace(&mut self.in_block, false);
@@ -801,6 +802,7 @@ impl<'a> VerifyContext<'a> {
         self.in_block = in_block;
         self.scratch = scratch;
         self.egraph = live;
+        self.inverse_axioms = inverse_axioms;
         self.clean = clean;
         out
     }

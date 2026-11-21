@@ -222,6 +222,19 @@ pub enum SpatialExpKind<PureExt> {
     Acc(ResourceExp<PureExt>, TypedPureExp<PureExt>),
     /// Lifts a pure boolean expression into the spatial context.
     Pure(TypedPureExp<PureExt>),
+
+    Forall(Box<QuantPerm>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantPerm {
+    pub bound: Vec<TypedIdent>,
+    pub triggers: Vec<Vec<TypedPureExp<AxiomExt>>>, // may be empty
+    /// No user triggers, and the location `f(e(xs))` can serve as the trigger.
+    pub location_trigger: bool,
+    pub cond: TypedPureExp<AxiomExt>, // conjunction of the guards on the path
+    pub res: ResourceExp<AxiomExt>,   // receiver/args free of heap reads
+    pub perm: TypedPureExp<AxiomExt>,
 }
 
 /// The valid targets for acc or perm queries.

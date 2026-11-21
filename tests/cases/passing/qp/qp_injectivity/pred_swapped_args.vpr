@@ -1,0 +1,8 @@
+// QP injectivity over a two-argument predicate whose arguments are the binders
+// in swapped order.
+predicate P(x: Ref, y: Ref)
+
+method pred_swapped_args(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref, y: Ref :: x in s && y in t ==> acc(P(y, x))
+}
