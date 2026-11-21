@@ -1,4 +1,5 @@
-// KNOWN LIMITATION: "unimplemented: purify: snap value outside footprint"
+// Must VERIFY. Was a known limitation (`known_limitations/marco_benchmark/`):
+// "unimplemented: purify: snap value outside footprint"
 // (`src/verify/declaration.rs`, `eval_snap`) on `snapO#ensures`.
 //
 // The second postcondition calls `snapU(result)`, which needs `U(result)`.

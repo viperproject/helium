@@ -19,9 +19,7 @@ upper bounds.
 
 | Case | Error | Blocked | Sole | Cumulative |
 |---|---|---|---|---|
-| `snap_footprint_address_via_postcondition.vpr` | purify: snap value outside footprint | 796 | 294 | 294 |
 | `heap_function_in_quantifier.vpr`, `old_in_quantifier.vpr` | heap-dependent function / `old` inside a `forall` | 440 | 0 | 676 |
-| `failed_postcondition_drops_caller_permission.vpr` | insufficient permission (downstream of the first row) | 89 | 11 | 763 |
 | `qp_predicate_in_function_precondition.vpr`, `qp_in_predicate_body.vpr`, `qp_field_in_method_contract.vpr` | unsupported construct: quantified permission | 49 | 0 | 808 |
 | *(no case: timeouts)* | over 180 s (4 Ru2, Dafny-book chap05 / chap10) | 6 | 6 | 814 |
 
@@ -48,10 +46,7 @@ is enough; general heap-dependent quantifiers are not needed.
 | Case | Error | Source |
 |---|---|---|
 | `field_permission_implies_non_null.vpr` | assertion failed: `acc(t.h)` does not give `t != null` | AVLTree.nokeys `rebalance*` |
-| `aliased_fraction_lost_at_branch_join.vpr` | insufficient permission | Prusti lifetime tokens (pair `max`; enums, loops, map_contains likely too) |
-| `read_through_branch_dependent_receiver.vpr` | insufficient permission | Prusti v1 `routes` (fixed on `ramon/qp`) |
 | `read_covered_by_complementary_conditional_permissions.vpr` | purify: deref outside footprint | PVL kernels `Ref__main_barrier` |
-| `wildcard_unfold_then_fold.vpr` | insufficient permission | RingBufferRd `Head` |
 | `function_through_nested_fold.vpr` | assertion failed | linkedlists `append`, `insert` |
 | `conditional_precondition_function_after_refold.vpr` | assertion failed | Gobra Tree / binary_tree `deleteLeftMost` |
 | `recursive_call_in_own_postcondition.vpr` | assertion failed | VerCors `Util.isPrefix` and its lemmas |
@@ -59,12 +54,7 @@ is enough; general heap-dependent quantifiers are not needed.
 | `unfolding_reads_permission_held_outside_predicate.vpr` | insufficient permission | AVLTree.iterative `has` (invariant) |
 | `../domain_tag_exhaustiveness_with_partial_arg.vpr` (existing) | assertion failed | Dafny-book chap04 `Eval`, `EvalList` |
 
-`Vi/viper/all/chalice/AVLTree.iterative` (`has`) has several causes: the
-`unfolding` read above, a read through a branch-dependent receiver after a
-join (`read_through_branch_dependent_receiver.vpr`), and, on `ramon/qp`
-where the second is fixed, a remaining "assertion failed" not reduced yet.
-
-## Not reduced
+`Vi/viper/all/chalice/AVLTree.iterative` (`has`) has problems with `unfolding`.
 
 - `PP/mpp/toplas_p3_no_heap/pldi16_so_PokerHand_true` (`compare`): Silicon
   needs over 100 s, too slow as a reduction oracle. Helium fails the
