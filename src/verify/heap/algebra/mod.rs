@@ -30,7 +30,7 @@ pub(super) use produce::*;
 use crate::verify::{
     context::VerifyContext,
     error::VerifyError,
-    heap::{Chunk, Heap, LocationKind},
+    heap::{Chunk, ChunkPerm, Heap, LocationKind},
     lang::Symbolic,
 };
 #[cfg(test)]
@@ -126,7 +126,7 @@ mod tests {
         );
         // Both fractions positive (1, 2) → agreement axiom fuses the values.
         assert_eq!(ctx.egraph.find(v1), ctx.egraph.find(v2));
-        assert_eq!(ctx.egraph.find(chunk.value), ctx.egraph.find(v1));
+        assert_eq!(ctx.egraph.find(chunk.stored_value()), ctx.egraph.find(v1));
         assert_eq!(merged.entries().count(), 1);
     }
 
@@ -153,11 +153,12 @@ mod tests {
         ctx.egraph.rebuild();
 
         let one = real(&mut ctx, 1, 1);
-        let out = heap_subtract(
+        let (out, _) = heap_subtract(
             &mut ctx,
             &h,
             &test_kind(),
-            Chunk::new(a, one, v0),
+            a,
+            ChunkPerm::leaf(one),
             &[],
             Demand::Concrete,
         )
@@ -217,7 +218,7 @@ mod tests {
         ctx.saturate();
 
         // p0 = 0 → asymmetric ternary picks the active half v1; no fusion.
-        assert_eq!(ctx.egraph.find(chunk.value), ctx.egraph.find(v1));
+        assert_eq!(ctx.egraph.find(chunk.stored_value()), ctx.egraph.find(v1));
         assert_ne!(ctx.egraph.find(v0), ctx.egraph.find(v1));
     }
 
@@ -241,7 +242,7 @@ mod tests {
 
         // Both fractions positive → agreement axiom fuses the symbolic values.
         assert_eq!(ctx.egraph.find(v0), ctx.egraph.find(v1));
-        assert_eq!(ctx.egraph.find(chunk.value), ctx.egraph.find(v0));
+        assert_eq!(ctx.egraph.find(chunk.stored_value()), ctx.egraph.find(v0));
     }
 
     #[test]
@@ -273,7 +274,7 @@ mod tests {
         // values must NOT fuse even though both fractions are positive.
         assert_ne!(ctx.egraph.find(v0), ctx.egraph.find(v1));
         // Value pick is independent of the PC gate.
-        assert_eq!(ctx.egraph.find(chunk.value), ctx.egraph.find(v0));
+        assert_eq!(ctx.egraph.find(chunk.stored_value()), ctx.egraph.find(v0));
     }
 
     #[test]
@@ -314,7 +315,7 @@ mod tests {
         let p_have = ctx.add(Symbolic::Fresh(1));
         let p_take = ctx.add(Symbolic::Fresh(2));
         let v1 = ctx.add(Symbolic::Fresh(3));
-        let v2 = ctx.add(Symbolic::Fresh(4));
+        let _v2 = ctx.add(Symbolic::Fresh(4));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p_have, v1));
         // Symbolic perms → `have >= take` not provable by equality saturation.
@@ -322,7 +323,8 @@ mod tests {
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p_take, v2),
+            a,
+            ChunkPerm::leaf(p_take),
             &[],
             Demand::Concrete,
         )
@@ -343,17 +345,18 @@ mod tests {
         let p2 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(2).into())));
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
-        let v2 = ctx.add(Symbolic::Fresh(3));
+        let _v2 = ctx.add(Symbolic::Fresh(3));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p2, v1));
         ctx.union(a, b);
         ctx.egraph.rebuild();
 
-        let result = heap_subtract(
+        let (result, taken) = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(b, p1, v2),
+            b,
+            ChunkPerm::leaf(p1),
             &[],
             Demand::Concrete,
         )
@@ -370,7 +373,8 @@ mod tests {
                 .find(chunk.perm_repr_id().expect("chunk holds no permission")),
             ctx.egraph.find(expected_perm)
         );
-        assert_eq!(ctx.egraph.find(v1), ctx.egraph.find(v2));
+        // The take hands back the value it took: the held chunk's.
+        assert_eq!(ctx.egraph.find(taken.id), ctx.egraph.find(v1));
     }
 
     #[test]
@@ -381,14 +385,15 @@ mod tests {
         let a = ctx.add(Symbolic::Fresh(0));
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
-        let v2 = ctx.add(Symbolic::Fresh(3));
+        let _v2 = ctx.add(Symbolic::Fresh(3));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
-        let result = heap_subtract(
+        let (result, _) = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p1, v2),
+            a,
+            ChunkPerm::leaf(p1),
             &[],
             Demand::Concrete,
         )
@@ -410,14 +415,15 @@ mod tests {
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
         let p2 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(2).into())));
         let v1 = ctx.add(Symbolic::Fresh(2));
-        let v2 = ctx.add(Symbolic::Fresh(3));
+        let _v2 = ctx.add(Symbolic::Fresh(3));
 
         let h1 = Heap::empty().with_chunk(&test_kind(), Chunk::new(a, p1, v1));
         let err = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p2, v2),
+            a,
+            ChunkPerm::leaf(p2),
             &[],
             Demand::Concrete,
         )
@@ -436,14 +442,15 @@ mod tests {
         let a = ctx.add(Symbolic::Fresh(0));
         let _b = ctx.add(Symbolic::Fresh(1));
         let p1 = ctx.add(Symbolic::Lit(Literal::Real(num::BigInt::from(1).into())));
-        let v1 = ctx.add(Symbolic::Fresh(2));
+        let _v1 = ctx.add(Symbolic::Fresh(2));
 
         let h1 = Heap::empty();
         let err = heap_subtract(
             &mut ctx,
             &h1,
             &test_kind(),
-            Chunk::new(a, p1, v1),
+            a,
+            ChunkPerm::leaf(p1),
             &[],
             Demand::Concrete,
         )

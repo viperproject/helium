@@ -1,0 +1,25 @@
+// QP medium: a single-location exhale split across a single chunk and two
+// chunk sets must not tie the chunk's stale value to the location.
+//
+// After the conditional exhale the chunk at `x.f` holds `c ? 0 : 1/2`, still
+// with its old value 5. Under `c` the two sets hold the whole location, whose
+// value is 7. Taking `acc(x.f)` from all three holders together must state
+// the chunk's value only where the chunk holds a share, so `5 == 7` must not
+// follow.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method split_stale_chunk_value(x: Ref, c: Bool, s1: Set[Ref], s2: Set[Ref])
+  requires acc(x.f, 1/2) && x.f == 5
+{
+  exhale c ==> acc(x.f, 1/2)
+  if (c) {
+    inhale forall z: Ref :: z in s1 ==> acc(z.f, 1/2)
+    inhale forall z: Ref :: z in s2 ==> acc(z.f, 1/2)
+    inhale x in s1 && x in s2
+    inhale x.f == 7
+    exhale acc(x.f)
+    assert false
+  }
+}

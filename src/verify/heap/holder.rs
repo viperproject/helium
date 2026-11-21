@@ -119,7 +119,12 @@ pub(crate) struct Point {
     pub(crate) addr: egg::Id,
     /// The amount, without the presence. Private: see the module docs.
     perm: ChunkPerm,
-    pub(crate) value: egg::Id,
+    /// The value it was given. Private, like the amount: it is the location's
+    /// value only where this chunk holds a positive share, and a chunk drained
+    /// to zero on some path keeps its old one. Reads and takes get a value
+    /// through `view::Shares`, which resolves it under that condition; see
+    /// [`Chunk::stored_value`] for the code that only carries it along.
+    value: egg::Id,
     /// Recipe provenance of `value` — the recipe-space temp a certificate walk
     /// (function/resource verification) associates with the held value, so a
     /// later `Deref` purifies to the pure term this chunk was produced from.
@@ -154,6 +159,21 @@ impl Chunk {
     pub(super) fn with_recipe(mut self, recipe: Option<vmir::Val>) -> Self {
         self.body.recipe = recipe;
         self
+    }
+
+    /// The value this chunk was given, **not** the location's value: that is
+    /// this one only where the chunk holds a positive share (see `value`). For
+    /// code that carries a value along with its chunk and states nothing about
+    /// the location — a share being built, a join's value phi, a heap sum whose
+    /// agreement is gated on both amounts, a write's `ite`, a debug dump. To
+    /// *use* the location's value, ask `view::Shares::value`.
+    pub(crate) fn stored_value(&self) -> egg::Id {
+        self.body.value
+    }
+
+    /// This chunk holding `value` instead (a write, a join, a heap sum).
+    pub(super) fn set_value(&mut self, value: egg::Id) {
+        self.body.value = value;
     }
 
     /// **The permission this chunk actually holds**: `presence ? perm : 0`.

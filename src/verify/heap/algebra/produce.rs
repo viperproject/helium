@@ -62,10 +62,17 @@ fn merge_chunks(
     // sound — but costs an `ite` per merge.
     let (mut merged, value) = Chunk::zip(ctx, a, b, |ctx, pa, pb| {
         // Neither amount is asked about: an inhale merges at once.
-        sum_at_location(ctx, pa, pb, (a.value, b.value), (false, false), pc_lits)
+        sum_at_location(
+            ctx,
+            pa,
+            pb,
+            (a.stored_value(), b.stored_value()),
+            (false, false),
+            pc_lits,
+        )
     });
     merged.addr = addr;
-    merged.value = value;
+    merged.set_value(value);
     // A merged value is no single chunk's: it has no recipe.
     merged.recipe = None;
     merged
