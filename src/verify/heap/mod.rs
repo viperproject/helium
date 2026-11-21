@@ -23,9 +23,10 @@ use cond::{Cube, Lit};
 use holder::{Chunk, QuantChunk, SetBody};
 
 /// S0 merge instrumentation (gated by `SILVER_OXIDE_TRACE_MERGE`). Counts the
-/// join-merge structures the pc-hoist plan aims to flatten: `Select` nodes
-/// actually built (reachability towers), `0`-leaf constructions (absence encoded
-/// as a `?:0` amount), and the deepest `Select` tree seen. Reset/dumped per
+/// join-merge structures the pc-hoist plan aims to flatten: branches actually
+/// built (a `Select`, or one literal added to a `Gate` — the one-sided branch a
+/// zero-armed `Select` was), `0`-leaf constructions (absence encoded as a `?:0`
+/// amount), and the deepest branch nesting seen. Reset/dumped per
 /// method by [`MergeTrace::take`]. Pure diagnostics — no effect when the flag is
 /// off (the `enabled()` check short-circuits every hot-path bump).
 #[derive(Default, Clone, Copy)]
@@ -93,8 +94,11 @@ impl MergeTrace {
 }
 
 /// A permission amount as an explicit term, held OUTSIDE the union-find so a
-/// branch structure collapses without saturation. Every condition on an amount
-/// lives in this tree; there is no zero amount hiding behind a guard elsewhere.
+/// branch structure collapses without saturation. The conditions *on the amount
+/// itself* (a join's divergence, a gated `acc`, an address gate, a chunk set's
+/// domain) live in this tree. The condition under which its holder is held at
+/// all is the holder's presence, kept apart and applied by
+/// [`holder::Holder::gate`]: a bare amount is not a holder's permission.
 ///
 /// - `Zero` is no permission. Structural: it becomes an e-node (`0/1`) only when
 ///   lowered by [`ChunkPerm::to_id`], so absence costs nothing to build or test.
@@ -354,7 +358,7 @@ impl ChunkPerm {
             Some(Literal::Bool(_)) => return ChunkPerm::Zero,
             _ => {}
         }
-        match perm {
+        let out = match perm {
             ChunkPerm::Gate { when, then } => {
                 let mut lits = when.to_vec();
                 lits.push((id, pol));
@@ -367,7 +371,11 @@ impl ChunkPerm {
                 when: Cube::from(vec![(id, pol)]),
                 then: Box::new(other),
             },
-        }
+        };
+        // A gate literal is the one-sided branch a `Select` with a zero arm used
+        // to be: count it as one, so the trace means what it did.
+        MergeTrace::bump_select(out.depth());
+        out
     }
 
     /// The join-select smart constructor. `cond` is the then-edge reach value.
