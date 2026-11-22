@@ -72,7 +72,8 @@ pub(crate) struct QuantRecipe {
 /// then skips it without memoizing it, so a later iteration builds it. For a
 /// body `a ==> b`, a guard `a` skips the instances that would say nothing yet
 /// but add terms the next round matches triggers against. The guard is
-/// evaluated by lookup only and never added to the graph.
+/// evaluated by lookup only and never added to the graph; an integer conjunct
+/// is also decided by its operands' ranges (`analysis::Data::Range`).
 pub(crate) struct Guard {
     /// The steps that compute the conjuncts, in their own temp space: the seed
     /// (captures ++ binders, as for the body), then one temp per value-producing

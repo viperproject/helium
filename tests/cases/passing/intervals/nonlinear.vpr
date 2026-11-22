@@ -1,0 +1,40 @@
+// Bounds of nonlinear terms. Without integer ranges each method, verified in
+// a file of its own, fails: the Z3 rung (nonlinear integer arithmetic under
+// Silicon's solver options and its resource limit) returns `unknown`. In one
+// file it proves some of them, since its solver persists across a file's
+// queries. Ranges bound a product by its operands' ranges directly, so egg
+// proves every one with no solver query. Must-fail twins:
+// `tests/cases/failing/intervals/{product_of_sum_off_by_one,
+// signed_product_off_by_one, wrap_signed_overflows}.vpr`.
+
+method product_of_sum(a: Int, b: Int, c: Int)
+  requires -1000 <= a && a <= 1000
+  requires -1000 <= b && b <= 1000
+  requires -1000 <= c && c <= 1000
+{
+  assert (a + b) * c <= 2000000
+}
+
+method signed_product(a: Int, b: Int)
+  requires -40000 <= a && a <= 40000
+  requires -50000 <= b && b <= 50000
+{
+  assert -2000000000 <= a * b && a * b <= 2000000000
+}
+
+// Prusti's `i32` wrap of a signed product reads back as the product itself
+// (`mod-in-range`), as in its `MulWithOverflow` encoding.
+method wrap_signed_product(a: Int, b: Int)
+  requires -40000 <= a && a <= 40000
+  requires -50000 <= b && b <= 50000
+{
+  assert ((a * b + 2147483648) % 4294967296) - 2147483648 == a * b
+}
+
+// The same for `i64`, with `i32` factors.
+method wrap_i64_product(a: Int, b: Int)
+  requires -2147483648 <= a && a <= 2147483647
+  requires -2147483648 <= b && b <= 2147483647
+{
+  assert ((a * b + 9223372036854775808) % 18446744073709551616) - 9223372036854775808 == a * b
+}

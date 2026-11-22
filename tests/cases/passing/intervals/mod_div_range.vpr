@@ -1,0 +1,34 @@
+// Viper's `%` and `\` are SMT-LIB's Euclidean `mod` and `div`: `x % m` lies in
+// `[0, |m|)`, and is `x` itself where `x` already does (`mod-in-range`). Prusti
+// checks every integer operation through the wrap `(v + 2^31) % 2^32 - 2^31`,
+// so a bounded result reads back as the unwrapped one (panic_free
+// `tier_c_range_arith`; miniz `create_comp_flags_from_zip_params` casts an
+// `i32` to `usize` as `value(x) % 2^64`).
+// Counterparts: `tests/cases/failing/intervals/mod_*.vpr`, `div_*.vpr`.
+
+method in_range(x: Int)
+  requires 0 <= x && x <= 10
+{ assert x % 18446744073709551616 < 11 }
+
+method any(x: Int)
+{ assert 0 <= x % 7 && x % 7 < 7 && x % -7 <= 6 }
+
+method wrap_reads_back(a: Int, b: Int)
+  requires 0 <= a && a < 10000 && 0 <= b && b < 10000
+{
+  var v: Int := a + b
+  var wrapped: Int := (v + 2147483648) % 4294967296 - 2147483648
+  assert wrapped == v
+}
+
+method quotient(x: Int)
+  requires 0 <= x && x <= 10
+{
+  assert 0 <= x \ 3 && x \ 3 <= 3
+  assert -3 <= x \ -3 && x \ -3 <= 0
+  assert x \ 11 == 0
+}
+
+method divisor_range(x: Int, m: Int)
+  requires 1 <= m && m <= 20
+{ assert 0 <= x % m && x % m < 20 }

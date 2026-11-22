@@ -1,0 +1,6 @@
+// `a * b` reaches `-2000000000` at `a = 40000, b = -50000`. Positive control:
+// `tests/cases/passing/intervals/nonlinear.vpr`.
+method bad_product(a: Int, b: Int)
+  requires -40000 <= a && a <= 40000
+  requires -50000 <= b && b <= 50000
+{ assert -2000000000 < a * b }

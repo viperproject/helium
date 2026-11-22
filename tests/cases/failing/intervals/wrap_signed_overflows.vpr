@@ -1,0 +1,6 @@
+// `50000 * 50000` leaves `i32`, so the wrap does not read back as the product.
+// Positive control: `tests/cases/passing/intervals/nonlinear.vpr`.
+method bad_wrap(a: Int, b: Int)
+  requires -50000 <= a && a <= 50000
+  requires -50000 <= b && b <= 50000
+{ assert ((a * b + 2147483648) % 4294967296) - 2147483648 == a * b }
