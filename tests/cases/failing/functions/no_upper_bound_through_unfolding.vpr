@@ -1,0 +1,11 @@
+// As `no_upper_bound_from_precondition.vpr`, with the two `write` permissions
+// produced by unfolding two predicate instances. Silicon rejects it.
+
+field f: Int
+
+predicate PF(x: Ref) { acc(x.f, write) }
+
+function bad(x: Ref, y: Ref): Bool
+    requires acc(PF(x), write) && acc(PF(y), write)
+    ensures result
+{ unfolding acc(PF(x), write) in unfolding acc(PF(y), write) in x != y }

@@ -1,0 +1,15 @@
+// One branch gives the whole share away before the call. Silicon rejects it.
+
+field f: Int
+
+function rd(x: Ref): Int
+    requires acc(x.f, write)
+{ x.f }
+
+method bad(x: Ref, b: Bool)
+    requires acc(x.f, 1/2)
+{
+    var v: Int
+    if (b) { exhale acc(x.f, 1/2) }
+    v := rd(x)
+}
