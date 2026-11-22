@@ -1,0 +1,23 @@
+// A location that any of many held chunks may occupy: none of the 24 addresses is
+// known to differ from `y`, so the consume falls back to summing the whole group,
+// each chunk gated by its address equality. Distributing that sum over the gates
+// would build a tree of 2^24 leaves before proving anything. The first chunk
+// present on a path already covers the demand, so no path needs to look further
+// than that, and the one path where none is present is closed by the precondition.
+
+predicate P(x: Ref)
+
+method alias_one_of_many(
+  x0: Ref, x1: Ref, x2: Ref, x3: Ref, x4: Ref, x5: Ref, x6: Ref, x7: Ref,
+  x8: Ref, x9: Ref, x10: Ref, x11: Ref, x12: Ref, x13: Ref, x14: Ref, x15: Ref,
+  x16: Ref, x17: Ref, x18: Ref, x19: Ref, x20: Ref, x21: Ref, x22: Ref, x23: Ref,
+  y: Ref)
+  requires acc(P(x0)) && acc(P(x1)) && acc(P(x2)) && acc(P(x3)) && acc(P(x4)) &&
+    acc(P(x5)) && acc(P(x6)) && acc(P(x7)) && acc(P(x8)) && acc(P(x9)) &&
+    acc(P(x10)) && acc(P(x11)) && acc(P(x12)) && acc(P(x13)) && acc(P(x14)) &&
+    acc(P(x15)) && acc(P(x16)) && acc(P(x17)) && acc(P(x18)) && acc(P(x19)) &&
+    acc(P(x20)) && acc(P(x21)) && acc(P(x22)) && acc(P(x23))
+  requires y == x22 || y == x23
+{
+  exhale acc(P(y))
+}

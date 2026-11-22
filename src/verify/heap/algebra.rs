@@ -847,15 +847,20 @@ pub(crate) fn prove_perm_positive(
     pc_lits: &[(egg::Id, Polarity)],
 ) -> bool {
     prove_perm_leaves(ctx, held, pc_lits, &|ctx, h, pc| {
-        if let Some(hr) = known_real(ctx, h) {
-            if hr > num::BigRational::from(num::BigInt::from(0)) {
-                return true;
-            }
-        }
-        let zero = expr!(ctx, 0 / 1);
-        let goal = expr!(ctx, { zero } < r { h });
-        ctx.prove_under_pc(goal, pc)
+        perm_leaf_positive(ctx, h, pc)
     })
+}
+
+/// `0 < h` for one leaf amount under `pc`.
+fn perm_leaf_positive(ctx: &mut VerifyContext<'_>, h: egg::Id, pc: &[(egg::Id, Polarity)]) -> bool {
+    if let Some(hr) = known_real(ctx, h) {
+        if hr > num::BigRational::from(num::BigInt::from(0)) {
+            return true;
+        }
+    }
+    let zero = expr!(ctx, 0 / 1);
+    let goal = expr!(ctx, { zero } < r { h });
+    ctx.prove_under_pc(goal, pc)
 }
 
 /// `¬(held < cap)` (full/write permission) over a structured `held`, per leaf.
@@ -890,18 +895,19 @@ pub(crate) fn prove_perm_write(
 /// `Select` so the branch structure survives into the result instead of being
 /// flattened into an `ite` in the graph.
 ///
-/// That survival is the whole point: a summarized location's total is what
+/// That survival is the whole point: a merged chunk's total is what
 /// [`prove_sufficient`] then discharges **per leaf**, with each branch literal
-/// pushed into the pc. Flattening first is what forced the old summarized path to
-/// prove one monolithic goal over a sum whose addends are live on different arms —
-/// a goal that needs a case split nothing was left to perform.
+/// pushed into the pc, rather than one monolithic goal over a sum whose addends
+/// are live on different arms — a goal that needs a case split nothing was left to
+/// perform.
 ///
 /// Descending into one side restricts the other to the same arm
 /// ([`ChunkPerm::restrict`], `ite`-idempotence), so two trees branching on one
 /// condition class yield a single `Select` layer rather than two. The result's
 /// conditions are exactly the union of the operands' — no condition is invented,
-/// so no split is either: the leaf count is fixed by how many distinct branch
-/// literals the participating chunks' guards mention, never by a search bound.
+/// so no split is either. The leaf count is the *product* of the operands'
+/// on unrelated conditions, which is why a sum over a whole group of chunks is kept
+/// as a [`PermSum`] instead of folded through here.
 pub(crate) fn perm_add(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm) -> ChunkPerm {
     match (a, b) {
         (ChunkPerm::Leaf { id: x, wild: wx }, ChunkPerm::Leaf { id: y, wild: wy }) => {
@@ -925,6 +931,346 @@ pub(crate) fn perm_add(ctx: &mut VerifyContext<'_>, a: &ChunkPerm, b: &ChunkPerm
             let e = perm_add(ctx, &oe, els);
             ChunkPerm::select(ctx, *cond, t, e)
         }
+    }
+}
+
+/// The permission at a location that several chunks may occupy: the **sum** of
+/// their contributions, one addend per chunk, each a [`ChunkPerm`] whose `Select`s
+/// say where that chunk counts (its presence guard, its address gate).
+///
+/// Kept as a list of addends rather than distributed into one tree with
+/// [`perm_add`]. Distributing builds the *product* of the addends' branch
+/// structures: n chunks each gated by a condition of its own give a tree of 2^n
+/// leaves, and a proof over it visits every one. The obligations asked of a sum are
+/// **monotone** in it (`needed ≤ Σ`, `0 < Σ`), and every addend is non-negative (a
+/// chunk's permission is), so on any path where the addends taken so far already
+/// meet the obligation, every way of completing the path does too.
+/// [`PermSum::prove_monotone`] walks the addends depth-first and stops there, and it
+/// tells the arms of one addend apart only by the amount they contribute. When the
+/// first addend present already suffices, as it does when the chunks hold whole
+/// permissions, the walk is linear in the number of chunks instead of exponential.
+pub(crate) struct PermSum {
+    addends: Vec<ChunkPerm>,
+}
+
+/// The question [`PermSum::prove_monotone`] asks of a path:
+/// `ok(ctx, partial, pc, complete)`.
+type PathAsk<'a> =
+    dyn FnMut(&mut VerifyContext<'_>, egg::Id, &[(egg::Id, Polarity)], bool) -> bool + 'a;
+
+impl PermSum {
+    fn new() -> Self {
+        Self {
+            addends: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, addend: ChunkPerm) {
+        self.addends.push(addend);
+    }
+
+    /// The sum as one term: the addends' own terms added up, linear in their size.
+    fn to_id(&self, ctx: &mut VerifyContext<'_>) -> egg::Id {
+        let mut total: Option<egg::Id> = None;
+        for a in &self.addends {
+            let id = a.to_id(ctx);
+            total = Some(match total {
+                None => id,
+                Some(t) => ctx.add(Symbolic::Binary(BinOp::AddR, [t, id])),
+            });
+        }
+        total.unwrap_or_else(|| expr!(ctx, 0 / 1))
+    }
+
+    /// `needed ≤ Σ` under `pc_lits`, decided per path as [`prove_sufficient`] does
+    /// for a single chunk.
+    fn prove_sufficient(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        needed: egg::Id,
+        pc_lits: &[(egg::Id, Polarity)],
+    ) -> bool {
+        self.prove_monotone(ctx, pc_lits, &mut |ctx, h, pc, complete| {
+            // A partial sum known to fall short can still pass only on an infeasible
+            // path, and that is asked once the path is complete.
+            if !complete
+                && let (Some(hr), Some(nr)) = (known_real(ctx, h), known_real(ctx, needed))
+                && hr < nr
+            {
+                return false;
+            }
+            sufficient_leaf(ctx, h, needed, pc, &mut Vec::new())
+        })
+    }
+
+    /// `0 < Σ` under `pc_lits`, per path.
+    pub(crate) fn prove_positive(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        pc_lits: &[(egg::Id, Polarity)],
+    ) -> bool {
+        self.prove_monotone(ctx, pc_lits, &mut |ctx, h, pc, _| {
+            perm_leaf_positive(ctx, h, pc)
+        })
+    }
+
+    /// Prove `ok` of the sum on every path through the addends' branch structure.
+    /// `ok(partial, pc, complete)` must be **monotone** in `partial`: if it holds of
+    /// a sum it holds of that sum plus any non-negative amount. It is asked of the
+    /// partial sum each time an addend contributes a non-zero amount, and a `true`
+    /// closes every completion of the path. Once the last addend is placed the path
+    /// is asked as `complete`, under all of its literals, which is where an
+    /// infeasible path is discharged; an incomplete ask may answer `false` when only
+    /// an infeasible path could make it hold, and the complete ask decides that. A
+    /// `Select` on a condition the path has already decided takes the matching arm
+    /// only.
+    fn prove_monotone(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        pc_lits: &[(egg::Id, Polarity)],
+        ok: &mut PathAsk<'_>,
+    ) -> bool {
+        let mut pc = pc_lits.to_vec();
+        sum_walk_addends(ctx, &self.addends, None, &mut pc, ok)
+    }
+}
+
+/// [`PermSum::prove_monotone`] from the start of `rest`, with `partial` the sum of
+/// the addends the path has taken so far (`None`: nothing yet).
+fn sum_walk_addends(
+    ctx: &mut VerifyContext<'_>,
+    rest: &[ChunkPerm],
+    partial: Option<egg::Id>,
+    pc: &mut Vec<(egg::Id, Polarity)>,
+    ok: &mut PathAsk<'_>,
+) -> bool {
+    match rest.split_first() {
+        Some((head, tail)) => sum_walk_tree(ctx, head, tail, partial, pc, ok),
+        None => {
+            let total = partial.unwrap_or_else(|| expr!(ctx, 0 / 1));
+            ok(ctx, total, pc, true)
+        }
+    }
+}
+
+/// One addend, then the addends after it. The path continues once per amount the
+/// addend can contribute on it. Arms that contribute the same amount are one case to
+/// a monotone obligation, so when several do they continue together, under the one
+/// literal "this addend's amount is that one", rather than once each: continuing
+/// per arm walks every later addend once per arm of this one, which is the product
+/// of the addends' structures again (n chunks held on one arm each, at addresses
+/// not known to differ, give two absent arms apiece). An amount reached by a single
+/// arm keeps that arm's own literals.
+fn sum_walk_tree(
+    ctx: &mut VerifyContext<'_>,
+    node: &ChunkPerm,
+    tail: &[ChunkPerm],
+    partial: Option<egg::Id>,
+    pc: &mut Vec<(egg::Id, Polarity)>,
+    ok: &mut PathAsk<'_>,
+) -> bool {
+    let mut leaves: Vec<(egg::Id, Vec<(egg::Id, Polarity)>)> = Vec::new();
+    addend_leaves(ctx, node, pc, &mut Vec::new(), &mut leaves);
+    // Leaves grouped by amount, in walk order: `None` is zero.
+    let mut groups: Vec<(Option<egg::Id>, Vec<usize>)> = Vec::new();
+    for (i, (id, _)) in leaves.iter().enumerate() {
+        let key = amount_key(ctx, *id);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    // An amount several leaves share continues as one case, under its *region*:
+    // the literal under which this addend contributes one of those leaves
+    // ([`addend_region`]). When one amount covers every arm (a single group) the
+    // path continues unconditionally and needs none. Regions are built now, before
+    // the walk below proves anything: proving can union classes in the live graph,
+    // and a region must describe the leaves as they were grouped.
+    let regions: Vec<Option<(egg::Id, Polarity)>> = groups
+        .iter()
+        .map(|(_, members)| {
+            (members.len() > 1 && groups.len() > 1).then(|| addend_region(ctx, node, pc, members))
+        })
+        .collect();
+    let depth = pc.len();
+    for ((key, members), region) in groups.iter().zip(&regions) {
+        crate::verify::stats::bump(|s| s.perm_sum_steps += 1);
+        if let [only] = members[..] {
+            pc.extend_from_slice(&leaves[only].1);
+        } else if let Some(region) = region {
+            pc.push(*region);
+        }
+        // The amount as the first member's own id rather than the class id `key`:
+        // the block scratch names a ground term by the id its caller holds, not by
+        // its ground leader (`BlockScratch::import`).
+        let amount = key.map(|_| leaves[members[0]].0);
+        let holds = sum_walk_continue(ctx, amount, tail, partial, pc, ok);
+        pc.truncate(depth);
+        if !holds {
+            return false;
+        }
+    }
+    true
+}
+
+/// The path after an addend contributed `amount` (`None`: nothing).
+fn sum_walk_continue(
+    ctx: &mut VerifyContext<'_>,
+    amount: Option<egg::Id>,
+    tail: &[ChunkPerm],
+    partial: Option<egg::Id>,
+    pc: &mut Vec<(egg::Id, Polarity)>,
+    ok: &mut PathAsk<'_>,
+) -> bool {
+    let Some(amount) = amount else {
+        return sum_walk_addends(ctx, tail, partial, pc, ok);
+    };
+    let sum = match partial {
+        None => amount,
+        Some(p) => ctx.add(Symbolic::Binary(BinOp::AddR, [p, amount])),
+    };
+    // The last addend completes the path: ask once, as the complete question.
+    if tail.is_empty() {
+        return ok(ctx, sum, pc, true);
+    }
+    if ok(ctx, sum, pc, false) {
+        return true;
+    }
+    sum_walk_addends(ctx, tail, Some(sum), pc, ok)
+}
+
+/// What a leaf contributes, as a grouping key: `None` for a known zero, else the
+/// amount's e-class.
+fn amount_key(ctx: &VerifyContext<'_>, id: egg::Id) -> Option<egg::Id> {
+    match known_real(ctx, id) {
+        Some(r) if r == num::BigRational::from(num::BigInt::from(0)) => None,
+        _ => Some(ctx.egraph.find(id)),
+    }
+}
+
+/// Whether `cond` is decided on the path: a known boolean, or a literal of `pc`.
+fn decided_on(ctx: &VerifyContext<'_>, cond: egg::Id, pc: &[(egg::Id, Polarity)]) -> Option<bool> {
+    let c = ctx.egraph.find(cond);
+    match ctx.egraph[c].data.known() {
+        Some(Literal::Bool(b)) => Some(*b),
+        _ => pc
+            .iter()
+            .find(|(l, _)| ctx.egraph.find(*l) == c)
+            .map(|(_, p)| *p == Polarity::Positive),
+    }
+}
+
+/// How a walk through an addend resolves `cond`: decided by `pc`, or by `arm`, the
+/// literals taken within the addend so far; `None` walks both arms. [`addend_leaves`]
+/// and [`addend_region`] both resolve through here, so they walk the same leaves in
+/// the same order.
+fn arm_decided(
+    ctx: &VerifyContext<'_>,
+    cond: egg::Id,
+    pc: &[(egg::Id, Polarity)],
+    arm: &[(egg::Id, Polarity)],
+) -> Option<bool> {
+    decided_on(ctx, cond, pc).or_else(|| decided_on(ctx, cond, arm))
+}
+
+/// The leaves of `node` reachable under `pc`, each with the literals that reach it
+/// beyond `pc`. A `Select` on a condition the path has decided takes that arm only.
+fn addend_leaves(
+    ctx: &VerifyContext<'_>,
+    node: &ChunkPerm,
+    pc: &[(egg::Id, Polarity)],
+    arm: &mut Vec<(egg::Id, Polarity)>,
+    out: &mut Vec<(egg::Id, Vec<(egg::Id, Polarity)>)>,
+) {
+    match node {
+        ChunkPerm::Leaf { id, .. } => out.push((*id, arm.clone())),
+        ChunkPerm::Select { cond, then, els } => match arm_decided(ctx, *cond, pc, arm) {
+            Some(true) => addend_leaves(ctx, then, pc, arm, out),
+            Some(false) => addend_leaves(ctx, els, pc, arm, out),
+            None => {
+                arm.push((*cond, Polarity::Positive));
+                addend_leaves(ctx, then, pc, arm, out);
+                arm.pop();
+                arm.push((*cond, Polarity::Negative));
+                addend_leaves(ctx, els, pc, arm, out);
+                arm.pop();
+            }
+        },
+    }
+}
+
+/// Where an addend contributes one of a set of its leaves: on every arm or on none
+/// (`Const`), or exactly where a literal holds (`Lit`).
+enum Region {
+    Const(bool),
+    Lit(egg::Id, Polarity),
+}
+
+/// The literal under which `node` contributes one of the leaves `members` (their
+/// positions in [`addend_leaves`]'s walk order): its branch structure with each
+/// leaf replaced by whether it is a member. Decided conditions are resolved as
+/// [`addend_leaves`] resolves them ([`arm_decided`]), so, asked before the graph
+/// changes, the positions name the same leaves.
+fn addend_region(
+    ctx: &mut VerifyContext<'_>,
+    node: &ChunkPerm,
+    pc: &[(egg::Id, Polarity)],
+    members: &[usize],
+) -> (egg::Id, Polarity) {
+    fn go(
+        ctx: &mut VerifyContext<'_>,
+        node: &ChunkPerm,
+        pc: &[(egg::Id, Polarity)],
+        arm: &mut Vec<(egg::Id, Polarity)>,
+        members: &[usize],
+        next: &mut usize,
+    ) -> Region {
+        match node {
+            ChunkPerm::Leaf { .. } => {
+                let i = *next;
+                *next += 1;
+                Region::Const(members.contains(&i))
+            }
+            ChunkPerm::Select { cond, then, els } => match arm_decided(ctx, *cond, pc, arm) {
+                Some(true) => go(ctx, then, pc, arm, members, next),
+                Some(false) => go(ctx, els, pc, arm, members, next),
+                None => {
+                    arm.push((*cond, Polarity::Positive));
+                    let t = go(ctx, then, pc, arm, members, next);
+                    arm.pop();
+                    arm.push((*cond, Polarity::Negative));
+                    let e = go(ctx, els, pc, arm, members, next);
+                    arm.pop();
+                    match (t, e) {
+                        (Region::Const(a), Region::Const(b)) if a == b => Region::Const(a),
+                        (Region::Const(true), Region::Const(false)) => {
+                            Region::Lit(*cond, Polarity::Positive)
+                        }
+                        (Region::Const(false), Region::Const(true)) => {
+                            Region::Lit(*cond, Polarity::Negative)
+                        }
+                        (t, e) => {
+                            let mut term = |r: Region| match r {
+                                Region::Lit(id, Polarity::Positive) => id,
+                                Region::Lit(id, Polarity::Negative) => {
+                                    let (f, tr) = (expr!(ctx, false), expr!(ctx, true));
+                                    ctx.add(Symbolic::Ite([id, f, tr]))
+                                }
+                                Region::Const(true) => expr!(ctx, true),
+                                Region::Const(false) => expr!(ctx, false),
+                            };
+                            let (t, e) = (term(t), term(e));
+                            Region::Lit(ctx.add(Symbolic::Ite([*cond, t, e])), Polarity::Positive)
+                        }
+                    }
+                }
+            },
+        }
+    }
+    match go(ctx, node, pc, &mut Vec::new(), members, &mut 0) {
+        Region::Lit(id, polarity) => (id, polarity),
+        Region::Const(true) => (expr!(ctx, true), Polarity::Positive),
+        Region::Const(false) => (expr!(ctx, false), Polarity::Positive),
     }
 }
 
@@ -1575,7 +1921,7 @@ pub(crate) fn pc_alias_set(
     existing: Option<&Chunk>,
     partners: &[egg::Id],
     pc_lits: &[(egg::Id, Polarity)],
-) -> (Vec<(Chunk, crate::verify::heap::HeapPc)>, ChunkPerm) {
+) -> (Vec<(Chunk, crate::verify::heap::HeapPc)>, PermSum) {
     let members: Vec<Chunk> = existing
         .cloned()
         .into_iter()
@@ -1588,26 +1934,20 @@ pub(crate) fn pc_alias_set(
         }))
         .collect();
     // Structural, like the Σ-ite summary's: a member whose perm carries join
-    // structure keeps it, so sufficiency is decided per leaf rather than over a
+    // structure keeps it, so sufficiency is decided per path rather than over a
     // flattened `ite`.
     // A member contributes only where it is PRESENT. The pc gate is implicit (the
     // proof runs under the pc), but a member's own presence guard is a different
     // condition — a chunk held on one join arm only — and summing it ungated
     // counted permission on the arm where the chunk does not exist.
-    let mut total: Option<ChunkPerm> = None;
+    let mut total = PermSum::new();
     for c in &members {
         let amount = present_amount(ctx, c, pc_lits);
-        total = Some(match total {
-            None => amount,
-            Some(t) => perm_add(ctx, &t, &amount),
-        });
+        total.push(amount);
     }
     let cube: crate::verify::heap::HeapPc = std::rc::Rc::from(pc_lits.to_vec());
     let set = members.into_iter().map(|c| (c, cube.clone())).collect();
-    (
-        set,
-        total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1))),
-    )
+    (set, total)
 }
 
 /// Consume `chunk2` against a **summarized** location: a set of chunks that each sit
@@ -1622,15 +1962,15 @@ pub(crate) fn pc_alias_set(
 ///
 /// - **Sufficiency** is proven against `total`, the sum the caller summarized: at any
 ///   state where a member's cube holds it is the demanded location, so its fraction
-///   joins the sum (`1/2 + 1/2 ≥ 1/1`). Proven **per leaf** of that sum
-///   ([`prove_sufficient`]), exactly as the unsummarized path proves a single
-///   chunk's: a member present on one arm only contributes a `Select` on its guard
-///   literal, and each leaf is discharged with that literal in the pc. Flattening
-///   into one goal instead was the whole of the `&mut`-reborrow incompleteness —
-///   the arms' contributions are live under complementary literals, so no single
-///   monolithic goal holds, while both leaves are trivial. The split set is the
-///   guards the chunks already carry, so it is finite and fixed by the CFG, never
-///   searched.
+///   joins the sum (`1/2 + 1/2 ≥ 1/1`). Proven **per path** through the members'
+///   branch structure ([`PermSum::prove_sufficient`]), as the unsummarized path
+///   proves a single chunk's per leaf: a member present on one arm only contributes
+///   a `Select` on its guard literal, and each path is discharged with that literal
+///   in the pc. Flattening into one goal instead was the whole of the `&mut`-reborrow
+///   incompleteness — the arms' contributions are live under complementary
+///   literals, so no single monolithic goal holds, while both paths are trivial.
+///   The split set is the guards the chunks already carry, so it is finite and
+///   fixed by the CFG, never searched.
 /// - **The debit is guarded and _distributed_** across the set, greedily: each chunk
 ///   gives up `min(it holds, still needed)`, gated by `cube ? take : 0`, and the demand
 ///   is retired by that **gated** amount. No chunk is merged — where the cube fails the
@@ -1649,14 +1989,14 @@ pub(crate) fn heap_subtract_summarized(
     out: Heap,
     kind: &LocationKind,
     set: &[(Chunk, crate::verify::heap::HeapPc)],
-    total: ChunkPerm,
+    total: PermSum,
     chunk2: Chunk,
     chunk2_perm: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Result<Heap, VerifyError> {
-    // `needed ≤ total`, per leaf of `total`, each under the pc plus that leaf's
-    // branch literals.
-    if !prove_sufficient(ctx, &total, chunk2_perm, pc_lits) {
+    // `needed ≤ total`, per path through the members' branch structure, each under
+    // the pc plus that path's branch literals.
+    if !total.prove_sufficient(ctx, chunk2_perm, pc_lits) {
         if crate::verify::viz::dump_perm_enabled() {
             let total = total.to_id(ctx);
             eprintln!(
@@ -1875,17 +2215,18 @@ pub(crate) fn merge_heaps(
 /// paid only by a chunk that missed on ground and was not disproven — the same
 /// budget the disproof check above already spends.
 ///
-/// The total is returned **structural** ([`perm_add`]), not flattened: a
+/// The total is returned **structural** ([`PermSum`]), not flattened: a
 /// conditionally-present chunk contributes a `Select` on its guard literal, and
-/// [`prove_sufficient`] discharges the sum per leaf with that literal in the pc.
+/// [`PermSum::prove_sufficient`] discharges the sum per path with that literal in
+/// the pc.
 pub(crate) fn summarize_perm_at(
     ctx: &mut VerifyContext<'_>,
     chunks: &[Chunk],
     addr: egg::Id,
     pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, Vec<(Chunk, crate::verify::heap::HeapPc)>) {
+) -> (PermSum, Vec<(Chunk, crate::verify::heap::HeapPc)>) {
     let canon = ctx.egraph.find(addr);
-    let mut total: Option<ChunkPerm> = None;
+    let mut total = PermSum::new();
     let mut set: Vec<(Chunk, crate::verify::heap::HeapPc)> = Vec::new();
     for c in chunks {
         let held = c.gated_perm(ctx);
@@ -1914,11 +2255,12 @@ pub(crate) fn summarize_perm_at(
                 } else {
                     // Structural, not folded into the term. Gating the amount as
                     // `ite(eq, held, 0)` collapses the whole summary to one flat
-                    // leaf, and `prove_perm_leaves` then has nothing to split on:
+                    // leaf, and the summary's walk then has nothing to split on:
                     // sufficiency has to be shown against
                     // `ite(a==c, p, 0) + ite(b==c, q, 0)` with every alias gate
-                    // still open. Kept as a `Select`, `perm_add` distributes it,
-                    // and each leaf is proven under its own gate polarities.
+                    // still open. Kept as a `Select`, the summary's walk
+                    // (`PermSum::prove_monotone`) splits on it, and each path is
+                    // proven under its own gate polarities.
                     let cube = vec![(eq, Polarity::Positive)];
                     let zero = ChunkPerm::leaf(expr!(ctx, 0 / 1));
                     (
@@ -1928,15 +2270,9 @@ pub(crate) fn summarize_perm_at(
                 }
             };
         set.push((c.clone(), cube));
-        total = Some(match total {
-            None => amount,
-            Some(t) => perm_add(ctx, &t, &amount),
-        });
+        total.push(amount);
     }
-    (
-        total.unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1))),
-        set,
-    )
+    (total, set)
 }
 
 /// The permission held at `addr`, as a term — what `perm(loc)` evaluates to.
@@ -1956,12 +2292,13 @@ pub(crate) fn perm_held_at(
     // materialized here — the one place it is.
     let total = summarize_perm_at(ctx, chunks, addr, pc_lits).0;
     let id = total.to_id(ctx);
-    // Flattening loses what the tree made obvious. `perm(x.f)` after a gated
+    // Flattening loses what the structure made obvious. `perm(x.f)` after a gated
     // wildcard exhale is `ite(c, r, 1/1)`: positive on both arms, but deciding that
     // from the flat term needs a case split the prover will not make for a `<r`
-    // goal. [`perm_known_positive`] reads it off the structure (its `Ite` arm
-    // requires both), so state the fact here, once, where the value is built.
-    if perm_known_positive(ctx, id) {
+    // goal. [`perm_known_positive`] reads it off each path's partial sum, so state
+    // the fact here, once, where the value is built. The walk starts from no
+    // literals: the fact is stated unconditionally, so it may rest on none.
+    if total.prove_monotone(ctx, &[], &mut |ctx, h, _, _| perm_known_positive(ctx, h)) {
         let pos = expr!(ctx, (0 / 1) < r { id });
         let t = expr!(ctx, true);
         ctx.union(pos, t);

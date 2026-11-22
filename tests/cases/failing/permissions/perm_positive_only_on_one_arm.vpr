@@ -1,0 +1,14 @@
+// `perm(z.f)` is positive only where `z == a`, i.e. on the `b` arm. The positivity
+// fact `perm(..)` states about its value holds on every path, so deciding it may
+// not lean on the literals of the branch the value was built in.
+
+field f: Int
+
+method positive_only_on_one_arm(a: Ref, z: Ref, b: Bool)
+  requires acc(a.f) && (b ==> z == a)
+{
+  if (b) {
+    assert perm(z.f) > none
+  }
+  assert perm(z.f) > none
+}

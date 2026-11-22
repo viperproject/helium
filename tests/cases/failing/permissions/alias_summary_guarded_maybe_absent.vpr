@@ -1,0 +1,28 @@
+// Counterpart of passing/permissions/alias_summary_guarded_members.vpr: `x10` is
+// held only if `b10`, which, unlike in the passing counterpart, the precondition
+// does not give, so `y == x10` leaves `y` uncovered. The absent arms continue
+// under one literal, which must still say exactly when the chunk is absent.
+
+predicate P(x: Ref)
+
+method maybe_not_held(
+  x0: Ref, b0: Bool, x1: Ref, b1: Bool, x2: Ref, b2: Bool, x3: Ref, b3: Bool,
+  x4: Ref, b4: Bool, x5: Ref, b5: Bool, x6: Ref, b6: Bool, x7: Ref, b7: Bool,
+  x8: Ref, b8: Bool, x9: Ref, b9: Bool, x10: Ref, b10: Bool, x11: Ref, b11: Bool,
+  y: Ref)
+  requires b11 && (y == x11 || y == x10)
+{
+  if (b0) { inhale acc(P(x0)) }
+  if (b1) { inhale acc(P(x1)) }
+  if (b2) { inhale acc(P(x2)) }
+  if (b3) { inhale acc(P(x3)) }
+  if (b4) { inhale acc(P(x4)) }
+  if (b5) { inhale acc(P(x5)) }
+  if (b6) { inhale acc(P(x6)) }
+  if (b7) { inhale acc(P(x7)) }
+  if (b8) { inhale acc(P(x8)) }
+  if (b9) { inhale acc(P(x9)) }
+  if (b10) { inhale acc(P(x10)) }
+  if (b11) { inhale acc(P(x11)) }
+  exhale acc(P(y))
+}

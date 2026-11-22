@@ -1,0 +1,22 @@
+// A consume whose location any of 16 held chunks may occupy falls back to summing
+// the whole group, each chunk gated by its address equality. The summary's cost is
+// `perm_sum_steps`: linear in the members when the first present chunk covers the
+// demand, where distributing the sum over the gates would build 2^16 leaves per
+// consume.
+
+field f: Int
+
+method alias_one_of_many(
+  x0: Ref, x1: Ref, x2: Ref, x3: Ref, x4: Ref, x5: Ref, x6: Ref, x7: Ref,
+  x8: Ref, x9: Ref, x10: Ref, x11: Ref, x12: Ref, x13: Ref, x14: Ref, x15: Ref,
+  y: Ref, z: Ref)
+  requires acc(x0.f, 1/2) && acc(x1.f, 1/2) && acc(x2.f, 1/2) && acc(x3.f, 1/2) &&
+    acc(x4.f, 1/2) && acc(x5.f, 1/2) && acc(x6.f, 1/2) && acc(x7.f, 1/2) &&
+    acc(x8.f, 1/2) && acc(x9.f, 1/2) && acc(x10.f, 1/2) && acc(x11.f, 1/2) &&
+    acc(x12.f, 1/2) && acc(x13.f, 1/2) && acc(x14.f, 1/2) && acc(x15.f, 1/2)
+  requires y == x14 || y == x15
+  requires z == x0 || z == x1
+{
+  exhale acc(y.f, 1/4)
+  exhale acc(z.f, 1/4)
+}
