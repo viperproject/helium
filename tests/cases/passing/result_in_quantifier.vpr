@@ -1,6 +1,5 @@
-// KNOWN LIMITATION: "`result` not allowed in this context" for `result` inside
-// a `forall` in a function postcondition. The quantifier body is lowered with
-// the domain-axiom rules, which reject `result`.
+// `result` inside a `forall` in a function postcondition: the quantifier
+// captures it like any other free variable.
 //
 // Nagini's `int___unbox__` prelude function has this shape, as do VerCors'
 // `toBag` functions: 6 of the 838 listed marco_benchmark files hit it.

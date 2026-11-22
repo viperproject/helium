@@ -248,7 +248,10 @@ impl FunctionTranslator<'_, Metaed> {
             let slot = ensures_slot.expect("declared when f.ensures is Some");
             let mut ens_params = params.clone();
             ens_params.push(ret.clone());
-            let result = vmir::Val::Temp(n_params);
+            // `result` is an identifier like the params (see `IdentCollector::finalize`).
+            let mut env = env.clone();
+            let result = ctx.interner.get("result").expect("interned by `finalize`");
+            env.insert(result, vmir::Val::Temp(n_params));
             let mut val_base = n_params + 1;
             let mut snap_entry = None;
             let mut ens_snap = None;
@@ -282,7 +285,6 @@ impl FunctionTranslator<'_, Metaed> {
                 ensures,
                 val_base,
                 vmir::HeapVal::Empty,
-                Some(result),
                 wf_contract,
                 snap_entry,
             )?;
@@ -343,7 +345,6 @@ impl FunctionTranslator<'_, Metaed> {
                 body_exp,
                 val_base,
                 vmir::HeapVal::Empty,
-                None,
                 Some(contract),
                 snap_entry,
             )?),

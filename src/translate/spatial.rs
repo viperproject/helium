@@ -37,14 +37,12 @@ impl SpatialMode {
                 value: acc_heap,
                 perm: acc_heap,
                 old,
-                result: None,
                 in_quantifier: false,
             },
             SpatialMode::Exhale { value_heap } => HeapCtx {
                 value: value_heap,
                 perm: acc_heap,
                 old,
-                result: None,
                 in_quantifier: false,
             },
         }
@@ -345,7 +343,6 @@ pub(crate) fn lower_assertion_bool<Ext: PureExt>(
         value: heap,
         perm: heap,
         old,
-        result: None,
         in_quantifier: false,
     };
     match &*exp.0 {

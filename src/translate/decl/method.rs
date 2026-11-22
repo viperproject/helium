@@ -990,13 +990,13 @@ fn lower_stmt(
                 }
             }
         }
-        S::Var(idents, Some(typed::AssignRhs::New(sof))) => {
+        S::Var(idents, Some(typed::AssignRhs::New(fields))) => {
             if idents.len() != 1 {
                 return Err(TranslationError::Unsupported("multi-LHS var := new"));
             }
-            lower_new(b, env, sink, current_heap, idents[0].name.0, sof)
+            lower_new(b, env, sink, current_heap, idents[0].name.0, fields)
         }
-        S::Assign(lhss, typed::AssignRhs::New(sof)) => {
+        S::Assign(lhss, typed::AssignRhs::New(fields)) => {
             if lhss.len() != 1 {
                 return Err(TranslationError::Unsupported("multi-LHS assign := new"));
             }
@@ -1006,7 +1006,7 @@ fn lower_stmt(
                     return Err(TranslationError::Unsupported("field lvalue"));
                 }
             };
-            lower_new(b, env, sink, current_heap, name, sof)
+            lower_new(b, env, sink, current_heap, name, fields)
         }
         // Control flow never reaches straight-line lowering. `viper::cfg`'s
         // `Builder::process` consumes every one of these into block structure —
@@ -1119,14 +1119,15 @@ fn lower_stmt(
 
 /// Lower `lhs := new(fields)`: allocate a fresh `Ref`, bind it to `lhs`, and
 /// inhale full permission to each listed field (`acc(lhs.f, write)`), adding the
-/// chunks to the current heap. `new(*)` is not yet supported.
+/// chunks to the current heap. `new(*)` arrives already expanded to every
+/// declared field by the typechecker.
 fn lower_new(
     b: &TranslationContext<'_>,
     env: &mut HashMap<Spur, Val>,
     sink: &mut Sink,
     current_heap: HeapVal,
     lhs: Spur,
-    sof: &typed::StarOrFields,
+    fields: &[typed::Ident],
 ) -> Result<HeapVal, TranslationError> {
     let v = sink.emit_pure(Type::Ref, PureInst::Fresh);
     env.insert(lhs, v.clone());
@@ -1142,25 +1143,20 @@ fn lower_new(
     );
     sink.emit_assume(non_null);
 
-    match sof {
-        typed::StarOrFields::Fields(fields) => {
-            let mut heap = current_heap;
-            for f in fields {
-                let (loc, perm) = resource::field_acc(b, sink, v.clone(), f.0, vmir::write())?;
-                let perm = sink.gate_perm(vmir::PermVal::Amount(perm));
-                heap = sink.emit_heap(HeapInst::Add {
-                    base: heap,
-                    loc,
-                    perm,
-                    // `new(...)` genuinely mints values: the canonical
-                    // legitimate `with fresh`.
-                    bind: vmir::Bind::Fresh,
-                });
-            }
-            Ok(heap)
-        }
-        typed::StarOrFields::Star => Err(TranslationError::Unsupported("new(*)")),
+    let mut heap = current_heap;
+    for f in fields {
+        let (loc, perm) = resource::field_acc(b, sink, v.clone(), f.0, vmir::write())?;
+        let perm = sink.gate_perm(vmir::PermVal::Amount(perm));
+        heap = sink.emit_heap(HeapInst::Add {
+            base: heap,
+            loc,
+            perm,
+            // `new(...)` genuinely mints values: the canonical
+            // legitimate `with fresh`.
+            bind: vmir::Bind::Fresh,
+        });
     }
+    Ok(heap)
 }
 
 /// Lower `fold P(args)` / `unfold P(args)` into its bind-point pair -- see
