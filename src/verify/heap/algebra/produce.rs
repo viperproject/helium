@@ -231,13 +231,13 @@ pub(super) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
     }
     let true_ = expr!(ctx, true);
 
-    // The cube each chunk is actually present under: the block's control cube
-    // (this heap only exists on that path — `heap_union` runs per `inhale`, inside
-    // a block) meet the chunk's own residual merge guard. A contradiction means the
-    // chunk is unreachable here, so it states nothing.
-    let block: Vec<(egg::Id, Polarity)> = ctx.current_cube().to_vec();
+    // The cube each chunk is actually present under: the heap's region (it only
+    // exists there) meet the chunk's own presence. Not the walker's ambient cube,
+    // which is empty in a join phase, where a merge and a loop head's invariant
+    // inhale build their heaps. A contradiction means the chunk is unreachable
+    // here, so it states nothing.
     let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> =
-        chunks.iter().map(|c| c.guard.within(ctx, &block)).collect();
+        chunks.iter().map(|c| c.guard.within(ctx, &h.region)).collect();
 
     // Bound: perm ≤ b at each bounded location — assumed **per leaf** of the
     // (possibly branch-structured) perm, so a join `Select` never materializes.

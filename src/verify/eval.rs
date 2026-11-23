@@ -294,7 +294,7 @@ pub(crate) fn get_heap(
     pc: &[(egg::Id, Polarity)],
 ) -> Result<Heap, VerifyError> {
     match hv {
-        HeapVal::Empty => Ok(Heap::empty()),
+        HeapVal::Empty => Heap::empty().at(ctx, pc),
         HeapVal::Temp(n) => state.heaps[*n].at(ctx, pc),
     }
 }
