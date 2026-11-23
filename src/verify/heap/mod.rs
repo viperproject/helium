@@ -17,6 +17,7 @@ use std::rc::Rc;
 use lasso::Spur;
 
 use crate::verify::context::VerifyContext;
+use crate::verify::error::VerifyError;
 use crate::verify::lang::Symbolic;
 use crate::vmir::{Bound, Literal, Polarity, Type};
 use cond::{Cube, Lit};
@@ -634,18 +635,6 @@ impl Group {
     fn is_empty(&self) -> bool {
         self.points.is_empty() && self.sets.is_empty()
     }
-
-    /// Both parts, each holder passed through `f`.
-    fn map(
-        &self,
-        mut point: impl FnMut(&Chunk) -> Chunk,
-        mut set: impl FnMut(&QuantChunk) -> QuantChunk,
-    ) -> Group {
-        Group {
-            points: self.points.iter().map(&mut point).collect(),
-            sets: self.sets.iter().map(&mut set).collect(),
-        }
-    }
 }
 
 /// Symbolic heap: holders partitioned by [`LocationKind`], one [`Group`] per
@@ -653,9 +642,8 @@ impl Group {
 ///
 /// Every holder's reachability is its own presence cube (see
 /// [`holder::Holder`]), relative to the heap's [`Heap::region`]: the cube of
-/// the block it was built in. A heap used outside that region goes through
-/// [`Heap::at`] first, which folds the region literals the use does not
-/// establish into every presence.
+/// the block it was built in. Every use goes through [`Heap::at`], which
+/// proves the use's path condition establishes that region.
 #[derive(Debug, Clone)]
 pub struct Heap {
     /// Unseeded hasher: iteration order (and so the order join/consume code mints
@@ -691,48 +679,29 @@ impl Heap {
         }
     }
 
-    /// This heap as seen from a state whose path condition is `pc`, with `pc`
-    /// as its region.
+    /// This heap used under the path condition `pc`, with `pc` as its region.
     ///
-    /// A heap's presences are relative to the block it was built in: a holder
-    /// with an empty presence is held wherever *that block* was reached, not
-    /// everywhere. A heap used where its region is not established (an
-    /// `old[L]` read whose label `L` does not dominate the read) must not see
-    /// its holders as held there, so every literal of `region` that `pc` does
-    /// not establish is added to each holder's presence. This is the rehoming
-    /// a join already does for its arms (appending the arm literal, see
-    /// `merge_heaps`), done for an arbitrary use.
+    /// A heap exists only where its region was reached, so using it is
+    /// well-defined only where `pc` establishes that region (Silicon's "did not
+    /// reach labelled state"): a use from a block the heap's block dominates
+    /// always does; an `old[L]` read whose label `L` does not dominate it must
+    /// prove it. Then `pc` implies the old region, so every presence means the
+    /// same relative to it.
     ///
-    /// When `pc` establishes the whole region (every use from a block the heap's
-    /// block dominates) only the region changes: `pc` implies the old one, so
-    /// every presence means the same relative to it.
-    pub(crate) fn at(&self, ctx: &mut VerifyContext<'_>, pc: &[Lit]) -> Heap {
-        let region = Cube::from(pc);
-        let missing: Vec<Lit> = self
-            .region
-            .iter()
-            .copied()
-            .filter(|&lit| !cond::lit_holds_under(ctx, pc, lit))
-            .collect();
-        if missing.is_empty() {
-            return Heap {
-                region,
-                ..self.clone()
-            };
+    /// The reach condition belongs to the *use*, not to the heap's contents:
+    /// emptying the heap off its region instead would reject only the reads
+    /// that need a chunk (a value), and let those an empty heap satisfies
+    /// (`perm(x.f) == none`) hold vacuously.
+    pub(crate) fn at(&self, ctx: &mut VerifyContext<'_>, pc: &[Lit]) -> Result<Heap, VerifyError> {
+        if !self.region.holds_under(ctx, pc) {
+            return Err(VerifyError::SideCondition(
+                "label may not have been reached",
+            ));
         }
-        let ctx = &*ctx;
-        let groups = self
-            .groups
-            .iter()
-            .map(|(kind, group)| {
-                let group = group.map(
-                    |c| missing.iter().fold(c.clone(), |c, &lit| c.under(ctx, lit)),
-                    |s| missing.iter().fold(s.clone(), |s, &lit| s.under(ctx, lit)),
-                );
-                (kind.clone(), group)
-            })
-            .collect();
-        Heap { groups, region }
+        Ok(Heap {
+            region: Cube::from(pc),
+            ..self.clone()
+        })
     }
 
     /// The path condition a use of this heap under `pc` stands for: the heap's

@@ -1,0 +1,19 @@
+// The same one-arm label, with the arm's state reached through an alias:
+// `x == y` and the full exhale of `y.f` hold only on the arm, so on the path
+// that skips it `l` is unreached. Without the label-reach check this verdict
+// rests on an incompleteness: main cannot prove the claim at all, but once
+// heap facts are guarded by their path (branch `fix-heap-fact-guards`) the
+// arm's heap makes it provable from the unreached path. The read must be
+// rejected regardless.
+field f: Int
+
+method l01(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  if (c) {
+    inhale x == y
+    exhale acc(y.f, 1/1)
+    label l
+  }
+  assert old[l](perm(x.f)) == none
+}

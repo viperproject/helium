@@ -1,0 +1,11 @@
+// An `exhale` whose permission amount reads an unreached label.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    label l
+  }
+  exhale acc(x.f, old[l](perm(x.f)))
+}

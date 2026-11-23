@@ -190,8 +190,8 @@ fn eval_heap_inst(
         // selects between mutually exclusive predecessor states.
         HeapInst::Union { a, b } => {
             let region = state.region(ctx);
-            let ha = get_heap(ctx, state, a, &region);
-            let hb = get_heap(ctx, state, b, &region);
+            let ha = get_heap(ctx, state, a, &region)?;
+            let hb = get_heap(ctx, state, b, &region)?;
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
@@ -206,7 +206,7 @@ fn eval_heap_inst(
         // so its region is that block's cube (see `HeapInst::Label`).
         HeapInst::Label { base } => {
             let region = state.region(ctx);
-            Ok(get_heap(ctx, state, base, &region))
+            get_heap(ctx, state, base, &region)
         }
         // Block-IR heap join: structural per-chunk SELECT of the two predecessor
         // exit heaps. Emitted at every CFG join by the block lowering.
@@ -221,11 +221,11 @@ fn eval_heap_inst(
             match state.join_arms_dead.unwrap_or((false, false)) {
                 (false, true) => {
                     let region = state.region(ctx);
-                    return Ok(get_heap(ctx, state, then_h, &region));
+                    return get_heap(ctx, state, then_h, &region);
                 }
                 (true, false) => {
                     let region = state.region(ctx);
-                    return Ok(get_heap(ctx, state, els_h, &region));
+                    return get_heap(ctx, state, els_h, &region);
                 }
                 _ => {}
             }
@@ -250,7 +250,7 @@ fn eval_heap_inst(
                 _ => None,
             };
             let region = state.region(ctx);
-            let base_h = get_heap(ctx, state, base, &region);
+            let base_h = get_heap(ctx, state, base, &region)?;
             let l = state
                 .loc(ctx, loc)
                 .expect("acc location must be Addr-typed");
@@ -365,7 +365,7 @@ fn eval_heap_inst(
             };
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let region = state.region(ctx);
-            get_heap(ctx, state, base, &region).produce(ctx, Access::Set(spec), value, &pc_lits)
+            get_heap(ctx, state, base, &region)?.produce(ctx, Access::Set(spec), value, &pc_lits)
         }
         // Exhale a chunk set: one held set must cover it.
         HeapInst::SubForall { base, q } => {
@@ -377,7 +377,7 @@ fn eval_heap_inst(
             let spec = quant_spec_of(state, q);
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let region = state.region(ctx);
-            let base_h = get_heap(ctx, state, base, &region);
+            let base_h = get_heap(ctx, state, base, &region)?;
             Ok(base_h
                 .consume(ctx, Access::Set(spec), ConsumeMode::Take, &pc_lits)?
                 .0)
@@ -395,7 +395,7 @@ fn eval_heap_inst(
             let new_val = state.get_val(ctx, val);
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let region = state.region(ctx);
-            get_heap(ctx, state, heap, &region).write(ctx, &l, new_val, &pc_lits)
+            get_heap(ctx, state, heap, &region)?.write(ctx, &l, new_val, &pc_lits)
         }
     }
 }
@@ -1066,7 +1066,7 @@ fn eval_sub_yield(
         unreachable!("eval_sub_yield called on a non-yielding-Sub instruction");
     };
     let region = state.region(ctx);
-    let base_h = get_heap(ctx, state, base, &region);
+    let base_h = get_heap(ctx, state, base, &region)?;
     let l = state
         .loc(ctx, loc)
         .expect("acc location must be Addr-typed");
@@ -1162,7 +1162,7 @@ fn eval_resource_op(
     );
     let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
     let region = state.region(ctx);
-    let base_h = get_heap(ctx, state, base, &region);
+    let base_h = get_heap(ctx, state, base, &region)?;
     let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
     let scale = eval_perm(ctx, state, perm);
     // Inhale: produce fresh chunks, assume the bool guarded by `0 < scale`
@@ -2466,13 +2466,15 @@ fn inst_obligations(
         // that only aliases a held chunk under this instruction's branch (e.g.
         // `y.f` where `x == y` holds here) still frame.
         InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
+            let heap = match get_heap(ctx, state, heap, pc_lits) {
+                Ok(heap) => heap,
+                Err(e) => return vec![(expr!(ctx, false), e)],
+            };
             let perm = state.loc(ctx, loc).map(|l| {
                 // A chunk set's body evaluated once already, at its inhale.
-                get_heap(ctx, state, heap, pc_lits)
-                    .framing_perm(ctx, &l, pc_lits)
-                    .unwrap_or_else(|e| {
-                        panic!("quantified chunk body failed to re-evaluate: {e:?}")
-                    })
+                heap.framing_perm(ctx, &l, pc_lits).unwrap_or_else(|e| {
+                    panic!("quantified chunk body failed to re-evaluate: {e:?}")
+                })
             });
             match perm {
                 None => vec![(expr!(ctx, false), VerifyError::InsufficientPermission)],

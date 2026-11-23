@@ -282,19 +282,19 @@ pub(crate) fn format_inst(
 /// `state.heaps[0]` by convention (mirroring how params occupy the
 /// initial `vals` slots).
 ///
-/// The heap is seen from `pc` (see [`Heap::at`]): a heap used outside the
-/// region it was built in (an `old[L]` whose label does not dominate the read)
-/// holds its chunks only where that region was reached. A read passes its
-/// effective pc; an instruction that builds a new heap passes
-/// [`EvalState::region`], so the result's region is the block's cube.
+/// The heap is used under `pc` (see [`Heap::at`]), which must establish the
+/// region it was built in: an `old[L]` read fails where `L` may not have been
+/// reached. A read passes its effective pc; an instruction that builds a new
+/// heap passes [`EvalState::region`], so the result's region is the block's
+/// cube.
 pub(crate) fn get_heap(
     ctx: &mut VerifyContext<'_>,
     state: &EvalState,
     hv: &HeapVal,
     pc: &[(egg::Id, Polarity)],
-) -> Heap {
+) -> Result<Heap, VerifyError> {
     match hv {
-        HeapVal::Empty => Heap::empty(),
+        HeapVal::Empty => Ok(Heap::empty()),
         HeapVal::Temp(n) => state.heaps[*n].at(ctx, pc),
     }
 }
@@ -666,7 +666,7 @@ pub(crate) fn eval_pure_inst(
             (id, recipe)
         }
         PureInst::Deref(hv, loc) => {
-            let heap = get_heap(ctx, state, hv, pc_lits);
+            let heap = get_heap(ctx, state, hv, pc_lits)?;
             // In a certificate walk the read names its value by the address
             // recipe and records holder agreements under the recipe-space pc.
             // A pc guard without a recipe leaves the pc `None`: the read then
@@ -897,7 +897,7 @@ pub(crate) fn eval_pure_inst(
                     "purify: perm in a function or resource body",
                 ));
             }
-            let heap = get_heap(ctx, state, hv, pc_lits);
+            let heap = get_heap(ctx, state, hv, pc_lits)?;
             let id = match state.loc(ctx, loc) {
                 Some(l) => heap.perm(ctx, &l, pc_lits)?,
                 None => expr!(ctx, 0 / 1),
