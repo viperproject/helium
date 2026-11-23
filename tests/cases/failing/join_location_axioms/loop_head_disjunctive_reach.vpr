@@ -1,0 +1,14 @@
+// A loop head reached on a disjunction of paths (`c && d` or `!c && e`): its
+// reach condition is not a cube of branch literals, and the head's `x != y` must
+// stay under it, not reach the paths that jump past the loop. Silicon rejects.
+field f: Int
+
+method loop_head_disjunctive_reach(x: Ref, y: Ref, c: Bool, d: Bool, e: Bool, n: Int)
+{
+  if (c) { if (d) { } else { goto E } } else { if (e) { } else { goto E } }
+  inhale acc(x.f) && acc(y.f)
+  var i: Int := 0
+  while (i < n) invariant acc(x.f) && acc(y.f) { i := i + 1 }
+  label E
+  assert x != y
+}

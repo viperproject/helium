@@ -1,0 +1,18 @@
+// `inner_join_in_arm.vpr`, read on the sibling arm instead of after the join.
+// Silicon rejects.
+field f: Int
+
+method inner_join_to_sibling(a: Ref, b: Ref, e: Bool, d: Bool)
+  requires acc(a.f)
+{
+  if (e) {
+    inhale acc(b.f)
+    if (d) {
+      inhale a.f == 1
+    } else {
+      inhale a.f == 2
+    }
+  } else {
+    assert a != b
+  }
+}

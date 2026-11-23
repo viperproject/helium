@@ -1,0 +1,19 @@
+// `loop_head_in_arm.vpr` two branches deep: the loop head's location axioms must
+// carry both outer reach literals. Silicon rejects.
+field f: Int
+
+method loop_head_in_nested_arm(x: Ref, y: Ref, c: Bool, d: Bool, n: Int)
+{
+  var i: Int := 0
+  if (c) {
+    if (d) {
+      inhale acc(x.f) && acc(y.f)
+      while (i < n)
+        invariant acc(x.f) && acc(y.f)
+      {
+        i := i + 1
+      }
+    }
+  }
+  assert x != y
+}

@@ -1,0 +1,18 @@
+// The bound axiom at an inner join must stay under the join's reach condition
+// as well. The `e` arm over-inhales `a.f` (3/2 in total), so the arm is
+// infeasible — but only the arm. Silicon rejects `assert false`.
+field f: Int
+
+method bound_at_inner_join(a: Ref, e: Bool, d: Bool)
+  requires acc(a.f, 1/2)
+{
+  if (e) {
+    inhale acc(a.f)
+    if (d) {
+      inhale a.f == 1
+    } else {
+      inhale a.f == 2
+    }
+  }
+  assert false
+}

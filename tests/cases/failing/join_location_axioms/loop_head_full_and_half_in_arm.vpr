@@ -1,0 +1,15 @@
+// The non-aliasing axiom of a full and a half permission (`1 + 1/2 > 1`) at a
+// loop head inside an arm: it must not make the sibling arm infeasible.
+// Silicon rejects.
+field f: Int
+
+method loop_head_full_and_half_in_arm(x: Ref, y: Ref, c: Bool, n: Int)
+{
+  if (c) {
+    inhale acc(x.f) && acc(y.f, 1/2)
+    while (n > 0) invariant acc(x.f) && acc(y.f, 1/2) { }
+  } else {
+    assume x == y
+    assert false
+  }
+}
