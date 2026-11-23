@@ -1,0 +1,19 @@
+// QP medium: two sets hold half of `a.f` each and are exhaled in turn; a set
+// inhaled afterwards holds `a.f` with an unknown value. The handovers recorded
+// on the way must not carry the old value into the new set.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method not_after_both_gone(s: Set[Ref], t: Set[Ref], u: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in s && a in t
+  requires a.f == 3
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  exhale forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  inhale forall x: Ref :: x in u ==> acc(x.f)
+  inhale a in u
+  assert a.f == 3
+}

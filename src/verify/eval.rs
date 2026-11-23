@@ -669,15 +669,12 @@ pub(crate) fn eval_pure_inst(
         PureInst::Deref(hv, loc) => {
             let heap = get_heap(ctx, state, hv, pc_lits)?;
             // In a certificate walk the read names its value by the address
-            // recipe and records holder agreements under the recipe-space pc.
-            // A pc guard without a recipe leaves the pc `None`: the read then
-            // records no agreement, which only loses facts.
+            // recipe.
             let read_recipe = ctx
                 .recipe
                 .is_some()
                 .then(|| crate::verify::heap::ReadRecipe {
                     addr: state.recipe_of(loc),
-                    pc: recipe_pc.and_then(|pc| state.recipe_pc(pc).ok()),
                 });
             let held = match state.loc(ctx, loc) {
                 Some(l) => heap.read(ctx, &l, pc_lits, read_recipe.as_ref())?,

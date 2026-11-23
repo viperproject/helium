@@ -32,7 +32,7 @@
 //! | `cond`                   | conditions: [`Cube`](super::cond::Cube)s of literals |
 //! | `holder`                 | what a heap holds: a body under a presence cube (single chunks, chunk sets, what was taken from a set) |
 //! | `view`                   | a heap under a pc: who holds a location (`Shares`), the total, the value, taking from them |
-//! | `agree`                  | a location has one value: the agreement between holders |
+//! | `agree`                  | a location has one value: the agreement between holders (at merge, read, and exhale) |
 //! | `algebra`                | amounts (`perm`), the consume ladder, produce, join and sum of heaps, location axioms |
 //! | `quantified_permissions` | chunk sets: injectivity, inverses, a set's amount at an address, containment |
 
@@ -48,7 +48,7 @@ use crate::verify::heap::quantified_permissions::{
     covered_by_sum, find_covering_qp, quant_chunk_from_caps, take_from_qp, take_spread,
 };
 use crate::verify::heap::view::HolderAt;
-use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind};
+use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
 use crate::verify::lang::Symbolic;
 use crate::vmir::{self, Polarity, Type, Val};
 
@@ -80,11 +80,6 @@ pub(crate) struct ReadRecipe {
     /// The address's recipe: a value read from a chunk set is named
     /// `lookup(map, addr)` by it. `None` when the address has none.
     pub(crate) addr: Option<Val>,
-    /// The read's path condition in recipe space, outermost-first. It guards
-    /// the agreement facts the read records (see
-    /// [`crate::verify::cert::RecipeBuilder::record_side_fact`]). `None` when
-    /// no recipe-space pc can be recovered; then nothing is recorded.
-    pub(crate) pc: Option<Vec<(Val, Polarity)>>,
 }
 
 /// What [`Heap::produce`] adds and [`Heap::consume`] takes.
@@ -244,7 +239,17 @@ impl Heap {
         let pc = &self.effective_pc(ctx, pc)[..];
         match access {
             Access::Single { loc, perm } => match mode {
-                ConsumeMode::Take => self.take_single(ctx, &loc, perm, pc),
+                ConsumeMode::Take => {
+                    // Before a holder gives up its share, its value is tied to
+                    // every other holder there (a chunk set among them: two
+                    // single chunks already agree where they were merged).
+                    if !self.qp_chunks_of(&loc.kind).is_empty() {
+                        self.view(pc)
+                            .all_shares(ctx, &loc.kind, loc.addr)?
+                            .assume_agreement(ctx);
+                    }
+                    self.take_single(ctx, &loc, perm, pc)
+                }
                 ConsumeMode::Frame => self.frame_single(ctx, &loc, perm, pc),
             },
             Access::Set(spec) => {
@@ -273,7 +278,14 @@ impl Heap {
                         return Err(VerifyError::InsufficientPermission);
                     }
                     let heap = match mode {
-                        ConsumeMode::Take => take_spread(ctx, self, &kind, exhaled)?,
+                        ConsumeMode::Take => {
+                            // Every set may give: each keeps its index in the
+                            // result, which gets the handovers. Its debits
+                            // record the heap before them.
+                            let n = self.qp_chunks_of(&kind).len();
+                            let out = take_spread(ctx, self, &kind, exhaled)?;
+                            self.hand_over(ctx, &kind, 0..n, pc, out)?
+                        }
                         ConsumeMode::Frame => self.clone(),
                     };
                     return Ok((heap, Value::plain(placeholder)));
@@ -284,7 +296,12 @@ impl Heap {
                     recipe: held.recipe.clone(),
                 };
                 let heap = match mode {
-                    ConsumeMode::Take => take_from_qp(ctx, self, &kind, i, exhaled),
+                    ConsumeMode::Take => {
+                        // Before the take: it may drop set `i` and shift the
+                        // indices of the others.
+                        let before = self.hand_over(ctx, &kind, i..i + 1, pc, self.clone())?;
+                        take_from_qp(ctx, &before, &kind, i, exhaled)
+                    }
                     ConsumeMode::Frame => self.clone(),
                 };
                 Ok((heap, value))
@@ -369,7 +386,8 @@ impl Heap {
 
     /// The sum of two heaps held at once.
     ///
-    /// Chunk sets are not summed yet: a heap holding one panics.
+    /// A chunk set given back to the set it was taken from cancels that take
+    /// (`algebra::combine::give_back`); every other set is kept as it is.
     pub(crate) fn union(
         &self,
         ctx: &mut VerifyContext<'_>,
@@ -378,6 +396,59 @@ impl Heap {
     ) -> Heap {
         let pc = &self.effective_pc(ctx, pc)[..];
         union_heaps(ctx, self, other, pc)
+    }
+
+    /// For an exhale of a chunk set that takes from this heap's sets `givers`
+    /// (of `kind`) under `pc`: what they hold is tied to every other holder
+    /// before any of it is forgotten. Returns `into` with the handovers added
+    /// to its sets, which must sit at this heap's indices.
+    ///
+    /// - Each single chunk of the kind agrees, at its own address, with every
+    ///   holder there ([`Shares::assume_agreement`]): ground, stated now.
+    /// - Every other set gets a [`Handover`] from each giver: quantified, so
+    ///   recorded and assumed per address where the set is read.
+    ///
+    /// Both use the holders as they are now, before the take, so what any of
+    /// them gave up earlier is already accounted for.
+    fn hand_over(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        kind: &LocationKind,
+        givers: std::ops::Range<usize>,
+        pc: &[(egg::Id, Polarity)],
+        into: Heap,
+    ) -> Result<Heap, VerifyError> {
+        for c in self.chunks_of(kind) {
+            self.view(pc)
+                .all_shares(ctx, kind, c.addr)?
+                .assume_agreement(ctx);
+        }
+        let sets = self.qp_chunks_of(kind).to_vec();
+        assert_eq!(
+            into.qp_chunks_of(kind).len(),
+            sets.len(),
+            "handovers are added to a heap whose sets sit at this heap's indices"
+        );
+        let mut out = into;
+        for (j, kept) in sets.iter().enumerate() {
+            let new: Vec<Handover> = givers
+                .clone()
+                .filter(|&g| g != j)
+                .map(|g| Handover {
+                    id: HandoverId::fresh(ctx),
+                    from: sets[g].clone(),
+                    kept: kept.clone(),
+                    pc: pc.into(),
+                })
+                .collect();
+            if new.is_empty() {
+                continue;
+            }
+            let mut set = out.qp_chunks_of(kind)[j].clone();
+            set.handovers = set.handovers.iter().cloned().chain(new).collect();
+            out = out.with_qp_chunk_replaced(kind, j, set);
+        }
+        Ok(out)
     }
 
     /// [`Heap::consume`] of one location: the permission is taken (from the

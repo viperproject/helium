@@ -262,13 +262,6 @@ pub(crate) struct ResourceDefinition {
     pub(crate) footprint: Vec<SlotRecipe>,
     /// The body boolean over the params and every footprint slot value.
     pub(crate) bool: BodyRecipe,
-    /// Facts the walk learned that hold in every heap this resource describes
-    /// (see [`RecipeBuilder::record_side_fact`]), e.g. that two holders of one
-    /// location agree on its value. Each is a boolean over the params and slot
-    /// values with its own path condition folded in. Unlike [`Self::bool`]
-    /// these are never obligations: a graft site **assumes** them, consuming
-    /// and producing alike.
-    pub(crate) side_facts: Vec<BodyRecipe>,
 }
 
 /// One step of a [`RecipeBuilder`] stream: either a **seed** (a footprint
@@ -309,12 +302,6 @@ pub(crate) struct RecipeBuilder {
     /// every step via `into_function_parts`). Each carries the callee-internal pc
     /// of the call it accompanies (see [`TokenStep`]).
     token_steps: Vec<TokenStep>,
-    /// The walk's side-fact table: facts that hold in every heap the
-    /// certificate describes but that the walk only learned in its scratch
-    /// graph, so a graft site would otherwise never see them. Today: the
-    /// agreement of two holders a read saw at one location (see
-    /// [`Self::record_side_fact`]).
-    side_facts: Vec<Val>,
 }
 
 impl RecipeBuilder {
@@ -329,22 +316,7 @@ impl RecipeBuilder {
             post_contract: false,
             pending_slots: Vec::new(),
             token_steps: Vec::new(),
-            side_facts: Vec::new(),
         }
-    }
-
-    /// Record `fact`, a boolean in this stream with its path condition folded
-    /// in, in the side-fact table. Today the only producer is a read that saw
-    /// two holders with a positive share at one location: `fact` is then
-    /// `pc ==> v1 == v2` (see `heap::holders::record_agreements`).
-    pub(crate) fn record_side_fact(&mut self, fact: Val) {
-        self.side_facts.push(fact);
-    }
-
-    /// Slice each recorded side fact into a standalone recipe (see
-    /// [`ResourceDefinition::side_facts`]).
-    pub(crate) fn slice_side_facts(&self) -> Result<Vec<BodyRecipe>, VerifyError> {
-        self.side_facts.iter().map(|f| self.slice(f)).collect()
     }
 
     /// Mark the walked body as a postcondition (`f#ensures`).

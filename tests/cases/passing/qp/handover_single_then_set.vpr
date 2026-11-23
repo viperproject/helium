@@ -1,0 +1,26 @@
+// QP medium: a single chunk and a chunk set each hold half of `a.f`. When the
+// single chunk is exhaled its value is handed over to the set, so the set still
+// reads the value the precondition fixed.
+//
+// Must VERIFY.
+field f: Int
+
+method single_then_set(s: Set[Ref], a: Ref)
+  requires acc(a.f, 1/2)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires a in s
+  requires a.f == 3
+{
+  exhale acc(a.f, 1/2)
+  assert a.f == 3
+}
+
+method set_then_single(s: Set[Ref], a: Ref)
+  requires acc(a.f, 1/2)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires a in s
+  requires a.f == 3
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert a.f == 3
+}

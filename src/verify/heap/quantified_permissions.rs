@@ -657,7 +657,7 @@ pub(super) fn covered_by_sum(
 ) -> Result<bool, VerifyError> {
     let pc = exhaled.eval_pc();
     set_within(ctx, exhaled, &[], &mut |ctx, addr| {
-        Ok(heap.view(&pc).all_shares(ctx, kind, addr)?.total(ctx))
+        Ok(heap.view(&pc).all_amounts(ctx, kind, addr)?.total(ctx))
     })
 }
 
@@ -676,7 +676,7 @@ fn share_at(
     let zero = expr!(ctx, 0 / 1);
     let d = qp_perm_at(ctx, demand, addr)?.to_id(ctx);
     let kind = LocationKind::from_addr_type(&demand.q.loc_ty).expect("QP loc_ty must be Addr");
-    let shares = before.view(guard).all_shares(ctx, &kind, addr)?;
+    let shares = before.view(guard).all_amounts(ctx, &kind, addr)?;
     let takes = shares.greedy_takes(ctx, d);
     Ok(shares
         .iter()
@@ -782,5 +782,6 @@ pub(super) fn quant_chunk_from_caps(
         value_map,
         recipe: None,
         restored: Rc::from([]),
+        handovers: Rc::from([]),
     }))
 }

@@ -1,0 +1,20 @@
+// QP medium: a predicate whose two set slots overlap. After `unfold`, exhaling
+// one slot's set hands the value over to the other's.
+//
+// Must VERIFY.
+field f: Int
+
+predicate both(s: Set[Ref], t: Set[Ref]) {
+  (forall x: Ref :: x in s ==> acc(x.f, 1/2)) &&
+  (forall x: Ref :: x in t ==> acc(x.f, 1/2))
+}
+
+method predicate_slots(s: Set[Ref], t: Set[Ref], a: Ref)
+  requires both(s, t)
+  requires a in s && a in t
+  requires unfolding both(s, t) in a.f == 3
+{
+  unfold both(s, t)
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert a.f == 3
+}

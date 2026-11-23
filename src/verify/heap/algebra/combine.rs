@@ -205,11 +205,20 @@ fn merge_set(
             restored.push(r.clone());
         }
     }
+    // Each arm's handovers hold where they were recorded: their own pc
+    // carries the arm, so they are kept as they are.
+    let mut handovers = t.handovers.to_vec();
+    for h in e.handovers.iter() {
+        if !handovers.iter().any(|x| x.id == h.id) {
+            handovers.push(h.clone());
+        }
+    }
     let mut out = t.clone();
     out.taken = taken;
     out.value_map = value_map;
     out.recipe = recipe;
     out.restored = restored.into();
+    out.handovers = handovers.into();
     out
 }
 
@@ -386,10 +395,19 @@ fn give_back(
         });
         (map, None)
     };
+    // The given-back values are `y`'s inside the region, so what `y` learned
+    // from other sets is needed there too.
+    let mut handovers = x.handovers.to_vec();
+    for h in y.handovers.iter() {
+        if !handovers.iter().any(|z| z.id == h.id) {
+            handovers.push(h.clone());
+        }
+    }
     let mut out = x.clone();
     out.taken = taken.into();
     out.value_map = value_map;
     out.recipe = recipe;
     out.restored = restored.into();
+    out.handovers = handovers.into();
     Some(out)
 }

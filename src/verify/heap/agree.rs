@@ -1,5 +1,14 @@
 //! A location has one value: wherever two holders both hold a positive share of
-//! it, their values agree. Every place the heap states that is here.
+//! it, their values agree. The fact itself is here; the heap states it at three
+//! moments:
+//!
+//! - **a merge** of two single chunks at one address ([`joint_value`]);
+//! - **a read** that meets several holders (`view::value_at`);
+//! - **an exhale**, before it takes from a holder (`Heap::consume`): ground
+//!   pairs are agreed at once (`Shares::assume_agreement`), and a chunk set
+//!   that keeps its share records a `Handover` from each set taken from, which
+//!   a read of it later assumes at its address. Without this, a value that
+//!   only one holder was known to have would be lost with that holder.
 //!
 //! The fact is [`assume_agree`]. Which amounts it is conditional on is the
 //! caller's: an amount already **known** positive (proven under the pc) is left

@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::heap::cond::{Cube, Lit};
-use crate::verify::heap::{ChunkPerm, QPTaken, Restored, SetId, TakeId, Taken};
+use crate::verify::heap::{ChunkPerm, Handover, QPTaken, Restored, SetId, TakeId, Taken};
 use crate::vmir;
 
 /// A body held under a presence cube. Derefs to the body, which never holds an
@@ -321,6 +321,10 @@ pub(crate) struct SetBody {
     /// The maps minted when a taken set was given back to this one (see
     /// [`Restored`]); each is defined at an address where it is read.
     pub(super) restored: Rc<[Restored]>,
+    /// What this set learned from other sets an exhale took from while this
+    /// one kept its share (see [`Handover`]); each is assumed at an address
+    /// where this set is read.
+    pub(super) handovers: Rc<[Handover]>,
 }
 
 /// A quantified chunk set, held under a presence cube.

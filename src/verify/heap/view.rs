@@ -37,10 +37,12 @@ use crate::verify::heap::algebra::{
 use crate::verify::heap::cond::{Cube, Lit};
 use crate::verify::heap::interface::{ReadRecipe, Value};
 use crate::verify::heap::quantified_permissions::qp_perm_at;
-use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind, QuantChunk, Restored, Taken};
+use crate::verify::heap::{
+    Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind, QuantChunk, Restored, Taken,
+};
 use crate::verify::lang::Symbolic;
 use crate::verify::rewrite::AxiomPure;
-use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
+use crate::vmir::{BinOp, Literal, Type, Val};
 
 /// A heap bound to the path condition of the state it is read in. Built by
 /// [`Heap::view`]; every question about who holds a location is asked of one,
@@ -268,6 +270,24 @@ impl<'a> View<'a> {
         }
         Ok(shares)
     }
+
+    /// [`View::all_shares`] for a question about **amounts only** (a total, a
+    /// greedy split): the sets' values are not defined at `addr`, so no
+    /// restored map or handover is assumed. A `Taken::Share` debit evaluates
+    /// its heap through this at every lookup; defining values there recursed
+    /// through every handover's `from` set and its own debits per lookup.
+    pub(super) fn all_amounts(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        kind: &LocationKind,
+        addr: egg::Id,
+    ) -> Result<Shares, VerifyError> {
+        let mut shares = self.point_shares(ctx, kind, addr);
+        for (i, set) in self.heap.qp_chunks_of(kind).iter().enumerate() {
+            shares.shares.push(set_amount(ctx, kind, set, i, addr)?);
+        }
+        Ok(shares)
+    }
 }
 
 fn chunk_share(c: &Chunk, perm: ChunkPerm, hold: ChunkPerm, when: Cube) -> Share {
@@ -283,8 +303,41 @@ fn chunk_share(c: &Chunk, perm: ChunkPerm, hold: ChunkPerm, when: Cube) -> Share
 }
 
 /// What the chunk set `set` (number `i`) holds at `addr`: its amount there and
-/// `lookup(map, addr)`. Assumes the definitions of its restored maps there.
+/// `lookup(map, addr)`. Assumes the definitions of its restored maps and its
+/// handovers there.
 fn set_share(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    set: &QuantChunk,
+    i: usize,
+    addr: egg::Id,
+) -> Result<Share, VerifyError> {
+    set_share_seen(ctx, kind, set, i, addr, &mut crate::dhash::HashSet::default())
+}
+
+/// [`set_share`], with the handovers already assumed at `addr` in `seen`: a
+/// handover reads its `from` set through this, whose own handovers may share
+/// entries with the reader's (copies of one set), so each is assumed once.
+fn set_share_seen(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    set: &QuantChunk,
+    i: usize,
+    addr: egg::Id,
+    seen: &mut crate::dhash::HashSet<HandoverId>,
+) -> Result<Share, VerifyError> {
+    for r in set.restored.iter() {
+        define_restored(ctx, kind, r, addr)?;
+    }
+    for h in set.handovers.iter() {
+        define_handover(ctx, kind, h, addr, seen)?;
+    }
+    set_amount(ctx, kind, set, i, addr)
+}
+
+/// What the chunk set `set` (number `i`) holds at `addr`, with its value named
+/// `lookup(map, addr)` but not defined there (see [`View::all_amounts`]).
+fn set_amount(
     ctx: &mut VerifyContext<'_>,
     kind: &LocationKind,
     set: &QuantChunk,
@@ -297,9 +350,6 @@ fn set_share(
         Box::new([]),
         Box::new([set.value_map, addr]),
     ));
-    for r in set.restored.iter() {
-        define_restored(ctx, kind, r, addr)?;
-    }
     let perm = qp_perm_at(ctx, set, addr)?;
     Ok(Share {
         hold: perm.clone(),
@@ -330,6 +380,34 @@ fn define_restored(
     ctx.assume_guarded(fact, std::iter::empty());
     // Where the set given back to held a share too, the values did not change.
     assume_agree(ctx, new, old, &[kept, region], &[]);
+    Ok(())
+}
+
+/// Assume the handover `h` at `addr` (see [`Handover`]): where `h.from` and
+/// `h.kept` both held a positive share just before the exhale, under its pc,
+/// `kept`'s map reads `from`'s value. `from` is read as a set of its own, so
+/// its restored maps and handovers are defined there too; `kept`'s are a
+/// prefix of the reader's, which defines them itself.
+fn define_handover(
+    ctx: &mut VerifyContext<'_>,
+    kind: &LocationKind,
+    h: &Handover,
+    addr: egg::Id,
+    seen: &mut crate::dhash::HashSet<HandoverId>,
+) -> Result<(), VerifyError> {
+    if !seen.insert(h.id) {
+        return Ok(());
+    }
+    let from = set_share_seen(ctx, kind, &h.from, 0, addr, seen)?;
+    let from_perm = from.perm.to_id(ctx);
+    let kept_perm = qp_perm_at(ctx, &h.kept, addr)?.to_id(ctx);
+    let lookup = ctx.alloc.value_map(kind).lookup;
+    let kept = ctx.add(Symbolic::FuncApp(
+        lookup,
+        Box::new([]),
+        Box::new([h.kept.value_map, addr]),
+    ));
+    assume_agree(ctx, kept, from.value, &[from_perm, kept_perm], &h.pc);
     Ok(())
 }
 
@@ -378,6 +456,14 @@ impl Shares {
 
     pub(super) fn len(&self) -> usize {
         self.shares.len()
+    }
+
+    /// Assume that any two of these holders with a positive share agree on the
+    /// value, under the pc: a location has one value. What an exhale states
+    /// before it takes from one of them, so the value survives in the others
+    /// (see [`Handover`] for the quantified counterpart).
+    pub(super) fn assume_agreement(&self, ctx: &mut VerifyContext<'_>) {
+        assume_pairwise(ctx, &self.shares, &self.pc);
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -555,9 +641,9 @@ impl Shares {
     /// hold a positive share, with its recipe (see [`holder_recipe`]), and
     /// `None` too when no holder is known positive there.
     ///
-    /// Naming one holder drops what the others hold there, and the walk runs in a
-    /// scratch graph, so their agreement would not reach a graft site. It is
-    /// recorded in the certificate instead (see [`record_agreements`]).
+    /// Naming one holder drops what the others hold there; their agreement is
+    /// assumed in the walk ([`agree_with_named`]). A graft site re-derives it in
+    /// its own heap.
     pub(super) fn value(
         &self,
         ctx: &mut VerifyContext<'_>,
@@ -589,15 +675,7 @@ impl Shares {
         let k = holders.iter().position(|h| h.positive(ctx, pc_lits))?;
         let addr_r = read_recipe.and_then(|r| r.addr.as_ref());
         let recipe = holder_recipe(ctx, &self.kind, &holders[k], addr_r);
-        record_agreements(
-            ctx,
-            &self.kind,
-            holders,
-            k,
-            recipe.as_ref(),
-            read_recipe,
-            pc_lits,
-        );
+        agree_with_named(ctx, holders, k, pc_lits);
         Some(Value {
             id: holders[k].value,
             recipe,
@@ -654,13 +732,7 @@ fn take_from_set(
 /// behind an `ite` on each holder before it that may be positive; fresh when no
 /// holder is known positive.
 fn value_at(ctx: &mut VerifyContext<'_>, holders: &[Share], ty: &Type, pc_lits: &[Lit]) -> egg::Id {
-    let perms: Vec<egg::Id> = holders.iter().map(|h| h.perm.to_id(ctx)).collect();
-    for i in 0..holders.len() {
-        for j in i + 1..holders.len() {
-            let (vi, vj) = (holders[i].value, holders[j].value);
-            assume_agree(ctx, vi, vj, &[perms[j], perms[i]], pc_lits);
-        }
-    }
+    let perms = assume_pairwise(ctx, holders, pc_lits);
     let positive: Vec<egg::Id> = perms
         .iter()
         .map(|&p| expr!(ctx, (0 / 1) < r { p }))
@@ -674,6 +746,19 @@ fn value_at(ctx: &mut VerifyContext<'_>, holders: &[Share], ty: &Type, pc_lits: 
         value = ctx.add(Symbolic::Ite([positive[i], holders[i].value, value]));
     }
     value
+}
+
+/// For every two `holders`, `pc ∧ 0 < p_i ∧ 0 < p_j ⇒ v_i == v_j`. Returns the
+/// holders' amounts as ids, in order.
+fn assume_pairwise(ctx: &mut VerifyContext<'_>, holders: &[Share], pc_lits: &[Lit]) -> Vec<egg::Id> {
+    let perms: Vec<egg::Id> = holders.iter().map(|h| h.perm.to_id(ctx)).collect();
+    for i in 0..holders.len() {
+        for j in i + 1..holders.len() {
+            let (vi, vj) = (holders[i].value, holders[j].value);
+            assume_agree(ctx, vi, vj, &[perms[j], perms[i]], pc_lits);
+        }
+    }
+    perms
 }
 
 /// The recipe naming what `h` holds at the address in a certificate walk: a
@@ -706,28 +791,12 @@ fn holder_recipe(
 
 /// In a certificate walk, the agreement between the named holder `holders[k]`
 /// and every later holder also known to hold a positive share: a location has
-/// one value. Assumed here, under the pc, and recorded in the certificate as
-/// `pc_r ==> v_k == v_j` (the read's recipe-space pc folded in), which each
-/// graft site assumes (see `walk_footprint`).
+/// one value. Assumed here, in the walk's graph, under the pc.
 ///
-/// Guarding by the pc alone is sound because positivity was proven here from
-/// what the certificate itself carries: the params, the slot permissions and
-/// the body's conjuncts, all reproduced (assumed or proven) at a graft site
-/// before the agreement is assumed.
-///
-/// A pair without a recipe on either side, or a read without a recipe-space
-/// pc, records nothing: the graft site then knows less, never too much.
-fn record_agreements(
-    ctx: &mut VerifyContext<'_>,
-    kind: &LocationKind,
-    holders: &[Share],
-    k: usize,
-    named_r: Option<&Val>,
-    read_recipe: Option<&ReadRecipe>,
-    pc_lits: &[Lit],
-) {
-    let addr_r = read_recipe.and_then(|r| r.addr.as_ref());
-    let pc_r = read_recipe.and_then(|r| r.pc.as_ref());
+/// It is not recorded in the certificate: a graft site holds the same slots in
+/// its own heap, which ties their values itself (at a read that meets both, or
+/// at an exhale that takes from one, see `Heap::consume`).
+fn agree_with_named(ctx: &mut VerifyContext<'_>, holders: &[Share], k: usize, pc_lits: &[Lit]) {
     let vk = holders[k].value;
     for h in &holders[k + 1..] {
         if ctx.egraph.find(vk) == ctx.egraph.find(h.value) {
@@ -738,25 +807,5 @@ fn record_agreements(
         }
         // Both are known positive here, so only the pc conditions it.
         assume_agree(ctx, vk, h.value, &[], pc_lits);
-        let (Some(named_r), Some(pc_r)) = (named_r, pc_r) else {
-            continue;
-        };
-        let Some(other_r) = holder_recipe(ctx, kind, h, addr_r) else {
-            continue;
-        };
-        let rb = ctx
-            .recipe
-            .as_mut()
-            .expect("agreement outside a certificate walk");
-        let mut fact = rb.emit(AxiomPure::Binary(BinOp::Eq, named_r.clone(), other_r));
-        let true_ = Val::Literal(Literal::Bool(true));
-        // Outermost-first, folded innermost-first (as `implication` does).
-        for (g, pol) in pc_r.iter().rev() {
-            fact = rb.emit(match pol {
-                Polarity::Positive => AxiomPure::Ternary(g.clone(), fact, true_.clone()),
-                Polarity::Negative => AxiomPure::Ternary(g.clone(), true_.clone(), fact),
-            });
-        }
-        rb.record_side_fact(fact);
     }
 }

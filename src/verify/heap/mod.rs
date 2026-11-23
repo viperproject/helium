@@ -543,6 +543,45 @@ impl SetId {
     }
 }
 
+/// The identity of one [`Handover`], minted when it is recorded. Copies of one
+/// set share the handovers recorded before they diverged, and only those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct HandoverId(u32);
+
+impl HandoverId {
+    pub(crate) fn fresh(ctx: &mut VerifyContext<'_>) -> HandoverId {
+        HandoverId(ctx.fresh_heap_id())
+    }
+}
+
+/// What a chunk set `kept` learned when an exhale took from another set `from`
+/// of its kind: wherever both held a positive share just before that exhale,
+/// their values were one. Recorded on the set that keeps its share, so the
+/// value survives the exhale through it.
+///
+/// ```text
+/// pc ∧ 0 < perm(from, r) ∧ 0 < perm(kept, r)  ==>  lookup(kept.map, r) == value(from, r)
+/// ```
+///
+/// `from` and `kept` are the two sets **as they were just before the exhale**:
+/// their amounts are `qp_perm_at` of those versions, so what either had given
+/// up before is already subtracted, and the fact is about their maps then. It
+/// stays true after: a later take or write changes the sets, not what held at
+/// that moment. `value(from, r)` is read through `from` itself, so its own
+/// handovers carry along (`A → B → C`).
+///
+/// Like [`Restored`] it is assumed per address, where a read meets the set
+/// (`View::shares`): the sets are quantified, and no ground term names the
+/// addresses they share.
+#[derive(Debug, Clone)]
+struct Handover {
+    pub(crate) id: HandoverId,
+    pub(crate) from: QuantChunk,
+    pub(crate) kept: QuantChunk,
+    /// The exhale's path condition: both sets were held only there.
+    pub(crate) pc: Cube,
+}
+
 impl TakeId {
     pub(crate) fn fresh(ctx: &mut VerifyContext<'_>) -> TakeId {
         TakeId(ctx.fresh_heap_id())
