@@ -286,7 +286,8 @@ pub(crate) fn format_inst(
 /// region it was built in: an `old[L]` read fails where `L` may not have been
 /// reached. A read passes its effective pc; an instruction that builds a new
 /// heap passes [`EvalState::region`], so the result's region is the block's
-/// cube.
+/// cube. That holds for the empty heap too: a heap built on it in a block (a
+/// loop head's invariant inhale) exists only where that block is reached.
 pub(crate) fn get_heap(
     ctx: &mut VerifyContext<'_>,
     state: &EvalState,

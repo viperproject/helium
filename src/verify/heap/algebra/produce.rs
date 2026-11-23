@@ -236,8 +236,10 @@ pub(super) fn assume_location_axioms(ctx: &mut VerifyContext<'_>, h: &Heap) {
     // which is empty in a join phase, where a merge and a loop head's invariant
     // inhale build their heaps. A contradiction means the chunk is unreachable
     // here, so it states nothing.
-    let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> =
-        chunks.iter().map(|c| c.guard.within(ctx, &h.region)).collect();
+    let cubes: Vec<Option<Vec<(egg::Id, Polarity)>>> = chunks
+        .iter()
+        .map(|c| c.guard.within(ctx, &h.region))
+        .collect();
 
     // Bound: perm ≤ b at each bounded location — assumed **per leaf** of the
     // (possibly branch-structured) perm, so a join `Select` never materializes.
