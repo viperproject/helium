@@ -1,25 +1,34 @@
-//! Receiver injectivity of a quantified permission.
+//! Well-formedness of a quantified permission, and the chunk set it denotes.
 //!
-//! `forall xs :: c(xs) ==> acc(f(e(xs)), p(xs))` is well-formed only if distinct
-//! instances that actually hold permission name distinct locations:
+//! `forall xs :: c(xs) ==> acc(f(e(xs)), p(xs))` is well-formed when, for every
+//! binding (checked in this order, as Silicon does):
+//!
+//! 1. its body is **well-defined**: `c` everywhere, `e` and `p` where `c` holds
+//!    (divisors, indices, map keys, callees' preconditions);
+//! 2. its amount is **non-negative** where `c` holds;
+//! 3. distinct instances that hold permission name distinct locations
+//!    (**receiver injectivity**):
 //!
 //! ```text
 //! forall xs1, xs2 ::
 //!     c(xs1) ∧ c(xs2) ∧ 0 < p(xs1) ∧ 0 < p(xs2) ∧ f(e(xs1)) = f(e(xs2))  ==>  xs1 = xs2
 //! ```
 //!
-//! This is what later licenses the inverse-function view of the chunk set (one
-//! binding per location). Without it, an inhale could split one location's
-//! permission across several bindings and the inverse axiom would assume `false`.
+//! Injectivity is what later licenses the inverse-function view of the chunk
+//! set (one binding per location). Without it, an inhale could split one
+//! location's permission across several bindings and the inverse axiom would
+//! assume `false`. Well-definedness is what lets every later instance of the
+//! body (`eval_qp_instance`) skip its side conditions.
 //!
-//! The universal is proven by **skolemization**: both binder tuples are fresh
-//! constants, the antecedents go into the path condition, and the binder
-//! equalities are the goals.
+//! All three are proven by **skolemization** in one scratch graph
+//! ([`check_qp_well_formed`]): the binder tuples are fresh constants, the
+//! antecedents go into the path condition, and the side conditions, the sign
+//! and the binder equalities are the goals.
 //!
-//! The antecedent compares the **addresses**, as Viper does. Address functions
-//! are injective (`rewrite::address_injectivity_rule`), so the prover gets the
-//! arguments' equality (`e(xs)`, the receiver of a field, the argument tuple of
-//! a predicate) from it.
+//! The injectivity antecedent compares the **addresses**, as Viper does.
+//! Address functions are injective (`rewrite::address_injectivity_rule`), so
+//! the prover gets the arguments' equality (`e(xs)`, the receiver of a field,
+//! the argument tuple of a predicate) from it.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -27,8 +36,9 @@ use std::sync::Arc;
 use egg::Id;
 
 use crate::verify::eval::{
-    EvalState, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
+    EvalState, eval_body_checked, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
 };
+use crate::verify::heap::QpCheck;
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
 use crate::vmir;
@@ -59,34 +69,57 @@ pub(super) struct QpInstance {
 type Instantiate<'s> =
     dyn FnMut(&mut VerifyContext<'_>, &[Id]) -> Result<QpInstance, VerifyError> + 's;
 
-/// Prove the receiver injectivity of `q` under the path condition `pc`, or fail
-/// with a [`VerifyError::SideCondition`].
+/// Prove that `q` (captured temps resolved through `caps`) is well-formed under
+/// the path condition `pc`, as far as `check` asks (see the module docs and
+/// [`QpCheck`]), or fail with the side condition that does not hold.
 ///
-/// Runs on a scratch e-graph: the fresh binders and both body instances exist
+/// Runs on a scratch e-graph: the fresh binders and the body instances exist
 /// only for this proof and must not leak into the live graph. The certificate
 /// recipe (if one is being built) is paused for the same reason, exactly as for
 /// a pure `forall`'s well-definedness check.
-fn check_qp_injectivity(
+fn check_qp_well_formed(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
+    caps: &[(usize, Id)],
     pc: &[(Id, Polarity)],
-    instantiate: &mut Instantiate<'_>,
+    check: QpCheck,
 ) -> Result<(), VerifyError> {
+    if check == QpCheck::Established {
+        return Ok(());
+    }
     ctx.pause_recipe(|ctx| {
-        ctx.with_scratch_graph(|ctx| check_injectivity_in_scratch(ctx, q, pc, instantiate))
+        ctx.with_scratch_graph(|ctx| check_well_formed_in_scratch(ctx, q, caps, pc, check))
     })
 }
 
-fn check_injectivity_in_scratch(
+fn check_well_formed_in_scratch(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
+    caps: &[(usize, Id)],
     pc: &[(Id, Polarity)],
-    instantiate: &mut Instantiate<'_>,
+    check: QpCheck,
 ) -> Result<(), VerifyError> {
+    // The first instance is evaluated with its side conditions discharged
+    // (well-definedness for an arbitrary binding); the second, for
+    // injectivity only, then needs none.
     let x1 = fresh_binders(ctx, q);
+    let i1 = if check == QpCheck::Body {
+        let i1 = eval_qp_instance_checked(ctx, caps, q, &x1, pc)?;
+        // Non-negative where the binding holds: `c(xs) ==> not(p(xs) < 0)`.
+        let mut lits = pc.to_vec();
+        lits.push((i1.cond, Polarity::Positive));
+        let p = i1.perm.to_id(ctx);
+        let zero = expr!(ctx, 0 / 1);
+        let goal = expr!(ctx, not({ p } < r { zero }));
+        if !ctx.prove_under_pc(goal, &lits) {
+            return Err(VerifyError::SideCondition("permission may be negative"));
+        }
+        i1
+    } else {
+        eval_qp_instance(ctx, caps, q, &x1, pc)?
+    };
     let x2 = fresh_binders(ctx, q);
-    let i1 = instantiate(ctx, &x1)?;
-    let i2 = instantiate(ctx, &x2)?;
+    let i2 = eval_qp_instance(ctx, caps, q, &x2, pc)?;
 
     // pc ++ antecedents: the order `prove_under_pc` (and the block scratch's
     // cube prefix test) expects, as in a pure `forall`'s WD check.
@@ -153,30 +186,6 @@ fn check_qp_contained(
 }
 
 /// One fresh constant per binder of `q`.
-/// Whether the amount of `q` (captured temps resolved through `caps`) is never
-/// negative where it holds: `forall xs :: c(xs) ==> not(p(xs) < 0)` under the
-/// path condition `pc`. Proven for fresh binders on a scratch graph, with the
-/// certificate recipe paused, as [`check_qp_injectivity`].
-pub(super) fn check_qp_nonnegative(
-    ctx: &mut VerifyContext<'_>,
-    q: &QuantChunks,
-    caps: &[(usize, Id)],
-    pc: &[(Id, Polarity)],
-) -> Result<bool, VerifyError> {
-    ctx.pause_recipe(|ctx| {
-        ctx.with_scratch_graph(|ctx| {
-            let xs = fresh_binders(ctx, q);
-            let inst = eval_qp_instance(ctx, caps, q, &xs, pc)?;
-            let mut lits = pc.to_vec();
-            lits.push((inst.cond, Polarity::Positive));
-            let p = inst.perm.to_id(ctx);
-            let zero = expr!(ctx, 0 / 1);
-            let goal = expr!(ctx, not({ p } < r { zero }));
-            Ok(ctx.prove_under_pc(goal, &lits))
-        })
-    })
-}
-
 fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
     q.bound
         .iter()
@@ -195,7 +204,7 @@ fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
 /// ```
 ///
 /// Its antecedent is the injectivity check's, which is what makes it
-/// consistent; so it must only be assumed once [`check_qp_injectivity`] passed
+/// consistent; so it must only be assumed once [`check_qp_well_formed`] passed
 /// under the same `pc`. Silicon's second axiom `f(e(inv(r))) = r` is left to the
 /// lookup, which conjoins it into the chunk's condition at the address it asks
 /// about.
@@ -391,9 +400,12 @@ fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
 /// another temp space or after the captured variables were reassigned. Body
 /// permission temps count from 0, so the frame starts with no permissions.
 ///
-/// The body holds only `Pure` and `Perm` instructions and its location is an
-/// address call (both guaranteed by `lower_quant_chunks`); anything else is a
-/// lowering bug and panics.
+/// The body holds `Pure` and `Perm` instructions, and the `Assert`/`Assume` of
+/// a call to a contract-bearing function; its location is an address call
+/// (both guaranteed by `lower_quant_chunks`). Anything else is a lowering bug
+/// and panics. Its side conditions and `Assert`s are not checked here: a set
+/// exists only once [`check_qp_well_formed`] showed them for an arbitrary
+/// binding (or its resource's own check did, see [`QpCheck`]).
 fn eval_qp_instance(
     ctx: &mut VerifyContext<'_>,
     caps: &[(usize, egg::Id)],
@@ -401,47 +413,108 @@ fn eval_qp_instance(
     binders: &[egg::Id],
     host_pc: &[(egg::Id, Polarity)],
 ) -> Result<QpInstance, VerifyError> {
-    // The instance only feeds proofs (injectivity, containment, a lookup's
+    // The instance only feeds proofs (well-formedness, containment, a lookup's
     // permission); its terms never enter a certificate, and its temps carry no
     // recipes. A read's certificate term is `lookup(seed, addr)`, built by the
     // `Deref` itself.
-    ctx.pause_recipe(|ctx| eval_qp_instance_unrecorded(ctx, caps, q, binders, host_pc))
+    ctx.pause_recipe(|ctx| {
+        let mut state = instance_frame(caps, q, binders);
+        for inst in &q.body.insts {
+            let pc_lits = body_inst_pc(ctx, &state, q, inst, host_pc);
+            match &inst.kind {
+                InstKind::Pure(ty, pi) => {
+                    let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
+                    state.push_val(id, ty.clone(), None);
+                }
+                InstKind::Perm(pi) => {
+                    let p = eval_perm_inst(ctx, &state, pi);
+                    state.push_perm(p, pi.clone());
+                }
+                // A callee's precondition: shown by the well-formedness check.
+                InstKind::Assert(_) => {}
+                // A callee's postcondition: it holds where the call is
+                // well-defined, which is what the pc (with the binding's
+                // condition) says.
+                InstKind::Assume(val) => {
+                    let id = state.get_val(ctx, val);
+                    ctx.assume_guarded(id, pc_lits.iter().rev().copied());
+                }
+                other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
+            }
+        }
+        Ok(instance_of(ctx, &state, q))
+    })
 }
 
-fn eval_qp_instance_unrecorded(
+/// [`eval_qp_instance`] with the body's side conditions discharged as it is
+/// evaluated ([`eval_body_checked`]): the instance at fresh `binders` that
+/// shows the body well-defined for every binding. The receiver and amount are
+/// checked only where the binding's condition holds ([`body_inst_pc`]).
+fn eval_qp_instance_checked(
     ctx: &mut VerifyContext<'_>,
     caps: &[(usize, egg::Id)],
     q: &vmir::QuantChunks,
     binders: &[egg::Id],
     host_pc: &[(egg::Id, Polarity)],
 ) -> Result<QpInstance, VerifyError> {
+    let mut state = instance_frame(caps, q, binders);
+    eval_body_checked(ctx, &mut state, &q.body.insts, &mut |ctx, state, inst| {
+        body_inst_pc(ctx, state, q, inst, host_pc)
+    })?;
+    Ok(instance_of(ctx, &state, q))
+}
+
+/// The body's frame at `binders`: the captures, then the binders.
+fn instance_frame(
+    caps: &[(usize, egg::Id)],
+    q: &vmir::QuantChunks,
+    binders: &[egg::Id],
+) -> EvalState {
     debug_assert_eq!(binders.len(), q.bound.len());
     let mut state = EvalState::frame_from_caps(q.binder_base, caps);
     for (&id, ty) in binders.iter().zip(q.bound.iter()) {
         state.push_val(id, ty.clone(), None);
     }
+    state
+}
 
-    for inst in &q.body.insts {
-        let mut pc_lits = host_pc.to_vec();
-        pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
-        match &inst.kind {
-            InstKind::Pure(ty, pi) => {
-                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                state.push_val(id, ty.clone(), None);
-            }
-            InstKind::Perm(pi) => {
-                let p = eval_perm_inst(ctx, &state, pi);
-                state.push_perm(p, pi.clone());
-            }
-            other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
-        }
-    }
-
-    Ok(QpInstance {
+/// The instance an evaluated body `state` denotes.
+fn instance_of(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    q: &vmir::QuantChunks,
+) -> QpInstance {
+    QpInstance {
         cond: state.get_val(ctx, &q.body.cond),
         addr: state.get_val(ctx, &q.body.loc),
-        perm: eval_perm_structural(ctx, &state, &q.body.perm),
-    })
+        perm: eval_perm_structural(ctx, state, &q.body.perm),
+    }
+}
+
+/// The path condition of one body instruction `inst`, evaluated in `state`
+/// under the host's `host_pc`: the host's, the instruction's own guards, and
+/// the binding's condition `c(xs)` once it is evaluated. The body evaluates the
+/// condition first, then the location and the amount, which Viper evaluates
+/// only where the condition holds (`forall xs :: c(xs) ==> acc(e(xs).f,
+/// p(xs))`): that guard is what lets `c(xs)` establish their well-definedness
+/// and their callees' postconditions.
+fn body_inst_pc(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    q: &vmir::QuantChunks,
+    inst: &vmir::Inst,
+    host_pc: &[(egg::Id, Polarity)],
+) -> Vec<(egg::Id, Polarity)> {
+    let mut pc = host_pc.to_vec();
+    pc.extend(pc_lits_raw(ctx, state, &inst.pc));
+    let cond_evaluated = match &q.body.cond {
+        Val::Temp(k) => *k < state.vals.len(),
+        Val::Literal(_) => true,
+    };
+    if cond_evaluated {
+        pc.push((state.get_val(ctx, &q.body.cond), Polarity::Positive));
+    }
+    pc
 }
 
 /// The permission a quantified chunk set holds at `addr`, gated by its presence
@@ -683,42 +756,20 @@ fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChu
 }
 
 /// The chunk set of `q` with its captured temps already resolved to `caps`:
-/// either from the live state ([`quant_chunk_of`]) or rebuilt from a resource
-/// footprint slot's recipes at a call site (`walk_footprint`). Proves the
-/// receiver injectivity under `pc_lits` and assumes the inverse axiom that
-/// proof licenses. The result carries no recipe; the caller sets one.
+/// either from the live state (an inhale or exhale of the set) or rebuilt from
+/// a resource footprint slot's recipes at a call site (`walk_footprint`).
+/// Proves what `check` asks of it under `pc_lits` ([`check_qp_well_formed`])
+/// and assumes the inverse axiom that injectivity licenses. The result carries
+/// no recipe; the caller sets one.
 pub(super) fn quant_chunk_from_caps(
     ctx: &mut VerifyContext<'_>,
     q: &Rc<vmir::QuantChunks>,
     caps: Rc<[(usize, egg::Id)]>,
     pc_lits: &[(egg::Id, Polarity)],
     value_map: egg::Id,
+    check: QpCheck,
 ) -> Result<QuantChunk, VerifyError> {
-    // Distinct bindings that hold permission must name distinct locations.
-    check_qp_injectivity(ctx, q, pc_lits, &mut |ctx, binders| {
-        eval_qp_instance(ctx, &caps, q, binders, pc_lits)
-    })?;
-    quant_chunk_injective(ctx, q, caps, pc_lits, value_map)
-}
-
-/// The chunk set of `q` at `caps` whose receiver injectivity is already
-/// established, so only the inverse axiom is assumed here.
-///
-/// The one such caller is a footprint slot *produced* by `walk_footprint`
-/// (inhale, unfold, from_snap): the resource's certificate walk proved
-/// injectivity for arbitrary arguments under the body's earlier conjuncts, and
-/// the produce assumes those conjuncts (the body boolean) under the same
-/// guard. It cannot re-prove it there, since the boolean is assumed only after
-/// all slots are walked. A *consumed* slot must not use this: there the
-/// boolean is asserted after the slots, and an inverse axiom assumed for a
-/// non-injective receiver would make that assertion vacuously provable.
-pub(super) fn quant_chunk_injective(
-    ctx: &mut VerifyContext<'_>,
-    q: &Rc<vmir::QuantChunks>,
-    caps: Rc<[(usize, egg::Id)]>,
-    pc_lits: &[(egg::Id, Polarity)],
-    value_map: egg::Id,
-) -> Result<QuantChunk, VerifyError> {
+    check_qp_well_formed(ctx, q, &caps, pc_lits, check)?;
     // One binding per location: assume the inverse axiom that names it.
     let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
     Ok(QuantChunk::unconditional(SetBody {

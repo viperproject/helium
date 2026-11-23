@@ -1,0 +1,10 @@
+// QP well-definedness: `xs[|xs|]` is out of bounds.
+//
+// Must FAIL (sequence index may be out of bounds). Silicon: "Index |xs| into
+// xs might exceed sequence length".
+field f: Int
+
+method cond_seq_index_out_of_bounds(xs: Seq[Int], s: Set[Ref])
+{
+  inhale forall x: Ref :: x in s && xs[|xs|] > 0 ==> acc(x.f)
+}

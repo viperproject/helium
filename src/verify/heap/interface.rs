@@ -45,8 +45,7 @@ use crate::verify::heap::algebra::{
     prove_perm_write, subtract_location, union_heaps,
 };
 use crate::verify::heap::quantified_permissions::{
-    check_qp_nonnegative, covered_by_sum, find_covering_qp, quant_chunk_from_caps,
-    quant_chunk_injective, take_from_qp, take_spread,
+    covered_by_sum, find_covering_qp, quant_chunk_from_caps, take_from_qp, take_spread,
 };
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Chunk, ChunkPerm, Heap, LocationKind};
@@ -102,22 +101,13 @@ pub(crate) enum Access {
 pub(crate) struct QuantSpec {
     pub(crate) q: Rc<vmir::QuantChunks>,
     pub(crate) caps: Rc<[(usize, egg::Id)]>,
-    pub(crate) injectivity: Injectivity,
+    /// What is still to be proven of it before it is added or taken.
+    pub(crate) check: QpCheck,
 }
 
 impl QuantSpec {
     pub(crate) fn kind(&self) -> LocationKind {
         LocationKind::from_addr_type(&self.q.loc_ty).expect("QP loc_ty must be Addr")
-    }
-
-    /// Whether the amount is never negative where the set holds:
-    /// `forall xs :: c(xs) ==> not(p(xs) < 0)` under `pc`.
-    pub(crate) fn prove_nonnegative(
-        &self,
-        ctx: &mut VerifyContext<'_>,
-        pc: &[(egg::Id, Polarity)],
-    ) -> Result<bool, VerifyError> {
-        check_qp_nonnegative(ctx, &self.q, &self.caps, pc)
     }
 }
 
@@ -133,16 +123,26 @@ impl ChunkPerm {
     }
 }
 
-/// Whether a chunk set's receiver injectivity still has to be proven.
+/// What is still to be proven of a chunk set's well-formedness before it is
+/// added or taken (see `quantified_permissions`: well-definedness of the body,
+/// a non-negative amount, receiver injectivity).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Injectivity {
-    /// Prove it under the operation's path condition.
-    Check,
-    /// Already proven: a footprint slot *produced* from a resource, whose
-    /// certificate proved it for arbitrary arguments under the body's earlier
-    /// conjuncts, which the produce assumes. Never valid for a consume: there
-    /// the conjuncts are asserted only after the slots, and an inverse axiom for
-    /// a non-injective receiver would make that assertion vacuous.
+pub(crate) enum QpCheck {
+    /// All of it, under the operation's path condition: a set stated in the
+    /// program here (an inhale, an exhale, a contract or resource body walked
+    /// as code).
+    Body,
+    /// Injectivity only: a footprint slot *consumed* at a call site. Its
+    /// well-definedness and amount were proven for arbitrary arguments when
+    /// the resource was checked, under its earlier conjuncts, which the consume
+    /// asserts after the slots. Injectivity must still be proven here: an
+    /// inverse axiom for a non-injective receiver would make that assertion
+    /// vacuous.
+    Injectivity,
+    /// Nothing: a footprint slot *produced* from a resource, whose certificate
+    /// proved all of it for arbitrary arguments under the body's earlier
+    /// conjuncts, which the produce assumes. Never valid for a consume (see
+    /// [`QpCheck::Injectivity`]).
     Established,
 }
 
@@ -223,14 +223,7 @@ impl Heap {
             }
             Access::Set(spec) => {
                 let kind = spec.kind();
-                let set = match spec.injectivity {
-                    Injectivity::Check => {
-                        quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, value.id)?
-                    }
-                    Injectivity::Established => {
-                        quant_chunk_injective(ctx, &spec.q, spec.caps, pc, value.id)?
-                    }
-                };
+                let set = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, value.id, spec.check)?;
                 let mut set = set;
                 set.recipe = value.recipe;
                 Ok(self.with_qp_chunk(&kind, set))
@@ -255,9 +248,9 @@ impl Heap {
                 ConsumeMode::Frame => self.frame_single(ctx, &loc, perm, pc),
             },
             Access::Set(spec) => {
-                assert_eq!(
-                    spec.injectivity,
-                    Injectivity::Check,
+                assert_ne!(
+                    spec.check,
+                    QpCheck::Established,
                     "a consumed chunk set must have its injectivity checked"
                 );
                 assert!(
@@ -270,7 +263,8 @@ impl Heap {
                 // then it carries a placeholder map that is never read.
                 let placeholder =
                     ctx.fresh_symbolic_value(Type::ValueMap(Box::new(spec.q.loc_ty.clone())));
-                let exhaled = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, placeholder)?;
+                let exhaled =
+                    quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, placeholder, spec.check)?;
                 let Some(i) = find_covering_qp(ctx, self, &kind, &exhaled)? else {
                     // No single set covers it: try all holders together. The
                     // exhaled set's values are then not tied to theirs yet (a

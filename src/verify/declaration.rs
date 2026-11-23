@@ -1,14 +1,14 @@
 use crate::dhash::HashMap;
 use crate::verify::eval::{
-    EvalState, OPERAND_RECIPE, collect_pc_lits, display_heaps, eval_perm, eval_perm_inst,
-    eval_perm_structural, eval_pure_inst, format_inst, get_heap, get_heap_unrehomed, pc_lits_raw,
-    perm_recipe,
+    EvalState, OPERAND_RECIPE, check_forall_wd, collect_pc_lits, display_heaps, eval_perm,
+    eval_perm_inst, eval_perm_structural, eval_pure_inst, format_inst, get_heap,
+    get_heap_unrehomed, pc_lits_raw, perm_recipe, pure_obligations,
 };
-use crate::verify::heap::{Access, ConsumeMode, Injectivity, Loc, QuantSpec, Value};
+use crate::verify::heap::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, Value};
 use std::rc::Rc;
 
 use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
-use crate::vmir::{CollKind, CollOp, MapOp, SeqOp};
+use crate::vmir::CollKind;
 use crate::{
     verify::{
         cert::{FunctionDefinition, ResourceDefinition},
@@ -323,7 +323,7 @@ fn eval_heap_inst(
         }
         HeapInst::AddForall { base, q, bind } => {
             let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
-            let spec = quant_spec_of(state, q, Injectivity::Check);
+            let spec = quant_spec_of(state, q);
             let value = match bind {
                 Bind::Fresh => {
                     debug_assert!(ctx.recipe.is_none(), "`with fresh` inside a resource body");
@@ -374,7 +374,7 @@ fn eval_heap_inst(
                     "quantified permission in a resource footprint",
                 ));
             }
-            let spec = quant_spec_of(state, q, Injectivity::Check);
+            let spec = quant_spec_of(state, q);
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let region = state.region(ctx);
             let base_h = get_heap(ctx, state, base, &region);
@@ -915,12 +915,12 @@ fn walk_qp_slot(
             let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| {
                 unreachable!("ReadHeap only consumes")
             });
-            // Injectivity was proven by the certificate walk; the body boolean
-            // assumed after the slots carries the facts it relied on.
+            // Well-formedness was proven by the certificate walk; the body
+            // boolean assumed after the slots carries the facts it relied on.
             let spec = QuantSpec {
                 q: q.clone(),
                 caps,
-                injectivity: Injectivity::Established,
+                check: QpCheck::Established,
             };
             let value = Value { id: map, recipe };
             *heap = heap.produce(ctx, Access::Set(spec), value.clone(), w.pc_lits)?;
@@ -930,7 +930,7 @@ fn walk_qp_slot(
             let spec = QuantSpec {
                 q: q.clone(),
                 caps,
-                injectivity: Injectivity::Check,
+                check: QpCheck::Injectivity,
             };
             let mode = if w.frame_only {
                 ConsumeMode::Frame
@@ -1849,116 +1849,10 @@ pub(crate) fn prepare_body(
     Ok(out)
 }
 
-/// Check the well-definedness of a `forall` **at the point it is encountered**,
-/// in a throwaway clone of the live e-graph.
-///
-/// Cloning (rather than seeding a blank graph) makes every ambient fact — the
-/// host's path condition, the assumed axioms, grafted certificates — available
-/// for free, with no seeding policy and no pollution of the real graph: whatever
-/// the binders' fresh values touch dies with the scratch graph.
-///
-/// The binders become fresh values while every enclosing value keeps its real
-/// e-class, so the body's side conditions are discharged *for an arbitrary
-/// binding*. Those conditions are exactly a pure expression's: `Div`/`Mod`
-/// divisors, and the `assert f#requires(..)` stitched at a call to a
-/// contract-bearing function. Body-local path conditions come along (short-circuit
-/// lowering emits them), so a guard proves its own consequent's WD:
-/// `forall x :: {f(x)} x != 0 ==> f(10 / x)` discharges the division under
-/// `<x != 0>`.
-///
-/// A nested `forall` is checked recursively here, with its encloser's binders
-/// already fresh, so no WD obligation survives into a recipe — instantiation runs
-/// inside a rewrite rule, where nothing can be proven.
-fn check_forall_wd(
-    ctx: &mut VerifyContext<'_>,
-    q: &vmir::Forall,
-    host: &EvalState,
-    host_pc: &[(egg::Id, Polarity)],
-) -> Result<(), VerifyError> {
-    // `ctx.egraph` is a scratch clone for the duration; the live graph, its
-    // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
-    // The certificate recipe (if one is being built) is paused: the WD walk's
-    // scratch evaluation must not mirror steps into the host's recipe.
-    ctx.pause_recipe(|ctx| {
-        ctx.with_scratch_graph(|ctx| check_forall_wd_in_scratch(ctx, q, host, host_pc))
-    })
-}
-
-fn check_forall_wd_in_scratch(
-    ctx: &mut VerifyContext<'_>,
-    q: &vmir::Forall,
-    host: &EvalState,
-    host_pc: &[(egg::Id, Polarity)],
-) -> Result<(), VerifyError> {
-    // Capture is implicit: the body indexes the *enclosing* value table directly,
-    // so the body's state is that table cut to the quantifier's frame — which
-    // starts at the `forall` step's own temp, shadowed by the first binder.
-    let mut state = host.frame_for(q);
-    for ty in q.bound.iter() {
-        let fresh = ctx.fresh_symbolic_value(ty.clone());
-        state.push_val(fresh, ty.clone(), None);
-    }
-
-    for inst in &q.body.insts {
-        // The body's own guards sit *under* the host's: a side condition must hold
-        // wherever the quantifier is stated, and wherever the body reaches it.
-        // `host_pc` came from a `collect_pc_lits` at the enclosing inst, so it
-        // already carries the ambient cube — the body's ambient *is* `host_pc`.
-        // Prepending the cube a second time here would break `cube_matches`'s
-        // length test and silently disable the block scratch.
-        let mut pc_lits = host_pc.to_vec();
-        pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
-
-        for (goal, err) in inst_obligations(ctx, &state, &inst.kind, &pc_lits) {
-            if !ctx.prove_under_pc(goal, &pc_lits) {
-                return Err(err);
-            }
-        }
-        match &inst.kind {
-            // A nested quantifier: check it under this level's fresh binders, then
-            // build its node like any other step.
-            InstKind::Pure(ty, pi @ PureInst::Forall(inner)) => {
-                check_forall_wd(ctx, inner, &state, &pc_lits)?;
-                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                state.push_val(id, ty.clone(), None);
-            }
-            InstKind::Pure(ty, pi) => {
-                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                state.push_val(id, ty.clone(), None);
-            }
-            // A callee's postcondition, stitched at the call: assume it under the
-            // guards it was emitted with.
-            InstKind::Assume(val) => {
-                let id = state.get_val(ctx, val);
-                ctx.assume_guarded(id, pc_lits.iter().rev().copied());
-            }
-            // A quantifier body is heap-free, hence permission-free.
-            InstKind::Perm(_) => {
-                return Err(VerifyError::Unimplemented(
-                    "permission instruction in a quantifier body",
-                ));
-            }
-            // A callee's precondition, stitched at the call site: the other half of
-            // a quantifier body's well-definedness, and the reason a WD check needs
-            // the *ambient* facts (the guard establishing it may be the body's own
-            // implication, or a fact the host already knows).
-            InstKind::Assert(val) => {
-                let id = state.get_val(ctx, val);
-                if !ctx.prove_under_pc(id, &pc_lits) {
-                    return Err(VerifyError::AssertionFailed);
-                }
-            }
-            InstKind::Refute(_) | InstKind::Heap(_) => {
-                return Err(VerifyError::Unimplemented("impure inst in a forall body"));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The chunk set a quantified permission denotes at this program point: its
-/// body plus the values its captured temps have in the live state.
-fn quant_spec_of(state: &EvalState, q: &vmir::QuantChunks, injectivity: Injectivity) -> QuantSpec {
+/// body plus the values its captured temps have in the live state, to be
+/// checked whole when it is added or taken ([`QpCheck::Body`]).
+fn quant_spec_of(state: &EvalState, q: &vmir::QuantChunks) -> QuantSpec {
     QuantSpec {
         q: Rc::new(q.clone()),
         caps: q
@@ -1966,7 +1860,8 @@ fn quant_spec_of(state: &EvalState, q: &vmir::QuantChunks, injectivity: Injectiv
             .into_iter()
             .map(|k| (k, state.vals[k]))
             .collect(),
-        injectivity,
+        // Stated here, so nothing about it is established yet.
+        check: QpCheck::Body,
     }
 }
 
@@ -2599,19 +2494,6 @@ fn inst_obligations(
                 }
             }
         }
-        // A quantified permission's amount must not be negative at any binding
-        // it holds for: `forall xs :: c(xs) ==> not(p(xs) < 0)`. Proven for
-        // fresh binders, so a failure is a trivially-false goal.
-        InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
-            match quant_spec_of(state, q, Injectivity::Check).prove_nonnegative(ctx, pc_lits) {
-                Ok(true) => vec![],
-                Ok(false) => vec![(
-                    expr!(ctx, false),
-                    VerifyError::SideCondition("permission may be negative"),
-                )],
-                Err(e) => vec![(expr!(ctx, false), e)],
-            }
-        }
         // `not(perm < 0)` desugared to an `Ite`. Applies to a location combine, a
         // resource inhale/exhale, and fold/unfold (a consuming op with a negative
         // scale would flip `heap_subtract` into permission fabrication).
@@ -2654,80 +2536,10 @@ fn inst_obligations(
                 VerifyError::SideCondition("permission may be negative"),
             )]
         }
-        // `not(divisor == 0)` desugared to an `Ite`. The divisor is homogeneous
-        // with the result (casts), so the VMIR result type gives the zero's type.
-        InstKind::Pure(ty, PureInst::Binary(op, _, r)) if op.is_div_or_mod() => {
-            let rv = state.get_val(ctx, r);
-            let zero = zero_of(ctx, ty);
-            // Divisor must be non-zero: not (divisor == 0).
-            let goal = expr!(ctx, not({ rv } == { zero }));
-            vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
-        }
-
-        // A map lookup `m[k]` needs `k in m`, i.e. `k in domain(m)`.
-        InstKind::Pure(
-            _,
-            PureInst::Coll {
-                tys,
-                op: CollOp::Map(MapOp::Lookup),
-                args: val,
-            },
-        ) => {
-            let m = state.get_val(ctx, &val[0]);
-            let k = state.get_val(ctx, &val[1]);
-            let domain = ctx.add(Symbolic::Coll(
-                tys.clone(),
-                MapOp::Domain.into(),
-                Box::new([m]),
-            ));
-            let present = ctx.add(Symbolic::Coll(
-                Box::new([tys[0].clone()]),
-                vmir::SetOp::Contains.into(),
-                Box::new([domain, k]),
-            ));
-            vec![(
-                present,
-                VerifyError::SideCondition("map may not contain the key"),
-            )]
-        }
-        InstKind::Pure(
-            _,
-            PureInst::Coll {
-                tys,
-                op: op @ CollOp::Seq(_),
-                args: val,
-            },
-        ) if op.has_side_condition() => {
-            // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
-            let s = state.get_val(ctx, &val[0]);
-            let i = state.get_val(ctx, &val[1]);
-            let len = ctx.add(Symbolic::Coll(
-                tys.clone(),
-                SeqOp::Len.into(),
-                Box::new([s]),
-            ));
-            let lower = expr!(ctx, not({ i } <i 0));
-            let upper = expr!(ctx, { i } < i { len });
-            vec![
-                (
-                    lower,
-                    VerifyError::SideCondition("sequence index may be negative"),
-                ),
-                (
-                    upper,
-                    VerifyError::SideCondition("sequence index may be out of bounds"),
-                ),
-            ]
-        }
+        // A pure expression's own side conditions: a divisor, a map key, a
+        // sequence index (shared with the quantifier bodies' checked walk).
+        InstKind::Pure(ty, pi) => pure_obligations(ctx, state, ty, pi),
         _ => vec![],
-    }
-}
-
-/// Zero literal of the given numeric type (`Real` fallback for non-numeric).
-fn zero_of(ctx: &mut VerifyContext<'_>, ty: &Type) -> egg::Id {
-    match ty {
-        Type::Int => ctx.add(Symbolic::Lit(Literal::Int(num::BigInt::from(0)))),
-        _ => expr!(ctx, 0 / 1),
     }
 }
 

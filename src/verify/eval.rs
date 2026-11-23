@@ -16,8 +16,8 @@ use crate::{
         lang::Symbolic,
     },
     vmir::{
-        self, BinOp, Declaration, HeapInst, HeapVal, Inst, InstKind, MemberId, PathConds, Polarity,
-        PureInst, Type, Val,
+        self, BinOp, CollOp, Declaration, HeapInst, HeapVal, Inst, InstKind, Literal, MapOp,
+        MemberId, PathConds, Polarity, PureInst, SeqOp, Type, Val,
     },
 };
 
@@ -355,6 +355,216 @@ pub(crate) fn pc_lits_raw(
         .iter()
         .map(|(v, p)| (state.get_val(ctx, v), *p))
         .collect()
+}
+
+/// The side conditions of a pure instruction, as `(goal, error)` pairs that
+/// must each be proven under its path condition: a non-zero divisor, a map key
+/// in the map's domain, a sequence index in range. Callees' preconditions are
+/// not here: the lowering stitches them in as `Assert`s.
+///
+/// Shared by every body walk (the per-instruction obligations of
+/// `declaration.rs`) and by the checked walk of a quantifier's body
+/// ([`eval_body_checked`]), so the two cannot disagree on what a pure
+/// expression needs.
+pub(crate) fn pure_obligations(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    ty: &Type,
+    pi: &PureInst,
+) -> Vec<(egg::Id, VerifyError)> {
+    match pi {
+        // `not(divisor == 0)`. The divisor is homogeneous with the result
+        // (casts), so the VMIR result type gives the zero's type.
+        PureInst::Binary(op, _, r) if op.is_div_or_mod() => {
+            let rv = state.get_val(ctx, r);
+            let zero = match ty {
+                Type::Int => ctx.add(Symbolic::Lit(Literal::Int(num::BigInt::from(0)))),
+                _ => expr!(ctx, 0 / 1),
+            };
+            let goal = expr!(ctx, not({ rv } == { zero }));
+            vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
+        }
+        // A map lookup `m[k]` needs `k in domain(m)`.
+        PureInst::Coll {
+            tys,
+            op: CollOp::Map(MapOp::Lookup),
+            args: val,
+        } => {
+            let m = state.get_val(ctx, &val[0]);
+            let k = state.get_val(ctx, &val[1]);
+            let domain = ctx.add(Symbolic::Coll(
+                tys.clone(),
+                MapOp::Domain.into(),
+                Box::new([m]),
+            ));
+            let present = ctx.add(Symbolic::Coll(
+                Box::new([tys[0].clone()]),
+                vmir::SetOp::Contains.into(),
+                Box::new([domain, k]),
+            ));
+            vec![(
+                present,
+                VerifyError::SideCondition("map may not contain the key"),
+            )]
+        }
+        PureInst::Coll {
+            tys,
+            op: op @ CollOp::Seq(_),
+            args: val,
+        } if op.has_side_condition() => {
+            // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
+            let s = state.get_val(ctx, &val[0]);
+            let i = state.get_val(ctx, &val[1]);
+            let len = ctx.add(Symbolic::Coll(
+                tys.clone(),
+                SeqOp::Len.into(),
+                Box::new([s]),
+            ));
+            let lower = expr!(ctx, not({ i } <i 0));
+            let upper = expr!(ctx, { i } < i { len });
+            vec![
+                (
+                    lower,
+                    VerifyError::SideCondition("sequence index may be negative"),
+                ),
+                (
+                    upper,
+                    VerifyError::SideCondition("sequence index may be out of bounds"),
+                ),
+            ]
+        }
+        _ => vec![],
+    }
+}
+
+/// The path condition of one instruction of a quantifier's body, given the
+/// body state it is evaluated in (see [`eval_body_checked`]).
+pub(crate) type BodyPc<'a> =
+    dyn FnMut(&mut VerifyContext<'_>, &EvalState, &Inst) -> Vec<(egg::Id, Polarity)> + 'a;
+
+/// Evaluate a quantifier's body `insts` into `state` (whose binders are fresh
+/// values) while discharging what makes it well-defined, so the body is shown
+/// well-defined **for an arbitrary binding**: each instruction's
+/// [`pure_obligations`], and the `assert f#requires(..)` stitched at a call to
+/// a contract-bearing function. A callee's postcondition (`Assume`) is assumed
+/// under the same pc. A nested `forall` is checked by [`check_forall_wd`].
+///
+/// `pc_of` gives each instruction's path condition: the host's plus the body's
+/// own guards (short-circuit lowering emits them, so a guard proves its own
+/// consequent's WD), and for a quantified permission also the binding's
+/// condition. `Perm` instructions are evaluated; a pure `forall` has none.
+///
+/// The caller runs this on a scratch graph with the recipe paused: whatever
+/// the fresh binders touch must not reach the live graph or a certificate.
+pub(crate) fn eval_body_checked(
+    ctx: &mut VerifyContext<'_>,
+    state: &mut EvalState,
+    insts: &[Inst],
+    pc_of: &mut BodyPc<'_>,
+) -> Result<(), VerifyError> {
+    for inst in insts {
+        let pc_lits = pc_of(ctx, state, inst);
+        match &inst.kind {
+            InstKind::Pure(ty, pi) => {
+                for (goal, err) in pure_obligations(ctx, state, ty, pi) {
+                    if !ctx.prove_under_pc(goal, &pc_lits) {
+                        return Err(err);
+                    }
+                }
+                // A nested quantifier: checked under this level's fresh
+                // binders, then built like any other step.
+                if let PureInst::Forall(inner) = pi {
+                    check_forall_wd(ctx, inner, state, &pc_lits)?;
+                }
+                let (id, _) = eval_pure_inst(ctx, state, ty, pi, &pc_lits, None)?;
+                state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Perm(pi) => {
+                let p = eval_perm_inst(ctx, state, pi);
+                state.push_perm(p, pi.clone());
+            }
+            InstKind::Assume(val) => {
+                let id = state.get_val(ctx, val);
+                ctx.assume_guarded(id, pc_lits.iter().rev().copied());
+            }
+            // The reason a WD check needs the *ambient* facts: the guard that
+            // establishes a callee's precondition may be the body's own
+            // implication, or a fact the host already knows.
+            InstKind::Assert(val) => {
+                let id = state.get_val(ctx, val);
+                if !ctx.prove_under_pc(id, &pc_lits) {
+                    return Err(VerifyError::AssertionFailed);
+                }
+            }
+            InstKind::Refute(_) | InstKind::Heap(_) => {
+                return Err(VerifyError::Unimplemented(
+                    "impure inst in a quantifier body",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check the well-definedness of a `forall` **at the point it is encountered**,
+/// in a throwaway clone of the live e-graph.
+///
+/// Cloning (rather than seeding a blank graph) makes every ambient fact — the
+/// host's path condition, the assumed axioms, grafted certificates — available
+/// for free, with no seeding policy and no pollution of the real graph: whatever
+/// the binders' fresh values touch dies with the scratch graph.
+///
+/// The binders become fresh values while every enclosing value keeps its real
+/// e-class, so the body's side conditions are discharged *for an arbitrary
+/// binding* ([`eval_body_checked`]): `forall x :: {f(x)} x != 0 ==> f(10 / x)`
+/// discharges the division under `<x != 0>`.
+///
+/// A nested `forall` is checked recursively, with its encloser's binders
+/// already fresh, so no WD obligation survives into a recipe — instantiation runs
+/// inside a rewrite rule, where nothing can be proven.
+pub(crate) fn check_forall_wd(
+    ctx: &mut VerifyContext<'_>,
+    q: &vmir::Forall,
+    host: &EvalState,
+    host_pc: &[(egg::Id, Polarity)],
+) -> Result<(), VerifyError> {
+    // A quantifier body is heap-free, hence permission-free.
+    if q.body
+        .insts
+        .iter()
+        .any(|i| matches!(i.kind, InstKind::Perm(_)))
+    {
+        return Err(VerifyError::Unimplemented(
+            "permission instruction in a quantifier body",
+        ));
+    }
+    // `ctx.egraph` is a scratch clone for the duration; the live graph, its
+    // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
+    // The certificate recipe (if one is being built) is paused: the WD walk's
+    // scratch evaluation must not mirror steps into the host's recipe.
+    ctx.pause_recipe(|ctx| {
+        ctx.with_scratch_graph(|ctx| {
+            // Capture is implicit: the body indexes the *enclosing* value table
+            // directly, so the body's state is that table cut to the
+            // quantifier's frame — which starts at the `forall` step's own temp,
+            // shadowed by the first binder.
+            let mut state = host.frame_for(q);
+            for ty in q.bound.iter() {
+                let fresh = ctx.fresh_symbolic_value(ty.clone());
+                state.push_val(fresh, ty.clone(), None);
+            }
+            // The body's own guards sit *under* the host's. `host_pc` came from
+            // a `collect_pc_lits` at the enclosing inst, so it already carries
+            // the ambient cube — the body's ambient *is* `host_pc`. Prepending
+            // the cube a second time would break `cube_matches`'s length test
+            // and silently disable the block scratch.
+            eval_body_checked(ctx, &mut state, &q.body.insts, &mut |ctx, state, inst| {
+                let mut pc = host_pc.to_vec();
+                pc.extend(pc_lits_raw(ctx, state, &inst.pc));
+                pc
+            })
+        })
+    })
 }
 
 /// The **effective** path condition of an instruction:

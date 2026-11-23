@@ -1,0 +1,14 @@
+// QP well-definedness: the receiver calls `g`, whose precondition `i > 0`
+// fails at `i == 0`. (This used to panic: the body's precondition `assert`
+// was never discharged.)
+//
+// Must FAIL. Silicon: "Precondition of function g might not hold".
+field f: Int
+
+function g(i: Int): Ref
+  requires i > 0
+
+method receiver_call_precondition()
+{
+  inhale forall i: Int :: 0 <= i && i < 3 ==> acc(g(i).f)
+}

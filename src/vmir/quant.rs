@@ -155,7 +155,8 @@ pub struct QuantChunks {
     pub body: QuantBody,
 }
 
-/// The body of a [`QuantChunks`]: `Pure` and `Perm` instructions only, then the
+/// The body of a [`QuantChunks`]: `Pure` and `Perm` instructions, plus the
+/// `Assert`/`Assume` a call to a contract-bearing function stitches in, then the
 /// per-binding condition, location and permission.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuantBody {
