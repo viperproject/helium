@@ -1,0 +1,18 @@
+// An exhale in an arm that holds vacuously (its condition `x == 2` contradicts
+// `x == 1`) makes neither the arm nor the join dead. The first `if` builds the
+// working graph before the branch.
+//
+// Must FAIL (`assert false` after the join).
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method v4(x: Int, z: Int, r: Ref, c: Bool)
+  requires x == 1 && acc(r.v)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    exhale (x == 2) ==> acc(r.v, 2/1)
+  }
+  assert false
+}

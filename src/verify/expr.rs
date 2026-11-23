@@ -56,7 +56,7 @@ use crate::verify::context::VerifyContext;
 use crate::verify::lang::Symbolic;
 
 /// Anything that can intern a node. Lets [`expr!`] serve both the verifier
-/// (where `add` also mirrors into the block scratch — see
+/// (where `add` also mirrors into the working graph — see
 /// [`VerifyContext::add`]) and the rewrite appliers, which hold a bare `EGraph`
 /// and would otherwise have to keep spelling nodes by hand.
 pub(crate) trait NodeSink {
@@ -64,8 +64,8 @@ pub(crate) trait NodeSink {
 }
 
 impl NodeSink for VerifyContext<'_> {
-    /// Routes through [`VerifyContext::add`], **not** `egraph.add` — the scratch
-    /// mirror and the fixpoint-cache invalidation live there.
+    /// Routes through [`VerifyContext::add`], **not** `egraph.add` — the
+    /// working-graph mirror and the fixpoint-cache invalidation live there.
     fn node(&mut self, n: Symbolic) -> egg::Id {
         self.add(n)
     }

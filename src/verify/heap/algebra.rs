@@ -1140,8 +1140,8 @@ pub(crate) fn heap_subtract_inner(
         // cannot be exhaled from an empty location.
         // Ask the pc-alias sum *before* the zero-demand probe. Both rungs answer a
         // ground miss, but their costs have inverted: the partner lookup now reads
-        // the block scratch (a `find` per chunk) while the probe assumes the pc on
-        // a clone and saturates it — 1.8s of `enum_v8_p1` over 16 calls. A census
+        // the working graph (a `find` per chunk) while the probe assumes the pc and
+        // saturates — 1.8s of `enum_v8_p1` over 16 calls. A census
         // of every cold consume event in the corpus found the probe closing **0 of
         // 261**, and the alias leg resolving all 398, so this is the likely answer
         // first rather than a new one.
@@ -1413,7 +1413,10 @@ fn debit_wildcard_walk(
             ctx.union(held_value, needed_value);
             let remainder = ctx.fresh_wildcard();
             let lt = expr!(ctx, { remainder } < r { held_id });
-            ctx.assume_all_guarded([lt], pc_lits);
+            // Innermost-first, as `assume_all_guarded` expects (`pc_lits` is
+            // outermost-first: cube, then delta).
+            let guards: Vec<_> = pc_lits.iter().rev().copied().collect();
+            ctx.assume_all_guarded([lt], &guards);
             (ChunkPerm::wild_leaf(remainder), held_value, None)
         }
         ChunkPerm::Select { cond, then, els } => {
@@ -2515,8 +2518,8 @@ mod tests {
 /// graph — the address `add`ed for the read is congruent to a held chunk's
 /// address. Zero extra cost, no clone.
 ///
-/// Slow path (a miss, and only then): clone, assume the path condition, and
-/// saturate. An assumed `x == y` fires `eq-true-union`, congruence then merges
+/// Slow path (a miss, and only then): assume the path condition in a probe of
+/// ground (under a checkpoint) and saturate. An assumed `x == y` fires `eq-true-union`, congruence then merges
 /// `f(x)` and `f(y)`, so the chunk `acc(x.f)` answers a read of `y.f` — which is
 /// what lets a predicate body like `acc(x.f) && x == y && y.f == 10` frame its
 /// `y.f` deref.
@@ -2538,22 +2541,9 @@ pub(crate) fn chunk_under_pc<'c>(
     if pc_lits.is_empty() {
         return None;
     }
-    let mut probe = ctx.egraph.clone();
-    for (id, pol) in pc_lits {
-        let want_true = matches!(pol, Polarity::Positive);
-        // An unsatisfiable path condition makes every read vacuous — leave
-        // the resolution to the (vacuous-pc) obligation check, don't invent
-        // a chunk here.
-        if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
-            return None;
-        }
-        let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
-        probe.union(*id, lit);
-    }
-    probe.rebuild();
-    let probe = ctx.run_probe(probe);
-    let canon = probe.find(addr);
-    chunks.iter().find(move |c| probe.find(c.addr) == canon)
+    // An unsatisfiable path condition makes every read vacuous — leave the
+    // resolution to the (vacuous-pc) obligation check, don't invent a chunk here.
+    pc_aliases(ctx, chunks, addr, pc_lits)?.next()
 }
 
 /// The chunks that alias `addr` **only under `pc_lits`** — pc-equal but not
@@ -2571,16 +2561,17 @@ pub(crate) fn pc_alias_partners(
     if pc_lits.is_empty() {
         return Vec::new();
     }
-    // Inside a method block the answer is already sitting in the block scratch: it is
-    // ground with this block's cube assumed and saturated, warm from the sufficiency
-    // proof that got us here. Reading the coincidence off it costs a `find` per
-    // chunk, where the clone+saturate below is a full probe — half of every probe
-    // saturation on the enum grid was this one lookup (40 of `enum_v8_p1`'s 80,
-    // 16.8s of its 70.5s). Measured to return the identical partner set on every
-    // call it was asked (55/55 across `structs_enums` and `enum_v5_p1`).
+    // Inside a method block the answer is already sitting in the working graph: it
+    // holds this block's cube and the facts of the blocks dominating it, saturated,
+    // warm from the sufficiency proof that got us here. Reading the coincidence off
+    // it costs a `find` per chunk, where the ground probe below saturates — half of
+    // every probe saturation on the enum grid was this one lookup (40 of
+    // `enum_v8_p1`'s 80, 16.8s of its 70.5s). Measured to return the identical
+    // partner set on every call it was asked (55/55 across `structs_enums` and
+    // `enum_v5_p1`).
     //
     // Only when the instruction's pc *is* the block cube: a wider pc would ask the
-    // scratch about literals it never assumed.
+    // working graph about literals it never assumed.
     if ctx.cube_matches(pc_lits)
         && let Some(partners) =
             ctx.scratch_alias_partners(addr, &chunks.iter().map(|c| c.addr).collect::<Vec<_>>())
@@ -2588,25 +2579,38 @@ pub(crate) fn pc_alias_partners(
         return partners;
     }
     let ground = ctx.egraph.find(addr);
-    let mut probe = ctx.egraph.clone();
-    for (id, pol) in pc_lits {
-        let want_true = matches!(pol, Polarity::Positive);
-        // Unsatisfiable pc: the consume is vacuous, so inventing partners would
-        // only mask that — leave it to the (vacuous-pc) obligation check.
-        if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
-            return Vec::new();
-        }
-        let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
-        probe.union(*id, lit);
-    }
-    probe.rebuild();
-    let probe = ctx.run_probe(probe);
-    let canon = probe.find(addr);
-    chunks
-        .iter()
-        .filter(|c| probe.find(c.addr) == canon && ctx.egraph.find(c.addr) != ground)
+    // Unsatisfiable pc: the consume is vacuous, so inventing partners would only
+    // mask that — leave it to the (vacuous-pc) obligation check.
+    let Some(aliases) = pc_aliases(ctx, chunks, addr, pc_lits) else {
+        return Vec::new();
+    };
+    aliases
+        .filter(|c| ctx.egraph.find(c.addr) != ground)
         .map(|c| c.addr)
         .collect()
+}
+
+/// The chunks whose address is in `addr`'s class once `pc_lits` is assumed, in
+/// order, or `None` when `pc_lits` is unsatisfiable (see
+/// [`VerifyContext::classes_under_pc`]).
+fn pc_aliases<'c>(
+    ctx: &mut VerifyContext<'_>,
+    chunks: &'c [Chunk],
+    addr: egg::Id,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Option<impl Iterator<Item = &'c Chunk> + use<'c>> {
+    let ids: Vec<egg::Id> = std::iter::once(addr)
+        .chain(chunks.iter().map(|c| c.addr))
+        .collect();
+    let canons = ctx.classes_under_pc(pc_lits, &ids)?;
+    let canon = canons[0];
+    Some(
+        chunks
+            .iter()
+            .zip(canons.into_iter().skip(1))
+            .filter(move |&(_, c)| c == canon)
+            .map(|(chunk, _)| chunk),
+    )
 }
 
 /// Gate a permission amount by a path condition: `pc ? amount : 0`. The ground

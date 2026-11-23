@@ -1,0 +1,17 @@
+// Permission an arm inhales before jumping to a merge label does not reach the
+// merge: the other path holds only half. The first `if` builds the working
+// graph before the branch.
+//
+// Must FAIL (the write at `L`).
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method w3(r: Ref, x: Int, z: Int, c: Bool)
+  requires acc(r.v, 1/2)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) { inhale acc(r.v, 1/2); r.v := 3; goto L }
+  label L
+  r.v := 4
+}

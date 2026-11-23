@@ -1,0 +1,17 @@
+// Every arm of an else-chain establishes `x == 0`, so it holds after the joins
+// and the `refute` fails. The Z3 rung proves it from every arm; Silicon
+// rejects the method too. The first `if` builds the working graph before the
+// branch.
+//
+// Must FAIL (the `refute`).
+
+domain D { function f(x: Int): Int }
+
+method q4(x: Int, z: Int, a: Int)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (a == 0) { inhale x == 0; assert f(x) == f(0) }
+  elseif (a == 1) { inhale x == 0; assert f(x) == f(0) }
+  else { inhale x == 0; assert f(x) == f(0) }
+  refute x == 0
+}

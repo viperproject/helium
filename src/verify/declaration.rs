@@ -273,7 +273,7 @@ fn pc_lits_raw(
 /// `Inst.pc` is a delta (see [`Sink::ambient`](crate::translate::sink)), so the
 /// ambient cube has to be prepended here. `ctx.current_cube()` *is* that ambient:
 /// it is set by `begin_block` before a block's body walk and cleared by
-/// `end_block` before its join walk, which is exactly the phase split the delta
+/// `enter_block` before its join walk, which is exactly the phase split the delta
 /// rule names — a join materializes its own cube literals, so there the ambient
 /// is empty and the delta is the whole pc.
 fn collect_pc_lits(
@@ -866,6 +866,23 @@ enum WildcardAs {
     One,
 }
 
+/// Run a certificate recipe `build` on ground and mirror what it released (the
+/// ids it merged with `true`, appended to `changed`) into the working graph: a
+/// recipe build adds to ground directly, past the `add`/`union` hooks.
+fn build_mirrored(
+    ctx: &mut VerifyContext<'_>,
+    changed: &mut Vec<egg::Id>,
+    build: impl FnOnce(
+        &mut egg::EGraph<Symbolic, crate::verify::analysis::ConstFold>,
+        &mut Vec<egg::Id>,
+    ) -> egg::Id,
+) -> egg::Id {
+    let start = changed.len();
+    let id = build(&mut ctx.egraph, changed);
+    ctx.note_released(&changed[start..]);
+    id
+}
+
 /// Graft a footprint slot's permission: [`eval_perm_structural`]'s descent, over a
 /// slot recipe instead of an [`EvalState`]. One wildcard is picked per `wildcard`
 /// **leaf** reached, eagerly — a leaf under a false guard still mints, and the
@@ -902,9 +919,9 @@ fn build_perm(
         wildcard_as: WildcardAs,
     ) -> ChunkPerm {
         match pv {
-            vmir::PermVal::Amount(r) => {
-                ChunkPerm::leaf(r.build(&mut ctx.egraph, resolve, pc, changed))
-            }
+            vmir::PermVal::Amount(r) => ChunkPerm::leaf(build_mirrored(ctx, changed, |eg, ch| {
+                r.build(eg, resolve, pc, ch)
+            })),
             // `WildcardAs::One` builds a **presence** indicator, not a share: it is
             // the literal `1`, with no wildcard left in it, so the leaf is concrete.
             vmir::PermVal::Wildcard => match wildcard_as {
@@ -920,7 +937,7 @@ fn build_perm(
     let mut built: Vec<ChunkPerm> = Vec::with_capacity(perm.steps.len());
     for step in &perm.steps {
         let vmir::PermInst::Ite(c, t, e) = step;
-        let c = c.build(&mut ctx.egraph, resolve, pc, changed);
+        let c = build_mirrored(ctx, changed, |eg, ch| c.build(eg, resolve, pc, ch));
         let t = leaf(ctx, t, &built, resolve, pc, changed, wildcard_as);
         let e = leaf(ctx, e, &built, resolve, pc, changed, wildcard_as);
         built.push(ChunkPerm::select(ctx, c, t, e));
@@ -1480,9 +1497,9 @@ fn walk_footprint(
         };
         let wc_slot = frame_only && slot_wildcard;
         let before = ctx.egraph.total_number_of_nodes();
-        let addr = slot
-            .addr
-            .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+        let addr = build_mirrored(ctx, &mut changed, |eg, ch| {
+            slot.addr.build(eg, resolve, pc_lits, ch)
+        });
         let wildcard_as = if wc_slot {
             WildcardAs::One
         } else {
@@ -1632,9 +1649,9 @@ fn walk_footprint(
     // `bool_guard`, not `pc_lits`: it is the path condition at every call site
     // (an `inhale` extends it with `0 < scale`, the others pass `pc_lits`
     // itself), so it is the tighter of the two and always a superset.
-    let bool_id = def
-        .bool
-        .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+    let bool_id = build_mirrored(ctx, &mut changed, |eg, ch| {
+        def.bool.build(eg, resolve, pc_lits, ch)
+    });
     match direction {
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {
@@ -2390,9 +2407,9 @@ pub(crate) fn prepare_body(
 }
 
 /// Check the well-definedness of a `forall` **at the point it is encountered**,
-/// in a throwaway clone of the live e-graph.
+/// in a throwaway state of the live e-graph, rolled back afterwards.
 ///
-/// Cloning (rather than seeding a blank graph) makes every ambient fact — the
+/// Probing the live graph (rather than seeding a blank graph) makes every ambient fact — the
 /// host's path condition, the assumed axioms, grafted certificates — available
 /// for free, with no seeding policy and no pollution of the real graph: whatever
 /// the binders' fresh values touch dies with the scratch graph.
@@ -2415,7 +2432,7 @@ fn check_forall_wd(
     host: &EvalState,
     host_pc: &[(egg::Id, Polarity)],
 ) -> Result<(), VerifyError> {
-    // `ctx.egraph` is a scratch clone for the duration; the live graph, its
+    // `ctx.egraph` is a scratch state for the duration; the live graph, its
     // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
     // The certificate recipe (if one is being built) is paused: the WD walk's
     // scratch evaluation must not mirror steps into the host's recipe.
@@ -2446,7 +2463,7 @@ fn check_forall_wd_in_scratch(
         // `host_pc` came from a `collect_pc_lits` at the enclosing inst, so it
         // already carries the ambient cube — the body's ambient *is* `host_pc`.
         // Prepending the cube a second time here would break `cube_matches`'s
-        // length test and silently disable the block scratch.
+        // length test and silently disable the working graph's alias lookup.
         let mut pc_lits = host_pc.to_vec();
         pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
 
@@ -2570,7 +2587,7 @@ fn walk_body(
             }
         }
         // A quantifier's own side conditions, discharged once per syntactic
-        // occurrence against fresh binders in a scratch clone (see
+        // occurrence against fresh binders in a scratch state (see
         // [`check_forall_wd`]). It happens here, not in the evaluator, because it
         // needs the path condition — and here it cannot be forgotten by one of the
         // three drivers. Axiom bodies never reach this walk: they stay trusted.
@@ -2617,6 +2634,16 @@ pub(crate) fn verify_method(
     let mut state = EvalState::new();
     let mut snap = Snapshotter::from_env(method_name);
     snap.snapshot(&ctx, &[], "init", None);
+    let preds: Vec<Vec<usize>> = method
+        .blocks
+        .iter()
+        .map(|b| match &b.preds {
+            vmir::Preds::Entry => vec![],
+            vmir::Preds::From(p) => vec![p.0],
+            vmir::Preds::Join { then_, els, .. } => vec![then_.0, els.0],
+        })
+        .collect();
+    ctx.begin_method(crate::verify::context::BlockOrder::new(&preds));
 
     // Block walker (Stage 3): evaluate blocks in stored order — which is
     // topological *and* the original emission order, so positional `EvalState`
@@ -2640,9 +2667,11 @@ pub(crate) fn verify_method(
         // `HeapInst::Merge` for a `Join`). Stage 3 threads the heap linearly via
         // the insts' explicit `base: HeapVal` refs, so there is nothing to do.
         // ───────────────────────────────────────────────────────────────────
-        // No scratch during the join phase: the cube's reach boolean is
-        // materialized *by* the join, so it isn't resolvable until join runs.
-        ctx.end_block();
+        // Close the working graph's scopes of blocks that do not dominate this
+        // one, and open its own. The join phase proves on ground: the cube's
+        // reach boolean is materialized *by* the join, so it isn't resolvable
+        // until the join runs.
+        ctx.enter_block(bid.0);
         state.join_arms_dead = match &block.preds {
             vmir::Preds::Join { then_, els, .. } => Some((
                 state.dead_blocks.contains(&then_.0),
@@ -2660,8 +2689,8 @@ pub(crate) fn verify_method(
             eval_method_inst,
             None,
         )?;
-        // Record this block's cube for the (experimental) per-block scratch. All
-        // body insts share it (vmir::Block::cube), so the scratch assumes it once.
+        // Record this block's cube for the working graph. All body insts share it
+        // (vmir::Block::cube), so the working graph assumes it once.
         let cube = pc_lits_raw(&mut ctx, &state, &block.cube);
         ctx.begin_block(cube);
         walk_body(
@@ -2700,7 +2729,7 @@ pub(crate) fn verify_method(
             state.dead_blocks.insert(bid.0);
         }
     }
-    ctx.end_block();
+    ctx.end_method();
     if let Some(t) = crate::verify::heap::MergeTrace::take() {
         eprintln!(
             "[merge-trace] {method_name}: selects_built={} zero_leaves={} max_depth={}",

@@ -1,0 +1,23 @@
+// A `goto` target inside an arm's dominator subtree (`P`) sees the arm's facts,
+// so both asserts there hold; the block that the join and `P` both reach (`E`)
+// does not. The first `if` builds the working graph before the branch.
+//
+// Must FAIL (the last assert).
+
+domain D { function f(x: Int): Int }
+
+method g2(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == 1
+    assert f(x) == f(1)
+    if (d) { goto P }
+  }
+  goto E
+  label P
+  assert x == 1
+  assert c
+  label E
+  assert x == 1
+}

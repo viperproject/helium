@@ -1,0 +1,20 @@
+// A fact on a `goto` exit out of a loop does not hold where that exit merges
+// with the loop's normal exit. The first `if` builds the working graph before
+// the branch.
+//
+// Must FAIL (the assert at `Out`).
+
+domain D { function f(x: Int): Int }
+
+method w4(x: Int, z: Int, n: Int)
+{
+  var i: Int := 0
+  if (x == z) { assert f(x) == f(z) }
+  while (i < n) invariant 0 <= i
+  {
+    if (i == 5) { inhale x == 9; assert f(x) == f(9); goto Out }
+    i := i + 1
+  }
+  label Out
+  assert x == 9
+}

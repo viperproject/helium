@@ -1,0 +1,15 @@
+// An exhale under `c` that draws on the alias `a == b` holding under `c` does
+// not assume `c`. The first `if` builds the working graph before the branch.
+//
+// Must FAIL (the assert after the exhale).
+
+domain D { function f(x: Int): Int }
+field v: Int
+
+method p6(a: Ref, b: Ref, c: Bool, x: Int, z: Int)
+  requires acc(a.v, 1/2) && acc(b.v, 1/2) && (c ==> a == b)
+{
+  if (x == z) { assert f(x) == f(z) }
+  exhale c ==> acc(b.v, 1/1)
+  assert c
+}

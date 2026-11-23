@@ -1,0 +1,22 @@
+// A block reached only by a `goto` out of an arm (`P`, emitted at the end of
+// the method) is dominated by the arm and sees its fact; the arm's join does
+// not. The first `if` builds the working graph before the branch.
+//
+// Must FAIL (the assert after the join).
+
+domain D { function f(x: Int): Int }
+
+method g1(x: Int, z: Int, c: Bool, d: Bool)
+{
+  if (x == z) { assert f(x) == f(z) }
+  if (c) {
+    inhale x == 1
+    assert f(x) == f(1)
+    if (d) { goto P }
+  }
+  assert x == 1
+  goto E
+  label P
+  assert x == 1
+  label E
+}

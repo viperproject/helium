@@ -1,28 +1,248 @@
-//! The prover: obligation discharge, and driving the per-block scratch e-graph
-//! (which lives in `context::scratch`, where only ground mirrors can write it).
+//! The prover: obligation discharge and the method's working e-graph.
 //!
-//! Split out of `context::mod` — same `VerifyContext`, second `impl` block.
+//! Split out of `context::mod` — same `VerifyContext`, second `impl` block. The
+//! working graph is a copy of ground taken once per method, scoped along the
+//! method's dominator tree, kept in sync with ground through the `add`/`union`
+//! hooks, and its id space is related to ground's by
+//! `watermark`/`map`/[`VerifyContext::tr`].
 //!
 //! `add` and `union` deliberately stay in `mod.rs`: each touches the e-graph and
-//! the fixpoint cache (engine state) *and* the scratch (prover state), so the
+//! the fixpoint cache (engine state) *and* the working graph (prover state), so the
 //! outer type keeps that coordination.
 
-use crate::verify::context::graph_utils;
+use crate::dhash::HashMap;
+
 use crate::{
     verify::{
         analysis::ConstFold,
-        context::{
-            VerifyContext, graph_inconsistent,
-            scratch::{BlockScratch, ScratchId},
-        },
+        context::{VerifyContext, graph_inconsistent, graph_utils},
         lang::Symbolic,
+        rewrite::{self, ScratchScope},
         stats,
     },
-    vmir::{Literal, Polarity},
+    vmir::{BinOp, Literal, Polarity},
 };
+use egg::Language as _;
 use z3::SatResult;
 
-/// How hard a decomposition's working graph has been run since its last
+type EGraph = egg::EGraph<Symbolic, ConstFold>;
+
+/// The method's **working graph**: where block obligations are proven.
+///
+/// It is a copy of ground taken once per method, on the first obligation that
+/// needs it, and then kept for the rest of the method. Its contents are organised
+/// by the method's dominator tree:
+///
+/// - the **base** (no scope) holds ground as it was when the copy was taken, plus
+///   everything mirrored into it since outside any scope: facts that hold on every
+///   path;
+/// - a **scope** is opened for a block whose facts must not outlive it (a branch
+///   arm: some block walked later is not dominated by it, see
+///   [`BlockOrder::needs_scope`]). The block's cube is assumed and its facts are
+///   assumed **unguarded** inside the scope; blocks it dominates are walked inside
+///   it and see all of that without re-deriving it. Leaving the block's dominator
+///   subtree rolls the scope back (an egg checkpoint) and re-asserts, in the
+///   enclosing scope, the **guarded** form of every fact recorded on ground while
+///   the scope was open — exactly what ground holds about those blocks — so the
+///   blocks after a join see the closed arm's facts the way ground shows them.
+///
+/// Invariant: every fact in the base or an open scope holds on every path to the
+/// block being walked. A block without a scope of its own puts its facts into the
+/// innermost open scope, which is sound because every block walked while that
+/// scope stays open is dominated by it.
+///
+/// Id-space handling: ids present when the copy was taken are identical in both
+/// graphs, so a ground id below `watermark` translates to itself. Ids minted after
+/// are mirrored through the `add`/`union` hooks into `map`, or imported on demand by
+/// [`VerifyContext::tr`] from `id_to_node` — the node minted at that exact
+/// uncanonical id, never a canonical-class representative. A map entry made inside
+/// a scope is removed with the scope (its target id is rolled back).
+pub(super) struct WorkGraph {
+    pub(super) egraph: EGraph,
+    /// ground id → working id, for mints since the copy.
+    map: HashMap<egg::Id, egg::Id>,
+    /// The keys of `map` in insertion order, so a scope can remove its own.
+    map_log: Vec<egg::Id>,
+    /// Ground id-space size when the copy was taken.
+    watermark: usize,
+    /// The `true` / `false` literals (same ids in both graphs when the copy was
+    /// taken). Canonicalize with `find`.
+    pub(super) true_id: egg::Id,
+    false_id: egg::Id,
+    /// The open scopes, outermost first.
+    scopes: Vec<Scope>,
+    /// Applier-memo scope of the base; each scope adds its own.
+    memo: u64,
+    /// Live-memo stamp when the copy was taken; live records before it hold here.
+    horizon: u64,
+    /// Changed since the last saturation / reduction.
+    pub(super) dirty: bool,
+    pub(super) dirty_reduce: bool,
+}
+
+struct Scope {
+    checkpoint: egg::Checkpoint,
+    /// The block the scope belongs to.
+    block: usize,
+    /// `map_log` length when the scope opened; restored on rollback.
+    map_len: usize,
+    /// `VerifyContext::facts` length when the scope was opened.
+    facts_len: usize,
+    /// The scope's applier-memo scope.
+    memo: u64,
+    /// `dirty` and `dirty_reduce` when the scope opened; restored on rollback.
+    dirty: bool,
+    dirty_reduce: bool,
+}
+
+/// Dominance over a method's blocks, in walk (stored, topological) order, and
+/// which blocks the walk has entered so far.
+pub(crate) struct BlockOrder {
+    /// Preorder number and the last preorder number of the subtree, per block, in
+    /// the dominator tree.
+    interval: Vec<(usize, usize)>,
+    /// Entered blocks, counted by preorder number (a Fenwick tree), so the
+    /// entered part of any dominator subtree is a range count.
+    entered: Vec<usize>,
+    /// Blocks entered so far.
+    n_entered: usize,
+}
+
+impl BlockOrder {
+    /// `preds[b]` are the predecessors of block `b`; every predecessor precedes its
+    /// successor.
+    pub(crate) fn new(preds: &[Vec<usize>]) -> Self {
+        let n = preds.len();
+        // Immediate dominators: in a topological order the dominators of a block
+        // form a chain ending in the nearest common dominator of its predecessors.
+        let mut idom: Vec<Option<usize>> = vec![None; n];
+        let mut depth = vec![0usize; n];
+        for b in 0..n {
+            let mut ps = preds[b].iter().copied();
+            let Some(first) = ps.next() else { continue };
+            let mut d = first;
+            for p in ps {
+                let mut p = p;
+                while d != p {
+                    if depth[d] >= depth[p] && d > p {
+                        d = idom[d].expect("non-entry block has a dominator");
+                    } else {
+                        p = idom[p].expect("non-entry block has a dominator");
+                    }
+                }
+            }
+            idom[b] = Some(d);
+            depth[b] = depth[d] + 1;
+        }
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut roots = Vec::new();
+        for (b, d) in idom.iter().enumerate() {
+            match *d {
+                Some(d) => children[d].push(b),
+                None => roots.push(b),
+            }
+        }
+        let mut interval = vec![(0, 0); n];
+        let mut next = 0;
+        let mut stack: Vec<(usize, bool)> = roots.into_iter().rev().map(|r| (r, false)).collect();
+        while let Some((b, done)) = stack.pop() {
+            if done {
+                interval[b].1 = next - 1;
+                continue;
+            }
+            interval[b].0 = next;
+            next += 1;
+            stack.push((b, true));
+            stack.extend(children[b].iter().rev().map(|&c| (c, false)));
+        }
+        BlockOrder {
+            interval,
+            entered: vec![0; n + 1],
+            n_entered: 0,
+        }
+    }
+
+    /// Record that the walk entered `block`. Blocks are entered in walk order,
+    /// each once.
+    pub(crate) fn enter(&mut self, block: usize) {
+        let mut i = self.interval[block].0 + 1;
+        while i < self.entered.len() {
+            self.entered[i] += 1;
+            i += i.isolate_lowest_one();
+        }
+        self.n_entered += 1;
+    }
+
+    /// Entered blocks with preorder number below `pre`.
+    fn entered_below(&self, pre: usize) -> usize {
+        let (mut i, mut n) = (pre, 0);
+        while i > 0 {
+            n += self.entered[i];
+            i -= i.isolate_lowest_one();
+        }
+        n
+    }
+
+    /// Blocks of `root`'s dominator subtree (`None`: all blocks) not yet entered.
+    fn remaining(&self, root: Option<usize>) -> usize {
+        match root {
+            None => self.interval.len() - self.n_entered,
+            Some(r) => {
+                let (lo, hi) = self.interval[r];
+                (hi + 1 - lo) - (self.entered_below(hi + 1) - self.entered_below(lo))
+            }
+        }
+    }
+
+    /// Whether `a` dominates `b` (reflexive).
+    pub(crate) fn dominates(&self, a: usize, b: usize) -> bool {
+        let (lo, hi) = self.interval[a];
+        (lo..=hi).contains(&self.interval[b].0)
+    }
+
+    /// Whether `block`, just entered with the innermost open scope belonging to
+    /// `outer` (`None`: the base), needs a scope of its own: whether a block walked
+    /// after it would still be walked inside `outer`'s scope without being
+    /// dominated by `block`. The blocks `block` dominates all follow it in a
+    /// topological order, so the question is whether `outer`'s subtree has more
+    /// blocks left to walk than `block`'s own: two range counts.
+    fn needs_scope(&self, block: usize, outer: Option<usize>) -> bool {
+        let (lo, hi) = self.interval[block];
+        self.remaining(outer) > hi - lo
+    }
+}
+
+impl WorkGraph {
+    /// Fast translate: `Some(working id)` for a mapped or pre-copy id; `None` when
+    /// a post-copy ground id is unmapped and so must be imported by
+    /// [`VerifyContext::tr`].
+    fn fast_translate(&self, g: egg::Id) -> Option<egg::Id> {
+        if let Some(&s) = self.map.get(&g) {
+            Some(s)
+        } else if usize::from(g) < self.watermark {
+            Some(g)
+        } else {
+            None
+        }
+    }
+
+    fn map_insert(&mut self, g: egg::Id, s: egg::Id) {
+        self.map.insert(g, s);
+        self.map_log.push(g);
+    }
+
+    /// Memo scopes for a run on this graph: the base's and every open scope's, so
+    /// instances built in an enclosing scope are remembered and those of a closed
+    /// one are forgotten with it.
+    fn memo_scopes(&self) -> Vec<ScratchScope> {
+        std::iter::once(self.memo)
+            .chain(self.scopes.iter().map(|s| s.memo))
+            .map(|id| ScratchScope::resume(id, self.horizon))
+            .collect()
+    }
+}
+
+/// How hard the decomposition's graph has been run since its last
 /// assumption — the escalation ladder [`VerifyContext::prove_by_ite_decomposition`]
 /// climbs when its chain stalls, cheapest rung first.
 ///
@@ -39,6 +259,85 @@ pub(super) enum Rung {
 }
 
 impl<'a> VerifyContext<'a> {
+    /// Translate a **ground** id into the working graph's id space. Identity
+    /// without a working graph. Fast path (a mapped or pre-copy id) is O(1);
+    /// otherwise the ground term at `g` is imported (its children translated,
+    /// then re-added).
+    pub(super) fn tr(&mut self, g: egg::Id) -> egg::Id {
+        self.tr_with(g, true)
+    }
+
+    /// [`Self::tr`] without the literal exception for `g` itself: the term `g`
+    /// was minted as, even when it is now the root of ground's `true` or `false`
+    /// class. Its children are translated by [`Self::tr`].
+    fn tr_term(&mut self, g: egg::Id) -> egg::Id {
+        self.tr_with(g, false)
+    }
+
+    fn tr_with(&mut self, g: egg::Id, literal_roots: bool) -> egg::Id {
+        // NB: **no** ground `find` here. Ground canonicalization is not
+        // meaning-preserving for the working graph: the first union that merges a
+        // term into the `true` class makes ground `find` return the `true` leader
+        // for it, so canonicalizing first would translate *every* such term to the
+        // working graph's `true` — silently turning each mirrored union/assume into
+        // `true == true`.
+        let Some(w) = self.work.as_ref() else {
+            return g;
+        };
+        // The one exception: the literals. `expr!(ctx, true)` is the canonical id
+        // of ground's `true` class, i.e. whichever node the class's root was
+        // minted as, and the root moves when a union makes another class the
+        // larger one. Translated as that node, it would be a class W need not know
+        // is `true`. So the current root of ground's `true` (`false`) class is
+        // W's `true` (`false`). Everything in that class holds unconditionally, so
+        // this is sound. It translates the root as the literal, not as its term:
+        // a fact about the term itself goes through [`Self::mirror_union`], which
+        // learns it with `tr_term`.
+        if literal_roots && g == self.egraph.find(g) {
+            if g == self.egraph.find(w.true_id) {
+                return w.true_id;
+            }
+            if g == self.egraph.find(w.false_id) {
+                return w.false_id;
+            }
+        }
+        if let Some(s) = w.fast_translate(g) {
+            return s;
+        }
+        // Miss: an unmirrored ground mint (recipe `build`s and rule runs add
+        // straight to `ctx.egraph`). Import it **faithfully** via `id_to_node(g)`,
+        // the node *minted at that id*: `self.egraph[g].nodes[0]` picks an arbitrary
+        // member of `g`'s canonical class, which is `Lit(true)` once any union
+        // merged `g` into the `true` class.
+        let node = self.egraph.id_to_node(g).clone();
+        let wnode = self.tr_children(node);
+        // A collection equality shares its class with the untyped equality in
+        // ground wherever it was built, also by a recipe build, which merges the
+        // two past the `union` hook; the import keeps that.
+        let untyped = match &wnode {
+            Symbolic::Coll(_, op, args) if op.is_eq() => Some([args[0], args[1]]),
+            _ => None,
+        };
+        let w = self.work.as_mut().unwrap();
+        let s = w.egraph.add(wnode);
+        if let Some(args) = untyped {
+            let eq = w.egraph.add(Symbolic::Binary(BinOp::Eq, args));
+            w.egraph.union(s, eq);
+        }
+        w.map_insert(g, s);
+        w.dirty = true;
+        w.dirty_reduce = true;
+        s
+    }
+
+    /// `node` with its children translated by [`Self::tr`].
+    fn tr_children(&mut self, mut node: Symbolic) -> Symbolic {
+        for c in node.children_mut() {
+            *c = self.tr(*c);
+        }
+        node
+    }
+
     /// Whether we are inside a method block's **body** walk (the join phase runs
     /// outside one — its cube's reach boolean is materialized *by* the join).
     pub(crate) fn in_block(&self) -> bool {
@@ -50,6 +349,339 @@ impl<'a> VerifyContext<'a> {
         &self.current_cube
     }
 
+    /// Assume `fact` in the working graph, guarded only by the part of `guards` (in
+    /// innermost-first fold order) beyond the current block's cube. Ground holds
+    /// every fact guarded; the working graph has the cube assumed, so it holds a
+    /// fact guarded only by conditions beyond the block cube. An intra-block
+    /// condition stays a guard, as the fact outlives the instruction in blocks the
+    /// current one dominates.
+    pub(super) fn work_assume(&mut self, fact: egg::Id, guards: &[(egg::Id, Polarity)]) {
+        if self.work.is_none() {
+            return;
+        }
+        let cube = self.current_cube.len();
+        let delta = match guards.len().checked_sub(cube) {
+            Some(n)
+                if guards[n..]
+                    .iter()
+                    .zip(self.current_cube.iter().rev())
+                    .all(|(g, c)| g == c) =>
+            {
+                &guards[..n]
+            }
+            _ => guards,
+        };
+        let mut imp = self.tr(fact);
+        let true_w = self.work.as_ref().unwrap().true_id;
+        for &(id, pol) in delta {
+            let c = self.tr(id);
+            let w = self.work.as_mut().unwrap();
+            imp = match pol {
+                Polarity::Positive => w.egraph.add(Symbolic::Ite([c, imp, true_w])),
+                Polarity::Negative => w.egraph.add(Symbolic::Ite([c, true_w, imp])),
+            };
+        }
+        let w = self.work.as_mut().unwrap();
+        w.egraph.union(imp, true_w);
+        w.dirty = true;
+        w.dirty_reduce = true;
+    }
+
+    /// Mirror a ground `add` that minted `node` at the fresh ground id
+    /// `ground_id` into the working graph, translating its children through
+    /// [`Self::tr`]. Only a fresh id names `node` itself: an `add` that finds the
+    /// node already present returns its class's canonical id, which may have been
+    /// minted as a different node (see [`Self::tr`]), so it is not mirrored.
+    pub(super) fn mirror_add(&mut self, ground_id: egg::Id, node: Symbolic) {
+        let wnode = self.tr_children(node);
+        let w = self.work.as_mut().unwrap();
+        let s = w.egraph.add(wnode);
+        w.map_insert(ground_id, s);
+        w.dirty = true;
+        w.dirty_reduce = true;
+    }
+
+    /// Mirror a ground union into the working graph. A same-typed conflict there
+    /// folds to `Inconsistent`, not a panic — that just makes the block's goals
+    /// vacuously provable.
+    ///
+    /// A side in ground's `true` (`false`) class makes the other side's own term
+    /// `true` (`false`) in W, translated by [`Self::tr_term`]: [`Self::tr`] would
+    /// turn a term that has become the root of that class into the literal and
+    /// the union into `true == true`. That happens to a released token a build
+    /// made the root, and to a replayed fact whose literal side was the root when
+    /// it was recorded but no longer is (the root has moved since). Ground's
+    /// `true` and `false` classes hold unconditionally, so this is sound.
+    pub(super) fn mirror_union(&mut self, a: egg::Id, b: egg::Id) {
+        let (lit_a, lit_b) = (self.literal_class(a), self.literal_class(b));
+        let unions = if lit_a.is_none() && lit_b.is_none() {
+            [Some((self.tr_term(a), self.tr_term(b))), None]
+        } else {
+            [
+                lit_b.map(|l| (self.tr_term(a), l)),
+                lit_a.map(|l| (self.tr_term(b), l)),
+            ]
+        };
+        let w = self.work.as_mut().unwrap();
+        for (x, y) in unions.into_iter().flatten() {
+            w.egraph.union(x, y);
+        }
+        w.dirty = true;
+        w.dirty_reduce = true;
+    }
+
+    /// W's `true` (`false`) when `g` is in ground's `true` (`false`) class.
+    fn literal_class(&self, g: egg::Id) -> Option<egg::Id> {
+        let w = self.work.as_ref().unwrap();
+        let root = self.egraph.find(g);
+        if root == self.egraph.find(w.true_id) {
+            Some(w.true_id)
+        } else if root == self.egraph.find(w.false_id) {
+            Some(w.false_id)
+        } else {
+            None
+        }
+    }
+
+    /// Record that a certificate build unioned each of `released` with `true` in
+    /// ground (a recipe build adds to `ctx.egraph` directly, past the `union`
+    /// hook): a fact like any other, so the working graph gets it too, also for a
+    /// token the build made the root of ground's `true` class (see
+    /// [`Self::mirror_union`]). A build also reports a collection equality it
+    /// merged with its untyped equality, which is no fact about the equality's
+    /// truth: only what ground holds true is recorded.
+    pub(crate) fn note_released(&mut self, released: &[egg::Id]) {
+        if self.work.is_none() {
+            return;
+        }
+        let true_ = expr!(self, true);
+        for &id in released {
+            if self.egraph.find(id) != self.egraph.find(true_) {
+                continue;
+            }
+            self.record_fact(id, true_);
+            self.mirror_union(id, true_);
+        }
+    }
+
+    /// Start walking a method whose blocks are ordered by `order`.
+    pub(crate) fn begin_method(&mut self, order: BlockOrder) {
+        self.end_method();
+        self.blocks = Some(order);
+    }
+
+    /// Finish the method: drop the working graph and the block state.
+    pub(crate) fn end_method(&mut self) {
+        if let Some(w) = self.work.take() {
+            rewrite::retire_scope(w.memo);
+            w.scopes.iter().for_each(|s| rewrite::retire_scope(s.memo));
+        }
+        self.blocks = None;
+        self.facts.clear();
+        self.current_block = None;
+        self.current_cube.clear();
+        self.in_block = false;
+        self.block_dead = false;
+    }
+
+    /// Enter block `block`, before its join phase: close the scopes of blocks that
+    /// do not dominate it and open its own if it needs one. Obligations of the join
+    /// phase are proven on ground (its cube's reach boolean is materialized *by*
+    /// the join), but what the join records is mirrored into the working graph.
+    pub(crate) fn enter_block(&mut self, block: usize) {
+        self.current_block = Some(block);
+        self.current_cube.clear();
+        self.in_block = false;
+        self.block_dead = false;
+        self.blocks.as_mut().unwrap().enter(block);
+        if self.work.is_none() {
+            return;
+        }
+        // Scopes nest along the dominator tree, so the ones to close are a suffix:
+        // everything above the innermost whose block dominates this one. Scanned
+        // from the top, so the scan costs what it closes.
+        let blocks = self.blocks.as_ref().unwrap();
+        let scopes = &self.work.as_ref().unwrap().scopes;
+        let mut first = scopes.len();
+        while first > 0 && !blocks.dominates(scopes[first - 1].block, block) {
+            first -= 1;
+        }
+        if first < scopes.len() {
+            self.close_scopes(first);
+        }
+        self.open_scope_if_needed(block);
+    }
+
+    /// Enter the body of the current block, under its control cube.
+    pub(crate) fn begin_block(&mut self, cube: Vec<(egg::Id, Polarity)>) {
+        self.block_dead = false;
+        self.current_cube = cube;
+        self.in_block = true;
+        if self.work.is_some() {
+            self.assume_cube();
+        }
+    }
+
+    fn open_scope_if_needed(&mut self, block: usize) {
+        let w = self.work.as_ref().unwrap();
+        let outer = w.scopes.last().map(|s| s.block);
+        if !self.blocks.as_ref().unwrap().needs_scope(block, outer) {
+            return;
+        }
+        let facts_len = self.facts.len();
+        let w = self.work.as_mut().unwrap();
+        let scope = Scope {
+            checkpoint: w.egraph.checkpoint(),
+            block,
+            map_len: w.map_log.len(),
+            facts_len,
+            memo: rewrite::new_scope_id(),
+            dirty: w.dirty,
+            dirty_reduce: w.dirty_reduce,
+        };
+        w.scopes.push(scope);
+        stats::bump(|s| s.work_scopes += 1);
+    }
+
+    /// Roll back the scopes from the `first`-th on (it and everything nested in
+    /// it) and hand the enclosing one every union recorded on ground while they
+    /// were open, in the form ground holds it: a fact of a closed block is guarded
+    /// by the block's path condition there, so it is learned as that implication.
+    /// Closing nested scopes together hands each fact over once, not once per
+    /// level.
+    fn close_scopes(&mut self, first: usize) {
+        let w = self.work.as_mut().unwrap();
+        let mut closed = w.scopes.split_off(first);
+        closed.iter().for_each(|s| rewrite::retire_scope(s.memo));
+        let scope = closed.swap_remove(0);
+        w.egraph.rollback(scope.checkpoint);
+        for g in w.map_log.drain(scope.map_len..) {
+            w.map.remove(&g);
+        }
+        w.dirty = scope.dirty;
+        w.dirty_reduce = scope.dirty_reduce;
+        let facts = self.facts[scope.facts_len..].to_vec();
+        stats::bump(|s| s.work_replayed_facts += facts.len() as u64);
+        for (a, b) in facts {
+            self.mirror_union(a, b);
+        }
+        // Outside every scope a recorded fact would never be replayed again.
+        if first == 0 {
+            self.facts.clear();
+        }
+        self.work.as_mut().unwrap().egraph.rebuild();
+    }
+
+    /// Record a union made on ground for the open scopes to replay when they
+    /// close; with none open, the working graph's base keeps it for good.
+    pub(super) fn record_fact(&mut self, a: egg::Id, b: egg::Id) {
+        if self.work.as_ref().is_some_and(|w| !w.scopes.is_empty()) {
+            self.facts.push((a, b));
+        }
+    }
+
+    /// Assume the current cube in the working graph; a contradiction makes the
+    /// block (and everything it dominates) unreachable.
+    fn assume_cube(&mut self) {
+        let true_g = expr!(self, true);
+        let false_g = expr!(self, false);
+        let cube = std::mem::take(&mut self.current_cube);
+        for (id, pol) in &cube {
+            let lit = if matches!(pol, Polarity::Positive) {
+                true_g
+            } else {
+                false_g
+            };
+            self.mirror_union(*id, lit);
+        }
+        self.current_cube = cube;
+        let w = self.work.as_mut().unwrap();
+        w.egraph.rebuild();
+        // `pc ⇒ false`, in its cheap *assume* form: a contradiction among the cube
+        // literals has surfaced as `true == false`. Recording it here decides the
+        // block's reachability once; every later obligation short-circuits at the
+        // top of `prove_under_pc`.
+        self.block_dead = graph_inconsistent(&w.egraph);
+    }
+
+    /// Build the working graph if absent: copy ground, open the current block's
+    /// scope if it needs one, assume the block cube.
+    pub(super) fn ensure_work(&mut self) {
+        if self.work.is_some() {
+            return;
+        }
+        let t_clone = std::time::Instant::now();
+        // The literals, minted before the copy so both graphs have them.
+        let true_id = expr!(self, true);
+        let false_id = expr!(self, false);
+        let egraph = self.egraph.clone();
+        // Id-space boundary = the size of the *id-indexed* node vector, i.e. the
+        // number of ids ever minted. Not `total_size()` (= `memo.len()`, which
+        // dedups and *shrinks* on a reduce): an under-count there pushes genuine
+        // pre-copy ids onto `tr`'s import path, and importing rebuilds an
+        // **unmerged** copy of a class whose ground merges the copy already had.
+        let watermark = egraph.nodes().len();
+        self.work = Some(WorkGraph {
+            egraph,
+            map: HashMap::default(),
+            map_log: Vec::new(),
+            watermark,
+            true_id,
+            false_id,
+            scopes: Vec::new(),
+            memo: rewrite::new_scope_id(),
+            horizon: rewrite::live_horizon(),
+            dirty: true,
+            dirty_reduce: true,
+        });
+        self.facts.clear();
+        if let Some(block) = self.current_block {
+            self.open_scope_if_needed(block);
+        }
+        self.assume_cube();
+        stats::bump(|s| s.graph_timing.0.scratch_clone += t_clone.elapsed().as_secs_f64());
+        stats::bump(|s| s.block_scratch_clones += 1);
+    }
+
+    /// Saturate the working graph under the full rule set if it changed since the
+    /// last saturation.
+    pub(super) fn saturate_work(&mut self) {
+        if !self.work.as_ref().is_some_and(|w| w.dirty) {
+            return;
+        }
+        let mut w = self.work.take().expect("working graph");
+        let scopes = w.memo_scopes();
+        let t = std::time::Instant::now();
+        let before = stats::with_stats(|s| s.sat_iterations);
+        w.egraph = graph_utils::saturate_flat(std::mem::take(&mut w.egraph), self.full_rules());
+        stats::bump(|s| s.block_scratch_saturations += 1);
+        stats::bump(|s| s.block_scratch_iterations += s.sat_iterations - before);
+        w.dirty = false;
+        w.dirty_reduce = false;
+        stats::bump(|s| s.graph_timing.0.scratch += t.elapsed().as_secs_f64());
+        drop(scopes);
+        self.work = Some(w);
+    }
+
+    /// Run only the terminating structural reductions on the working graph — what
+    /// **framing** needs: address matching wants snapshot towers collapsed, not the
+    /// full rule set.
+    pub(super) fn reduce_work(&mut self) {
+        if !self.work.as_ref().is_some_and(|w| w.dirty_reduce) {
+            return;
+        }
+        let mut w = self.work.take().expect("working graph");
+        let scopes = w.memo_scopes();
+        let t = std::time::Instant::now();
+        w.egraph = graph_utils::saturate_flat(std::mem::take(&mut w.egraph), self.reduce_rules());
+        // A reduce is not a saturation: leave `dirty` set so the next obligation
+        // still runs the full rule set.
+        w.dirty_reduce = false;
+        stats::bump(|s| s.graph_timing.0.scratch += t.elapsed().as_secs_f64());
+        drop(scopes);
+        self.work = Some(w);
+    }
+
     /// Prove `pc ⇒ goal` against the live e-graph, escalating through named
     /// tiers (cheapest first) and **memoizing** the result. In execution order,
     /// each named by the stat it bumps:
@@ -58,7 +690,7 @@ impl<'a> VerifyContext<'a> {
     ///    vacuously provable. Two `find`s, hence first: it is both the cheapest
     ///    verdict and the one that makes all further work pointless.
     /// 2. `dead_block` — the current block's control cube is unsatisfiable
-    ///    (`pc ⇒ false`), decided once when its scratch was built.
+    ///    (`pc ⇒ false`), decided when the cube was assumed in the working graph.
     /// 3. `goal_true` — the goal is *unconditionally* true, so the implication
     ///    holds whatever the pc is. Checked before the implication chain is
     ///    built, because building it allocates nodes and const-folding
@@ -66,10 +698,10 @@ impl<'a> VerifyContext<'a> {
     /// 4. `memo` — the implication itself is already `true` (a prior identical
     ///    obligation merged it, or it is trivial), or sits in `proven_imps`.
     /// 5. `saturate` — saturate the live graph (only **unconditional** facts
-    ///    live there) and re-check. No clone.
-    /// 6. `probe` — the only tier that clones: the block scratch, or (functions
-    ///    and resources, which have no CFG) a ground clone with the path condition
-    ///    assumed and saturated.
+    ///    live there) and re-check.
+    /// 6. `probe` — in a method block, the working graph; outside one (functions
+    ///    and resources, which have no CFG, and join phases), ground under a
+    ///    checkpoint with the path condition assumed and saturated.
     /// 7. `ite_decompose` — non-forking `ite`-goal decomposition on that probe,
     ///    see [`Self::prove_by_ite_decomposition`]. The last resort: there is
     ///    **no case split**, so a goal needing genuine reasoning-by-cases over
@@ -77,7 +709,7 @@ impl<'a> VerifyContext<'a> {
     ///
     /// In a block these last two are **one** step rather than two: the pc is not
     /// assumed by a loop of its own, it is handed to the decomposition *as* the
-    /// implication and telescoped there — see [`Self::prove_via_scratch`].
+    /// implication and telescoped there — see [`Self::prove_in_work`].
     ///
     /// On success the implication is merged with `true` in the live graph so the
     /// next identical obligation hits `memo`. (Tiers 1–5 already have it merged.)
@@ -100,7 +732,7 @@ impl<'a> VerifyContext<'a> {
         }
         // Dead block: the block's control cube is unsatisfiable, so nothing in it
         // is reachable and all its obligations hold vacuously. Decided once, when
-        // the scratch was built, instead of rediscovered per obligation.
+        // the cube was assumed, instead of rediscovered per obligation.
         if self.block_dead {
             stats::bump(|s| s.prove_dead_block += 1);
             return true;
@@ -132,90 +764,81 @@ impl<'a> VerifyContext<'a> {
             return true;
         }
 
-        // Inside a method block, discharge `probe`-tier proving against the per-block scratch
-        // graph (reused across the block's obligations) instead of cloning ground
-        // per obligation: it is warm, cube-assumed and kept in sync with ground, and
-        // its `tr` imports any ground operand it is missing.
-        //
-        // Functions/resources have no CFG — a whole-body scratch would just equal
-        // ground — so they keep the per-obligation clone path below.
+        // Inside a method block, discharge the `probe` tier against the working
+        // graph: it has the block cube assumed and every dominating block's facts
+        // unguarded, it is kept in sync with ground, and its `tr` imports any ground
+        // operand it is missing.
         if self.in_block {
             // Z3 is the last rung: it runs on ground plus the cube, never on the
-            // scratch (translation.typ, "Inputs").
-            let proven = self.prove_via_scratch(goal, pc_lits) || self.prove_by_z3(goal, pc_lits);
+            // working graph (translation.typ, "Inputs").
+            let proven = self.prove_in_work(goal, pc_lits) || self.prove_by_z3(goal, pc_lits);
             if proven {
-                // Export under the **full** path condition. `pc_lits` is only the
-                // instruction's delta; the block's cube is ambient — assumed by the
-                // scratch, absent from `imp`. Recording `imp` would publish a verdict
-                // that only holds under the cube as if it held under the delta alone,
-                // and for an empty delta that is the bare goal: a dead arm's
-                // `assert false` merged `false` with `true` in ground and poisoned
-                // every later block. Guarded by the cube it is exactly the fact the
-                // arm licenses (`¬b ⇒ false`), true even where the cube is unsat.
-                let cube = std::mem::take(&mut self.current_cube);
-                let (full_imp, full_empty) = if cube.is_empty() {
+                // Export under the **full** path condition: the proof used the
+                // block's cube, which the working graph assumes. An instruction's
+                // `pc_lits` already starts with the cube (`collect_pc_lits` prepends
+                // it to the instruction's delta), so prepending it here repeats a
+                // guard (kept as on main; harmless). Recording the goal without the
+                // cube would publish a verdict that only holds under the cube as if
+                // it held everywhere: a dead arm's `assert false` would merge `false`
+                // with `true` in ground and poison every later block. Guarded by the
+                // cube it is exactly the fact the arm licenses (`¬b ⇒ false`), true
+                // even where the cube is unsat.
+                let (full_imp, full_empty) = if self.current_cube.is_empty() {
                     (imp, pc_lits.is_empty())
                 } else {
-                    let lits: Vec<_> = cube.iter().chain(pc_lits).rev().copied().collect();
-                    (self.implication(goal, lits.into_iter()), false)
+                    let guards: Vec<_> = self.current_cube.iter().chain(pc_lits).copied().collect();
+                    (self.implication(goal, guards.iter().rev().copied()), false)
                 };
-                self.current_cube = cube;
                 self.record_proven(full_imp, true_, full_empty);
             }
             return proven;
         }
 
-        // Tier 3 shortcut: if every PC literal already carries its required polarity
-        // in the just-saturated live graph, assuming the PC adds nothing — skip
-        // straight to the `ite_decompose` tier. Only functions/resources reach
-        // here, and their `saturate` tier always ran the full rule set, so the premise
-        // (the live graph is fully saturated) holds.
-        if pc_lits.iter().all(|(id, pol)| {
-            matches!(
-                self.egraph[*id].data.known(),
-                Some(Literal::Bool(b)) if *b == matches!(pol, Polarity::Positive)
-            )
-        }) {
-            let probe = self.egraph.clone();
-            let proven = self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated)
-                || self.prove_by_z3(goal, pc_lits);
-            if proven {
-                self.record_proven(imp, true_, pc_lits.is_empty());
+        // Outside a block: probe ground itself under a checkpoint, with the pc
+        // assumed. The probe never touches live state (its every change is rolled
+        // back), so it needs no copy of the graph.
+        let proven = self.probe_ground(|ctx, mut probe| {
+            // Tier 3 shortcut: if every PC literal already carries its required
+            // polarity in the just-saturated live graph, assuming the PC adds
+            // nothing — skip straight to the `ite_decompose` tier.
+            let all_known = pc_lits.iter().all(|(id, pol)| {
+                matches!(
+                    probe[*id].data.known(),
+                    Some(Literal::Bool(b)) if *b == matches!(pol, Polarity::Positive)
+                )
+            });
+            if all_known {
+                return ctx.prove_by_ite_decomposition(probe, goal, Rung::Saturated);
             }
-            return proven;
-        }
-
-        // Tier 3: clone, assume the path condition, saturate the clone, check.
-        let mut probe = self.egraph.clone();
-        let true_p = probe.add(Symbolic::Lit(Literal::Bool(true)));
-        let false_p = probe.add(Symbolic::Lit(Literal::Bool(false)));
-        let mut unsat_pc = false;
-        for (id, pol) in pc_lits {
-            let want_true = matches!(pol, Polarity::Positive);
-            match probe[*id].data.known() {
-                Some(Literal::Bool(b)) if *b != want_true => {
-                    // PC literal contradicts its required polarity → off-path,
-                    // so `pc ⇒ goal` is vacuously true. (Guard also avoids a
-                    // `true == false` ConstFold conflict from the union below.)
-                    unsat_pc = true;
-                    break;
-                }
-                _ => {
-                    probe.union(*id, if want_true { true_p } else { false_p });
+            let true_p = probe.add(Symbolic::Lit(Literal::Bool(true)));
+            let false_p = probe.add(Symbolic::Lit(Literal::Bool(false)));
+            for (id, pol) in pc_lits {
+                let want_true = matches!(pol, Polarity::Positive);
+                match probe[*id].data.known() {
+                    Some(Literal::Bool(b)) if *b != want_true => {
+                        // PC literal contradicts its required polarity → off-path,
+                        // so `pc ⇒ goal` is vacuously true. (Guard also avoids a
+                        // `true == false` ConstFold conflict from the union below.)
+                        return (true, probe);
+                    }
+                    _ => {
+                        probe.union(*id, if want_true { true_p } else { false_p });
+                    }
                 }
             }
+            let probe = ctx.run_probe_until(probe, goal);
+            // Then the non-forking ite-goal decomposition.
+            if probe.find(goal) == probe.find(true_p) {
+                return (true, probe);
+            }
+            ctx.prove_by_ite_decomposition(probe, goal, Rung::Saturated)
+        });
+        if proven {
+            stats::bump(|s| s.prove_probe += 1);
         }
-        stats::bump(|s| s.prove_probe += 1);
-        let proven = if unsat_pc {
-            true
-        } else {
-            let probe = self.run_probe_until(probe, goal);
-            // Then the non-forking ite-goal decomposition, and finally Z3, which
-            // adds arithmetic and real case splits.
-            probe.find(goal) == probe.find(true_p)
-                || self.prove_by_ite_decomposition(&probe, goal, Rung::Saturated)
-                || self.prove_by_z3(goal, pc_lits)
-        };
+        // Then Z3, which adds arithmetic and real case splits. It runs on ground
+        // itself, so after the probe is rolled back.
+        let proven = proven || self.prove_by_z3(goal, pc_lits);
 
         // Persist the result so future identical obligations hit the `memo` tier.
         if proven {
@@ -224,216 +847,155 @@ impl<'a> VerifyContext<'a> {
         proven
     }
 
-    /// Enter a method block: record its control cube (shared pc of all its
-    /// insts) and drop any previous block's scratch (sibling cubes are mutually
-    /// exclusive, so it cannot be reused). The scratch itself is built lazily, on
-    /// the block's first `probe`-tier obligation — most blocks never reach the `probe` tier, and
-    /// building at entry measured 1.8x slower on `structs_enums`.
-    ///
-    pub(crate) fn begin_block(&mut self, cube: Vec<(egg::Id, Polarity)>) {
-        self.scratch = None;
-        self.block_dead = false;
-        self.current_cube = cube;
-        self.in_block = true;
-    }
-
-    /// Leave the block walk (after the last block, or before a non-block walk):
-    /// discard the scratch and clear block state.
-    pub(crate) fn end_block(&mut self) {
-        self.current_cube.clear();
-        self.in_block = false;
-        self.scratch = None;
-        self.block_dead = false;
-    }
-
-    /// Build the block scratch if absent: clone ground, assume the block cube.
-    pub(super) fn ensure_scratch(&mut self) {
-        if self.scratch.is_some() {
-            return;
-        }
-        let true_id = expr!(self, true);
-        let false_id = expr!(self, false);
-        let t_clone = std::time::Instant::now();
-        let sc = BlockScratch::build(&self.egraph, &self.current_cube, true_id, false_id);
-        // `pc ⇒ false`, in its cheap *assume* form: the cube literals are already
-        // merged with their polarities, so a contradiction among them has surfaced
-        // as `true == false`. Recording it here decides the block's reachability
-        // once; every later obligation short-circuits at the top of
-        // `prove_under_pc`. (The implication form would be strictly weaker —
-        // const-fold does not collapse the `ite` chain of an unsatisfiable pc.)
-        self.block_dead = sc.is_inconsistent();
-        if std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some() {
-            eprintln!(
-                "[scratch-build] ground {}n/{}c ids {} cube {} | clone+union+rebuild {:?}",
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-                sc.watermark(),
-                self.current_cube.len(),
-                t_clone.elapsed(),
-            );
-        }
-        self.scratch = Some(sc);
-        stats::bump(|s| s.graph_timing.0.scratch_clone += t_clone.elapsed().as_secs_f64());
-        stats::bump(|s| s.block_scratch_clones += 1);
-    }
-
-    /// Saturate the block scratch under the full rule set if it changed since the
-    /// last saturation. Counted separately from the live/probe saturations.
-    pub(super) fn saturate_scratch(&mut self) {
-        // Take the scratch out for the run: `full_rules` borrows all of `self`.
-        let Some(mut sc) = self.scratch.take_if(|s| s.needs_saturate()) else {
-            return;
-        };
-        sc.saturate(self.full_rules());
-        self.scratch = Some(sc);
-    }
-
-    /// Run only the terminating structural reductions on the block scratch — the
-    /// scratch counterpart of [`Self::reduce`], and what **framing** needs: address
-    /// matching wants snapshot towers collapsed, not the full rule set. Keeping this
-    /// separate from [`Self::saturate_scratch`] is what stops every heap lookup from
-    /// paying a full saturation (the in-block equivalent of ground's cheap `reduce`).
-    pub(super) fn reduce_scratch(&mut self) {
-        // Take the scratch out for the run: `reduce_rules` borrows all of `self`.
-        let Some(mut sc) = self.scratch.take_if(|s| s.needs_reduce()) else {
-            return;
-        };
-        sc.reduce(self.reduce_rules());
-        self.scratch = Some(sc);
-    }
-
-    /// The `probe` tier against the per-block scratch. The scratch already has the block
-    /// cube assumed and saturated, so an obligation whose pc is fully implied by
-    /// the cube is discharged with no per-obligation clone (a "free hit").
-    /// Obligations carrying extra pc literals (a perm-`Select` branch condition)
-    /// clone the *warm* scratch and hand `pc ⇒ goal` — the extra literals only — to
-    /// [`Self::prove_by_ite_decomposition`], which assumes them by telescoping the
-    /// chain. Assuming them here in a loop and saturating would be the same work
-    /// with a full saturation where a reduce per literal does.
-    pub(super) fn prove_via_scratch(
+    /// Run `f` on ground under a checkpoint and roll everything it did back:
+    /// the graph, and the fixpoint cache. `f` receives ground by value (it may run
+    /// rules on it) and returns it. The working graph is detached for the extent,
+    /// so nothing `f` does is mirrored into it.
+    pub(crate) fn probe_ground<T>(
         &mut self,
-        goal: egg::Id,
+        f: impl FnOnce(&mut Self, EGraph) -> (T, EGraph),
+    ) -> T {
+        let clean = self.clean;
+        let work = self.work.take();
+        let mut ground = std::mem::take(&mut self.egraph);
+        let checkpoint = ground.checkpoint();
+        let (out, mut ground) = f(self, ground);
+        ground.rollback(checkpoint);
+        self.egraph = ground;
+        self.work = work;
+        self.clean = clean;
+        out
+    }
+
+    /// Canonical ids of `ids` in ground with `pc_lits` assumed and the full rule set
+    /// run, or `None` when a literal of `pc_lits` is already decided against its
+    /// polarity (the path is unsatisfiable). Ground itself is left untouched.
+    pub(crate) fn classes_under_pc(
+        &mut self,
         pc_lits: &[(egg::Id, Polarity)],
-    ) -> bool {
-        // Ground size at the moment the `probe` tier is reached, before the scratch is built or
-        // touched — paired below with the scratch size the obligation actually
-        // reasons over (`SILVER_OXIDE_TRACE_SCRATCH`).
-        let trace = std::env::var_os("SILVER_OXIDE_TRACE_SCRATCH").is_some();
-        let g0 = if trace {
-            let t = self.egraph.find(self.true_id_cached());
-            (
-                self.egraph.total_number_of_nodes(),
-                self.egraph.number_of_classes(),
-                self.egraph[t].nodes.len(),
-            )
-        } else {
-            (0, 0, 0)
-        };
-        let fresh = self.scratch.is_none();
-        self.ensure_scratch();
-        // Building the scratch is what decides `pc ⇒ false`; if the cube is
+        ids: &[egg::Id],
+    ) -> Option<Vec<egg::Id>> {
+        self.probe_ground(|ctx, mut probe| {
+            for (id, pol) in pc_lits {
+                let want_true = matches!(pol, Polarity::Positive);
+                if matches!(probe[*id].data.known(), Some(Literal::Bool(b)) if *b != want_true) {
+                    return (None, probe);
+                }
+                let lit = probe.add(Symbolic::Lit(Literal::Bool(want_true)));
+                probe.union(*id, lit);
+            }
+            probe.rebuild();
+            let probe = ctx.run_probe(probe);
+            let out = ids.iter().map(|&i| probe.find(i)).collect();
+            (Some(out), probe)
+        })
+    }
+
+    /// The `probe` tier against the working graph. It already has the block cube
+    /// assumed and is saturated on demand, so an obligation whose pc is fully
+    /// implied by the cube is discharged with no per-obligation probe (a "free
+    /// hit"). Obligations carrying extra pc literals (a perm-`Select` branch
+    /// condition) hand `pc ⇒ goal` — the extra literals only — to
+    /// [`Self::prove_by_ite_decomposition`] under a checkpoint of the working graph,
+    /// which assumes them by telescoping the chain.
+    pub(super) fn prove_in_work(&mut self, goal: egg::Id, pc_lits: &[(egg::Id, Polarity)]) -> bool {
+        self.ensure_work();
+        // Assuming the cube is what decides `pc ⇒ false`; if the cube is
         // unsatisfiable there is nothing to translate or run.
         if self.block_dead {
             return true;
         }
-        // Translate goal + pc into scratch space first: `import` may copy ground
-        // operands (a lazy/structural ground surfaces rule-canonical leaders),
-        // which dirties the scratch — so import before the saturation below.
-        let sc = self.scratch.as_mut().expect("scratch live");
-        let tg = sc.import(&self.egraph, goal);
-        let tpc: Vec<(ScratchId, Polarity)> = pc_lits
-            .iter()
-            .map(|(id, p)| (sc.import(&self.egraph, *id), *p))
-            .collect();
-        // Tier the scratch the way the ground path is tiered: try the cheap
-        // reductions first and saturate only if the goal is still open. Saturating
-        // unconditionally is what made the scratch expensive — with the block cube
-        // assumed outright, the cube's `ite` guards collapse and no longer throttle
-        // function-unfold / axiom-trigger / forall cascades, so a full run can grow
-        // the graph 20-30× for a goal the reductions already close.
-        self.reduce_scratch();
-        {
-            let sc = self.block_scratch();
-            // A cube that only contradicts once reduced still kills the block, and
-            // latching it here spares every later obligation the same discovery.
-            if sc.is_inconsistent() {
-                self.block_dead = true;
-                return true;
-            }
-            if sc.is_true(tg) {
-                stats::bump(|s| s.block_scratch_freehits += 1);
-                if trace {
-                    self.trace_probe(g0, fresh, "reduce");
+        // Translate goal + pc into working space first: `tr` may *import* ground
+        // operands, which dirties the graph — so import before the runs below.
+        let tg = self.tr(goal);
+        let tpc: Vec<(egg::Id, Polarity)> =
+            pc_lits.iter().map(|(id, p)| (self.tr(*id), *p)).collect();
+        // Try the cheap reductions first and saturate only if the goal is still
+        // open: with the cube assumed *unguarded* the `ite` guards no longer
+        // throttle function-unfold / axiom-trigger / forall cascades, so a full run
+        // can grow the graph a lot for a goal the reductions already close.
+        self.reduce_work();
+        if self.work_decided(tg) {
+            return true;
+        }
+        self.saturate_work();
+        if self.work_decided(tg) {
+            return true;
+        }
+        let w = self.work.as_ref().expect("working graph");
+        // Whether every literal already folds to its required polarity, and
+        // whether one folds against it (off-path: `pc ⇒ goal` holds vacuously).
+        // One pass, O(k) folds, no allocation.
+        let (mut all_sat, mut off_path) = (true, false);
+        for (tid, pol) in &tpc {
+            match w.egraph[w.egraph.find(*tid)].data.known() {
+                Some(Literal::Bool(b)) if *b == matches!(pol, Polarity::Positive) => {}
+                Some(Literal::Bool(_)) => {
+                    (all_sat, off_path) = (false, true);
+                    break;
                 }
-                return true;
+                _ => all_sat = false,
             }
         }
-        self.saturate_scratch();
-        if trace {
-            self.trace_probe(g0, fresh, "saturate");
+        if all_sat {
+            stats::bump(|s| s.block_scratch_freehits += 1);
+        } else if off_path {
+            return true;
         }
+        self.probe_work(|ctx, mut probe| {
+            if all_sat {
+                return ctx.prove_by_ite_decomposition(probe, tg, Rung::Saturated);
+            }
+            // Extra literals: rather than assume them and saturate, hand the
+            // *implication* to the decomposition and let it telescope them — one
+            // reduce per literal instead of one saturation for the batch. The chain
+            // is built exactly as `VerifyContext::implication` builds the ground
+            // one, but in working space, so the nodes die with the probe;
+            // `prove_under_pc` still memoizes the ground `imp`.
+            let true_p = probe.add(Symbolic::Lit(Literal::Bool(true)));
+            let mut imp = tg;
+            for (id, pol) in tpc.iter().rev() {
+                imp = match pol {
+                    Polarity::Positive => probe.add(Symbolic::Ite([*id, imp, true_p])),
+                    Polarity::Negative => probe.add(Symbolic::Ite([*id, true_p, imp])),
+                };
+            }
+            probe.rebuild();
+            // The working graph arrives saturated and the chain assumes nothing
+            // until its first pick, so no saturation is owed up front.
+            ctx.prove_by_ite_decomposition(probe, imp, Rung::Saturated)
+        })
+    }
 
-        // A contradictory cube (or a mirrored union that conflicts under it)
-        // makes every goal vacuously provable — and kills the rest of the block.
-        if self.block_scratch().is_inconsistent() {
+    /// Whether the (reduced or saturated) working graph already settles the block:
+    /// a contradiction kills the block, a goal in `true`'s class is a free hit.
+    fn work_decided(&mut self, tg: egg::Id) -> bool {
+        let w = self.work.as_ref().expect("working graph");
+        // A cube that only contradicts once run still kills the block, and
+        // latching it here spares every later obligation the same discovery.
+        if graph_inconsistent(&w.egraph) {
             self.block_dead = true;
             return true;
         }
-        let sc = self.block_scratch();
-        if sc.is_true(tg) {
+        if w.egraph.find(tg) == w.egraph.find(w.true_id) {
             stats::bump(|s| s.block_scratch_freehits += 1);
             return true;
         }
-        let all_sat = tpc.iter().all(|(tid, pol)| {
-            matches!(
-                sc.known(*tid),
-                Some(Literal::Bool(b)) if *b == matches!(pol, Polarity::Positive)
-            )
-        });
-        let probe_base = sc.detached_clone();
+        false
+    }
 
-        // Free hit: the cube already implies the pc — no extra assumption needed,
-        // go straight to the goal-structural decomposition on the warm scratch.
-        if all_sat {
-            stats::bump(|s| s.block_scratch_freehits += 1);
-            return self.prove_by_ite_decomposition(&probe_base, tg.in_clone(), Rung::Saturated);
-        }
-
-        // Off-path: a literal that already folds against its required polarity
-        // makes `pc ⇒ goal` vacuously true. O(k) folds, no allocation — kept ahead
-        // of the chain below, which would only reach that literal after
-        // telescoping the ones outside it.
-        if tpc.iter().any(|(tid, pol)| {
-            matches!(
-                sc.known(*tid),
-                Some(Literal::Bool(b)) if *b != matches!(pol, Polarity::Positive)
-            )
-        }) {
-            return true;
-        }
-
-        // Extra literals: rather than assume them and saturate, hand the
-        // *implication* to the decomposition and let it telescope them — that is
-        // the same work, one reduce per literal instead of one saturation for the
-        // batch, and it shares the machinery that already had to handle a guarded
-        // goal. The chain is built exactly as `VerifyContext::implication` builds
-        // the ground one, but in a clone of the scratch (same ids, hence `in_clone`), so
-        // the nodes die with the clone;
-        // `prove_under_pc` still memoizes the ground `imp`.
-        let mut probe = probe_base;
-        let true_p = probe.add(Symbolic::Lit(Literal::Bool(true)));
-        let mut imp = tg.in_clone();
-        for (tid, pol) in tpc.iter().rev() {
-            let id = tid.in_clone();
-            imp = match pol {
-                Polarity::Positive => probe.add(Symbolic::Ite([id, imp, true_p])),
-                Polarity::Negative => probe.add(Symbolic::Ite([id, true_p, imp])),
-            };
-        }
-        probe.rebuild();
-        // The scratch arrives saturated and the chain assumes nothing until its
-        // first pick, so no saturation is owed up front.
-        self.prove_by_ite_decomposition(&probe, imp, Rung::Saturated)
+    /// Run `f` on the working graph under a checkpoint and roll back what it did.
+    fn probe_work<T>(&mut self, f: impl FnOnce(&mut Self, EGraph) -> (T, EGraph)) -> T {
+        let mut w = self.work.take().expect("working graph");
+        let scopes = w.memo_scopes();
+        let mut probe = std::mem::take(&mut w.egraph);
+        let checkpoint = probe.checkpoint();
+        let (out, mut probe) = f(self, probe);
+        probe.rollback(checkpoint);
+        w.egraph = probe;
+        drop(scopes);
+        self.work = Some(w);
+        out
     }
 
     /// Persist a proven obligation so future identical ones hit the `memo` tier.
@@ -458,10 +1020,11 @@ impl<'a> VerifyContext<'a> {
         }
     }
 
-    /// Tier 3.5 — **non-forking `ite`-goal decomposition**. When the goal's
-    /// class holds an `ite` with a *`true` constant arm*, that arm's world is
-    /// already discharged, so the goal reduces to proving the **other** arm
-    /// under the corresponding condition polarity — **one** probe, never a fork:
+    /// Tier 3.5 — **non-forking `ite`-goal decomposition** on `probe`, a graph the
+    /// caller rolls back afterwards (it is handed back with the verdict). When the
+    /// goal's class holds an `ite` with a *`true` constant arm*, that arm's world is
+    /// already discharged, so the goal reduces to proving the **other** arm under
+    /// the corresponding condition polarity — **one** probe, never a fork:
     ///
     /// - `ite(c, true, e)  ⟸  e` proven under `¬c`
     /// - `ite(c, e, true)  ⟸  e` proven under `c`   (this is `c ⟹ e`, i.e. a
@@ -495,20 +1058,19 @@ impl<'a> VerifyContext<'a> {
     /// cleanly), where the previous shape paid one per pick.
     ///
     /// `entry` says how hard `probe` has already been run; every assumption drops
-    /// the working graph back to [`Rung::Rebuilt`], since a union invalidates the
-    /// fixpoint.
+    /// it back to [`Rung::Rebuilt`], since a union invalidates the fixpoint.
     fn prove_by_ite_decomposition(
         &mut self,
-        probe: &egg::EGraph<Symbolic, ConstFold>,
+        probe: EGraph,
         goal: egg::Id,
         entry: Rung,
-    ) -> bool {
+    ) -> (bool, EGraph) {
         if std::env::var_os("SILVER_OXIDE_NO_ITE_DECOMPOSE").is_some() {
-            return false;
+            return (false, probe);
         }
-        // One working graph threaded across the chain, so its ids stay stable
-        // and `assumed` (a set of condition classes) is a sound progress guard.
-        let mut work = probe.clone();
+        // One graph threaded across the chain, so its ids stay stable and
+        // `assumed` (a set of condition classes) is a sound progress guard.
+        let mut work = probe;
         let mut goal = goal;
         let mut rung = entry;
         let mut assumed: crate::dhash::HashSet<egg::Id> = crate::dhash::HashSet::default();
@@ -520,12 +1082,12 @@ impl<'a> VerifyContext<'a> {
             // strictly weaker than asking saturation to produce `¬c` outright.
             if graph_inconsistent(&work) {
                 stats::bump(|s| s.prove_ite_decompose += 1);
-                return true;
+                return (true, work);
             }
             let g = work.find(goal);
             if Self::known_bool_class(&work, g, true) {
                 stats::bump(|s| s.prove_ite_decompose += 1);
-                return true;
+                return (true, work);
             }
             // Pick a `true`-constant-arm ite: the surviving arm is the *other*
             // branch, to be proven under the condition that reaches it.
@@ -582,7 +1144,7 @@ impl<'a> VerifyContext<'a> {
                         work = self.run_probe_until(work, goal);
                         rung = Rung::Saturated;
                     }
-                    Rung::Saturated => return false,
+                    Rung::Saturated => return (false, work),
                 }
                 continue;
             };
@@ -590,12 +1152,12 @@ impl<'a> VerifyContext<'a> {
             // arm is the only reachable one — the goal holds outright.
             if Self::known_bool_class(&work, cond, !want) {
                 stats::bump(|s| s.prove_ite_decompose += 1);
-                return true;
+                return (true, work);
             }
             // Progress guard: assuming a condition already assumed on this chain
             // would re-saturate an identical graph — give up instead of looping.
             if !assumed.insert(work.find(cond)) {
-                return false;
+                return (false, work);
             }
             let lit = work.add(Symbolic::Lit(Literal::Bool(want)));
             work.union(cond, lit);
@@ -623,8 +1185,10 @@ impl<'a> VerifyContext<'a> {
 
         let goal_z3 = crate::verify::z3::build_goal(self, goal);
 
-        // The block's cube is ambient (assumed by the scratch, not in `pc_lits`),
-        // so it has to be added here for its guarded facts to apply.
+        // Ground does not assume the block's cube (the working graph does), so it
+        // goes into the query for its guarded facts to apply. An instruction's
+        // `pc_lits` already starts with it, so this repeats its literals (kept as on
+        // main; harmless).
         let pc: Vec<_> = self.current_cube().iter().chain(pc_lits).copied().collect();
         let pc_cond = crate::verify::z3::build_pc(self, &pc);
 
@@ -686,11 +1250,10 @@ impl<'a> VerifyContext<'a> {
         matches!(probe[probe.find(id)].data.known(), Some(Literal::Bool(v)) if *v == b)
     }
 
-    /// Which held chunk addresses coincide with `addr` in the **block scratch** —
-    /// the graph that already has this block's cube assumed and saturated, reused
-    /// across the block's obligations. `None` outside a block (functions and
-    /// resources have no CFG, so no scratch); the caller then falls back to its own
-    /// clone-and-probe.
+    /// Which held chunk addresses coincide with `addr` in the **working graph** —
+    /// the graph that already has this block's cube assumed. `None` outside a block
+    /// (functions and resources have no CFG); the caller then falls back to a
+    /// ground probe.
     ///
     /// This is the pc-alias question [`pc_alias_partners`](crate::verify::heap::algebra::pc_alias_partners)
     /// asks, answered by `find` instead of by a fresh saturation.
@@ -702,44 +1265,29 @@ impl<'a> VerifyContext<'a> {
         if !self.in_block {
             return None;
         }
-        self.ensure_scratch();
+        self.ensure_work();
         if self.block_dead {
             return None;
         }
-        // Translate everything first: `import` can copy nodes and dirty the scratch.
-        let sc = self.scratch.as_mut().expect("scratch live");
-        let ta = sc.import(&self.egraph, addr);
-        let tcs: Vec<ScratchId> = chunk_addrs
-            .iter()
-            .map(|c| sc.import(&self.egraph, *c))
-            .collect();
-        self.saturate_scratch();
+        // Translate everything first: `tr` can import nodes and dirty the graph.
+        let ta = self.tr(addr);
+        let tcs: Vec<egg::Id> = chunk_addrs.iter().map(|c| self.tr(*c)).collect();
+        self.saturate_work();
         let ground = self.egraph.find(addr);
-        let sc = self.block_scratch();
+        let w = self.work.as_ref().unwrap();
+        let canon = w.egraph.find(ta);
         let mut out = Vec::new();
         for (c, tc) in chunk_addrs.iter().zip(tcs) {
-            if sc.same_class(tc, ta) && self.egraph.find(*c) != ground {
+            if w.egraph.find(tc) == canon && self.egraph.find(*c) != ground {
                 out.push(*c);
             }
         }
         Some(out)
     }
 
-    /// The block scratch, to read an answer off. The answer holds only under the
-    /// cube the scratch assumed, and every reader takes that to be the current
-    /// block's cube, so a mismatch is a broken invariant and panics.
-    fn block_scratch(&self) -> &BlockScratch {
-        let sc = self.scratch.as_ref().expect("scratch live");
-        assert_eq!(
-            sc.assumed(),
-            self.current_cube.as_slice(),
-            "the block scratch is read under a cube it did not assume"
-        );
-        sc
-    }
-
     /// Whether `pc_lits` *is* the current block's control cube — the precondition
-    /// for reading an answer off the scratch, which has assumed exactly that cube.
+    /// for reading an answer off the working graph, which has assumed exactly that
+    /// cube.
     pub(crate) fn cube_matches(&self, pc_lits: &[(egg::Id, Polarity)]) -> bool {
         self.current_cube.len() == pc_lits.len()
             && self
@@ -757,7 +1305,9 @@ impl<'a> VerifyContext<'a> {
         graph_utils::run_probe(probe, self.full_rules())
     }
 
-    /// [`graph_utils::run_probe_until`] with the full rule set.
+    /// [`graph_utils::run_probe_until`] with the full rule set. The result is not
+    /// saturated (it stops at `goal`); use it only on a graph that is rolled back,
+    /// see `run_rules_until`.
     pub(crate) fn run_probe_until(
         &self,
         probe: egg::EGraph<Symbolic, ConstFold>,
@@ -766,7 +1316,8 @@ impl<'a> VerifyContext<'a> {
         graph_utils::run_probe_until(probe, self.full_rules(), goal)
     }
 
-    /// [`graph_utils::run_reduce`] with the reduce rule set.
+    /// [`graph_utils::run_reduce`] with the reduce rule set, the rule set
+    /// [`VerifyContext::reduce`] and [`Self::reduce_work`] also run.
     ///
     /// This is what an `ite_decompose` link costs between picks: assuming a
     /// condition makes the surviving arm's `ite` collapse by const-fold plus these
@@ -779,29 +1330,233 @@ impl<'a> VerifyContext<'a> {
         graph_utils::run_reduce(probe, self.reduce_rules())
     }
 
-    /// Run `f` with `self.egraph` swapped for a scratch clone of the live
-    /// graph, restoring the live graph — and its fixpoint cache, which `f`'s
-    /// scratch runs would otherwise clobber — afterwards. The whole extent is
-    /// a scratch memo scope.
+    /// Run `f` against a throwaway state of the live graph: everything `f` does to
+    /// ground (and its fixpoint cache, and `proven_imps`) is rolled back afterwards.
+    /// The whole extent is a scratch memo scope.
     ///
-    /// The block scratch is **detached** for the extent: inside `f` the "ground"
-    /// graph is a throwaway whose ids are restored away afterwards, so mirroring
-    /// would leave `map` entries keyed by ids that cease to mean anything, and a
-    /// stale entry makes `tr` hand back an unrelated class. Detached, `f`'s
-    /// obligations take the non-block path (saturate + clone the throwaway).
+    /// The working graph is **detached** for the extent: `f`'s ground is a
+    /// throwaway whose ids are rolled back afterwards, so mirroring would leave
+    /// `map` entries keyed by ids that cease to mean anything, and a stale entry
+    /// makes `tr` hand back an unrelated class. Detached, `f`'s obligations take
+    /// the non-block path (ground probes).
     pub(crate) fn with_scratch_graph<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let _scope = crate::verify::rewrite::ScratchScope::enter();
-        let live = self.egraph.clone();
+        let _scope = ScratchScope::enter();
         let clean = self.clean;
-        let scratch = self.scratch.take();
+        let proven_imps = self.proven_imps.clone();
+        let work = self.work.take();
         let in_block = std::mem::replace(&mut self.in_block, false);
         let solver_state = crate::verify::z3::enter_scratch(self);
+        let checkpoint = self.egraph.checkpoint();
         let out = f(self);
+        self.egraph.rollback(checkpoint);
         crate::verify::z3::leave_scratch(self, solver_state);
         self.in_block = in_block;
-        self.scratch = scratch;
-        self.egraph = live;
+        self.work = work;
         self.clean = clean;
+        self.proven_imps = proven_imps;
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlockOrder;
+    use crate::verify::lang::Symbolic;
+    use crate::vmir::{Literal, Polarity};
+
+    /// `0 → {1, 2} → 3 → {4, 5} → 6` (two diamonds in sequence, and 6, the join
+    /// of 4 and 5).
+    fn two_diamonds() -> BlockOrder {
+        let preds = vec![
+            vec![],
+            vec![0],
+            vec![0],
+            vec![1, 2],
+            vec![3],
+            vec![3],
+            vec![4, 5],
+        ];
+        BlockOrder::new(&preds)
+    }
+
+    #[test]
+    fn dominance_follows_the_diamonds() {
+        let o = two_diamonds();
+        assert!(o.dominates(0, 6) && o.dominates(3, 6) && o.dominates(3, 3));
+        assert!(!o.dominates(1, 3) && !o.dominates(2, 3));
+        assert!(!o.dominates(4, 6) && !o.dominates(1, 2));
+    }
+
+    #[test]
+    fn only_arms_need_a_scope() {
+        let mut o = two_diamonds();
+        // Walked in order with the base as the enclosing scope: the entry and the
+        // joins dominate everything walked after them, so their facts hold on
+        // every later path; an arm does not dominate its sibling or its join (the
+        // last arm still does not dominate the join after it).
+        let expect = [false, true, true, false, true, true, false];
+        for (b, &want) in expect.iter().enumerate() {
+            o.enter(b);
+            assert_eq!(o.needs_scope(b, None), want, "block {b}");
+        }
+    }
+
+    /// Inside an arm's scope only what that arm's subtree still has to walk
+    /// counts: a nested diamond's arms need scopes, the arm's own join does not.
+    #[test]
+    fn nested_arms_count_the_enclosing_subtree() {
+        // 0 -> {1, 5}; 1 -> {2, 3} -> 4; {4, 5} -> 6
+        let preds = vec![
+            vec![],
+            vec![0],
+            vec![1],
+            vec![1],
+            vec![2, 3],
+            vec![0],
+            vec![4, 5],
+        ];
+        let mut o = BlockOrder::new(&preds);
+        o.enter(0);
+        o.enter(1);
+        assert!(o.needs_scope(1, None));
+        o.enter(2);
+        assert!(o.needs_scope(2, Some(1)));
+        o.enter(3);
+        assert!(o.needs_scope(3, Some(1)));
+        o.enter(4);
+        assert!(!o.needs_scope(4, Some(1)));
+        o.enter(5);
+        assert!(o.needs_scope(5, None));
+        o.enter(6);
+        assert!(!o.needs_scope(6, None));
+    }
+
+    /// `assume_all_guarded` takes its guards innermost-first, so the block's cube
+    /// is their tail: the working graph strips it and holds the fact unguarded.
+    #[test]
+    fn a_fact_guarded_by_the_cube_holds_unguarded_in_the_working_graph() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(0));
+        let d = ctx.add(Symbolic::Fresh(1));
+        let x = ctx.add(Symbolic::Fresh(2));
+        ctx.begin_method(BlockOrder::new(&[vec![]]));
+        ctx.enter_block(0);
+        let cube = vec![(c, Polarity::Positive), (d, Polarity::Negative)];
+        ctx.begin_block(cube.clone());
+        ctx.ensure_work();
+        let guards: Vec<_> = cube.into_iter().rev().collect();
+        ctx.assume_all_guarded([x], &guards);
+        let tx = ctx.tr(x);
+        let w = ctx.work.as_ref().unwrap();
+        assert_eq!(w.egraph.find(tx), w.egraph.find(w.true_id));
+    }
+
+    /// Give the boolean `x` one more parent, so a union with a class of fewer
+    /// parents makes it the root; `flip` picks one of two distinct parents.
+    fn add_parent(ctx: &mut crate::verify::context::VerifyContext<'_>, x: egg::Id, flip: bool) {
+        let y = ctx.add(Symbolic::Fresh(100));
+        let z = ctx.add(Symbolic::Fresh(101));
+        let (y, z) = if flip { (z, y) } else { (y, z) };
+        ctx.add(Symbolic::Ite([x, y, z]));
+    }
+
+    /// The working graph's translation of `g` is known `true` there.
+    fn true_in_work(ctx: &mut crate::verify::context::VerifyContext<'_>, g: egg::Id) -> bool {
+        let tg = ctx.tr_term(g);
+        let w = ctx.work.as_ref().unwrap();
+        w.egraph.find(tg) == w.egraph.find(w.true_id)
+    }
+
+    /// A build unions a released token with `true` straight on ground, and the
+    /// token, having more parents, becomes the class's root before it is noted.
+    #[test]
+    fn a_released_root_of_true_is_learned_true() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        ctx.begin_method(BlockOrder::new(&[vec![]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.ensure_work();
+        let tok = ctx.add(Symbolic::Fresh(0));
+        add_parent(&mut ctx, tok, false);
+        ctx.egraph.union(tok, t);
+        ctx.egraph.rebuild();
+        assert_eq!(ctx.egraph.find(t), tok);
+        ctx.note_released(&[tok]);
+        assert!(true_in_work(&mut ctx, tok));
+    }
+
+    /// A fact recorded in an arm's scope against the root of ground's `true`
+    /// class is replayed when the scope closes, after the root has moved on: the
+    /// recorded root is then an ordinary member, translated as its own term.
+    #[test]
+    fn a_replayed_fact_survives_a_moved_true_root() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(0));
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        // 0 -> {1, 2} -> 3
+        ctx.begin_method(BlockOrder::new(&[vec![], vec![0], vec![0], vec![1, 2]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.ensure_work();
+        let p = ctx.add(Symbolic::Fresh(1));
+        // Ground learns `r` outside the hooks (as a rule run would): W does not.
+        let r = ctx.add(Symbolic::Fresh(2));
+        add_parent(&mut ctx, r, false);
+        ctx.egraph.union(r, t);
+        ctx.egraph.rebuild();
+        ctx.enter_block(1);
+        ctx.begin_block(vec![(c, Polarity::Positive)]);
+        let true_ = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        assert_eq!(true_, r);
+        ctx.union(p, true_);
+        ctx.egraph.rebuild();
+        // The root moves on to a class with more parents.
+        let s = ctx.add(Symbolic::Fresh(3));
+        add_parent(&mut ctx, s, false);
+        add_parent(&mut ctx, s, true);
+        ctx.egraph.union(s, t);
+        ctx.egraph.rebuild();
+        assert_eq!(ctx.egraph.find(t), s);
+        ctx.enter_block(2);
+        assert!(true_in_work(&mut ctx, p));
+    }
+
+    /// Ground's `true` class translates to W's `true` even once the class's root
+    /// is a node W does not know is true: here ground learns `x` outside the
+    /// hooks (as a rule run would), its root moves, and a re-`add` of `x` returns
+    /// that root after the scope the working graph was built in has closed.
+    #[test]
+    fn true_stays_true_in_the_working_graph() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = crate::verify::test_support::fresh_ctx(&interner);
+        let c = ctx.add(Symbolic::Fresh(0));
+        let x = ctx.add(Symbolic::Fresh(1));
+        let t = ctx.add(Symbolic::Lit(Literal::Bool(true)));
+        // 0 -> {1, 2} -> 3
+        ctx.begin_method(BlockOrder::new(&[vec![], vec![0], vec![0], vec![1, 2]]));
+        ctx.enter_block(0);
+        ctx.begin_block(vec![]);
+        ctx.enter_block(1);
+        ctx.begin_block(vec![(c, Polarity::Positive)]);
+        ctx.ensure_work();
+        ctx.egraph.union(x, t);
+        ctx.egraph.rebuild();
+        ctx.enter_block(2);
+        ctx.begin_block(vec![(c, Polarity::Negative)]);
+        let again = ctx.add(Symbolic::Fresh(1));
+        assert_eq!(ctx.egraph.find(again), ctx.egraph.find(t));
+        for id in [again, ctx.egraph.find(t)] {
+            let tw = ctx.tr(id);
+            let w = ctx.work.as_ref().unwrap();
+            assert_eq!(w.egraph.find(tw), w.egraph.find(w.true_id));
+        }
+        // The cube of block 2 (`!c`) reached W's `false`, not some other class.
+        let tc = ctx.tr(c);
+        let w = ctx.work.as_ref().unwrap();
+        assert_eq!(w.egraph.find(tc), w.egraph.find(w.false_id));
     }
 }

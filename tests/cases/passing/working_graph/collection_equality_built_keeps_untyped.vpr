@@ -1,0 +1,18 @@
+// A collection equality built by a certificate (the exhaled postcondition's
+// `==` on sequences) shares its class with the untyped equality in ground; the
+// working graph keeps that when it imports the term. Without it the Z3 rung on
+// the working graph sees an uninterpreted `seq.eq` and cannot prove the
+// postcondition.
+//
+// Must verify.
+field elems: Seq[Int]
+
+method pop(this: Ref) returns (v: Int)
+  requires acc(this.elems) && |this.elems| > 0
+  ensures acc(this.elems)
+  ensures this.elems == old(this.elems)[..|old(this.elems)| - 1]
+  ensures v == old(this.elems)[|old(this.elems)| - 1]
+{
+  v := this.elems[|this.elems| - 1]
+  this.elems := this.elems[..|this.elems| - 1]
+}
