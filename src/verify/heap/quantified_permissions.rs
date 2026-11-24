@@ -714,7 +714,7 @@ pub(super) fn qp_perm_at(
                     .expect("a whole-set take reads back as a set");
                 let taken = qp_perm_at(ctx, &set, addr)?;
                 if set.caps.wildcard.is_some() {
-                    bound_wildcard_take(ctx, &taken, &perm);
+                    bound_wildcard_take(ctx, &taken, &perm, &set.eval_pc());
                 }
                 taken
             }
@@ -744,11 +744,22 @@ pub(super) fn qp_perm_at(
 /// (the remainder stays positive, Silicon's rule for a wildcard). `taken` is a
 /// fresh `D(addr)`, and the exhale proved `0 < before` wherever it took, so
 /// assuming this at each address read is consistent.
-fn bound_wildcard_take(ctx: &mut VerifyContext<'_>, taken: &ChunkPerm, before: &ChunkPerm) {
+///
+/// Only under `pc`, the exhale's path condition: `0 < before` was proven only
+/// there. `taken` alone does not confine it, since the exhaled set may share
+/// inverses with a set held on every path, so `D(addr)` is the debit there too
+/// (`failing/qp/wildcard_exhale_bound_off_path.vpr`).
+fn bound_wildcard_take(
+    ctx: &mut VerifyContext<'_>,
+    taken: &ChunkPerm,
+    before: &ChunkPerm,
+    pc: &[(Id, Polarity)],
+) {
     let (t, b) = (taken.to_id(ctx), before.to_id(ctx));
     let took = expr!(ctx, (0 / 1) < r { t });
     let below = expr!(ctx, { t } < r { b });
-    ctx.assume_guarded(below, std::iter::once((took, Polarity::Positive)));
+    let guards = std::iter::once((took, Polarity::Positive)).chain(pc.iter().rev().copied());
+    ctx.assume_guarded(below, guards);
 }
 
 /// `perm` where the address `at` is `addr`, `0` elsewhere; no gate when they are
