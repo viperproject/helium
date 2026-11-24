@@ -40,6 +40,7 @@ use crate::verify::eval::{
     pc_lits_raw,
 };
 use crate::verify::heap::QpCheck;
+use crate::verify::heap::algebra::{prove_framed_aligned, prove_sufficient_aligned};
 use crate::verify::heap::interface::Captures;
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
@@ -147,6 +148,13 @@ fn check_well_formed_in_scratch(
     Ok(())
 }
 
+/// When what is held at a location covers what a set has there, per branch:
+/// `prove_sufficient_aligned` compares amounts; `prove_framed_aligned` also
+/// lets a `wildcard` demand ask for a positive share only, for a consume's
+/// demand that a frame checks. A *held* set's wildcard is a real amount
+/// (`Captures::wildcard`), so comparing two held sets compares amounts.
+type Covers = fn(&mut VerifyContext<'_>, &ChunkPerm, &ChunkPerm, &[(Id, Polarity)]) -> bool;
+
 /// The permission held at an address, guards folded in. Supplied by the caller,
 /// which owns the lookup (`qp_perm_at`, or a sum over all holders).
 type HeldAt<'s> = dyn FnMut(&mut VerifyContext<'_>, Id) -> Result<ChunkPerm, VerifyError> + 's;
@@ -163,15 +171,15 @@ type HeldAt<'s> = dyn FnMut(&mut VerifyContext<'_>, Id) -> Result<ChunkPerm, Ver
 /// Proven by skolemization, as the injectivity check: `ys` are fresh constants
 /// on a scratch graph (nothing leaks into the live one; the certificate recipe
 /// is paused likewise), `c'(ys)` joins the path condition, and the comparison
-/// is discharged per branch by `prove_sufficient_aligned`. This is what makes
-/// recording the exhaled set as taken from the held one sound: no location
-/// goes negative.
+/// is discharged per branch by `covers`. This is what makes recording the
+/// exhaled set as taken from the held one sound: no location goes negative.
 fn check_qp_contained(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
     pc: &[(Id, Polarity)],
     instantiate: &mut Instantiate<'_>,
     held_at: &mut HeldAt<'_>,
+    covers: Covers,
 ) -> Result<bool, VerifyError> {
     ctx.pause_recipe(|ctx| {
         ctx.with_scratch_graph(|ctx| {
@@ -180,9 +188,7 @@ fn check_qp_contained(
             let avail = held_at(ctx, inst.addr)?;
             let mut lits = pc.to_vec();
             lits.push((inst.cond, Polarity::Positive));
-            Ok(crate::verify::heap::algebra::prove_sufficient_aligned(
-                ctx, &avail, &inst.perm, &lits,
-            ))
+            Ok(covers(ctx, &avail, &inst.perm, &lits))
         })
     })
 }
@@ -743,12 +749,14 @@ fn gate_at(ctx: &mut VerifyContext<'_>, perm: ChunkPerm, at: Id, addr: Id) -> Ch
 /// Whether the set `sub` is within what `held_at` says is held: at every
 /// location `sub` names, its amount is at most that ([`check_qp_contained`]).
 /// Proven under `sub`'s own evaluation pc and `extra_pc`. Every containment
-/// question about chunk sets is this one, with a different `held_at`.
+/// question about chunk sets is this one, with a different `held_at` and
+/// [`Covers`].
 fn set_within(
     ctx: &mut VerifyContext<'_>,
     sub: &QuantChunk,
     extra_pc: &[(Id, Polarity)],
     held_at: &mut HeldAt<'_>,
+    covers: Covers,
 ) -> Result<bool, VerifyError> {
     let pc: Vec<_> = sub
         .eval_pc()
@@ -761,6 +769,7 @@ fn set_within(
         &pc,
         &mut |ctx, binders| eval_qp_instance(ctx, &sub.caps, &sub.q, binders, &pc),
         held_at,
+        covers,
     )
 }
 
@@ -770,10 +779,15 @@ fn set_within_set(
     sub: &QuantChunk,
     extra_pc: &[(Id, Polarity)],
     held: &QuantChunk,
+    covers: Covers,
 ) -> Result<bool, VerifyError> {
-    set_within(ctx, sub, extra_pc, &mut |ctx, addr| {
-        qp_perm_at(ctx, held, addr)
-    })
+    set_within(
+        ctx,
+        sub,
+        extra_pc,
+        &mut |ctx, addr| qp_perm_at(ctx, held, addr),
+        covers,
+    )
 }
 
 /// Index of the first held set of `kind` that covers `exhaled` by itself.
@@ -784,7 +798,7 @@ pub(super) fn find_covering_qp(
     exhaled: &QuantChunk,
 ) -> Result<Option<usize>, VerifyError> {
     for (i, held) in heap.qp_chunks_of(kind).iter().enumerate() {
-        if set_within_set(ctx, exhaled, &[], held)? {
+        if set_within_set(ctx, exhaled, &[], held, prove_framed_aligned)? {
             return Ok(Some(i));
         }
     }
@@ -796,7 +810,7 @@ pub(super) fn find_covering_qp(
 /// something away is not the same as its origin.
 pub(super) fn same_footprint(ctx: &mut VerifyContext<'_>, a: &QuantChunk, b: &QuantChunk) -> bool {
     let within = |ctx: &mut VerifyContext<'_>, sub, held| {
-        set_within_set(ctx, sub, &[], held)
+        set_within_set(ctx, sub, &[], held, prove_sufficient_aligned)
             // The bodies evaluated once already, at their inhales.
             .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
     };
@@ -813,9 +827,10 @@ pub(super) fn covered_by_sum(
     exhaled: &QuantChunk,
 ) -> Result<bool, VerifyError> {
     let pc = exhaled.eval_pc();
-    set_within(ctx, exhaled, &[], &mut |ctx, addr| {
+    let mut held_at = |ctx: &mut VerifyContext<'_>, addr| {
         Ok(heap.view(&pc).all_amounts(ctx, kind, addr)?.total(ctx))
-    })
+    };
+    set_within(ctx, exhaled, &[], &mut held_at, prove_framed_aligned)
 }
 
 /// What the holder `at` of `before` gives up at `addr` when `demand` is split
@@ -907,9 +922,15 @@ pub(super) fn take_from_qp(
 /// matters, as the heap is dropped from only there on, so the containment is
 /// proven under both guards.
 fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChunk) -> bool {
-    set_within_set(ctx, held, &exhaled.eval_pc(), exhaled)
-        // The body evaluated once already, at its inhale.
-        .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
+    set_within_set(
+        ctx,
+        held,
+        &exhaled.eval_pc(),
+        exhaled,
+        prove_sufficient_aligned,
+    )
+    // The body evaluated once already, at its inhale.
+    .unwrap_or_else(|e| panic!("chunk set body failed to re-evaluate: {e:?}"))
 }
 
 /// The chunk set of `q` with its captured temps already resolved to `caps`:

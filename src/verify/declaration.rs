@@ -689,11 +689,14 @@ fn walk_footprint(
             )?,
             SlotShape::Quant { q, caps } => {
                 // A produced wildcard set gets its own amount per location
-                // (`heap::Captures::wildcard`); taking or framing one is not
-                // supported yet.
-                if q.body.contains_wc_permission() && matches!(walk.direction, Direction::Consume) {
+                // (`heap::Captures::wildcard`), and a frame asks for a positive
+                // share; taking one is not supported yet.
+                if q.body.contains_wc_permission()
+                    && matches!(walk.direction, Direction::Consume)
+                    && !walk.frame_only
+                {
                     return Err(VerifyError::Unimplemented(
-                        "wildcard quantified permission consumed from a resource footprint",
+                        "wildcard quantified permission taken from a resource footprint",
                     ));
                 }
                 if let Some(pm) = walk.scale {

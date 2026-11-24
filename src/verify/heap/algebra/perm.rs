@@ -265,17 +265,60 @@ pub(in crate::verify::heap) fn prove_sufficient_aligned(
     needed: &ChunkPerm,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> bool {
+    prove_aligned(ctx, held, needed, pc_lits, sufficient_amount)
+}
+
+/// [`prove_sufficient_aligned`] for what a frame demands: a `wildcard` leaf
+/// asks for *some* share, so what is held there must be positive. Nothing is
+/// taken, so the demanded amount needs no bound; a take uses
+/// [`prove_sufficient_aligned`] (or `consume::debit_wildcard`) instead.
+pub(in crate::verify::heap) fn prove_framed_aligned(
+    ctx: &mut VerifyContext<'_>,
+    held: &ChunkPerm,
+    needed: &ChunkPerm,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> bool {
+    prove_aligned(ctx, held, needed, pc_lits, |ctx, held, n, wild, pc| {
+        if wild {
+            prove_perm_positive(ctx, held, pc)
+        } else {
+            sufficient_amount(ctx, held, n, wild, pc)
+        }
+    })
+}
+
+/// When one demand leaf `n` (a `wildcard` when `wild`) is met by `held`.
+type LeafRule =
+    fn(&mut VerifyContext<'_>, &ChunkPerm, egg::Id, bool, &[(egg::Id, Polarity)]) -> bool;
+
+/// `held ≥ n` for one demand leaf, whatever its origin.
+fn sufficient_amount(
+    ctx: &mut VerifyContext<'_>,
+    held: &ChunkPerm,
+    n: egg::Id,
+    _wild: bool,
+    pc_lits: &[(egg::Id, Polarity)],
+) -> bool {
+    if let Some(r) = known_real(ctx, n) {
+        if r <= num::BigRational::from(num::BigInt::from(0)) {
+            return true;
+        }
+    }
+    prove_sufficient(ctx, held, n, pc_lits)
+}
+
+/// Descend the demand's branches, meeting each leaf by `leaf`.
+fn prove_aligned(
+    ctx: &mut VerifyContext<'_>,
+    held: &ChunkPerm,
+    needed: &ChunkPerm,
+    pc_lits: &[(egg::Id, Polarity)],
+    leaf: LeafRule,
+) -> bool {
     match needed.shape() {
         // Nothing demanded on this arm: every held amount is ≥ 0.
         Shape::Zero => true,
-        Shape::Leaf { id: n, .. } => {
-            if let Some(r) = known_real(ctx, n) {
-                if r <= num::BigRational::from(num::BigInt::from(0)) {
-                    return true;
-                }
-            }
-            prove_sufficient(ctx, held, n, pc_lits)
-        }
+        Shape::Leaf { id, wild } => leaf(ctx, held, id, wild, pc_lits),
         Shape::Branch { cond, then, els } => {
             // The demand's own branch, taken both ways: `held ≥ needed` follows by
             // case analysis. `restrict` aligns the held side — it takes the matching
@@ -285,13 +328,13 @@ pub(in crate::verify::heap) fn prove_sufficient_aligned(
             let ht = ChunkPerm::restrict(ctx, cond, held.clone(), true);
             let mut pc_t = pc_lits.to_vec();
             pc_t.push((cond, Polarity::Positive));
-            if !prove_sufficient_aligned(ctx, &ht, &then, &pc_t) {
+            if !prove_aligned(ctx, &ht, &then, &pc_t, leaf) {
                 return false;
             }
             let he = ChunkPerm::restrict(ctx, cond, held.clone(), false);
             let mut pc_e = pc_lits.to_vec();
             pc_e.push((cond, Polarity::Negative));
-            prove_sufficient_aligned(ctx, &he, &els, &pc_e)
+            prove_aligned(ctx, &he, &els, &pc_e, leaf)
         }
     }
 }

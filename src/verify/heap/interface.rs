@@ -313,9 +313,12 @@ impl Heap {
                     QpCheck::Established,
                     "a consumed chunk set must have its injectivity checked"
                 );
+                // A wildcard demand asks for a positive share only
+                // (`check_qp_contained`), which a frame needs; a take would
+                // debit an amount it cannot bound.
                 assert!(
-                    !spec.q.body.contains_wc_permission(),
-                    "a consumed wildcard quantified permission is refused at translation                      and at a footprint consume"
+                    mode == ConsumeMode::Frame || !spec.q.body.contains_wc_permission(),
+                    "taking a wildcard quantified permission is refused at translation                      and at a footprint consume"
                 );
                 let kind = spec.kind();
                 // The exhaled set's values are the covering set's (an exhale
