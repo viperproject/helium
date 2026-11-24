@@ -3754,6 +3754,32 @@ method m(x: Ref)
     }
 
     #[test]
+    fn forall_with_predicate_shorthand_is_quantified_permission() {
+        // `P(x)` asserts `acc(P(x), write)`, so the `forall` is a QP.
+        let qp = run_pipeline(
+            r#"
+predicate P(x: Ref)
+method m(s: Set[Ref]) requires forall x: Ref :: x in s ==> P(x) { }
+"#,
+        );
+        assert!(qp.is_ok(), "expected a quantified permission, got: {qp:?}");
+
+        // The predicate an `unfolding` or `perm` names is a pure use: the
+        // `forall` stays a pure fact.
+        let pure = run_pipeline(
+            r#"
+field f: Int
+predicate P(x: Ref) { acc(x.f) }
+function g(x: Ref): Bool
+method m(s: Set[Ref])
+  requires forall x: Ref :: {g(x)} g(x) ==> (unfolding P(x) in x.f == 0)
+{ assert forall x: Ref :: {g(x)} g(x) ==> perm(P(x)) == write }
+"#,
+        );
+        assert!(pure.is_ok(), "expected pure facts, got: {pure:?}");
+    }
+
+    #[test]
     fn predicate_in_pure_function_body_is_error() {
         let result = run_pipeline(
             r#"

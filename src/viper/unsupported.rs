@@ -39,14 +39,23 @@ impl Scan {
     }
 }
 
-/// Whether an expression mentions `acc(..)` anywhere — what makes a `forall`
-/// body a quantified permission rather than a pure fact.
+/// Whether an expression mentions `acc(..)` anywhere, or asserts a predicate
+/// by its shorthand `P(..)` (`acc(P(..), write)`) — what makes a `forall` body
+/// a quantified permission rather than a pure fact. The predicate an
+/// `unfolding` or `perm` names is a pure use, so those are not descended into
+/// (an `unfolding`'s body still is).
 pub(crate) fn mentions_acc(exp: &Exp) -> bool {
     struct FindAcc(bool);
     impl<'a> AstWalker<'a> for FindAcc {
         fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
-            if matches!(exp, ExpKind::Acc(_)) {
-                self.0 = true;
+            match exp {
+                ExpKind::Acc(_) => self.0 = true,
+                ExpKind::Call(call) if matches!(call.kind, Some(ExpCallKind::Predicate)) => {
+                    self.0 = true
+                }
+                ExpKind::HeapUpdate(_, _, body) => return body.walk(self),
+                ExpKind::UnOp(UnOp::Perm, _) => return,
+                _ => {}
             }
             exp.walk_children(self);
         }
