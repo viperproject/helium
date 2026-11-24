@@ -1731,16 +1731,16 @@ pub(crate) fn prepare_trig_term(
 /// which has no registry access at rule-application time. `names` resolves a
 /// member to its source name, needed for the display label of a minted `f%pre`
 /// token (the registry holds no interner). Every operand is passed through
-/// `rename` (into the recipe's temp space). A `Deref` that `read` resolves to
-/// a location kind and a map (already in the recipe's space) becomes
-/// `lookup(map, addr)`; any other `Deref` is refused.
+/// `rename` (into the recipe's temp space). A `Deref` that `read` resolves
+/// compiles as its [`ReadStep`](crate::verify::quant::ReadStep) says; any other
+/// `Deref` is refused.
 pub(crate) fn prepare_body(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     quants: &crate::verify::quant::RecipeTable,
     names: &dyn Fn(MemberId) -> String,
     insts: &[vmir::Inst],
     rename: &dyn Fn(&Val) -> Val,
-    read: &dyn Fn(&vmir::HeapVal, &Val) -> Option<(crate::verify::heap::LocationKind, Val)>,
+    read: &dyn Fn(&vmir::HeapVal, &Val) -> Option<crate::verify::quant::ReadStep>,
 ) -> Result<Vec<crate::verify::rewrite::AxiomInst>, VerifyError> {
     use crate::verify::rewrite::{AxiomInst, AxiomPure};
     let mut out = Vec::with_capacity(insts.len());
@@ -1749,13 +1749,15 @@ pub(crate) fn prepare_body(
     };
     for inst in insts {
         if let InstKind::Pure(_, PureInst::Deref(heap, addr)) = &inst.kind
-            && let Some((kind, map)) = read(heap, addr)
+            && let Some(step) = read(heap, addr)
         {
-            out.push(AxiomInst::Val(AxiomPure::App {
-                func: alloc.value_map(&kind).lookup,
-                type_args: vec![],
-                args: vec![map, rename(addr)],
-            }));
+            if let crate::verify::quant::ReadStep::Lookup(kind, map) = step {
+                out.push(AxiomInst::Val(AxiomPure::App {
+                    func: alloc.value_map(&kind).lookup,
+                    type_args: vec![],
+                    args: vec![map, rename(addr)],
+                }));
+            }
             continue;
         }
         // A nested `forall` is a step like any other: it materializes the inner
@@ -1977,14 +1979,18 @@ fn walk_body(
         // [`check_forall_wd`]). It happens here, not in the evaluator, because it
         // needs the path condition — and here it cannot be forgotten by one of the
         // three drivers. Axiom bodies never reach this walk: they stay trusted.
+        // It also resolves the quantifier's heap reads, which its step captures.
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
-            if let Err(err) = check_forall_wd(ctx, q, state, &pc_lits) {
-                let inst_text = inst_text(program);
-                if snap.enabled() {
-                    let heaps = display_heaps(state, &inst.kind, heaps_before);
-                    snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), None);
+            match check_forall_wd(ctx, q, state, &pc_lits) {
+                Ok(reads) => state.forall_reads = reads,
+                Err(err) => {
+                    let inst_text = inst_text(program);
+                    if snap.enabled() {
+                        let heaps = display_heaps(state, &inst.kind, heaps_before);
+                        snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), None);
+                    }
+                    return Err(err.with_inst(inst_text, inst_idx, insts.len()));
                 }
-                return Err(err.with_inst(inst_text, inst_idx, insts.len()));
             }
         }
         if let Err(err) = eval(ctx, program, state, inst, certs) {

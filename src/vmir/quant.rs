@@ -79,7 +79,7 @@ impl Forall {
     /// The heap reads of this quantifier's own body, in instruction order (see
     /// [`HeapRead`]). Derived, like [`Forall::free_temps`].
     pub fn heap_reads(&self) -> Vec<HeapRead> {
-        heap_reads_of(&self.body.insts)
+        heap_reads_of(self.step_base(), &self.body.insts)
     }
 
     /// Visit every type this quantifier mentions: its binder types, its
@@ -141,27 +141,41 @@ fn free_temps_of(
 /// that heap before it uses the body, so the body it compiles is heap-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeapRead {
-    /// The `Deref` instruction's index in the body.
-    pub inst: usize,
     /// The enclosing heap it reads (`Empty` in a resource body's first slots).
     pub heap: HeapVal,
     /// The address it reads, a body operand.
     pub addr: Val,
+    /// The address's `Type::Addr`: which kind of location it reads.
+    pub addr_ty: Type,
 }
 
-/// The heap reads of a quantified scope's own instructions, in order. A
-/// nested `forall`'s reads belong to that quantifier and are not listed: each
-/// level resolves its own.
-fn heap_reads_of(insts: &[crate::vmir::Inst]) -> Vec<HeapRead> {
+/// The heap reads of a quantified scope's own instructions (its steps from
+/// `step_base` on), in order. A nested `forall`'s reads belong to that
+/// quantifier and are not listed: each level resolves its own. Panics on a
+/// read at an address the body does not compute: translation builds every
+/// address inside the body (`resource::field_addr` in the body's sink).
+fn heap_reads_of(step_base: usize, insts: &[crate::vmir::Inst]) -> Vec<HeapRead> {
+    let step_types: Vec<&Type> = insts
+        .iter()
+        .filter_map(|i| match &i.kind {
+            InstKind::Pure(ty, _) => Some(ty),
+            _ => None,
+        })
+        .collect();
     insts
         .iter()
-        .enumerate()
-        .filter_map(|(i, inst)| match &inst.kind {
-            InstKind::Pure(_, PureInst::Deref(heap, addr)) => Some(HeapRead {
-                inst: i,
-                heap: *heap,
-                addr: addr.clone(),
-            }),
+        .filter_map(|inst| match &inst.kind {
+            InstKind::Pure(_, PureInst::Deref(heap, addr)) => {
+                let addr_ty = match addr {
+                    Val::Temp(t) if *t >= step_base => step_types[t - step_base].clone(),
+                    _ => panic!("a quantifier body reads at {addr:?}, which it does not compute"),
+                };
+                Some(HeapRead {
+                    heap: *heap,
+                    addr: addr.clone(),
+                    addr_ty,
+                })
+            }
             _ => None,
         })
         .collect()
@@ -228,7 +242,7 @@ impl QuantChunks {
     /// The heap reads of this scope's body, in instruction order (see
     /// [`HeapRead`]): a heap-dependent condition, receiver or amount.
     pub fn heap_reads(&self) -> Vec<HeapRead> {
-        heap_reads_of(&self.body.insts)
+        heap_reads_of(self.step_base(), &self.body.insts)
     }
 
     /// The enclosing temps this scope mentions (its capture list), triggers

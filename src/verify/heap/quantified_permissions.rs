@@ -36,7 +36,8 @@ use std::sync::Arc;
 use egg::Id;
 
 use crate::verify::eval::{
-    EvalState, eval_body_checked, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
+    EvalState, OnRead, eval_body_checked, eval_perm_inst, eval_perm_structural, eval_pure_inst,
+    pc_lits_raw,
 };
 use crate::verify::heap::QpCheck;
 use crate::verify::heap::interface::Captures;
@@ -49,9 +50,9 @@ use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::ChunkPerm;
 use crate::verify::lang::{FuncId, RecipeId, Symbolic};
-use crate::verify::quant::{Canonical, QuantRecipe, ReadMap};
+use crate::verify::quant::{Canonical, QuantRecipe, ResolvedRead, Stand};
 use crate::verify::rewrite::AxiomPure;
-use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, PureInst, QuantChunks, Type, Val};
+use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, PureInst, QuantChunks, Val};
 
 /// One instance of a quantified permission's body at given binder values: what
 /// the injectivity check reads off it.
@@ -225,6 +226,11 @@ fn mint_and_assume_inverse_axiom(
     }
 
     let free: Vec<usize> = caps.temps.iter().map(|&(k, _)| k).collect();
+    let by_value: Vec<bool> = caps
+        .reads
+        .iter()
+        .map(|r| matches!(r.stand, Stand::Value(_)))
+        .collect();
     let (interner, decls) = (ctx.interner, ctx.decls);
     let names = move |m| crate::verify::context::member_name_in(interner, decls, m);
     let table = Arc::clone(ctx.alloc.quant_table());
@@ -235,12 +241,13 @@ fn mint_and_assume_inverse_axiom(
         q.binder_base,
         q.bound.len(),
         &free,
-        &caps.reads,
+        &q.heap_reads(),
+        &by_value,
         &q.triggers,
         &q.body.insts,
     )?;
     // A receiver that reads the heap has no VMIR location trigger (typecheck's
-    // `location_can_trigger`): the compiled location, which reads the maps,
+    // `location_can_trigger`): the compiled location, which reads the stand-ins,
     // triggers instead.
     if c.groups.is_empty() {
         let loc = c.rename(&q.body.loc);
@@ -274,9 +281,11 @@ fn mint_and_assume_inverse_axiom(
         ante: ante.clone(),
         loc: loc.clone(),
     };
-    // The children, in `Canonical`'s slot order: captured temps, then read maps.
+    // The children, in `Canonical`'s slot order: captured temps, then reads.
     let temp_ids = caps.temps.iter().map(|&(_, id)| id);
-    let cap_ids: Vec<Id> = temp_ids.chain(caps.reads.iter().map(|r| r.map)).collect();
+    let cap_ids: Vec<Id> = temp_ids
+        .chain(caps.reads.iter().map(|r| r.stand.id()))
+        .collect();
     let (rid, inv) = match ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
         Some(found) => found,
         None => {
@@ -437,17 +446,6 @@ fn eval_qp_instance(
     })
 }
 
-/// A body read's value at the walked binding, given the read's heap, address
-/// and pc: how [`resolve_reads`] meets each read as [`eval_body_at`] reaches it.
-type OnRead<'s> = dyn FnMut(
-        &mut VerifyContext<'_>,
-        &EvalState,
-        &vmir::HeapVal,
-        &Val,
-        &[(Id, Polarity)],
-    ) -> Result<Id, VerifyError>
-    + 's;
-
 /// [`eval_qp_instance`]'s walk: the body's state at `binders`. A `Deref` goes
 /// to `on_read` when one is given, else to the resolved [`Captures::reads`].
 fn eval_body_at(
@@ -489,19 +487,85 @@ fn eval_body_at(
     Ok(state)
 }
 
-/// Resolve the heap reads of `q`'s body ([`vmir::HeapRead`]) to the value maps
-/// that stand in for their heaps ([`ReadMap`]), and return them with the
-/// captured `temps`.
+/// Resolves the heap reads of a quantifier body ([`vmir::HeapRead`]) to the
+/// value maps that stand in for their heaps ([`ResolvedRead`]). Shared by
+/// quantified permissions ([`resolve_reads`]) and pure `forall`s
+/// (`eval::check_forall_wd`).
 ///
 /// A read must be framed, for every binding that reaches it, by **one** holder
-/// of its heap. That is shown as the injectivity check shows its goals: in one
-/// walk of the body at fresh binders on a scratch graph, each read meeting its
-/// heap under its own pc, which includes `c(xs)` past the condition
-/// ([`body_inst_pc`]). The holder's value there is the read's value for the
-/// rest of the walk. A chunk set lends its own value map. A single chunk then
-/// sits at every address the read names, so a fresh map defined there by the
-/// chunk's value serves; it is minted after the walk, in the live graph, and
-/// being fresh its definition assumes nothing about the heap.
+/// of its heap. That is shown as the well-formedness checks show their goals:
+/// a walk of the body at fresh binders on a scratch graph meets each read
+/// under its own pc ([`Self::on_read`]), and the holder's value there stands
+/// for the read for the rest of the walk. After the walk, in the live graph,
+/// [`Self::finish`] hands back what stands for each read ([`Stand`]): a chunk
+/// set's value map, or a single chunk's value, which the read is for every
+/// binding since every address it names is that chunk's. Only e-classes that
+/// predate the scratch graph are kept across it: a set's map, a chunk's value.
+pub(crate) struct ReadResolver<F> {
+    /// The heap a body `Deref` names, as it is at the quantifier.
+    heap_of: F,
+    /// Per read in body order: what resolves it.
+    covers: Vec<ResolvedRead>,
+}
+
+impl<F> ReadResolver<F>
+where
+    F: FnMut(&mut VerifyContext<'_>, &vmir::HeapVal) -> Result<Heap, VerifyError>,
+{
+    pub(crate) fn new(heap_of: F) -> Self {
+        ReadResolver {
+            heap_of,
+            covers: Vec::new(),
+        }
+    }
+
+    /// The read `Deref(heap, addr)` met by the walk in `state` under `pc`: its
+    /// value at the walked binding.
+    pub(crate) fn on_read(
+        &mut self,
+        ctx: &mut VerifyContext<'_>,
+        state: &EvalState,
+        heap: &vmir::HeapVal,
+        addr: &Val,
+        pc: &[(Id, Polarity)],
+    ) -> Result<Id, VerifyError> {
+        let loc = state
+            .loc(ctx, addr)
+            .expect("a read's operand is an address");
+        let h = (self.heap_of)(ctx, heap)?;
+        let Some((at, value)) = h.covering_holder(ctx, &loc, pc)? else {
+            return Err(VerifyError::Unimplemented(
+                "heap read in a quantifier framed by several holders",
+            ));
+        };
+        let (stand, recipe) = match at {
+            HolderAt::Set(i) => {
+                let set = &h.qp_chunks_of(&loc.kind)[i];
+                (Stand::Map(set.value_map), set.recipe.clone())
+            }
+            HolderAt::Chunk(at) => {
+                let chunk = h.chunks_of(&loc.kind).iter().find(|c| c.addr == at);
+                (Stand::Value(value), chunk.and_then(|c| c.recipe.clone()))
+            }
+        };
+        self.covers.push(ResolvedRead {
+            heap: *heap,
+            addr: addr.clone(),
+            kind: loc.kind,
+            stand,
+            recipe,
+        });
+        Ok(value)
+    }
+
+    /// The reads met, resolved.
+    pub(crate) fn finish(self) -> Rc<[ResolvedRead]> {
+        self.covers.into()
+    }
+}
+
+/// The captures of `q`'s body: the captured `temps`, and its heap reads
+/// resolved by one walk at fresh binders ([`ReadResolver`]).
 pub(crate) fn resolve_reads(
     ctx: &mut VerifyContext<'_>,
     q: &vmir::QuantChunks,
@@ -516,59 +580,18 @@ pub(crate) fn resolve_reads(
     if q.heap_reads().is_empty() {
         return Ok(caps);
     }
-    // Per read: its heap, address and kind, and what covers it (a set's map,
-    // or a single chunk's address and value). Only live e-classes leave the
-    // scratch graph: a holder's map, address and value predate it.
-    let mut covers = Vec::new();
+    let mut resolver = ReadResolver::new(heap_of);
     ctx.pause_recipe(|ctx| {
         ctx.with_scratch_graph(|ctx| {
-            let mut on_read = |ctx: &mut VerifyContext<'_>,
-                               state: &EvalState,
-                               heap: &vmir::HeapVal,
-                               addr: &Val,
-                               read_pc: &[(Id, Polarity)]| {
-                let loc = state
-                    .loc(ctx, addr)
-                    .expect("a read's operand is an address");
-                let h = heap_of(ctx, heap)?;
-                let Some((at, value)) = h.covering_holder(ctx, &loc, read_pc)? else {
-                    return Err(VerifyError::Unimplemented(
-                        "heap read in a quantified permission framed by several holders",
-                    ));
-                };
-                let map = match at {
-                    HolderAt::Set(i) => Ok(h.qp_chunks_of(&loc.kind)[i].value_map),
-                    HolderAt::Chunk(at) => Err((at, value)),
-                };
-                covers.push((*heap, addr.clone(), loc.kind, map));
-                Ok(value)
-            };
             let xs = fresh_binders(ctx, q);
+            let mut on_read =
+                |ctx: &mut VerifyContext<'_>, state: &EvalState, heap: &_, addr: &_, pc: &_| {
+                    resolver.on_read(ctx, state, heap, addr, pc)
+                };
             eval_body_at(ctx, &caps, q, &xs, pc, Some(&mut on_read)).map(|_| ())
         })
     })?;
-    let reads = covers.into_iter().map(|(heap, addr, kind, map)| {
-        let map = map.unwrap_or_else(|(at, value)| {
-            let addr_ty = Type::Addr {
-                group: kind.group,
-                value: Box::new(kind.value.clone()),
-                bound: kind.bound.clone(),
-            };
-            let map = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(addr_ty)));
-            let lookup = ctx.alloc.value_map(&kind).lookup;
-            let read = ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([map, at])));
-            let defined = ctx.add(Symbolic::Binary(BinOp::Eq, [read, value]));
-            ctx.assume_guarded(defined, std::iter::empty());
-            map
-        });
-        ReadMap {
-            heap,
-            addr,
-            kind,
-            map,
-        }
-    });
-    caps.reads = reads.collect();
+    caps.reads = resolver.finish();
     Ok(caps)
 }
 
@@ -584,9 +607,10 @@ fn eval_qp_instance_checked(
     host_pc: &[(egg::Id, Polarity)],
 ) -> Result<QpInstance, VerifyError> {
     let mut state = instance_frame(caps, q, binders);
-    eval_body_checked(ctx, &mut state, &q.body.insts, &mut |ctx, state, inst| {
+    let mut pc_of = |ctx: &mut VerifyContext<'_>, state: &EvalState, inst: &vmir::Inst| {
         body_inst_pc(ctx, state, q, inst, host_pc)
-    })?;
+    };
+    eval_body_checked(ctx, &mut state, &q.body.insts, &mut pc_of, None)?;
     Ok(instance_of(ctx, &state, q))
 }
 

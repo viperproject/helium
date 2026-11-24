@@ -50,7 +50,7 @@ use crate::verify::heap::quantified_permissions::{
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
 use crate::verify::lang::Symbolic;
-use crate::verify::quant::ReadMap;
+use crate::verify::quant::ResolvedRead;
 use crate::vmir::{self, Polarity, Type, Val};
 
 /// One location: its kind and its address.
@@ -92,13 +92,13 @@ pub(crate) enum Access {
 }
 
 /// What a chunk set's body captures from where it was stated: the values of
-/// the enclosing temps it mentions (`QuantChunks::free_temps`), and the value
-/// map standing in for each enclosing heap it reads ([`ReadMap`]). Fixed when
+/// the enclosing temps it mentions (`QuantChunks::free_temps`), and what
+/// stands for each enclosing heap read ([`ResolvedRead`]). Fixed when
 /// the set is stated, so a later lookup re-evaluates the body exactly as then.
 #[derive(Debug, Clone)]
 pub(crate) struct Captures {
     pub(crate) temps: Rc<[(usize, egg::Id)]>,
-    pub(crate) reads: Rc<[ReadMap]>,
+    pub(crate) reads: Rc<[ResolvedRead]>,
 }
 
 impl FromIterator<(usize, egg::Id)> for Captures {

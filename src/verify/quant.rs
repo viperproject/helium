@@ -227,11 +227,11 @@ pub(crate) fn intern_forall(
     alloc: &mut FuncRegistry,
     names: &dyn Fn(vmir::MemberId) -> String,
     q: &vmir::Forall,
+    by_value: &[bool],
 ) -> Result<(RecipeId, Arc<[usize]>), VerifyError> {
     let table = Arc::clone(alloc.quant_table());
     let mut table = table.write().expect("recipe table lock");
-    intern(alloc, &mut table, names, q)?;
-    Ok(table.entry_of(q)?.clone())
+    intern(alloc, &mut table, names, q, by_value)
 }
 
 fn intern_insts(
@@ -242,7 +242,14 @@ fn intern_insts(
 ) -> Result<(), VerifyError> {
     for inst in insts {
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
-            intern(alloc, table, names, q)?;
+            // Its maps would have to be capture children of the enclosing
+            // recipe's `AxiomInst::Forall`, which carries only its temps.
+            if !q.heap_reads().is_empty() {
+                return Err(VerifyError::Unimplemented(
+                    "heap read in a nested quantifier",
+                ));
+            }
+            intern(alloc, table, names, q, &[])?;
         }
     }
     Ok(())
@@ -261,15 +268,20 @@ fn intern_insts(
 ///   binder: e5                          (binder_base = 5)  -->  t2
 ///   steps:  e6, e7                                         -->  t3, t4
 /// ```
+///
+/// A body that reads the heap compiles by how its reads were resolved
+/// (`by_value`, see [`Stand`]), which can differ between uses: it is not
+/// cached by occurrence, and its recipe is found again by [`RecipeKey`].
 fn intern(
     alloc: &mut FuncRegistry,
     table: &mut RecipeTable,
     names: &dyn Fn(vmir::MemberId) -> String,
     q: &vmir::Forall,
-) -> Result<RecipeId, VerifyError> {
+    by_value: &[bool],
+) -> Result<(RecipeId, Arc<[usize]>), VerifyError> {
     intern_insts(alloc, table, names, &q.body.insts)?;
-    if let Some((id, _)) = table.by_forall.get(q) {
-        return Ok(*id);
+    if let Some(entry) = table.by_forall.get(q) {
+        return Ok(entry.clone());
     }
 
     let free = q.free_temps();
@@ -280,7 +292,8 @@ fn intern(
         q.binder_base,
         q.bound.len(),
         &free,
-        &[],
+        &q.heap_reads(),
+        by_value,
         &q.triggers,
         &q.body.insts,
     )?;
@@ -320,32 +333,65 @@ fn intern(
             id
         }
     };
-    table.by_forall.insert(q.clone(), (id, free.into()));
-    Ok(id)
+    let entry = (id, Arc::from(free));
+    if by_value.is_empty() {
+        table.by_forall.insert(q.clone(), entry.clone());
+    }
+    Ok(entry)
 }
 
-/// One heap read of a quantified permission's body ([`vmir::HeapRead`]),
-/// resolved to the value map that stands in for the enclosing heap there
-/// (`heap::quantified_permissions::resolve_reads`). The body reads
-/// `lookup(map, addr)` instead, so it stays heap-free: the map is one more
-/// capture, in instances ([`crate::verify::eval::EvalState::read_maps`]) and
-/// in the compiled body ([`Canonical`], after the captured temps) alike.
+/// One heap read of a quantifier body ([`vmir::HeapRead`]), resolved to what
+/// stands for the enclosing heap there (`heap::ReadResolver`), so the body
+/// stays heap-free: the stand-in is one more capture, in instances
+/// ([`crate::verify::eval::EvalState::read_maps`]) and in the compiled body
+/// ([`Canonical`], after the captured temps) alike.
 #[derive(Debug, Clone)]
-pub(crate) struct ReadMap {
+pub(crate) struct ResolvedRead {
     /// The `Deref`'s heap and address operand: which read this resolves.
     pub(crate) heap: vmir::HeapVal,
     pub(crate) addr: Val,
     pub(crate) kind: crate::verify::heap::LocationKind,
-    pub(crate) map: egg::Id,
+    pub(crate) stand: Stand,
+    /// The stand-in's recipe in a certificate walk (a footprint slot's seed),
+    /// which a pure `forall` there captures it by; `None` otherwise.
+    pub(crate) recipe: Option<Val>,
 }
 
-impl ReadMap {
+/// What stands for a resolved read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Stand {
+    /// A chunk set's value map: the read is `lookup(map, addr)`.
+    Map(egg::Id),
+    /// A single chunk's value, which the read is for every binding: one chunk
+    /// frames it, so every address the read names is that chunk's.
+    Value(egg::Id),
+}
+
+impl Stand {
+    /// The captured e-class.
+    pub(crate) fn id(self) -> egg::Id {
+        match self {
+            Stand::Map(id) | Stand::Value(id) => id,
+        }
+    }
+}
+
+/// How [`prepare_body`] compiles a resolved `Deref` (see [`Stand`]).
+pub(crate) enum ReadStep {
+    /// `lookup(map, addr)`, the map a capture already in the recipe's space.
+    Lookup(crate::verify::heap::LocationKind, Val),
+    /// No step: the read is its captured value, which [`Canonical::rename`]
+    /// names in its place.
+    Captured,
+}
+
+impl ResolvedRead {
     /// The resolved read `Deref(heap, addr)` among `reads`, with its index.
     pub(crate) fn find<'a>(
-        reads: &'a [ReadMap],
+        reads: &'a [ResolvedRead],
         heap: &vmir::HeapVal,
         addr: &Val,
-    ) -> Option<(usize, &'a ReadMap)> {
+    ) -> Option<(usize, &'a ResolvedRead)> {
         reads
             .iter()
             .enumerate()
@@ -362,8 +408,13 @@ pub(crate) struct Canonical {
     binder_base: usize,
     /// Enclosing temp -> capture slot.
     slot: HashMap<usize, usize>,
-    /// How many read maps are captured after the temps (see [`ReadMap`]).
+    /// How many read stand-ins are captured after the temps (see [`ResolvedRead`]).
     n_reads: usize,
+    /// Body temp of a read captured by value -> its capture slot. Its step is
+    /// dropped ([`ReadStep::Captured`]), so [`Self::rename`] closes the gaps
+    /// those steps leave (`dropped`, ascending).
+    alias: HashMap<usize, usize>,
+    dropped: Vec<usize>,
     /// The next free temp: one past the binders and every value step so far.
     next: usize,
     pub(crate) insts: Vec<AxiomInst>,
@@ -372,7 +423,9 @@ pub(crate) struct Canonical {
 
 impl Canonical {
     /// `free` is the scope's capture list (enclosing temps, in child order);
-    /// the maps of its resolved `reads` are captured after them, in order.
+    /// the stand-ins of its heap `reads` ([`vmir::HeapRead`], resolved at each
+    /// use into [`ResolvedRead`]s) are captured after them, in order, read `j`
+    /// by value iff `by_value[j]`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         alloc: &mut FuncRegistry,
@@ -381,26 +434,55 @@ impl Canonical {
         binder_base: usize,
         n_bound: usize,
         free: &[usize],
-        reads: &[ReadMap],
+        reads: &[vmir::HeapRead],
+        by_value: &[bool],
         triggers: &[vmir::QuantTrigger],
         insts: &[vmir::Inst],
     ) -> Result<Self, VerifyError> {
-        let n_vals = insts
-            .iter()
-            .filter(|i| matches!(i.kind, InstKind::Pure(..)))
-            .count();
+        // Read `j`'s stand-in is the capture after the temps': slot `free.len() + j`.
+        let read_of = |heap: &vmir::HeapVal, addr: &Val| {
+            let j = reads
+                .iter()
+                .position(|r| r.heap == *heap && r.addr == *addr)?;
+            Some((j, free.len() + j))
+        };
+        // The steps, as body temps from `binder_base + n_bound` on; a read
+        // captured by value aliases its capture and drops its step.
+        let mut alias = HashMap::default();
+        let mut dropped = Vec::new();
+        let steps = insts.iter().filter_map(|i| match &i.kind {
+            InstKind::Pure(_, pi) => Some(pi),
+            _ => None,
+        });
+        let mut n_vals = 0;
+        for (t, pi) in (binder_base + n_bound..).zip(steps) {
+            n_vals += 1;
+            if let PureInst::Deref(heap, addr) = pi
+                && let Some((j, slot)) = read_of(heap, addr)
+                && by_value[j]
+            {
+                alias.insert(t, slot);
+                dropped.push(t);
+            }
+        }
         let mut c = Self {
             binder_base,
             slot: free.iter().copied().zip(0..).collect(),
             n_reads: reads.len(),
-            next: free.len() + reads.len() + n_bound + n_vals,
+            next: free.len() + reads.len() + n_bound + n_vals - dropped.len(),
+            alias,
+            dropped,
             insts: Vec::new(),
             groups: Vec::new(),
         };
-        // Read `j`'s map is the capture after the temps': slot `free.len() + j`.
         let read = |heap: &vmir::HeapVal, addr: &Val| {
-            let (j, r) = ReadMap::find(reads, heap, addr)?;
-            Some((r.kind.clone(), Val::Temp(free.len() + j)))
+            let (j, slot) = read_of(heap, addr)?;
+            if by_value[j] {
+                return Some(ReadStep::Captured);
+            }
+            let kind = crate::verify::heap::LocationKind::from_addr_type(&reads[j].addr_ty)
+                .expect("a heap read's address is an address");
+            Some(ReadStep::Lookup(kind, Val::Temp(slot)))
         };
         c.insts = prepare_body(alloc, table, names, insts, &|v| c.rename(v), &read)?;
         c.groups = triggers
@@ -415,18 +497,23 @@ impl Canonical {
         Ok(c)
     }
 
-    /// The capture arity: the captured temps, then the read maps.
+    /// The capture arity: the captured temps, then the read stand-ins.
     pub(crate) fn n_caps(&self) -> usize {
         self.slot.len() + self.n_reads
     }
 
     /// Canonicalize one operand. Below `binder_base` it is a capture, and its
-    /// slot is its position in `free`; at or above, it is a binder or a step,
-    /// which keep their order after the captures.
+    /// slot is its position in `free`; a read captured by value is its
+    /// capture; otherwise it is a binder or a step, which keep their order
+    /// after the captures, less the dropped steps before it.
     pub(crate) fn rename(&self, v: &Val) -> Val {
         match v {
             Val::Temp(k) if *k < self.binder_base => Val::Temp(self.slot[k]),
-            Val::Temp(k) => Val::Temp(self.n_caps() + (k - self.binder_base)),
+            Val::Temp(k) if let Some(&s) = self.alias.get(k) => Val::Temp(s),
+            Val::Temp(k) => {
+                let gaps = self.dropped.partition_point(|d| d < k);
+                Val::Temp(self.n_caps() + (k - self.binder_base) - gaps)
+            }
             lit => lit.clone(),
         }
     }
