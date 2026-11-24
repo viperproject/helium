@@ -1,0 +1,33 @@
+// KNOWN LIMITATION: "insufficient permission" on a write to `loc(a, c0.idx)`,
+// held by a quantified permission whose receiver calls a heap-dependent
+// function on its binder (`acc(loc(a, at(c)).val)`), when nothing applies
+// `at(c0)`.
+//
+// The lookup goes through the set's inverse: `loc(a, at(inv(r))) == r` relates
+// the written location to the instance at `inv(r)` only once `at(inv(r))` is
+// unfolded through its rebuilt snapshot (`unwrap(proj(cons(Some(..))))`); the
+// permission check does not get that far. Writing `loc(a, at(c0)).val`
+// verifies (`passing/qp/call_on_binder_receiver_predicate.vpr`), and so does
+// the same receiver with a field read (`acc(loc(a, c.idx).val)`).
+field val: Int
+field idx: Int
+
+domain Array {
+  function loc(a: Ref, i: Int): Ref
+  function first(r: Ref): Ref
+  function second(r: Ref): Int
+  axiom inj { forall a: Ref, i: Int :: { loc(a, i) } first(loc(a, i)) == a && second(loc(a, i)) == i }
+}
+
+function at(c: Ref): Int
+  requires acc(c.idx, wildcard)
+{ c.idx }
+
+method receiver(cells: Set[Ref], a: Ref, c0: Ref)
+  requires forall c: Ref :: c in cells ==> acc(c.idx)
+  requires forall c1: Ref, c2: Ref :: { c1.idx, c2.idx } c1 in cells && c2 in cells && c1 != c2 ==> c1.idx != c2.idx
+  requires c0 in cells
+{
+  inhale forall c: Ref :: c in cells ==> acc(loc(a, at(c)).val)
+  loc(a, c0.idx).val := 1
+}

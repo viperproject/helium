@@ -1,0 +1,20 @@
+// A binder-free heap-dependent call inside a `forall` names the value at the
+// quantifier: after a write, an instance says nothing about the new value.
+//
+// Must FAIL (assertion).
+field val: Int
+
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+domain D { function t(i: Int): Bool }
+
+method stale(y: Ref)
+  requires acc(y.val)
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> get(y) == 1
+  y.val := 3
+  inhale t(7)
+  assert y.val == 1
+}

@@ -1,0 +1,95 @@
+// Heap-dependent calls on a quantifier's binder: each footprint slot of the
+// callee's precondition is framed, for every binding, by one holder (a chunk
+// set's map or a single chunk's value), and the snapshot is rebuilt from those
+// per binding, in instances and in the compiled body
+// (plans/heap-dependent-calls-in-quantifiers.md, phase 3). A trigger on the
+// call leaves its snapshot open.
+//
+// Must VERIFY.
+field val: Int
+
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+domain Array {
+  function loc(a: Ref, i: Int): Ref
+  function len(a: Ref): Int
+  function first(r: Ref): Ref
+  function second(r: Ref): Int
+  axiom inj { forall a: Ref, i: Int :: { loc(a, i) } first(loc(a, i)) == a && second(loc(a, i)) == i }
+  axiom len_nonneg { forall a: Ref :: { len(a) } len(a) >= 0 }
+}
+
+function elem(a: Ref, i: Int): Int
+  requires 0 <= i && i < len(a)
+  requires acc(loc(a, i).val, wildcard)
+{ loc(a, i).val }
+
+// An instance at a member: the client's call meets the quantifier's.
+method set_instance(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s
+{
+  inhale forall x: Ref :: { get(x) } x in s ==> get(x) == 7
+  assert get(a) == 7
+  assert a.val == 7
+}
+
+// The precondition holds only under the antecedent.
+method array_instance(a: Ref)
+  requires forall i: Int :: 0 <= i && i < len(a) ==> acc(loc(a, i).val)
+  requires 3 < len(a)
+{
+  inhale forall i: Int :: { elem(a, i) } 0 <= i && i < len(a) ==> elem(a, i) == 0
+  assert elem(a, 3) == 0
+  assert loc(a, 3).val == 0
+}
+
+// A caller learns a postcondition over the members.
+method zero(s: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  ensures forall x: Ref :: x in s ==> acc(x.val)
+  ensures forall x: Ref :: { get(x) } x in s ==> get(x) == 0
+
+method client(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s
+{
+  zero(s)
+  assert get(a) == 0
+  assert a.val == 0
+}
+
+// A call in a quantified permission's amount, per binding.
+method amount(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val, 1/2)
+  requires forall x: Ref :: { x.val } x in s ==> x.val > 0
+  requires a in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.val, get(x) > 0 ? 1/2 : none)
+  a.val := 3
+}
+
+// A function body that calls on its binder: a client unfolds it.
+function allz(s: Set[Ref]): Bool
+  requires forall x: Ref :: x in s ==> acc(x.val, wildcard)
+{ forall x: Ref :: { get(x) } x in s ==> get(x) == 0 }
+
+method function_body(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s && allz(s)
+{
+  assert get(a) == 0
+  assert a.val == 0
+}
+
+// Another member's value stays: a write elsewhere.
+method frame_other(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s && b in s && a != b
+{
+  inhale forall x: Ref :: { get(x) } x in s ==> get(x) == 7
+  a.val := 1
+  assert get(b) == 7
+}

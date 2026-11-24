@@ -1,0 +1,52 @@
+// A heap-dependent call inside a `forall` that does not mention the binder:
+// its snapshot is one value, built once and captured by the quantifier, and
+// the call is framed for every binding (plans/heap-dependent-calls-in-
+// quantifiers.md, phase 2). The quantifier sits in a method postcondition, so
+// the snapshot is captured by its certificate recipe.
+//
+// Shape of Prusti's `memory_block_join` / `memory_block_split` (marco_benchmark
+// Ru2 suite; formerly `known_limitations/marco_benchmark/heap_function_in_quantifier.vpr`).
+//
+// Must VERIFY.
+predicate MB(a: Ref)
+
+function bytes(a: Ref): Int
+  requires acc(MB(a), wildcard)
+
+function to_bytes(s: Int): Int
+
+method join(a: Ref)
+  requires acc(MB(a))
+  ensures acc(MB(a))
+  ensures forall s: Int :: { to_bytes(s) } bytes(a) == to_bytes(s)
+
+method client(a: Ref)
+  requires acc(MB(a))
+{
+  join(a)
+  assert bytes(a) == to_bytes(3)
+}
+
+// Prusti's exact shape: the call's argument is a domain-function term the
+// body computes, without the binder (`constructor$Snap$Usize$(0)`). It is
+// evaluated once, before the body walk.
+domain Size {
+  function usize(v: Int): Int
+}
+
+predicate MBs(a: Ref, size: Int)
+
+function sized_bytes(a: Ref, size: Int): Int
+  requires acc(MBs(a, size), wildcard)
+
+method join_sized(a: Ref)
+  requires acc(MBs(a, usize(0)))
+  ensures acc(MBs(a, usize(0)))
+  ensures forall s: Int :: { to_bytes(s) } sized_bytes(a, usize(0)) == to_bytes(s)
+
+method client_sized(a: Ref)
+  requires acc(MBs(a, usize(0)))
+{
+  join_sized(a)
+  assert sized_bytes(a, usize(0)) == to_bytes(3)
+}

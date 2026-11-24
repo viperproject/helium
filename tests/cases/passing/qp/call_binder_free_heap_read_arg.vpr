@@ -1,0 +1,22 @@
+// A binder-free heap-dependent call whose argument the body reads from the
+// heap (`get(y.next)`): its snapshot cannot be built before the body walk, so
+// the walk resolves it per binding, like a call on a binder
+// (plans/heap-dependent-calls-in-quantifiers.md, phase 3).
+//
+// Must VERIFY.
+field val: Int
+field next: Ref
+
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+domain D { function t(i: Int): Bool }
+
+method m(y: Ref)
+  requires acc(y.next) && acc(y.next.val)
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> get(y.next) == 4
+  inhale t(1)
+  assert y.next.val == 4
+}

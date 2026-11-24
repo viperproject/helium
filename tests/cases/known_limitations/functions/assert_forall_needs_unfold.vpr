@@ -1,0 +1,19 @@
+// KNOWN LIMITATION: "assertion failed".
+//
+// Asserting a `forall` whose truth needs a function body unfolded fails when
+// nothing outside the quantifier applies the function: the asserted
+// quantifier's body is never instantiated where the function's definition
+// can fire. Calling `idf(y.val)` once before the assert makes it verify.
+// Heap-free and heap-dependent functions alike (see
+// plans/heap-dependent-calls-in-quantifiers.md).
+field val: Int
+
+function idf(v: Int): Int { v }
+
+domain D { function t(i: Int): Bool }
+
+method heapfree(y: Ref)
+  requires acc(y.val) && y.val == 5
+{
+  assert forall i: Int :: { t(i) } t(i) ==> idf(y.val) == 5
+}

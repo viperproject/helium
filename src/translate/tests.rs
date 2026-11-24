@@ -1355,7 +1355,10 @@ method m(s: Set[Ref], y: Ref)
             .nth(t - step_base + 1)
             .expect("the call follows its snapshot");
         let vmir::InstKind::Pure(_, vmir::PureInst::FunctionCall(fc)) = &call_step.kind else {
-            panic!("expected the call after its snapshot, got {:?}", call_step.kind);
+            panic!(
+                "expected the call after its snapshot, got {:?}",
+                call_step.kind
+            );
         };
         assert_eq!(fc.args.iter().last(), Some(&c.snap));
     }
@@ -1363,7 +1366,11 @@ method m(s: Set[Ref], y: Ref)
     let reads = q.heap_reads();
     assert_eq!(reads.len(), 2, "x.f and y.f");
     for r in &reads {
-        assert!(matches!(r.addr_ty, vmir::Type::Addr { .. }), "{:?}", r.addr_ty);
+        assert!(
+            matches!(r.addr_ty, vmir::Type::Addr { .. }),
+            "{:?}",
+            r.addr_ty
+        );
     }
 }
 

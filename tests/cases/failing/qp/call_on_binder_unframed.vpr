@@ -1,0 +1,13 @@
+// A call on the binder over members of a set that is not held.
+//
+// Must FAIL (insufficient permission).
+field val: Int
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+method m(s: Set[Ref], t: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.val)
+{
+  inhale forall x: Ref :: { get(x) } x in t ==> get(x) == 0
+}

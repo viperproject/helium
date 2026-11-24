@@ -19,7 +19,6 @@ upper bounds.
 
 | Case | Error | Blocked | Sole | Cumulative |
 |---|---|---|---|---|
-| `heap_function_in_quantifier.vpr`, `old_in_quantifier.vpr` | heap-dependent function inside a `forall` | 440 | 0 | 676 |
 | `qp_predicate_in_function_precondition.vpr` | Predicate `P` used in pure expression context (a predicate trigger) | 49 | 0 | 808 |
 | *(no case: timeouts)* | over 180 s (4 Ru2, Dafny-book chap05 / chap10) | 6 | 6 | 814 |
 
@@ -32,10 +31,17 @@ permission row) and `result_in_quantifier.vpr` now verify and moved to
 `functions/result_in_quantifier.vpr`), and so does `field_read_in_quantifier.vpr`
 (now `qp/forall_read_in_contract.vpr`). The counts were not re-measured.
 
+The former top row, a heap-dependent function inside a `forall` (440 blocked, 0 sole,
+676 cumulative), is resolved for binder-free calls: its reductions
+`heap_function_in_quantifier.vpr` and `old_in_quantifier.vpr` verify and moved
+to `tests/cases/passing/qp/call_binder_free{,_old}.vpr`
+(plans/heap-dependent-calls-in-quantifiers.md). The row's files were not
+re-measured.
+
 All Ru2 (Prusti) quantifier rows share one shape: the heap reads in Prusti's
 `memory_block_join` / `memory_block_split` postconditions never mention the
-bound variable (all 865 of them), so hoisting those reads out of the `forall`
-is enough; general heap-dependent quantifiers are not needed.
+bound variable (all 865 of them), so resolving binder-free calls is enough;
+general heap-dependent quantifiers are not needed.
 
 ## Unsupported constructs and front-end rejections
 
@@ -56,7 +62,6 @@ is enough; general heap-dependent quantifiers are not needed.
 | `function_through_nested_fold.vpr` | assertion failed | linkedlists `append`, `insert` |
 | `conditional_precondition_function_after_refold.vpr` | assertion failed | Gobra Tree / binary_tree `deleteLeftMost` |
 | `recursive_call_in_own_postcondition.vpr` | assertion failed | VerCors `Util.isPrefix` and its lemmas |
-| `sequence_case_split_on_function_branch.vpr` | assertion failed (passes with `SILVER_OXIDE_Z3_RLIMIT=50000000`) | RingBufferRd `Push` |
 | `unfolding_reads_permission_held_outside_predicate.vpr` | insufficient permission | AVLTree.iterative `has` (invariant) |
 | `../domain_tag_exhaustiveness_with_partial_arg.vpr` (existing) | assertion failed | Dafny-book chap04 `Eval`, `EvalList` |
 

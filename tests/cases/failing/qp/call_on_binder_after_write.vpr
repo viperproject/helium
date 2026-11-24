@@ -1,0 +1,17 @@
+// A call on the binder names the values at the quantifier: after a write
+// to a member, its call is not the old value.
+//
+// Must FAIL (assertion).
+field val: Int
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+method m(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s
+{
+  inhale forall x: Ref :: { get(x) } x in s ==> get(x) == 7
+  a.val := 1
+  assert get(a) == 7
+}

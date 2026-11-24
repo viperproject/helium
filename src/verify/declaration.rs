@@ -1310,7 +1310,7 @@ fn snapshot_recipe(
     // is that unspecified value, as a term the certificate can carry.
     let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
         let f = expr!(ctx, false);
-        ctx.is_inconsistent() || ctx.prove_under_pc(f, &pc_lits)
+        ctx.is_inconsistent() || ctx.prove_under_pc(f, pc_lits)
     };
     let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
     let rb = ctx.recipe.as_mut().unwrap();

@@ -1,0 +1,15 @@
+// An instance of a call on the binder gives the quantifier's value.
+//
+// Must FAIL (assertion).
+field val: Int
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+method m(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s
+{
+  inhale forall x: Ref :: { get(x) } x in s ==> get(x) == 7
+  assert get(a) == 8
+}

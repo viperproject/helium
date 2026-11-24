@@ -29,7 +29,9 @@ pub use function::{
 };
 pub use inst::{Inst, InstKind, PathConds, Polarity};
 pub use method::{Block, BlockId, Method, Preds};
-pub use quant::{Forall, HeapCall, HeapRead, QuantBody, QuantChunks, QuantTrigger, TrigHead, TrigTerm};
+pub use quant::{
+    Forall, HeapCall, HeapRead, QuantBody, QuantChunks, QuantTrigger, TrigHead, TrigTerm,
+};
 pub use resource::{Precond, Resource, ResourceBody, ResourceCall};
 pub use ty::Bound;
 

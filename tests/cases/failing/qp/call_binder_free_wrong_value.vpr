@@ -1,0 +1,17 @@
+// A binder-free heap-dependent call inside a `forall` is the field's value.
+//
+// Must FAIL (assertion).
+field val: Int
+
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+domain D { function t(i: Int): Bool }
+
+method wrong_value(y: Ref)
+  requires acc(y.val) && y.val == 5
+{
+  assert get(y) == 5
+  assert forall i: Int :: { t(i) } t(i) ==> get(y) == 6
+}

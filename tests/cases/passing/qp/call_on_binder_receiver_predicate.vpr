@@ -1,0 +1,46 @@
+// Heap-dependent calls on a quantifier's binder: in a quantified permission's
+// receiver (`loc(a, at(c))`, injective by the stated facts), and to a callee
+// whose precondition is a predicate held as a predicate set.
+//
+// Must VERIFY.
+field val: Int
+field idx: Int
+
+domain Array {
+  function loc(a: Ref, i: Int): Ref
+  function first(r: Ref): Ref
+  function second(r: Ref): Int
+  axiom inj { forall a: Ref, i: Int :: { loc(a, i) } first(loc(a, i)) == a && second(loc(a, i)) == i }
+}
+
+function at(c: Ref): Int
+  requires acc(c.idx, wildcard)
+{ c.idx }
+
+// A call in a quantified permission's receiver. (The write goes through
+// `at(c0)`; see `known_limitations/qp/call_on_binder_receiver_lookup.vpr`.)
+method receiver(cells: Set[Ref], a: Ref, c0: Ref)
+  requires forall c: Ref :: c in cells ==> acc(c.idx)
+  requires forall c1: Ref, c2: Ref :: { c1.idx, c2.idx } c1 in cells && c2 in cells && c1 != c2 ==> c1.idx != c2.idx
+  requires c0 in cells
+{
+  inhale forall c: Ref :: c in cells ==> acc(loc(a, at(c)).val)
+  loc(a, at(c0)).val := 1
+}
+
+predicate P(x: Ref) { acc(x.val) }
+
+function pv(x: Ref): Int
+  requires acc(P(x), wildcard)
+{ unfolding acc(P(x), wildcard) in x.val }
+
+// A callee whose precondition is a predicate, held as a predicate set.
+method pred(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(P(x))
+  requires a in s
+{
+  inhale forall x: Ref :: { pv(x) } x in s ==> pv(x) == 5
+  assert pv(a) == 5
+  unfold P(a)
+  assert a.val == 5
+}
