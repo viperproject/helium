@@ -4,7 +4,7 @@
 //!
 //! | operation                 | method                 |
 //! |---------------------------|------------------------|
-//! | read a location           | [`Heap::read`], [`Heap::framing_perm`] |
+//! | read a location           | [`Heap::read`], [`Heap::framing_perm`], [`Heap::covering_holder`] |
 //! | `perm(loc)`               | [`Heap::perm`]         |
 //! | add permission            | [`Heap::produce`]      |
 //! | take permission / frame   | [`Heap::consume`]      |
@@ -50,6 +50,7 @@ use crate::verify::heap::quantified_permissions::{
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
 use crate::verify::lang::Symbolic;
+use crate::verify::quant::ReadMap;
 use crate::vmir::{self, Polarity, Type, Val};
 
 /// One location: its kind and its address.
@@ -90,12 +91,31 @@ pub(crate) enum Access {
     Set(QuantSpec),
 }
 
+/// What a chunk set's body captures from where it was stated: the values of
+/// the enclosing temps it mentions (`QuantChunks::free_temps`), and the value
+/// map standing in for each enclosing heap it reads ([`ReadMap`]). Fixed when
+/// the set is stated, so a later lookup re-evaluates the body exactly as then.
+#[derive(Debug, Clone)]
+pub(crate) struct Captures {
+    pub(crate) temps: Rc<[(usize, egg::Id)]>,
+    pub(crate) reads: Rc<[ReadMap]>,
+}
+
+impl FromIterator<(usize, egg::Id)> for Captures {
+    /// The captured temps of a body whose heap reads are not resolved (yet).
+    fn from_iter<I: IntoIterator<Item = (usize, egg::Id)>>(temps: I) -> Self {
+        Captures {
+            temps: temps.into_iter().collect(),
+            reads: Rc::from([]),
+        }
+    }
+}
+
 /// A quantified permission `forall xs :: c(xs) ==> acc(e(xs).f, p(xs))` ready
-/// to be added or taken: the body plus the values of the enclosing temps it
-/// captures.
+/// to be added or taken: the body plus what it captures.
 pub(crate) struct QuantSpec {
     pub(crate) q: Rc<vmir::QuantChunks>,
-    pub(crate) caps: Rc<[(usize, egg::Id)]>,
+    pub(crate) caps: Captures,
     /// What is still to be proven of it before it is added or taken.
     pub(crate) check: QpCheck,
 }
@@ -183,6 +203,30 @@ impl Heap {
         let pc = &self.effective_pc(ctx, pc)[..];
         let shares = self.view(pc).shares(ctx, &loc.kind, loc.addr)?;
         Ok(shares.value(ctx, read_recipe))
+    }
+
+    /// The one holder that frames a read of `loc` on its own: the first of the
+    /// [`Heap::read`] holders whose share is positive under `pc`, with its value
+    /// there. `Ok(None)` when only several holders together frame it;
+    /// `InsufficientPermission` when they do not.
+    pub(super) fn covering_holder(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        loc: &Loc,
+        pc: &[(egg::Id, Polarity)],
+    ) -> Result<Option<(HolderAt, egg::Id)>, VerifyError> {
+        let pc = &self.effective_pc(ctx, pc)[..];
+        let shares = self.view(pc).all_shares(ctx, &loc.kind, loc.addr)?;
+        if let Some(s) = shares
+            .iter()
+            .find(|s| prove_perm_positive(ctx, &s.perm, pc))
+        {
+            return Ok(Some((s.at, s.value)));
+        }
+        match shares.total(ctx).prove_positive(ctx, pc) {
+            true => Ok(None),
+            false => Err(VerifyError::InsufficientPermission),
+        }
     }
 
     /// `perm(loc)`: exactly the permission this heap holds at `loc`, the sum

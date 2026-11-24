@@ -381,9 +381,7 @@ trait PureExt: Sized + Clone {
         unreachable!("build_forall on a context with LOWER_FORALL = false")
     }
     /// How a trigger term rooted at this extension node can be matched: the
-    /// operands of an application, or not at all. A field read `e.f` is an
-    /// application of the field's location function to `e`: every read builds
-    /// that term, so it is what the trigger matches (`lower_trig_term`).
+    /// operands of an application, a field read, or not at all.
     fn trigger_shape(&self) -> TriggerShape<'_, Self>;
 }
 
@@ -391,6 +389,11 @@ trait PureExt: Sized + Clone {
 enum TriggerShape<'a, Ext> {
     /// An application with these operands.
     App(Vec<&'a TypedPureExp<Ext>>),
+    /// A field read `e.f`, matchable only as a trigger term's root: there it
+    /// is the location term `f(e)` every read of `e.f` builds
+    /// (`lower_trig_term`). Below the root it would stand for the read's
+    /// value, which a trigger pattern cannot name.
+    Read(&'a TypedPureExp<Ext>),
     /// Not matchable (a nested `forall`, `old`, `unfolding`, `perm`, `result`).
     NotMatchable,
 }
@@ -398,7 +401,7 @@ enum TriggerShape<'a, Ext> {
 /// [`PureExt::trigger_shape`] of a heap node, shared by every heap-bearing host.
 fn heap_node_trigger_shape<Ext>(node: &typed::HeapNode<Ext>) -> TriggerShape<'_, Ext> {
     match node {
-        typed::HeapNode::Field(e, _) => TriggerShape::App(vec![e]),
+        typed::HeapNode::Field(e, _) => TriggerShape::Read(e),
         typed::HeapNode::FunctionCall(call) => TriggerShape::App(call.args.iter().collect()),
         typed::HeapNode::Unfolding(..) => TriggerShape::NotMatchable,
     }
@@ -2779,7 +2782,13 @@ fn check_triggers<Ext: PureExt>(
             if !is_trigger_application(term) {
                 return Err(TypeError::TriggerNotAnApplication);
             }
-            check_trigger_subterms(term, &mut covered)?;
+            match &*term.exp {
+                // A root field read: only its receiver is a subterm.
+                PureExpKind::Ext(ext) if let TriggerShape::Read(e) = ext.trigger_shape() => {
+                    check_trigger_subterms(e, &mut covered)?
+                }
+                _ => check_trigger_subterms(term, &mut covered)?,
+            }
         }
         if let Some(bv) = bound.iter().find(|bv| !covered.contains(&bv.name.0)) {
             return Err(TypeError::TriggerNotCovering(
@@ -2815,7 +2824,7 @@ fn is_trigger_application<Ext: PureExt>(term: &TypedPureExp<Ext>) -> bool {
         | P::AdtConstructor(_)
         | P::AdtDestructor(..)
         | P::AdtDiscriminator(..) => true,
-        P::Ext(ext) => matches!(ext.trigger_shape(), TriggerShape::App(_)),
+        P::Ext(ext) => !matches!(ext.trigger_shape(), TriggerShape::NotMatchable),
         _ => coll_trigger_operands(term).is_some(),
     }
 }
@@ -2891,7 +2900,7 @@ fn check_trigger_subterms<Ext: PureExt>(
                 }
                 Ok(())
             }
-            TriggerShape::NotMatchable => Err(TypeError::TriggerBadSubterm),
+            TriggerShape::Read(_) | TriggerShape::NotMatchable => Err(TypeError::TriggerBadSubterm),
         },
         P::Unary(..)
         | P::Binary(..)

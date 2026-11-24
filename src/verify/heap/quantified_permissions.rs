@@ -39,6 +39,7 @@ use crate::verify::eval::{
     EvalState, eval_body_checked, eval_perm_inst, eval_perm_structural, eval_pure_inst, pc_lits_raw,
 };
 use crate::verify::heap::QpCheck;
+use crate::verify::heap::interface::Captures;
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
 use crate::vmir;
@@ -48,9 +49,9 @@ use crate::verify::context::VerifyContext;
 use crate::verify::error::VerifyError;
 use crate::verify::heap::ChunkPerm;
 use crate::verify::lang::{FuncId, RecipeId, Symbolic};
-use crate::verify::quant::{Canonical, QuantRecipe};
+use crate::verify::quant::{Canonical, QuantRecipe, ReadMap};
 use crate::verify::rewrite::AxiomPure;
-use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, QuantChunks, Val};
+use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, PureInst, QuantChunks, Type, Val};
 
 /// One instance of a quantified permission's body at given binder values: what
 /// the injectivity check reads off it.
@@ -80,7 +81,7 @@ type Instantiate<'s> =
 fn check_qp_well_formed(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
-    caps: &[(usize, Id)],
+    caps: &Captures,
     pc: &[(Id, Polarity)],
     check: QpCheck,
 ) -> Result<(), VerifyError> {
@@ -95,7 +96,7 @@ fn check_qp_well_formed(
 fn check_well_formed_in_scratch(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
-    caps: &[(usize, Id)],
+    caps: &Captures,
     pc: &[(Id, Polarity)],
     check: QpCheck,
 ) -> Result<(), VerifyError> {
@@ -215,15 +216,15 @@ fn fresh_binders(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Vec<Id> {
 fn mint_and_assume_inverse_axiom(
     ctx: &mut VerifyContext<'_>,
     q: &QuantChunks,
-    caps: &[(usize, Id)],
+    caps: &Captures,
     pc: &[(Id, Polarity)],
 ) -> Result<Rc<[FuncId]>, VerifyError> {
     // Without a trigger the axiom could never fire; assuming nothing is sound.
-    if q.triggers.is_empty() {
+    if q.triggers.is_empty() && caps.reads.is_empty() {
         return Ok(mint_inverses(ctx, q));
     }
 
-    let free: Vec<usize> = caps.iter().map(|&(k, _)| k).collect();
+    let free: Vec<usize> = caps.temps.iter().map(|&(k, _)| k).collect();
     let (interner, decls) = (ctx.interner, ctx.decls);
     let names = move |m| crate::verify::context::member_name_in(interner, decls, m);
     let table = Arc::clone(ctx.alloc.quant_table());
@@ -234,9 +235,20 @@ fn mint_and_assume_inverse_axiom(
         q.binder_base,
         q.bound.len(),
         &free,
+        &caps.reads,
         &q.triggers,
         &q.body.insts,
     )?;
+    // A receiver that reads the heap has no VMIR location trigger (typecheck's
+    // `location_can_trigger`): the compiled location, which reads the maps,
+    // triggers instead.
+    if c.groups.is_empty() {
+        let loc = c.rename(&q.body.loc);
+        match c.pattern_of(&loc, q.bound.len()) {
+            Some(pattern) => c.groups = vec![vec![pattern]],
+            None => return Ok(mint_inverses(ctx, q)),
+        }
+    }
 
     // `c(xs) ∧ 0 < p(xs)  ==>  ⋀_j inv_j(f(e(xs))) = xs_j`
     let perms: Vec<&PermInst> = q
@@ -262,7 +274,9 @@ fn mint_and_assume_inverse_axiom(
         ante: ante.clone(),
         loc: loc.clone(),
     };
-    let cap_ids: Vec<Id> = caps.iter().map(|&(_, id)| id).collect();
+    // The children, in `Canonical`'s slot order: captured temps, then read maps.
+    let temp_ids = caps.temps.iter().map(|&(_, id)| id);
+    let cap_ids: Vec<Id> = temp_ids.chain(caps.reads.iter().map(|r| r.map)).collect();
     let (rid, inv) = match ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
         Some(found) => found,
         None => {
@@ -408,7 +422,7 @@ fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
 /// binding (or its resource's own check did, see [`QpCheck`]).
 fn eval_qp_instance(
     ctx: &mut VerifyContext<'_>,
-    caps: &[(usize, egg::Id)],
+    caps: &Captures,
     q: &vmir::QuantChunks,
     binders: &[egg::Id],
     host_pc: &[(egg::Id, Polarity)],
@@ -418,32 +432,144 @@ fn eval_qp_instance(
     // recipes. A read's certificate term is `lookup(seed, addr)`, built by the
     // `Deref` itself.
     ctx.pause_recipe(|ctx| {
-        let mut state = instance_frame(caps, q, binders);
-        for inst in &q.body.insts {
-            let pc_lits = body_inst_pc(ctx, &state, q, inst, host_pc);
-            match &inst.kind {
-                InstKind::Pure(ty, pi) => {
-                    let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                    state.push_val(id, ty.clone(), None);
-                }
-                InstKind::Perm(pi) => {
-                    let p = eval_perm_inst(ctx, &state, pi);
-                    state.push_perm(p, pi.clone());
-                }
-                // A callee's precondition: shown by the well-formedness check.
-                InstKind::Assert(_) => {}
-                // A callee's postcondition: it holds where the call is
-                // well-defined, which is what the pc (with the binding's
-                // condition) says.
-                InstKind::Assume(val) => {
-                    let id = state.get_val(ctx, val);
-                    ctx.assume_guarded(id, pc_lits.iter().rev().copied());
-                }
-                other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
-            }
-        }
+        let state = eval_body_at(ctx, caps, q, binders, host_pc, None)?;
         Ok(instance_of(ctx, &state, q))
     })
+}
+
+/// A body read's value at the walked binding, given the read's heap, address
+/// and pc: how [`resolve_reads`] meets each read as [`eval_body_at`] reaches it.
+type OnRead<'s> = dyn FnMut(
+        &mut VerifyContext<'_>,
+        &EvalState,
+        &vmir::HeapVal,
+        &Val,
+        &[(Id, Polarity)],
+    ) -> Result<Id, VerifyError>
+    + 's;
+
+/// [`eval_qp_instance`]'s walk: the body's state at `binders`. A `Deref` goes
+/// to `on_read` when one is given, else to the resolved [`Captures::reads`].
+fn eval_body_at(
+    ctx: &mut VerifyContext<'_>,
+    caps: &Captures,
+    q: &vmir::QuantChunks,
+    binders: &[egg::Id],
+    host_pc: &[(egg::Id, Polarity)],
+    mut on_read: Option<&mut OnRead<'_>>,
+) -> Result<EvalState, VerifyError> {
+    let mut state = instance_frame(caps, q, binders);
+    for inst in &q.body.insts {
+        let pc_lits = body_inst_pc(ctx, &state, q, inst, host_pc);
+        match &inst.kind {
+            InstKind::Pure(ty, PureInst::Deref(heap, addr)) if let Some(f) = &mut on_read => {
+                let id = f(ctx, &state, heap, addr, &pc_lits)?;
+                state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Pure(ty, pi) => {
+                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
+                state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Perm(pi) => {
+                let p = eval_perm_inst(ctx, &state, pi);
+                state.push_perm(p, pi.clone());
+            }
+            // A callee's precondition: shown by the well-formedness check.
+            InstKind::Assert(_) => {}
+            // A callee's postcondition: it holds where the call is
+            // well-defined, which is what the pc (with the binding's
+            // condition) says.
+            InstKind::Assume(val) => {
+                let id = state.get_val(ctx, val);
+                ctx.assume_guarded(id, pc_lits.iter().rev().copied());
+            }
+            other => panic!("quantified permission body holds a non-pure inst: {other:?}"),
+        }
+    }
+    Ok(state)
+}
+
+/// Resolve the heap reads of `q`'s body ([`vmir::HeapRead`]) to the value maps
+/// that stand in for their heaps ([`ReadMap`]), and return them with the
+/// captured `temps`.
+///
+/// A read must be framed, for every binding that reaches it, by **one** holder
+/// of its heap. That is shown as the injectivity check shows its goals: in one
+/// walk of the body at fresh binders on a scratch graph, each read meeting its
+/// heap under its own pc, which includes `c(xs)` past the condition
+/// ([`body_inst_pc`]). The holder's value there is the read's value for the
+/// rest of the walk. A chunk set lends its own value map. A single chunk then
+/// sits at every address the read names, so a fresh map defined there by the
+/// chunk's value serves; it is minted after the walk, in the live graph, and
+/// being fresh its definition assumes nothing about the heap.
+pub(crate) fn resolve_reads(
+    ctx: &mut VerifyContext<'_>,
+    q: &vmir::QuantChunks,
+    temps: Rc<[(usize, Id)]>,
+    heap_of: &mut dyn FnMut(&mut VerifyContext<'_>, &vmir::HeapVal) -> Result<Heap, VerifyError>,
+    pc: &[(Id, Polarity)],
+) -> Result<Captures, VerifyError> {
+    let mut caps = Captures {
+        temps,
+        reads: Rc::from([]),
+    };
+    if q.heap_reads().is_empty() {
+        return Ok(caps);
+    }
+    // Per read: its heap, address and kind, and what covers it (a set's map,
+    // or a single chunk's address and value). Only live e-classes leave the
+    // scratch graph: a holder's map, address and value predate it.
+    let mut covers = Vec::new();
+    ctx.pause_recipe(|ctx| {
+        ctx.with_scratch_graph(|ctx| {
+            let mut on_read = |ctx: &mut VerifyContext<'_>,
+                               state: &EvalState,
+                               heap: &vmir::HeapVal,
+                               addr: &Val,
+                               read_pc: &[(Id, Polarity)]| {
+                let loc = state
+                    .loc(ctx, addr)
+                    .expect("a read's operand is an address");
+                let h = heap_of(ctx, heap)?;
+                let Some((at, value)) = h.covering_holder(ctx, &loc, read_pc)? else {
+                    return Err(VerifyError::Unimplemented(
+                        "heap read in a quantified permission framed by several holders",
+                    ));
+                };
+                let map = match at {
+                    HolderAt::Set(i) => Ok(h.qp_chunks_of(&loc.kind)[i].value_map),
+                    HolderAt::Chunk(at) => Err((at, value)),
+                };
+                covers.push((*heap, addr.clone(), loc.kind, map));
+                Ok(value)
+            };
+            let xs = fresh_binders(ctx, q);
+            eval_body_at(ctx, &caps, q, &xs, pc, Some(&mut on_read)).map(|_| ())
+        })
+    })?;
+    let reads = covers.into_iter().map(|(heap, addr, kind, map)| {
+        let map = map.unwrap_or_else(|(at, value)| {
+            let addr_ty = Type::Addr {
+                group: kind.group,
+                value: Box::new(kind.value.clone()),
+                bound: kind.bound.clone(),
+            };
+            let map = ctx.fresh_symbolic_value(Type::ValueMap(Box::new(addr_ty)));
+            let lookup = ctx.alloc.value_map(&kind).lookup;
+            let read = ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([map, at])));
+            let defined = ctx.add(Symbolic::Binary(BinOp::Eq, [read, value]));
+            ctx.assume_guarded(defined, std::iter::empty());
+            map
+        });
+        ReadMap {
+            heap,
+            addr,
+            kind,
+            map,
+        }
+    });
+    caps.reads = reads.collect();
+    Ok(caps)
 }
 
 /// [`eval_qp_instance`] with the body's side conditions discharged as it is
@@ -452,7 +578,7 @@ fn eval_qp_instance(
 /// checked only where the binding's condition holds ([`body_inst_pc`]).
 fn eval_qp_instance_checked(
     ctx: &mut VerifyContext<'_>,
-    caps: &[(usize, egg::Id)],
+    caps: &Captures,
     q: &vmir::QuantChunks,
     binders: &[egg::Id],
     host_pc: &[(egg::Id, Polarity)],
@@ -465,13 +591,10 @@ fn eval_qp_instance_checked(
 }
 
 /// The body's frame at `binders`: the captures, then the binders.
-fn instance_frame(
-    caps: &[(usize, egg::Id)],
-    q: &vmir::QuantChunks,
-    binders: &[egg::Id],
-) -> EvalState {
+fn instance_frame(caps: &Captures, q: &vmir::QuantChunks, binders: &[egg::Id]) -> EvalState {
     debug_assert_eq!(binders.len(), q.bound.len());
-    let mut state = EvalState::frame_from_caps(q.binder_base, caps);
+    let mut state = EvalState::frame_from_caps(q.binder_base, &caps.temps);
+    state.read_maps = caps.reads.clone();
     for (&id, ty) in binders.iter().zip(q.bound.iter()) {
         state.push_val(id, ty.clone(), None);
     }
@@ -764,7 +887,7 @@ fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChu
 pub(super) fn quant_chunk_from_caps(
     ctx: &mut VerifyContext<'_>,
     q: &Rc<vmir::QuantChunks>,
-    caps: Rc<[(usize, egg::Id)]>,
+    caps: Captures,
     pc_lits: &[(egg::Id, Polarity)],
     value_map: egg::Id,
     check: QpCheck,

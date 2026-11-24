@@ -295,7 +295,7 @@ pub(crate) struct SetBody {
     /// The body, still in vmir temp space.
     pub(super) q: Rc<vmir::QuantChunks>,
     /// `free_temps()` resolved at inhale: enclosing temp -> its e-class then.
-    pub(super) caps: Rc<[(usize, egg::Id)]>,
+    pub(super) caps: crate::verify::heap::interface::Captures,
     /// The inverse functions minted at inhale, one per binder, each from the
     /// arguments of the location's address call to that binder (see
     /// `quantified_permissions::mint_and_assume_inverse_axiom`).

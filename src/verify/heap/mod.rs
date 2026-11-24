@@ -8,7 +8,7 @@ mod quantified_permissions;
 mod view;
 
 pub(crate) use interface::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, ReadRecipe, Value};
-pub(crate) use quantified_permissions::InverseAxioms;
+pub(crate) use quantified_permissions::{InverseAxioms, resolve_reads};
 
 use std::borrow::Cow;
 use std::cell::Cell;

@@ -322,9 +322,8 @@ fn eval_heap_inst(
             base_h.produce(ctx, access, value, &pc_lits)
         }
         HeapInst::AddForall { base, q, bind } => {
-            crate::verify::eval::reject_heap_reads(&q.heap_reads())?;
             let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
-            let spec = quant_spec_of(state, q);
+            let spec = quant_spec_of(ctx, state, q, pc)?;
             let value = match bind {
                 Bind::Fresh => {
                     debug_assert!(ctx.recipe.is_none(), "`with fresh` inside a resource body");
@@ -375,8 +374,7 @@ fn eval_heap_inst(
                     "quantified permission in a resource footprint",
                 ));
             }
-            crate::verify::eval::reject_heap_reads(&q.heap_reads())?;
-            let spec = quant_spec_of(state, q);
+            let spec = quant_spec_of(ctx, state, q, pc)?;
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let region = state.region(ctx);
             let base_h = get_heap(ctx, state, base, &region)?;
@@ -654,6 +652,7 @@ fn walk_footprint(
 ) -> Result<FootprintResult, VerifyError> {
     let def = certs.get(&resource).ok_or(VerifyError::DependencyFailed)?;
 
+    let before = base.clone();
     let mut heap = base;
     let mut values: Vec<egg::Id> = Vec::with_capacity(def.footprint.len());
     let mut recipes: Vec<Option<Val>> = Vec::with_capacity(def.footprint.len());
@@ -668,6 +667,7 @@ fn walk_footprint(
         scale_wild,
         pc_lits,
         frame_only,
+        before: &before,
     };
     for (i, slot) in def.footprint.iter().enumerate() {
         let SlotOut {
@@ -765,6 +765,8 @@ struct SlotWalk<'a> {
     scale_wild: bool,
     pc_lits: &'a [(egg::Id, Polarity)],
     frame_only: bool,
+    /// The heap the walk started from.
+    before: &'a Heap,
 }
 
 /// What one walked footprint slot contributes: its value (seen by later slots
@@ -899,6 +901,16 @@ fn walk_qp_slot(
         .iter()
         .map(|&(k, id)| (k, ctx.egraph.find(id)))
         .collect();
+    // The body's heap reads, resolved against the caller's heap, which is the
+    // one heap every footprint heap of the resource body stands for here: as
+    // produced so far on a produce, as before the walk on a consume (an exhale
+    // reads values in the state before it).
+    let reads_from = match w.direction {
+        Direction::Produce => heap.clone(),
+        Direction::Consume => w.before.clone(),
+    };
+    let mut heap_of = |_: &mut VerifyContext<'_>, _: &_| Ok(reads_from.clone());
+    let caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
 
     let value = match w.direction {
         Direction::Produce => {
@@ -1718,27 +1730,48 @@ pub(crate) fn prepare_trig_term(
 /// steps (every callee down to its verifier `FuncId`), ready for the applier —
 /// which has no registry access at rule-application time. `names` resolves a
 /// member to its source name, needed for the display label of a minted `f%pre`
-/// token (the registry holds no interner).
+/// token (the registry holds no interner). Every operand is passed through
+/// `rename` (into the recipe's temp space). A `Deref` that `read` resolves to
+/// a location kind and a map (already in the recipe's space) becomes
+/// `lookup(map, addr)`; any other `Deref` is refused.
 pub(crate) fn prepare_body(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     quants: &crate::verify::quant::RecipeTable,
     names: &dyn Fn(MemberId) -> String,
     insts: &[vmir::Inst],
+    rename: &dyn Fn(&Val) -> Val,
+    read: &dyn Fn(&vmir::HeapVal, &Val) -> Option<(crate::verify::heap::LocationKind, Val)>,
 ) -> Result<Vec<crate::verify::rewrite::AxiomInst>, VerifyError> {
     use crate::verify::rewrite::{AxiomInst, AxiomPure};
     let mut out = Vec::with_capacity(insts.len());
+    let push = |out: &mut Vec<AxiomInst>, i: AxiomInst| {
+        out.push(crate::verify::cert::map_operands(&i, rename))
+    };
     for inst in insts {
+        if let InstKind::Pure(_, PureInst::Deref(heap, addr)) = &inst.kind
+            && let Some((kind, map)) = read(heap, addr)
+        {
+            out.push(AxiomInst::Val(AxiomPure::App {
+                func: alloc.value_map(&kind).lookup,
+                type_args: vec![],
+                args: vec![map, rename(addr)],
+            }));
+            continue;
+        }
         // A nested `forall` is a step like any other: it materializes the inner
         // e-node with the enclosing instance's values as capture children. Its
         // capture list is derived (`Forall::free_temps`) and cached on the table by
         // the innermost-first intern that ran just before this one.
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
             let (recipe, free) = quants.entry_of(q)?;
-            out.push(AxiomInst::Forall {
-                recipe: *recipe,
-                type_args: quants.get(*recipe).open_types(),
-                caps: free.iter().map(|&k| Val::Temp(k)).collect(),
-            });
+            push(
+                &mut out,
+                AxiomInst::Forall {
+                    recipe: *recipe,
+                    type_args: quants.get(*recipe).open_types(),
+                    caps: free.iter().map(|&k| Val::Temp(k)).collect(),
+                },
+            );
             continue;
         }
         // A call is two steps, exactly as on the eval walk (`eval_pure_inst`'s
@@ -1749,22 +1782,28 @@ pub(crate) fn prepare_body(
         // so the application keeps this inst's slot.
         if let InstKind::Pure(_, PureInst::FunctionCall(fc)) = &inst.kind {
             let args: Vec<Val> = fc.args.iter().cloned().collect();
-            out.push(AxiomInst::Val(AxiomPure::App {
-                func: crate::verify::func_registry::func_id_for_member(fc.function),
-                type_args: fc.type_args.clone(),
-                args: args.clone(),
-            }));
+            push(
+                &mut out,
+                AxiomInst::Val(AxiomPure::App {
+                    func: crate::verify::func_registry::func_id_for_member(fc.function),
+                    type_args: fc.type_args.clone(),
+                    args: args.clone(),
+                }),
+            );
             // The token's truth is released under this inst's own path condition —
             // a call under `i > 0 ==> ..` inside the body must not fire the
             // callee's axioms at a σ where `i > 0` fails. No `recipe_pc` needed:
             // a prepared body's `Val`s *are* the host body's temps, used
             // identity-wise, so `inst.pc`'s literals transfer directly.
-            out.push(AxiomInst::Token {
-                func: alloc.fn_pre_token(fc.function, &names(fc.function)),
-                type_args: fc.type_args.clone(),
-                args,
-                guards: inst.pc.conds.clone(),
-            });
+            push(
+                &mut out,
+                AxiomInst::Token {
+                    func: alloc.fn_pre_token(fc.function, &names(fc.function)),
+                    type_args: fc.type_args.clone(),
+                    args,
+                    guards: inst.pc.conds.clone(),
+                },
+            );
             continue;
         }
         let prepared = match &inst.kind {
@@ -1834,25 +1873,31 @@ pub(crate) fn prepare_body(
             InstKind::Perm(_) => continue,
             _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
         };
-        out.push(prepared);
+        push(&mut out, prepared);
     }
     Ok(out)
 }
 
 /// The chunk set a quantified permission denotes at this program point: its
-/// body plus the values its captured temps have in the live state, to be
+/// body plus the values its captured temps have in the live state and its heap
+/// reads resolved against the live heaps (`heap::resolve_reads`), to be
 /// checked whole when it is added or taken ([`QpCheck::Body`]).
-fn quant_spec_of(state: &EvalState, q: &vmir::QuantChunks) -> QuantSpec {
-    QuantSpec {
+fn quant_spec_of(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    q: &vmir::QuantChunks,
+    pc: &PathConds,
+) -> Result<QuantSpec, VerifyError> {
+    let temps = q.free_temps().into_iter().map(|k| (k, state.vals[k]));
+    let pc_lits = pc_lits_raw(ctx, state, pc);
+    let mut heap_of = |ctx: &mut VerifyContext<'_>, h: &_| get_heap(ctx, state, h, &pc_lits);
+    let caps = crate::verify::heap::resolve_reads(ctx, q, temps.collect(), &mut heap_of, &pc_lits)?;
+    Ok(QuantSpec {
         q: Rc::new(q.clone()),
-        caps: q
-            .free_temps()
-            .into_iter()
-            .map(|k| (k, state.vals[k]))
-            .collect(),
+        caps,
         // Stated here, so nothing about it is established yet.
         check: QpCheck::Body,
-    }
+    })
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and

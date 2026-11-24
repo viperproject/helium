@@ -143,30 +143,25 @@ fn free_temps_of(
 pub struct HeapRead {
     /// The `Deref` instruction's index in the body.
     pub inst: usize,
-    /// The enclosing heap it reads (`HeapVal::Temp(heap)`).
-    pub heap: usize,
+    /// The enclosing heap it reads (`Empty` in a resource body's first slots).
+    pub heap: HeapVal,
     /// The address it reads, a body operand.
     pub addr: Val,
 }
 
 /// The heap reads of a quantified scope's own instructions, in order. A
 /// nested `forall`'s reads belong to that quantifier and are not listed: each
-/// level resolves its own. Panics on a read of `HeapVal::Empty`: translation
-/// gives a quantifier body its host's heaps, and a host that has none (a domain
-/// axiom) cannot express a read at all.
+/// level resolves its own.
 fn heap_reads_of(insts: &[crate::vmir::Inst]) -> Vec<HeapRead> {
     insts
         .iter()
         .enumerate()
         .filter_map(|(i, inst)| match &inst.kind {
-            InstKind::Pure(_, PureInst::Deref(heap, addr)) => match heap {
-                HeapVal::Temp(h) => Some(HeapRead {
-                    inst: i,
-                    heap: *h,
-                    addr: addr.clone(),
-                }),
-                HeapVal::Empty => panic!("a quantifier body reads the empty heap"),
-            },
+            InstKind::Pure(_, PureInst::Deref(heap, addr)) => Some(HeapRead {
+                inst: i,
+                heap: *heap,
+                addr: addr.clone(),
+            }),
             _ => None,
         })
         .collect()

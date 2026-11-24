@@ -27,7 +27,7 @@ use crate::verify::declaration::{prepare_body, prepare_trig_term};
 use crate::verify::error::VerifyError;
 use crate::verify::func_registry::FuncRegistry;
 use crate::verify::lang::RecipeId;
-use crate::verify::rewrite::{AxiomInst, PreparedTerm};
+use crate::verify::rewrite::{AxiomInst, AxiomPure, PreparedTerm};
 use crate::vmir::{self, InstKind, PureInst, Type, Val};
 
 /// A compiled `forall` body: the pure steps, the boolean result, the binder arity,
@@ -280,6 +280,7 @@ fn intern(
         q.binder_base,
         q.bound.len(),
         &free,
+        &[],
         &q.triggers,
         &q.body.insts,
     )?;
@@ -323,6 +324,35 @@ fn intern(
     Ok(id)
 }
 
+/// One heap read of a quantified permission's body ([`vmir::HeapRead`]),
+/// resolved to the value map that stands in for the enclosing heap there
+/// (`heap::quantified_permissions::resolve_reads`). The body reads
+/// `lookup(map, addr)` instead, so it stays heap-free: the map is one more
+/// capture, in instances ([`crate::verify::eval::EvalState::read_maps`]) and
+/// in the compiled body ([`Canonical`], after the captured temps) alike.
+#[derive(Debug, Clone)]
+pub(crate) struct ReadMap {
+    /// The `Deref`'s heap and address operand: which read this resolves.
+    pub(crate) heap: vmir::HeapVal,
+    pub(crate) addr: Val,
+    pub(crate) kind: crate::verify::heap::LocationKind,
+    pub(crate) map: egg::Id,
+}
+
+impl ReadMap {
+    /// The resolved read `Deref(heap, addr)` among `reads`, with its index.
+    pub(crate) fn find<'a>(
+        reads: &'a [ReadMap],
+        heap: &vmir::HeapVal,
+        addr: &Val,
+    ) -> Option<(usize, &'a ReadMap)> {
+        reads
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.heap == *heap && r.addr == *addr)
+    }
+}
+
 /// A quantifier body moved into a recipe's canonical `caps ++ binders ++ steps`
 /// temp space: its steps prepared ([`prepare_body`]) and renamed, its triggers
 /// prepared. What [`intern`] does to a pure `forall`; also the starting point
@@ -332,6 +362,8 @@ pub(crate) struct Canonical {
     binder_base: usize,
     /// Enclosing temp -> capture slot.
     slot: HashMap<usize, usize>,
+    /// How many read maps are captured after the temps (see [`ReadMap`]).
+    n_reads: usize,
     /// The next free temp: one past the binders and every value step so far.
     next: usize,
     pub(crate) insts: Vec<AxiomInst>,
@@ -339,7 +371,8 @@ pub(crate) struct Canonical {
 }
 
 impl Canonical {
-    /// `free` is the scope's capture list (enclosing temps, in child order).
+    /// `free` is the scope's capture list (enclosing temps, in child order);
+    /// the maps of its resolved `reads` are captured after them, in order.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         alloc: &mut FuncRegistry,
@@ -348,6 +381,7 @@ impl Canonical {
         binder_base: usize,
         n_bound: usize,
         free: &[usize],
+        reads: &[ReadMap],
         triggers: &[vmir::QuantTrigger],
         insts: &[vmir::Inst],
     ) -> Result<Self, VerifyError> {
@@ -358,15 +392,17 @@ impl Canonical {
         let mut c = Self {
             binder_base,
             slot: free.iter().copied().zip(0..).collect(),
-            next: free.len() + n_bound + n_vals,
+            n_reads: reads.len(),
+            next: free.len() + reads.len() + n_bound + n_vals,
             insts: Vec::new(),
             groups: Vec::new(),
         };
-        let prepared: Vec<AxiomInst> = prepare_body(alloc, table, names, insts)?
-            .iter()
-            .map(|i| crate::verify::cert::map_operands(i, |v| c.rename(v)))
-            .collect();
-        c.insts = prepared;
+        // Read `j`'s map is the capture after the temps': slot `free.len() + j`.
+        let read = |heap: &vmir::HeapVal, addr: &Val| {
+            let (j, r) = ReadMap::find(reads, heap, addr)?;
+            Some((r.kind.clone(), Val::Temp(free.len() + j)))
+        };
+        c.insts = prepare_body(alloc, table, names, insts, &|v| c.rename(v), &read)?;
         c.groups = triggers
             .iter()
             .map(|g| {
@@ -379,9 +415,9 @@ impl Canonical {
         Ok(c)
     }
 
-    /// The capture arity.
+    /// The capture arity: the captured temps, then the read maps.
     pub(crate) fn n_caps(&self) -> usize {
-        self.slot.len()
+        self.slot.len() + self.n_reads
     }
 
     /// Canonicalize one operand. Below `binder_base` it is a capture, and its
@@ -393,6 +429,58 @@ impl Canonical {
             Val::Temp(k) => Val::Temp(self.n_caps() + (k - self.binder_base)),
             lit => lit.clone(),
         }
+    }
+
+    /// The trigger pattern the canonical value `v` is built as, if it mentions
+    /// every one of the `n_bound` binders: captures and binders become
+    /// variables, a function application step an application. `None` if some
+    /// part is not matchable (an interpreted operation) or a binder is missing.
+    ///
+    /// What a quantified permission's location `f(e(xs))` triggers on when the
+    /// receiver reads the heap: the read is a `lookup` of a captured map here,
+    /// which a VMIR trigger cannot name.
+    pub(crate) fn pattern_of(&self, v: &Val, n_bound: usize) -> Option<PreparedTerm> {
+        fn build(
+            c: &Canonical,
+            v: &Val,
+            n_bound: usize,
+            seen: &mut Vec<bool>,
+        ) -> Option<PreparedTerm> {
+            let n_caps = c.n_caps();
+            Some(match v {
+                Val::Literal(lit) => PreparedTerm::Lit(lit.clone()),
+                Val::Temp(k) if *k < n_caps => PreparedTerm::Capture(*k),
+                Val::Temp(k) if *k < n_caps + n_bound => {
+                    seen[k - n_caps] = true;
+                    PreparedTerm::Bound(k - n_caps)
+                }
+                // A step: the `k`-th instruction that holds a temp slot.
+                Val::Temp(k) => {
+                    let slotted =
+                        |i: &&AxiomInst| matches!(i, AxiomInst::Val(_) | AxiomInst::Forall { .. });
+                    let step = c.insts.iter().filter(slotted).nth(k - n_caps - n_bound)?;
+                    let AxiomInst::Val(AxiomPure::App {
+                        func,
+                        type_args,
+                        args,
+                    }) = step
+                    else {
+                        return None;
+                    };
+                    let args = args.iter().map(|a| build(c, a, n_bound, seen));
+                    PreparedTerm::App {
+                        head: crate::verify::rewrite::TermHead::Func {
+                            func: *func,
+                            type_args: type_args.iter().cloned().collect(),
+                        },
+                        args: args.collect::<Option<_>>()?,
+                    }
+                }
+            })
+        }
+        let mut seen = vec![false; n_bound];
+        let pattern = build(self, v, n_bound, &mut seen)?;
+        seen.iter().all(|&b| b).then_some(pattern)
     }
 
     /// Append a step (operands already canonical) and return its temp.

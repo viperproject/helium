@@ -7,6 +7,7 @@ use crate::dhash::HashMap;
 use crate::verify::heap::Loc;
 
 use crate::verify::cert::PermRecipe;
+use crate::verify::quant::ReadMap;
 use crate::vmir::display::VmirDisplay;
 use crate::{
     verify::{
@@ -60,6 +61,10 @@ pub(crate) struct EvalState {
     /// For the join block being evaluated: whether its (then, else) predecessor
     /// blocks are dead. The `Merge` reads this; `None` outside a method join.
     pub(crate) join_arms_dead: Option<(bool, bool)>,
+    /// The resolved heap reads of the quantified-permission body being
+    /// evaluated (see [`ReadMap`]): its `Deref`s read these maps, never a heap
+    /// (an instance frame has none). Empty in every other state.
+    pub(crate) read_maps: std::rc::Rc<[ReadMap]>,
 }
 
 impl EvalState {
@@ -74,6 +79,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            read_maps: std::rc::Rc::from([]),
         }
     }
 
@@ -91,6 +97,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            read_maps: std::rc::Rc::from([]),
         }
     }
 
@@ -170,6 +177,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            read_maps: std::rc::Rc::from([]),
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
@@ -214,6 +222,7 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
+            read_maps: std::rc::Rc::from([]),
         }
     }
 
@@ -523,11 +532,12 @@ pub(crate) fn eval_body_checked(
 /// A nested `forall` is checked recursively, with its encloser's binders
 /// already fresh, so no WD obligation survives into a recipe — instantiation runs
 /// inside a rewrite rule, where nothing can be proven.
-/// Refuse a quantifier body that reads an enclosing heap (see
+/// Refuse a pure `forall` body that reads an enclosing heap (see
 /// [`vmir::HeapRead`]). Such a body must have each read resolved to a value
-/// map before it is evaluated or compiled (`plans/heap-dependent-quantifier-reads.md`);
-/// until that exists, every place that uses a body calls this first, so no
-/// walk reads the live heap through it and no recipe meets a `Deref`.
+/// map before it is evaluated or compiled, which only quantified permissions
+/// do so far (`heap::resolve_reads`; `plans/heap-dependent-quantifier-reads.md`,
+/// phase 5). Called before a pure `forall` is used, so no walk reads the live
+/// heap through it and no recipe meets a `Deref`.
 pub(crate) fn reject_heap_reads(reads: &[vmir::HeapRead]) -> Result<(), VerifyError> {
     if reads.is_empty() {
         Ok(())
@@ -680,6 +690,19 @@ pub(crate) fn eval_pure_inst(
                 None
             };
             (id, recipe)
+        }
+        // A resolved read of a quantified permission's body: `lookup(map, addr)`.
+        PureInst::Deref(hv, loc)
+            if let Some((_, read)) = ReadMap::find(&state.read_maps, hv, loc) =>
+        {
+            let addr = state.get_val(ctx, loc);
+            let lookup = ctx.alloc.value_map(&read.kind).lookup;
+            let id = ctx.add(Symbolic::FuncApp(
+                lookup,
+                Box::new([]),
+                Box::new([read.map, addr]),
+            ));
+            (id, None)
         }
         PureInst::Deref(hv, loc) => {
             let heap = get_heap(ctx, state, hv, pc_lits)?;
