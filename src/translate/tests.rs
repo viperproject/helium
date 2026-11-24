@@ -1312,6 +1312,62 @@ method m(x: Int) {
 }
 
 #[test]
+fn heap_dependent_call_in_forall_body_is_a_frame_exhale_step() {
+    // A heap-dependent call in a `forall` body lowers as outside one: a
+    // frame-only exhale of `get#requires` yields the snapshot, then the call.
+    // The exhale's snapshot is a body step, so the reads after it are numbered
+    // past it, and a call is binder-free iff no argument depends on a binder.
+    let input = r#"
+field f: Int
+function get(x: Ref): Int
+    requires acc(x.f, wildcard)
+
+method m(s: Set[Ref], y: Ref)
+    requires acc(y.f)
+    requires forall x: Ref :: x in s ==> acc(x.f)
+{
+    assert forall x: Ref :: { x.f } x in s ==> get(x) + x.f + get(y) == y.f
+}
+"#;
+    let p = run(input);
+    let m_id = p.id("m").expect("missing method m");
+    let vmir::Declaration::Method(m) = &p.decls[m_id] else {
+        panic!("m must be a Method");
+    };
+    let insts = m.flatten();
+    let [q] = foralls(&insts)[..] else {
+        panic!("expected one forall in the method body");
+    };
+    let calls = q.heap_calls();
+    let binder_free: Vec<bool> = calls.iter().map(|c| c.binder_free).collect();
+    assert_eq!(binder_free, vec![false, true], "get(x), then get(y)");
+    // Each snapshot temp is the last argument of the call that follows it.
+    let step_base = q.step_base();
+    for c in &calls {
+        let vmir::Val::Temp(t) = c.snap else {
+            panic!("a snapshot is a temp")
+        };
+        let call_step = q
+            .body
+            .insts
+            .iter()
+            .filter(|i| matches!(i.kind, vmir::InstKind::Pure(..) | vmir::InstKind::Heap(..)))
+            .nth(t - step_base + 1)
+            .expect("the call follows its snapshot");
+        let vmir::InstKind::Pure(_, vmir::PureInst::FunctionCall(fc)) = &call_step.kind else {
+            panic!("expected the call after its snapshot, got {:?}", call_step.kind);
+        };
+        assert_eq!(fc.args.iter().last(), Some(&c.snap));
+    }
+    // Both reads still find their address type past the snapshot steps.
+    let reads = q.heap_reads();
+    assert_eq!(reads.len(), 2, "x.f and y.f");
+    for r in &reads {
+        assert!(matches!(r.addr_ty, vmir::Type::Addr { .. }), "{:?}", r.addr_ty);
+    }
+}
+
+#[test]
 fn nested_trigger_lowers_to_nested_app() {
     // A trigger may be an arbitrarily nested application: `{f(g(i))}` binds the
     // binder at depth 1.

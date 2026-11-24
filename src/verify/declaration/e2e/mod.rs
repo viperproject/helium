@@ -2454,21 +2454,6 @@ method client(x: Int) {
     assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
-/// Translate `input`, expecting it to be *rejected* by translation.
-fn lower_err(input: &str) -> Vec<crate::translate::TranslationError> {
-    let mut program = viper_parser::vpr_program(input).expect("parse");
-    let mut ic = IdentCollector::default();
-    program.walk_mut(&mut ic);
-    let interner = ic.finalize();
-    let mut gc = GlobalsCollector::new(&interner);
-    program.walk(&mut gc);
-    let globals = gc.finalize().expect("globals");
-    disambiguate(&mut program, &interner, &globals).expect("disambiguation");
-    inline_macros(&mut program, &interner).expect("macros");
-    let typed = typecheck_program(&mut program, interner, &globals).expect("typecheck");
-    translate::translate(&typed).expect_err("expected translation to reject this program")
-}
-
 #[test]
 fn forall_body_division_guarded_by_the_binder_is_well_defined() {
     // WD of a quantifier body, checked once at the point it is stated, against
@@ -2654,11 +2639,10 @@ method m() {
 }
 
 #[test]
-fn heap_dependent_call_in_a_forall_body_is_rejected() {
-    // A quantifier body must stay pure and heap-free: its compiled recipe is
-    // rebuilt inside a rewrite rule, which can neither read the symbolic heap nor
-    // discharge the `Snap`'s implicit precondition check. (A binder-dependent
-    // footprint would need quantified permissions, which are unsupported.)
+fn heap_dependent_call_in_a_forall_body_is_unimplemented() {
+    // Translation lowers the call in the body (a frame-only exhale, then the
+    // call); the verifier refuses it until it resolves calls like reads
+    // (plans/heap-dependent-calls-in-quantifiers.md, phase 1).
     let input = r#"
 field f: Int
 domain D { function t(i: Int): Bool }
@@ -2673,13 +2657,16 @@ method m(y: Ref)
     inhale forall i: Int :: {t(i)} get(y) == get(y)
 }
 "#;
-    let errs = lower_err(input);
+    let program = lower(input);
+    let result = verify_named_method(&program, "m");
     assert!(
-        errs.iter().any(|e| matches!(
-            e,
-            crate::translate::TranslationError::HeapDepFunctionInQuantifier(_)
-        )),
-        "expected HeapDepFunctionInQuantifier, got {errs:?}"
+        matches!(
+            result.as_ref().map_err(VerifyError::root_cause),
+            Err(VerifyError::Unimplemented(
+                "heap-dependent function call inside a quantifier"
+            ))
+        ),
+        "got {result:?}"
     );
 }
 

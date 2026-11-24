@@ -592,6 +592,7 @@ pub(crate) fn resolve_reads(
         reads: Rc::from([]),
         wildcard: None,
     };
+    crate::verify::eval::reject_heap_calls(&q.heap_calls())?;
     if q.heap_reads().is_empty() {
         return Ok(caps);
     }

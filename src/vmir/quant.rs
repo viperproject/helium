@@ -82,6 +82,12 @@ impl Forall {
         heap_reads_of(self.step_base(), &self.body.insts)
     }
 
+    /// The heap-dependent calls of this quantifier's own body, in instruction
+    /// order (see [`HeapCall`]). Derived, like [`Forall::heap_reads`].
+    pub fn heap_calls(&self) -> Vec<HeapCall> {
+        heap_calls_of(self.binder_base, self.step_base(), &self.body.insts)
+    }
+
     /// Visit every type this quantifier mentions: its binder types, its
     /// triggers' type arguments, and every type of its body, nested quantifiers
     /// included.
@@ -155,13 +161,7 @@ pub struct HeapRead {
 /// read at an address the body does not compute: translation builds every
 /// address inside the body (`resource::field_addr` in the body's sink).
 fn heap_reads_of(step_base: usize, insts: &[crate::vmir::Inst]) -> Vec<HeapRead> {
-    let step_types: Vec<&Type> = insts
-        .iter()
-        .filter_map(|i| match &i.kind {
-            InstKind::Pure(ty, _) => Some(ty),
-            _ => None,
-        })
-        .collect();
+    let step_types = step_types(insts);
     insts
         .iter()
         .filter_map(|inst| match &inst.kind {
@@ -179,6 +179,84 @@ fn heap_reads_of(step_base: usize, insts: &[crate::vmir::Inst]) -> Vec<HeapRead>
             _ => None,
         })
         .collect()
+}
+
+/// The type of the `Val` each step of a quantifier body yields, in order: a
+/// body's temps from `step_base` on name these. A pure step yields its own
+/// type, a heap-dependent call's frame-only exhale its snapshot.
+fn step_types(insts: &[crate::vmir::Inst]) -> Vec<Type> {
+    insts
+        .iter()
+        .filter_map(|i| match &i.kind {
+            InstKind::Pure(ty, _) => Some(ty.clone()),
+            InstKind::Heap(hi) => Some(Type::Snap(frame_call(hi).resource)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The call of a quantifier body's heap step, which is always a frame-only
+/// exhale (see [`HeapCall`]).
+fn frame_call(hi: &crate::vmir::HeapInst) -> &crate::vmir::ResourceCall {
+    hi.frame_exhale().map(|(_, call)| call).unwrap_or_else(|| {
+        panic!("a quantifier body holds a heap step other than a frame-only exhale: {hi:?}")
+    })
+}
+
+/// A heap-dependent function call in a quantifier body: the frame-only
+/// `exhale` of the callee's `#requires` on an **enclosing** heap, which yields
+/// the snapshot the call takes. Like a [`HeapRead`], the verifier resolves it
+/// before it uses the body: framed per binding, then replaced by stand-ins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapCall {
+    /// The enclosing heap it frames against.
+    pub heap: HeapVal,
+    pub call: crate::vmir::ResourceCall,
+    /// The snapshot temp the exhale yields.
+    pub snap: Val,
+    /// No argument depends on a binder, so the snapshot is the same for every
+    /// binding.
+    pub binder_free: bool,
+}
+
+/// The heap-dependent calls of a quantified scope's own instructions, in
+/// order. A nested `forall`'s calls belong to that quantifier.
+fn heap_calls_of(
+    binder_base: usize,
+    step_base: usize,
+    insts: &[crate::vmir::Inst],
+) -> Vec<HeapCall> {
+    // Per body step: whether its value depends on a binder.
+    let mut dep: Vec<bool> = Vec::new();
+    let depends = |dep: &[bool], v: &Val| match v {
+        Val::Temp(k) if *k >= step_base => dep[k - step_base],
+        Val::Temp(k) => *k >= binder_base,
+        _ => false,
+    };
+    let mut out = Vec::new();
+    for inst in insts {
+        match &inst.kind {
+            InstKind::Pure(_, pi) => {
+                let mut d = false;
+                pi.for_each_operand(&mut |v| d |= depends(&dep, v));
+                dep.push(d);
+            }
+            InstKind::Heap(hi) => {
+                let call = frame_call(hi);
+                let (heap, _) = hi.frame_exhale().expect("checked by frame_call");
+                let d = call.args.iter().any(|v| depends(&dep, v));
+                out.push(HeapCall {
+                    heap,
+                    call: call.clone(),
+                    snap: Val::Temp(step_base + dep.len()),
+                    binder_free: !d,
+                });
+                dep.push(d);
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// A quantified set of heap chunks, `{ loc(xs) @ perm(xs) | cond(xs) }` — the
@@ -245,6 +323,12 @@ impl QuantChunks {
         heap_reads_of(self.step_base(), &self.body.insts)
     }
 
+    /// The heap-dependent calls of this scope's body, in instruction order
+    /// (see [`HeapCall`]).
+    pub fn heap_calls(&self) -> Vec<HeapCall> {
+        heap_calls_of(self.binder_base, self.step_base(), &self.body.insts)
+    }
+
     /// The enclosing temps this scope mentions (its capture list), triggers
     /// first, then the body, then `cond`, `loc` and the permission amount.
     pub fn free_temps(&self) -> Vec<usize> {
@@ -278,6 +362,9 @@ impl FunctionBody {
                     }
                 }
                 InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {}
+                // A heap-dependent call's snapshot: `Snap(..)` has no type
+                // arguments.
+                InstKind::Heap(hi) if hi.frame_exhale().is_some() => {}
                 InstKind::Heap(_) | InstKind::Perm(_) => {
                     panic!(
                         "a quantifier or axiom body is pure, but has {:?}",
@@ -307,6 +394,9 @@ impl FunctionBody {
                     }
                 }
                 InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {}
+                // A heap-dependent call's snapshot: `Snap(..)` has no type
+                // arguments.
+                InstKind::Heap(hi) if hi.frame_exhale().is_some() => {}
                 InstKind::Heap(_) | InstKind::Perm(_) => {
                     panic!(
                         "a quantifier or axiom body is pure, but has {:?}",

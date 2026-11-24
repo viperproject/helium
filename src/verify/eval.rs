@@ -558,6 +558,19 @@ pub(crate) fn eval_body_checked(
     Ok(())
 }
 
+/// A heap-dependent call in a quantifier body (a frame-only exhale, see
+/// [`vmir::HeapCall`]) is not resolved yet: refused before the body is walked.
+/// Phase 1 of plans/heap-dependent-calls-in-quantifiers.md.
+pub(crate) fn reject_heap_calls(calls: &[vmir::HeapCall]) -> Result<(), VerifyError> {
+    if calls.is_empty() {
+        Ok(())
+    } else {
+        Err(VerifyError::Unimplemented(
+            "heap-dependent function call inside a quantifier",
+        ))
+    }
+}
+
 /// Check the well-definedness of a `forall` **at the point it is encountered**,
 /// in a throwaway clone of the live e-graph.
 ///
@@ -590,6 +603,7 @@ pub(crate) fn check_forall_wd(
             "permission instruction in a quantifier body",
         ));
     }
+    reject_heap_calls(&q.heap_calls())?;
     // The same walk resolves the body's heap reads against the host's heaps.
     let heap_of = |ctx: &mut VerifyContext<'_>, h: &HeapVal| get_heap(ctx, host, h, host_pc);
     let mut resolver = crate::verify::heap::ReadResolver::new(heap_of);

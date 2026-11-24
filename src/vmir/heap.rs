@@ -266,6 +266,21 @@ impl HeapInst {
         ) || self.snap_yield(decls).is_some()
     }
 
+    /// The base heap and resource call of a **frame-only** exhale: a
+    /// heap-dependent function call's snapshot, the one heap step a quantifier
+    /// body may hold.
+    pub fn frame_exhale(&self) -> Option<(HeapVal, &ResourceCall)> {
+        match self {
+            HeapInst::Exhale {
+                frame_only: true,
+                base,
+                call,
+                ..
+            } => Some((*base, call)),
+            _ => None,
+        }
+    }
+
     /// Whether this instruction produces a heap. Everything does except a
     /// **frame-only** exhale, whose binder is `_` (see
     /// [`HeapInst::Exhale::frame_only`]). Output arity is part of an

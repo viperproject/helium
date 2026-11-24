@@ -33,11 +33,11 @@ pub(crate) struct HeapCtx<'a> {
     pub old: Option<&'a OldHeaps<'a>>,
     /// Set while lowering a `forall` body (pure or a quantified permission's).
     /// The body keeps the host's heaps: a field read lowers to a `Deref` of an
-    /// enclosing heap, which the verifier resolves per binding before the body
-    /// is compiled into a recipe (a recipe is rebuilt inside a rewrite rule,
-    /// which can neither read the symbolic heap nor discharge an obligation).
-    /// It gates the constructs that cannot be resolved that way yet: a
-    /// heap-dependent call's `Snap`, `unfolding` and `perm`.
+    /// enclosing heap, and a heap-dependent call to a frame-only `exhale` of it,
+    /// which the verifier resolves per binding before the body is compiled into
+    /// a recipe (a recipe is rebuilt inside a rewrite rule, which can neither
+    /// read the symbolic heap nor discharge an obligation). It gates the
+    /// constructs that cannot be resolved that way yet: `unfolding` and `perm`.
     pub in_quantifier: bool,
 }
 
@@ -784,39 +784,12 @@ fn lower_func_app<Ext: PureExt>(
         // Narrow the current value heap to the callee's precondition snapshot.
         // `Snap` implicitly asserts the precondition under the running pc.
         let req_id = requires.expect("heap-dep implies a requires");
-        // A quantifier body has no heap to narrow, and could not have one (see
-        // `HeapCtx::in_quantifier`). A binder-dependent footprint would need
-        // quantified permissions besides.
-        //
-        // The obvious workaround — emit the `Snap` in the *host* scope and let
-        // `vmir::Forall::free_temps` capture it — does not work, for two reasons
-        // worth recording so they are not re-derived:
-        //
-        //  * `Snap` bundles two jobs: it narrows the footprint to a snapshot
-        //    *and* asserts the resource's boolean. Those pull opposite ways here.
-        //    The snapshot wants to be binder-free (one captured value), but the
-        //    boolean must be checked per-binding **under the quantifier's
-        //    antecedent** — for `get(xs, i)` it is typically `0 <= i && i < len(xs)`,
-        //    which only the antecedent establishes. Hoisting asserts it outside the
-        //    antecedent, so it fails exactly where the feature would be wanted.
-        //  * `f#requires` is parameterized by the callee's *whole* param list, so a
-        //    `Snap` for `get(xs, i)` carries `args = [xs, i]` and mentions the
-        //    binder even when no footprint slot does. Hoisting is therefore only
-        //    ever applicable to calls that are already fully binder-free.
-        //
-        // Supporting this properly means splitting those two jobs: a
-        // param-independence analysis over the footprint recipes, a snapshot term
-        // that omits the irrelevant params, and per-binding checking of the
-        // resource boolean under the antecedent.
-        if hctx.in_quantifier {
-            return Err(TranslationError::HeapDepFunctionInQuantifier(
-                b.interner.resolve(&call.name.0).to_string(),
-            ));
-        }
         // The implicit precondition check: a frame-only exhale of the callee's
         // `#requires` resource, yielding its snapshot but no heap. `1/1`, not
         // `wildcard`: the scale multiplies each footprint slot's own permission,
         // so `1 * p` reproduces the amounts the dedicated `Snap` instruction used.
+        // The same inside a quantifier body: the verifier resolves the exhale
+        // like a field read, per binding under the body's path condition.
         let s = sink.emit_resource_frame_exhale(
             hctx.value,
             vmir::ResourceCall {
