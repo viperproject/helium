@@ -1,0 +1,21 @@
+// A callee's quantified precondition taken from two held sets together: the
+// precondition snapshot holds the summary map, and the callee's two-state
+// `#ensures` reads `old(x.f)` through it as a pure term (no heap read).
+field f: Int
+
+method callee(s: Set[Ref], x: Ref)
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s
+  ensures forall y: Ref :: y in s ==> acc(y.f)
+  ensures x.f == old(x.f) + 1
+
+method caller(s1: Set[Ref], s2: Set[Ref], x: Ref)
+  requires x in s2
+  requires s1 intersection s2 == Set[Ref]()
+  requires forall y: Ref :: y in s1 ==> acc(y.f)
+  requires forall y: Ref :: y in s2 ==> acc(y.f)
+  requires x.f == 7
+{
+  callee(s1 union s2, x)
+  assert x.f == 8
+}

@@ -1,0 +1,16 @@
+// QP hard: the quantified predicate instance is never unfolded, so the field
+// inside it is not directly accessible.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+predicate P(x: Ref) {
+  acc(x.f)
+}
+
+method qp_predicate_no_unfold(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> P(x)
+  requires a in s
+{
+  a.f := 1
+}

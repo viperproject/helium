@@ -1,0 +1,14 @@
+// The postcondition claims every member kept its pre-state value, but `a.f`
+// was incremented.
+//
+// Must FAIL (postcondition).
+field f: Int
+
+method inc(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: { x.f } x in s ==> x.f == old(x.f)
+{
+  a.f := a.f + 1
+}

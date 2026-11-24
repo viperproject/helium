@@ -1,0 +1,13 @@
+// A pure `forall` that reads `x.val` without holding it.
+//
+// Must FAIL (insufficient permission).
+domain D {
+  function h(i: Int): Bool
+}
+
+field val: Int
+
+method m(x: Ref)
+{
+  assert forall i: Int :: { h(i) } h(i) ==> x.val > i
+}

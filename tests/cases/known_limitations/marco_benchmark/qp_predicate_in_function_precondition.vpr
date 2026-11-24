@@ -1,5 +1,7 @@
-// KNOWN LIMITATION: "unsupported construct: quantified permission" for a
-// quantified predicate permission in a function precondition.
+// KNOWN LIMITATION: "Predicate `P` used in pure expression context" for a
+// quantified predicate permission in a function precondition. Triggers are
+// lowered as pure expressions, so a predicate trigger `{ P(a) }` is refused;
+// past it, a `wildcard` amount in a quantified permission is unsupported.
 //
 // Prusti's `snap_owned_range_aliased`, `snap_frac_ref_range_aliased` and
 // `snap_unique_ref_current_range_aliased` (slices / `Vec` / `ArrayList`) have

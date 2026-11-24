@@ -1,0 +1,24 @@
+// `old(..)` inside a `forall` in a postcondition reads the pre-state heap; a
+// caller learns that every other member kept its value.
+//
+// Must VERIFY.
+field f: Int
+
+method inc(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: { x.f } x in s && x != a ==> x.f == old(x.f)
+  ensures a.f == old(a.f) + 1
+{
+  a.f := a.f + 1
+}
+
+method client(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b
+{
+  var v: Int := b.f
+  inc(s, a)
+  assert b.f == v
+}

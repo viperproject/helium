@@ -1,0 +1,40 @@
+// QP hard: copy one array into another of the same length. Two disjoint chunk
+// sets: read-only (1/2) on the source, write on the target; the source values
+// are framed across the loop.
+//
+// Must VERIFY.
+field val: Int
+
+domain IArray {
+  function slot(a: IArray, i: Int): Ref
+  function len(a: IArray): Int
+  function first(r: Ref): IArray
+  function second(r: Ref): Int
+
+  axiom slot_injective {
+    forall a: IArray, i: Int :: { slot(a, i) } first(slot(a, i)) == a && second(slot(a, i)) == i
+  }
+  axiom len_nonneg {
+    forall a: IArray :: { len(a) } len(a) >= 0
+  }
+}
+
+method copy(src: IArray, dst: IArray)
+  requires src != dst && len(src) == len(dst)
+  requires forall i: Int :: 0 <= i && i < len(src) ==> acc(slot(src, i).val, 1/2)
+  requires forall i: Int :: 0 <= i && i < len(dst) ==> acc(slot(dst, i).val)
+  ensures forall i: Int :: 0 <= i && i < len(src) ==> acc(slot(src, i).val, 1/2)
+  ensures forall i: Int :: 0 <= i && i < len(dst) ==> acc(slot(dst, i).val)
+  ensures forall i: Int :: { slot(dst, i).val } 0 <= i && i < len(dst) ==> slot(dst, i).val == slot(src, i).val
+{
+  var k: Int := 0
+  while (k < len(dst))
+    invariant 0 <= k && k <= len(dst)
+    invariant forall i: Int :: 0 <= i && i < len(src) ==> acc(slot(src, i).val, 1/2)
+    invariant forall i: Int :: 0 <= i && i < len(dst) ==> acc(slot(dst, i).val)
+    invariant forall i: Int :: { slot(dst, i).val } 0 <= i && i < k ==> slot(dst, i).val == slot(src, i).val
+  {
+    slot(dst, k).val := slot(src, k).val
+    k := k + 1
+  }
+}

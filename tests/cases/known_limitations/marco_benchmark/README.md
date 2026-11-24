@@ -19,9 +19,18 @@ upper bounds.
 
 | Case | Error | Blocked | Sole | Cumulative |
 |---|---|---|---|---|
-| `heap_function_in_quantifier.vpr`, `old_in_quantifier.vpr` | heap-dependent function / `old` inside a `forall` | 440 | 0 | 676 |
-| `qp_predicate_in_function_precondition.vpr`, `qp_in_predicate_body.vpr`, `qp_field_in_method_contract.vpr` | unsupported construct: quantified permission | 49 | 0 | 808 |
+| `heap_function_in_quantifier.vpr`, `old_in_quantifier.vpr` | heap-dependent function inside a `forall` | 440 | 0 | 676 |
+| `qp_predicate_in_function_precondition.vpr` | Predicate `P` used in pure expression context (a predicate trigger) | 49 | 0 | 808 |
 | *(no case: timeouts)* | over 180 s (4 Ru2, Dafny-book chap05 / chap10) | 6 | 6 | 814 |
+
+The counts are from the measurement above. Since then, quantifier bodies
+are typed with their host's rules (`typed::Forall`), so `old` inside a
+`forall` and field-read triggers (`{ r.v }`) are accepted. The reductions
+`qp_in_predicate_body.vpr` and `qp_field_in_method_contract.vpr` (quantified
+permission row) and `result_in_quantifier.vpr` now verify and moved to
+`tests/cases/passing/` (`qp/field_read_trigger_in_*.vpr`,
+`functions/result_in_quantifier.vpr`), and so does `field_read_in_quantifier.vpr`
+(now `qp/forall_read_in_contract.vpr`). The counts were not re-measured.
 
 All Ru2 (Prusti) quantifier rows share one shape: the heap reads in Prusti's
 `memory_block_join` / `memory_block_split` postconditions never mention the
@@ -35,8 +44,7 @@ is enough; general heap-dependent quantifiers are not needed.
 | `axiom_without_trigger.vpr` | `forall` needs an explicit trigger | 14 | Nagini prelude, Gobra |
 | `inhale_exhale_expression.vpr`, `forperm.vpr` | inhale-exhale `[A, B]`, `forperm` | 9 | Nagini obligations |
 | `acc_in_let.vpr` | unsupported pure expression: `Acc(..)` | 2 | Gobra struct allocation |
-| `unfolding_in_quantifier.vpr` | `unfolding` not allowed in a domain axiom | 1 | linkedlists `test02` |
-| `field_read_in_quantifier.vpr` | field access not allowed in a domain axiom | 1 | quickselect |
+| `unfolding_in_quantifier.vpr` | unsupported: `unfolding` inside a quantifier | 1 | linkedlists `test02` |
 | `sibling_scope_redeclaration.vpr` | name already declared in this scope | 1 | Nagini SIF `lookup` |
 
 ## Reasoning gaps (reduced from single benchmark files)

@@ -1,0 +1,22 @@
+// The summary map behind a callee's `old(x.f)` is the caller's value: the
+// callee increments it, so the caller must not see it unchanged.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method callee(s: Set[Ref], x: Ref)
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s
+  ensures forall y: Ref :: y in s ==> acc(y.f)
+  ensures x.f == old(x.f) + 1
+
+method caller(s1: Set[Ref], s2: Set[Ref], x: Ref)
+  requires x in s2
+  requires s1 intersection s2 == Set[Ref]()
+  requires forall y: Ref :: y in s1 ==> acc(y.f)
+  requires forall y: Ref :: y in s2 ==> acc(y.f)
+  requires x.f == 7
+{
+  callee(s1 union s2, x)
+  assert x.f == 7
+}

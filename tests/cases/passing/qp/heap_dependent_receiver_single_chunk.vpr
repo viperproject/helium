@@ -1,0 +1,29 @@
+// A quantified permission whose receiver reads the heap: `loc(x.arr, i)`,
+// with `x.arr` held by a single chunk. The read is the same location for every
+// binding, so the chunk frames it on its own (`heap::resolve_reads`); the set
+// triggers on its compiled location, which reads the chunk's value.
+//
+// Must VERIFY.
+domain Array {
+  function loc(a: Ref, i: Int): Ref
+  function len(a: Ref): Int
+  function idx(r: Ref): Int
+
+  axiom loc_injective {
+    forall a: Ref, i: Int :: { loc(a, i) } idx(loc(a, i)) == i
+  }
+}
+
+field arr: Ref
+field val: Int
+
+method write_one(x: Ref)
+  requires acc(x.arr)
+  requires forall i: Int :: 0 <= i && i < len(x.arr) ==> acc(loc(x.arr, i).val)
+  requires 0 < len(x.arr)
+  ensures acc(x.arr)
+  ensures forall i: Int :: 0 <= i && i < len(x.arr) ==> acc(loc(x.arr, i).val)
+{
+  loc(x.arr, 0).val := 1
+  assert loc(x.arr, 0).val == 1
+}

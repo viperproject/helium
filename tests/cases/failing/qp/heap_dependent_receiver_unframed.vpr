@@ -1,0 +1,15 @@
+// A quantified permission whose receiver reads `x.arr` without holding it.
+//
+// Must FAIL (insufficient permission).
+domain Array {
+  function loc(a: Ref, i: Int): Ref
+  function len(a: Ref): Int
+}
+
+field arr: Ref
+field val: Int
+
+method unframed(x: Ref)
+  requires forall i: Int :: 0 <= i && i < len(x.arr) ==> acc(loc(x.arr, i).val)
+{
+}

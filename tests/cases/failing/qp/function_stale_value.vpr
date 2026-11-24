@@ -1,0 +1,21 @@
+// QP hard: after a write to `a.f`, the function reading it can no longer
+// return the old value.
+//
+// Must FAIL (assertion).
+field f: Int
+
+function get(s: Set[Ref], a: Ref): Int
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  a.f
+}
+
+method function_stale_value(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  var v: Int := get(s, a)
+  a.f := v + 1
+  assert get(s, a) == v
+}

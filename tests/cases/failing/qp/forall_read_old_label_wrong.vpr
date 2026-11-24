@@ -1,0 +1,14 @@
+// Like `passing/qp/forall_read_old_label.vpr`, but the assertion also claims
+// the written member kept its labelled value.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method write_one(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  label L
+  a.f := a.f + 1
+  assert forall x: Ref :: { x.f } x in s ==> x.f == old[L](x.f)
+}

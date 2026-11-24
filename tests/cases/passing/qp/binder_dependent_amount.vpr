@@ -1,0 +1,13 @@
+// QP hard: the permission amount is a pure expression of the binder (not a
+// spatial ternary), so the chunk set is non-uniform.
+//
+// Must VERIFY.
+field f: Int
+
+method binder_dependent_amount(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, x == a ? write : 1/2)
+  requires a in s && b in s && a != b
+{
+  a.f := 1
+  assert perm(b.f) == 1/2
+}

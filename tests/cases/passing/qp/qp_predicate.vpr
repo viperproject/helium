@@ -1,0 +1,19 @@
+// QP hard: a quantified predicate permission; one instance is unfolded,
+// written through, and folded back.
+//
+// Must VERIFY.
+field f: Int
+
+predicate P(x: Ref) {
+  acc(x.f)
+}
+
+method qp_predicate(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(P(x))
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(P(x))
+{
+  unfold P(a)
+  a.f := 1
+  fold P(a)
+}

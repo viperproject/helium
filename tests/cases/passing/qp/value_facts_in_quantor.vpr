@@ -1,0 +1,7 @@
+field f: Int
+
+method m(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: { x.f } x in s ==> x.f > 0
+  requires a in s
+{ assert a.f > 0 }

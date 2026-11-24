@@ -1,7 +1,7 @@
-// KNOWN LIMITATION: "`unfolding` not allowed in a domain axiom" for an
-// `unfolding` inside a pure `forall` in a method body. Method-level quantifiers
-// are lowered with the domain-axiom rules (`typed::AxiomExt`), which reject
-// every heap construct, and the message wrongly calls the quantifier an axiom.
+// KNOWN LIMITATION: "unsupported: `unfolding` inside a quantifier" for an
+// `unfolding` inside a pure `forall` in a method body. It typechecks (the body
+// allows what its host allows); translation rejects it, since a body cannot
+// unfold per binding.
 //
 // Seen in `Vi/viper/all/functions/linkedlists` (`test02`).
 domain D {

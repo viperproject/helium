@@ -1,0 +1,13 @@
+// KNOWN LIMITATION: "wildcard exhale of a quantified permission across
+// several holders". A wildcard exhale takes from a single covering chunk set
+// only; here two single chunks cover it together
+// (`plans/wildcard-quantified-permissions.md`, phase 4).
+//
+// Should VERIFY.
+field f: Int
+
+method wildcard_exhale_across_holders(a: Ref, b: Ref)
+  requires acc(a.f) && acc(b.f)
+{
+  exhale forall x: Ref :: x in Set(a, b) ==> acc(x.f, wildcard)
+}

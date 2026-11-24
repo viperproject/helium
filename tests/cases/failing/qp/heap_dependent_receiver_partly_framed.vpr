@@ -1,0 +1,26 @@
+// The receiver `loc(cell(i).arr, i)` reads `cell(i).arr` for every `i` in
+// `s`, but only the members of `t` hold it.
+//
+// Must FAIL (insufficient permission).
+domain Cells {
+  function cell(i: Int): Ref
+  function cell_idx(r: Ref): Int
+  function loc(a: Ref, i: Int): Ref
+  function idx(r: Ref): Int
+
+  axiom cell_injective {
+    forall i: Int :: { cell(i) } cell_idx(cell(i)) == i
+  }
+  axiom loc_injective {
+    forall a: Ref, i: Int :: { loc(a, i) } idx(loc(a, i)) == i
+  }
+}
+
+field arr: Ref
+field val: Int
+
+method partly_framed(s: Set[Int], t: Set[Int])
+  requires forall i: Int :: { cell(i) } i in t ==> acc(cell(i).arr)
+  requires forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+{
+}

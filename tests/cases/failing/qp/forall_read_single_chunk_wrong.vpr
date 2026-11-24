@@ -1,0 +1,15 @@
+// Like `passing/qp/forall_read_single_chunk.vpr`, but the bound is too high
+// for the value read: `x.val > 6` does not follow from `x.val > 5`.
+//
+// Must FAIL (assertion).
+domain D {
+  function h(i: Int): Bool
+}
+
+field val: Int
+
+method m(x: Ref)
+{
+  inhale acc(x.val) && x.val > 5
+  assert forall i: Int :: { h(i) } h(i) && i < 7 ==> x.val > i
+}

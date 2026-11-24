@@ -1,0 +1,42 @@
+// QP hard: `bsearch_found` with the branches written as ternaries, so the
+// body has no branch join: isolates the heap sum at the loop exit.
+//
+// Must VERIFY.
+field val: Int
+
+domain IArray {
+  function slot(a: IArray, i: Int): Ref
+  function len(a: IArray): Int
+  function first(r: Ref): IArray
+  function second(r: Ref): Int
+
+  axiom slot_injective {
+    forall a: IArray, i: Int :: { slot(a, i) } first(slot(a, i)) == a && second(slot(a, i)) == i
+  }
+  axiom len_nonneg {
+    forall a: IArray :: { len(a) } len(a) >= 0
+  }
+}
+
+method bsearch_found_ternary(a: IArray, key: Int) returns (res: Int)
+  requires forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+  ensures  forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+  ensures  -1 <= res && res < len(a)
+  ensures  0 <= res ==> slot(a, res).val == key
+{
+  var lo: Int := 0
+  var hi: Int := len(a)
+  res := -1
+  while (lo < hi && res == -1)
+    invariant 0 <= lo && lo <= hi && hi <= len(a)
+    invariant -1 <= res && res < len(a)
+    invariant forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+    invariant 0 <= res ==> slot(a, res).val == key
+  {
+    var mid: Int := lo + (hi - lo) / 2
+    var v: Int := slot(a, mid).val
+    res := v == key ? mid : res
+    lo := v < key ? mid + 1 : lo
+    hi := v > key ? mid : hi
+  }
+}

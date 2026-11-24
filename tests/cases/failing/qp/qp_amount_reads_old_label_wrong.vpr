@@ -1,0 +1,16 @@
+// Like `passing/qp/qp_amount_reads_old_label.vpr`, but the exhale asks for
+// twice the labelled amount.
+//
+// Must FAIL (insufficient permission).
+field p: Perm
+field g: Int
+
+method take_double(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.p, 1/2)
+  requires forall x: Ref :: { x.p } x in s ==> none < x.p
+  requires forall x: Ref :: x in s ==> acc(x.g, x.p)
+  requires a in s
+{
+  label L
+  exhale forall x: Ref :: x in s ==> acc(x.g, old[L](x.p) + old[L](x.p))
+}

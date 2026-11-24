@@ -1,0 +1,13 @@
+// QP hard: a heap-dependent pure `forall` over the QP-held locations, read
+// back at one member.
+//
+// Must VERIFY.
+field f: Int
+
+method heap_dependent_read(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: { x.f } x in s ==> x.f > 0
+  requires a in s
+{
+  assert a.f > 0
+}

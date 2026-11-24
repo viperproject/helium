@@ -1,0 +1,15 @@
+// QP hard: like `closed_graph`, but without the closure property: the
+// successor may lie outside the held nodes.
+//
+// Must FAIL (insufficient permission).
+field next: Ref
+
+method open_graph(nodes: Set[Ref], a: Ref) returns (r: Ref)
+  requires forall x: Ref :: x in nodes ==> acc(x.next)
+  requires a in nodes
+{
+  r := a.next
+  if (r != null) {
+    r := r.next
+  }
+}

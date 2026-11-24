@@ -1,0 +1,19 @@
+// A label defined in one branch only: the `forall` reading it sits in that
+// branch, and the write in the other branch does not affect it.
+//
+// Must VERIFY.
+field f: Int
+
+method branch(s: Set[Ref], a: Ref, b: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (b) {
+    label L
+    a.f := 3
+    assert forall x: Ref :: { x.f } x in s && x != a ==> x.f == old[L](x.f)
+  } else {
+    a.f := 4
+  }
+  assert a.f == (b ? 3 : 4)
+}

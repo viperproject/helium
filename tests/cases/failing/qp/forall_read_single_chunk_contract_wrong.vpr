@@ -1,0 +1,22 @@
+// Like `passing/qp/forall_read_in_contract.vpr`, but the client asserts a
+// bound the postcondition does not give: it says `x.val > i` only where
+// `h(i)`, and only `h(5)` is known.
+//
+// Must FAIL (assertion).
+domain D {
+  function h(i: Int): Bool
+}
+
+field val: Int
+
+method m(x: Ref)
+  requires acc(x.val)
+  ensures acc(x.val)
+  ensures forall i: Int :: { h(i) } h(i) ==> x.val > i
+
+method client(x: Ref)
+  requires acc(x.val) && h(5)
+{
+  m(x)
+  assert x.val > 6
+}
