@@ -712,7 +712,11 @@ pub(super) fn qp_perm_at(
                 let set = debit
                     .as_set()
                     .expect("a whole-set take reads back as a set");
-                qp_perm_at(ctx, &set, addr)?
+                let taken = qp_perm_at(ctx, &set, addr)?;
+                if set.caps.wildcard.is_some() {
+                    bound_wildcard_take(ctx, &taken, &perm);
+                }
+                taken
             }
             // A single location counts only where it is `addr`.
             Taken::Single { addr: at, perm: p } => {
@@ -733,6 +737,18 @@ pub(super) fn qp_perm_at(
         perm = crate::verify::heap::algebra::perm_sub_aligned(ctx, &perm, &p);
     }
     Ok(chunk.gate(ctx, perm))
+}
+
+/// The bound on a wildcard take at one address: where it took something, it
+/// took less than the set held there before it, `0 < taken ==> taken < before`
+/// (the remainder stays positive, Silicon's rule for a wildcard). `taken` is a
+/// fresh `D(addr)`, and the exhale proved `0 < before` wherever it took, so
+/// assuming this at each address read is consistent.
+fn bound_wildcard_take(ctx: &mut VerifyContext<'_>, taken: &ChunkPerm, before: &ChunkPerm) {
+    let (t, b) = (taken.to_id(ctx), before.to_id(ctx));
+    let took = expr!(ctx, (0 / 1) < r { t });
+    let below = expr!(ctx, { t } < r { b });
+    ctx.assume_guarded(below, std::iter::once((took, Polarity::Positive)));
 }
 
 /// `perm` where the address `at` is `addr`, `0` elsewhere; no gate when they are

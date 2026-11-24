@@ -313,13 +313,10 @@ impl Heap {
                     QpCheck::Established,
                     "a consumed chunk set must have its injectivity checked"
                 );
-                // A wildcard demand asks for a positive share only
-                // (`check_qp_contained`), which a frame needs; a take would
-                // debit an amount it cannot bound.
-                assert!(
-                    mode == ConsumeMode::Frame || !spec.q.body.contains_wc_permission(),
-                    "taking a wildcard quantified permission is refused at translation                      and at a footprint consume"
-                );
+                // A wildcard demand asks for a positive share
+                // (`prove_framed_aligned`); a take then debits a fresh amount
+                // below what the covering set held (`Captures::wildcard`).
+                let wild = spec.q.body.contains_wc_permission();
                 let kind = spec.kind();
                 // The exhaled set's values are the covering set's (an exhale
                 // changes no value), known only once one is found below; until
@@ -334,6 +331,11 @@ impl Heap {
                     // fresh map: sound, but its snapshot says nothing).
                     if !covered_by_sum(ctx, self, &kind, &exhaled)? {
                         return Err(VerifyError::InsufficientPermission);
+                    }
+                    if wild && mode == ConsumeMode::Take {
+                        return Err(VerifyError::Unimplemented(
+                            "wildcard exhale of a quantified permission across several holders",
+                        ));
                     }
                     let heap = match mode {
                         ConsumeMode::Take => {
@@ -358,6 +360,12 @@ impl Heap {
                         // Before the take: it may drop set `i` and shift the
                         // indices of the others.
                         let before = self.hand_over(ctx, &kind, i..i + 1, pc, self.clone())?;
+                        let mut exhaled = exhaled;
+                        if wild {
+                            // What leaves: `D(l)`, fresh and positive, bounded
+                            // by what set `i` held where it is read (`qp_perm_at`).
+                            exhaled.caps.wildcard = Some(mint_wildcard(ctx, &exhaled.q));
+                        }
                         take_from_qp(ctx, &before, &kind, i, exhaled)
                     }
                     ConsumeMode::Frame => self.clone(),

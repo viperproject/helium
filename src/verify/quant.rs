@@ -379,7 +379,7 @@ impl Stand {
 /// How [`prepare_body`] compiles a resolved `Deref` (see [`Stand`]).
 pub(crate) enum ReadStep {
     /// `lookup(map, addr)`, the map a capture already in the recipe's space.
-    Lookup(crate::verify::heap::LocationKind, Val),
+    Lookup(Box<crate::verify::heap::LocationKind>, Val),
     /// No step: the read is its captured value, which [`Canonical::rename`]
     /// names in its place.
     Captured,
@@ -482,7 +482,7 @@ impl Canonical {
             }
             let kind = crate::verify::heap::LocationKind::from_addr_type(&reads[j].addr_ty)
                 .expect("a heap read's address is an address");
-            Some(ReadStep::Lookup(kind, Val::Temp(slot)))
+            Some(ReadStep::Lookup(Box::new(kind), Val::Temp(slot)))
         };
         c.insts = prepare_body(alloc, table, names, insts, &|v| c.rename(v), &read)?;
         c.groups = triggers
