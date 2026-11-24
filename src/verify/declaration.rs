@@ -688,10 +688,14 @@ fn walk_footprint(
                 &mut changed,
             )?,
             SlotShape::Quant { q, caps } => {
-                assert!(
-                    !q.body.contains_wc_permission(),
-                    "a wildcard quantified permission is rejected at translation"
-                );
+                // A produced wildcard set gets its own amount per location
+                // (`heap::Captures::wildcard`); taking or framing one is not
+                // supported yet.
+                if q.body.contains_wc_permission() && matches!(walk.direction, Direction::Consume) {
+                    return Err(VerifyError::Unimplemented(
+                        "wildcard quantified permission consumed from a resource footprint",
+                    ));
+                }
                 if let Some(pm) = walk.scale {
                     let is_one = expr!(ctx, { pm } == (1 / 1));
                     if !ctx.prove_under_pc(is_one, walk.pc_lits) {

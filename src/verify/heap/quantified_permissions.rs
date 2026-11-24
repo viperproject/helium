@@ -327,6 +327,14 @@ fn mint_and_assume_inverse_axiom(
     Ok(inv)
 }
 
+/// The fresh wildcard function of a produced set of `q`, over its locations
+/// (see [`Captures::wildcard`]).
+pub(super) fn mint_wildcard(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> FuncId {
+    let f = ctx.alloc.qp_wildcard(q.loc_ty.clone());
+    ctx.func_ret_types.insert(f, vmir::Type::Real);
+    f
+}
+
 /// One fresh inverse per binder of `q`, from its location's address type.
 fn mint_inverses(ctx: &mut VerifyContext<'_>, q: &QuantChunks) -> Rc<[FuncId]> {
     q.bound
@@ -576,6 +584,7 @@ pub(crate) fn resolve_reads(
     let mut caps = Captures {
         temps,
         reads: Rc::from([]),
+        wildcard: None,
     };
     if q.heap_reads().is_empty() {
         return Ok(caps);
@@ -619,6 +628,7 @@ fn instance_frame(caps: &Captures, q: &vmir::QuantChunks, binders: &[egg::Id]) -
     debug_assert_eq!(binders.len(), q.bound.len());
     let mut state = EvalState::frame_from_caps(q.binder_base, &caps.temps);
     state.read_maps = caps.reads.clone();
+    state.wildcard = caps.wildcard.map(|w| (w, q.body.loc.clone()));
     for (&id, ty) in binders.iter().zip(q.bound.iter()) {
         state.push_val(id, ty.clone(), None);
     }

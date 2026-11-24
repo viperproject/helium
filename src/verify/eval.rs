@@ -70,6 +70,11 @@ pub(crate) struct EvalState {
     /// set by the body walk from its [`check_forall_wd`] right before it:
     /// what the `Forall` step captures besides its temps.
     pub(crate) forall_reads: std::rc::Rc<[ResolvedRead]>,
+    /// In the quantified-permission instance being evaluated: the held set's
+    /// wildcard function `W` and the body's location temp. A `wildcard` leaf
+    /// is then `W(loc)` (see `heap::Captures::wildcard`). `None` mints a fresh
+    /// wildcard, as everywhere else.
+    pub(crate) wildcard: Option<(crate::verify::lang::FuncId, vmir::Val)>,
 }
 
 impl EvalState {
@@ -86,6 +91,7 @@ impl EvalState {
             join_arms_dead: None,
             read_maps: std::rc::Rc::from([]),
             forall_reads: std::rc::Rc::from([]),
+            wildcard: None,
         }
     }
 
@@ -105,6 +111,7 @@ impl EvalState {
             join_arms_dead: None,
             read_maps: std::rc::Rc::from([]),
             forall_reads: std::rc::Rc::from([]),
+            wildcard: None,
         }
     }
 
@@ -186,6 +193,7 @@ impl EvalState {
             join_arms_dead: None,
             read_maps: std::rc::Rc::from([]),
             forall_reads: std::rc::Rc::from([]),
+            wildcard: None,
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
@@ -232,6 +240,7 @@ impl EvalState {
             join_arms_dead: None,
             read_maps: std::rc::Rc::from([]),
             forall_reads: std::rc::Rc::from([]),
+            wildcard: None,
         }
     }
 
@@ -1166,7 +1175,20 @@ pub(crate) fn eval_perm_structural(
 ) -> ChunkPerm {
     match perm {
         vmir::PermVal::Amount(v) => ChunkPerm::leaf(state.get_val(ctx, v)),
-        vmir::PermVal::Wildcard => ChunkPerm::wild_leaf(ctx.fresh_wildcard()),
+        // `W(loc)`, positive: a fact about a fresh function at one argument,
+        // so assuming it wherever an instance is evaluated is consistent. The
+        // location precedes the amount in the body (`lower_quant_chunks`).
+        vmir::PermVal::Wildcard => match &state.wildcard {
+            Some((w, loc)) => {
+                let addr = state.get_val(ctx, loc);
+                let amount = ctx.add(Symbolic::FuncApp(*w, Box::new([]), Box::new([addr])));
+                let pos = expr!(ctx, (0 / 1) < r { amount });
+                let true_ = expr!(ctx, true);
+                ctx.union(pos, true_);
+                ChunkPerm::wild_leaf(amount)
+            }
+            None => ChunkPerm::wild_leaf(ctx.fresh_wildcard()),
+        },
         vmir::PermVal::Temp(i) => state.perms[*i].clone(),
     }
 }

@@ -45,11 +45,12 @@ use crate::verify::heap::algebra::{
     prove_perm_write, subtract_location, union_heaps,
 };
 use crate::verify::heap::quantified_permissions::{
-    covered_by_sum, find_covering_qp, quant_chunk_from_caps, take_from_qp, take_spread,
+    covered_by_sum, find_covering_qp, mint_wildcard, quant_chunk_from_caps, take_from_qp,
+    take_spread,
 };
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
-use crate::verify::lang::Symbolic;
+use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::quant::ResolvedRead;
 use crate::vmir::{self, Polarity, Type, Val};
 
@@ -99,6 +100,12 @@ pub(crate) enum Access {
 pub(crate) struct Captures {
     pub(crate) temps: Rc<[(usize, egg::Id)]>,
     pub(crate) reads: Rc<[ResolvedRead]>,
+    /// A held set whose amount is a `wildcard`: the fresh function `W` over
+    /// its locations, minted when it is produced. Its amount at location `l`
+    /// is `W(l)`, positive, and the same at every lookup: one unknown amount
+    /// per location, not one shared by all. `None` for a set without a
+    /// wildcard, and for a demand.
+    pub(crate) wildcard: Option<FuncId>,
 }
 
 impl FromIterator<(usize, egg::Id)> for Captures {
@@ -107,6 +114,7 @@ impl FromIterator<(usize, egg::Id)> for Captures {
         Captures {
             temps: temps.into_iter().collect(),
             reads: Rc::from([]),
+            wildcard: None,
         }
     }
 }
@@ -260,8 +268,11 @@ impl Heap {
                 let chunk = Chunk::new_perm(loc.addr, perm, value.id).with_recipe(value.recipe);
                 Ok(heap_union(ctx, self, &loc.kind, chunk, pc))
             }
-            Access::Set(spec) => {
+            Access::Set(mut spec) => {
                 let kind = spec.kind();
+                if spec.q.body.contains_wc_permission() {
+                    spec.caps.wildcard = Some(mint_wildcard(ctx, &spec.q));
+                }
                 let set = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, value.id, spec.check)?;
                 let mut set = set;
                 set.recipe = value.recipe;
@@ -304,7 +315,7 @@ impl Heap {
                 );
                 assert!(
                     !spec.q.body.contains_wc_permission(),
-                    "a wildcard quantified permission is rejected at translation"
+                    "a consumed wildcard quantified permission is refused at translation                      and at a footprint consume"
                 );
                 let kind = spec.kind();
                 // The exhaled set's values are the covering set's (an exhale

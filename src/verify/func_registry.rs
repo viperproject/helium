@@ -399,6 +399,20 @@ impl FuncRegistry {
         self.skolem(&name, SkolemSig { params, ret })
     }
 
+    /// Mint the fresh wildcard function of a produced quantified permission,
+    /// from its location's address type to a permission (see
+    /// `heap::Captures::wildcard`).
+    pub(crate) fn qp_wildcard(&mut self, loc_ty: Type) -> FuncId {
+        let name = format!("qp_wc#{}", self.skolems.len());
+        self.skolem(
+            &name,
+            SkolemSig {
+                params: vec![loc_ty],
+                ret: Type::Real,
+            },
+        )
+    }
+
     /// The value-map functions of location kind `kind` (minting them on first
     /// use): the values of a quantified chunk set are one map of type
     /// `ValueMap(Addr<kind>)`, read with `lookup` and written with `store`.
