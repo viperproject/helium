@@ -51,7 +51,7 @@ use crate::verify::heap::quantified_permissions::{
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
 use crate::verify::lang::{FuncId, Symbolic};
-use crate::verify::quant::ResolvedRead;
+use crate::verify::quant::Resolved;
 use crate::vmir::{self, Polarity, Type, Val};
 
 /// One location: its kind and its address.
@@ -94,12 +94,12 @@ pub(crate) enum Access {
 
 /// What a chunk set's body captures from where it was stated: the values of
 /// the enclosing temps it mentions (`QuantChunks::free_temps`), and what
-/// stands for each enclosing heap read ([`ResolvedRead`]). Fixed when
+/// stands for each enclosing heap read and heap-dependent call ([`Resolved`]). Fixed when
 /// the set is stated, so a later lookup re-evaluates the body exactly as then.
 #[derive(Debug, Clone)]
 pub(crate) struct Captures {
     pub(crate) temps: Rc<[(usize, egg::Id)]>,
-    pub(crate) reads: Rc<[ResolvedRead]>,
+    pub(crate) reads: Resolved,
     /// A held set whose amount is a `wildcard`: the fresh function `W` over
     /// its locations, minted when it is produced. Its amount at location `l`
     /// is `W(l)`, positive, and the same at every lookup: one unknown amount
@@ -113,7 +113,7 @@ impl FromIterator<(usize, egg::Id)> for Captures {
     fn from_iter<I: IntoIterator<Item = (usize, egg::Id)>>(temps: I) -> Self {
         Captures {
             temps: temps.into_iter().collect(),
-            reads: Rc::from([]),
+            reads: Resolved::default(),
             wildcard: None,
         }
     }

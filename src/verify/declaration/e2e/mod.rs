@@ -2639,10 +2639,40 @@ method m() {
 }
 
 #[test]
-fn heap_dependent_call_in_a_forall_body_is_unimplemented() {
-    // Translation lowers the call in the body (a frame-only exhale, then the
-    // call); the verifier refuses it until it resolves calls like reads
-    // (plans/heap-dependent-calls-in-quantifiers.md, phase 1).
+fn heap_dependent_call_on_a_binder_is_unimplemented() {
+    // A binder-free call is resolved (its snapshot is one value); a call on the
+    // binder needs a snapshot per binding, which is phase 3 of
+    // plans/heap-dependent-calls-in-quantifiers.md.
+    let input = r#"
+field f: Int
+
+function get(x: Ref): Int
+    requires acc(x.f)
+{ x.f }
+
+method m(s: Set[Ref])
+    requires forall x: Ref :: x in s ==> acc(x.f)
+{
+    inhale forall x: Ref :: {get(x)} x in s ==> get(x) == 0
+}
+"#;
+    let program = lower(input);
+    let result = verify_named_method(&program, "m");
+    assert!(
+        matches!(
+            result.as_ref().map_err(VerifyError::root_cause),
+            Err(VerifyError::Unimplemented(
+                "heap-dependent function call on a binder inside a quantifier"
+            ))
+        ),
+        "got {result:?}"
+    );
+}
+
+#[test]
+fn binder_free_heap_dependent_call_in_a_forall_verifies() {
+    // The snapshot of `get(y)` is built once and captured; an instance gives
+    // the field's value at the quantifier.
     let input = r#"
 field f: Int
 domain D { function t(i: Int): Bool }
@@ -2654,20 +2684,14 @@ function get(x: Ref): Int
 method m(y: Ref)
     requires acc(y.f)
 {
-    inhale forall i: Int :: {t(i)} get(y) == get(y)
+    inhale forall i: Int :: {t(i)} t(i) ==> get(y) == 4
+    inhale t(1)
+    assert y.f == 4
 }
 "#;
     let program = lower(input);
     let result = verify_named_method(&program, "m");
-    assert!(
-        matches!(
-            result.as_ref().map_err(VerifyError::root_cause),
-            Err(VerifyError::Unimplemented(
-                "heap-dependent function call inside a quantifier"
-            ))
-        ),
-        "got {result:?}"
-    );
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
 #[test]

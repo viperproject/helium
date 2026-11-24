@@ -439,7 +439,7 @@ fn eval_resource_body_inst(
             bind: Bind::Bound(_),
             ..
         }) => {
-            let heap = eval_from_snap(ctx, program, state, inst, certs)?;
+            let heap = eval_from_snap(ctx, state, inst, certs)?;
             state.push_heap(heap);
         }
         InstKind::Heap(hi) => {
@@ -588,10 +588,12 @@ enum ValueSource {
 
 /// The direction of a footprint walk: consume a held footprint and **assert** the
 /// resource's boolean (`fold`/`snap`), or produce one and **assume** it
-/// (`unfold`/`from_snap`).
+/// (`unfold`/`from_snap`). `Build` only builds the snapshot a frame-only exhale
+/// yields, with no heap effect and no check (see [`frame_snapshot`]).
 enum Direction {
     Consume,
     Produce,
+    Build,
 }
 
 /// The result of a footprint walk: the accumulator heap after all slot effects,
@@ -622,7 +624,6 @@ struct FootprintResult {
 #[allow(clippy::too_many_arguments)]
 fn walk_footprint(
     ctx: &mut VerifyContext<'_>,
-    _program: &vmir::Program,
     certs: &HashMap<MemberId, ResourceDefinition>,
     resource: MemberId,
     args: &[egg::Id],
@@ -739,6 +740,7 @@ fn walk_footprint(
         Direction::Produce => {
             ctx.assume_guarded(bool_id, bool_guard.iter().rev().copied());
         }
+        Direction::Build => {}
     }
     // Two slots that may hold one location need no fact here: the heap ties
     // their values itself, at a read that meets both or at an exhale that
@@ -845,10 +847,17 @@ fn walk_single_slot(
         // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
         let pp = perm.to_id(ctx);
         let guard = expr!(ctx, (0 / 1) < r { pp });
-        let access = Access::Single { loc, perm };
-        heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
+        if !matches!(w.direction, Direction::Build) {
+            let access = Access::Single { loc, perm };
+            heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
+        }
         guard
     } else {
+        // A function's precondition is read-only: every amount is a wildcard.
+        assert!(
+            !matches!(w.direction, Direction::Build),
+            "a snapshot is built only for a function precondition, whose slots are wildcards"
+        );
         let value = Value {
             id: value,
             recipe: recipe.clone(),
@@ -903,7 +912,7 @@ fn walk_qp_slot(
     // reads values in the state before it).
     let reads_from = match w.direction {
         Direction::Produce => heap.clone(),
-        Direction::Consume => w.before.clone(),
+        Direction::Consume | Direction::Build => w.before.clone(),
     };
     let mut heap_of = |_: &mut VerifyContext<'_>, _: &_| Ok(reads_from.clone());
     let caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
@@ -938,6 +947,13 @@ fn walk_qp_slot(
             let (out, held) = heap.consume(ctx, Access::Set(spec), mode, w.pc_lits)?;
             *heap = out;
             held
+        }
+        // Its value is the covering set's map, found only by the containment
+        // check this direction skips.
+        Direction::Build => {
+            return Err(VerifyError::Unimplemented(
+                "heap-dependent call inside a quantifier whose precondition holds a quantified permission",
+            ));
         }
     };
     let (map, recipe) = (value.id, value.recipe);
@@ -1025,6 +1041,7 @@ fn apply_slot_perm(
             out
         }
         Direction::Produce => heap.produce(ctx, access, value, w.pc_lits)?,
+        Direction::Build => unreachable!("a built snapshot has no heap effect"),
     };
     let perm_id = perm.to_id(ctx);
     Ok(expr!(ctx, (0 / 1) < r { perm_id }))
@@ -1212,7 +1229,6 @@ fn eval_resource_op(
         slot_recipes,
     } = walk_footprint(
         ctx,
-        program,
         certs,
         call.resource,
         &args,
@@ -1241,61 +1257,116 @@ fn eval_resource_op(
         // (a function's precondition check) is ever reached during a
         // recipe walk; a consuming inhale/exhale is method-only, where no
         // recipe is in flight and this yields `None` as before.
-        let recipe = if ctx.recipe.is_some() {
-            let def = certs.get(&res_id).ok_or(VerifyError::DependencyFailed)?;
-            let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
-            let some_id = ctx.alloc.option_some();
-            let cons_id = ctx.alloc.cons(res_id, 0);
-            // A slot read without provenance on a path the walk proves dead
-            // (e.g. under `unfolding` of a predicate whose body is `false` — a
-            // Prusti enum variant that cannot occur) may take any value: the
-            // definitional axiom's ite never selects this branch. `unwrap(None)`
-            // is that unspecified value, as a term the certificate can carry.
-            let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
-                let f = expr!(ctx, false);
-                ctx.is_inconsistent() || ctx.prove_under_pc(f, &pc_lits)
-            };
-            let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
-            let rb = ctx.recipe.as_mut().unwrap();
-            let mut members_r = Vec::with_capacity(slot_recipes.len());
-            for (i, r) in slot_recipes.iter().enumerate() {
-                let v = match r.clone() {
-                    Some(v) => v,
-                    None if dead_path => {
-                        let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
-                            func: none_id,
-                            type_args: vec![elems[i].clone()],
-                            args: Vec::new(),
-                        });
-                        rb.emit(crate::verify::rewrite::AxiomPure::App {
-                            func: value_id,
-                            type_args: vec![elems[i].clone()],
-                            args: vec![none],
-                        })
-                    }
-                    None => {
-                        return Err(VerifyError::Unimplemented(
-                            "purify: snap value outside footprint",
-                        ));
-                    }
-                };
-                members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                    func: some_id,
-                    type_args: vec![elems[i].clone()],
-                    args: vec![v],
-                }));
-            }
-            Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                func: cons_id,
-                type_args: Vec::new(),
-                args: members_r,
-            }))
-        } else {
-            None
-        };
+        let recipe = snapshot_recipe(ctx, certs, res_id, &slot_recipes, &pc_lits)?;
         state.push_val(s, Type::Snap(res_id), recipe);
     }
     Ok(())
+}
+
+/// The certificate recipe of a frame-only exhale's snapshot (`None` outside a
+/// certificate walk): `cons(Some(v_i))` over the read slot values' recipes --
+/// a self-framed footprint is fully held, so every slot is `Some`. Only a
+/// frame-only exhale (a function's precondition check) is ever reached during
+/// a recipe walk; a consuming inhale/exhale is method-only, where no recipe is
+/// in flight.
+fn snapshot_recipe(
+    ctx: &mut VerifyContext<'_>,
+    certs: &HashMap<MemberId, ResourceDefinition>,
+    res_id: MemberId,
+    slot_recipes: &[Option<Val>],
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Result<Option<Val>, VerifyError> {
+    if ctx.recipe.is_none() {
+        return Ok(None);
+    }
+    let def = certs.get(&res_id).ok_or(VerifyError::DependencyFailed)?;
+    let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
+    let some_id = ctx.alloc.option_some();
+    let cons_id = ctx.alloc.cons(res_id, 0);
+    // A slot read without provenance on a path the walk proves dead
+    // (e.g. under `unfolding` of a predicate whose body is `false` — a
+    // Prusti enum variant that cannot occur) may take any value: the
+    // definitional axiom's ite never selects this branch. `unwrap(None)`
+    // is that unspecified value, as a term the certificate can carry.
+    let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
+        let f = expr!(ctx, false);
+        ctx.is_inconsistent() || ctx.prove_under_pc(f, &pc_lits)
+    };
+    let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
+    let rb = ctx.recipe.as_mut().unwrap();
+    let mut members_r = Vec::with_capacity(slot_recipes.len());
+    for (i, r) in slot_recipes.iter().enumerate() {
+        let v = match r.clone() {
+            Some(v) => v,
+            None if dead_path => {
+                let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
+                    func: none_id,
+                    type_args: vec![elems[i].clone()],
+                    args: Vec::new(),
+                });
+                rb.emit(crate::verify::rewrite::AxiomPure::App {
+                    func: value_id,
+                    type_args: vec![elems[i].clone()],
+                    args: vec![none],
+                })
+            }
+            None => {
+                return Err(VerifyError::Unimplemented(
+                    "purify: snap value outside footprint",
+                ));
+            }
+        };
+        members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
+            func: some_id,
+            type_args: vec![elems[i].clone()],
+            args: vec![v],
+        }));
+    }
+    Ok(Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
+        func: cons_id,
+        type_args: Vec::new(),
+        args: members_r,
+    })))
+}
+
+/// Whether [`frame_snapshot`] checks the frame-only exhale it builds.
+pub(crate) enum SnapshotCheck {
+    /// Framing and the precondition, under the given pc, as at a call.
+    Check,
+    /// Neither: they are checked elsewhere, under a stronger pc.
+    Build,
+}
+
+/// The snapshot a frame-only exhale of `resource(args)` on `heap` yields (a
+/// heap-dependent call's), and its certificate recipe. A quantifier body's
+/// call is checked per binding and its snapshot built once (see
+/// `heap::resolve_calls`).
+pub(crate) fn frame_snapshot(
+    ctx: &mut VerifyContext<'_>,
+    resource: MemberId,
+    args: &[egg::Id],
+    heap: Heap,
+    pc: &[(egg::Id, Polarity)],
+    check: SnapshotCheck,
+) -> Result<(egg::Id, Option<Val>), VerifyError> {
+    let certs = ctx
+        .certs
+        .expect("a verification context carries the certificates");
+    let direction = match check {
+        SnapshotCheck::Check => Direction::Consume,
+        SnapshotCheck::Build => Direction::Build,
+    };
+    let source = ValueSource::ReadHeap(heap.clone());
+    let FootprintResult {
+        members,
+        slot_recipes,
+        ..
+    } = walk_footprint(
+        ctx, certs, resource, args, heap, source, direction, None, false, pc, pc, true,
+    )?;
+    let snap = build_snapshot(ctx, resource, members);
+    let recipe = snapshot_recipe(ctx, certs, resource, &slot_recipes, pc)?;
+    Ok((snap, recipe))
 }
 
 /// Evaluate a a bound `inhale`: widen a snapshot value back into a heap — the entry
@@ -1306,7 +1377,6 @@ fn eval_resource_op(
 /// **assumed** over the projected values. Returns the reconstructed heap.
 fn eval_from_snap(
     ctx: &mut VerifyContext<'_>,
-    program: &vmir::Program,
     state: &EvalState,
     inst: &Inst,
     certs: &HashMap<MemberId, ResourceDefinition>,
@@ -1336,7 +1406,6 @@ fn eval_from_snap(
     // (guarded by the path condition — a a bound `inhale` may sit under a branch).
     let FootprintResult { heap: out, .. } = walk_footprint(
         ctx,
-        program,
         certs,
         *resource,
         &arg_ids,
@@ -1804,6 +1873,13 @@ pub(crate) fn prepare_body(
             );
             continue;
         }
+        // A heap-dependent call's snapshot: captured, and `Canonical` names
+        // it in place of the step's temp.
+        if let InstKind::Heap(hi) = &inst.kind
+            && hi.frame_exhale().is_some()
+        {
+            continue;
+        }
         let prepared = match &inst.kind {
             InstKind::Pure(_, pi) => AxiomInst::Val(match pi {
                 PureInst::Binary(op, l, r) => AxiomPure::Binary(*op, l.clone(), r.clone()),
@@ -2018,6 +2094,7 @@ pub(crate) fn verify_method(
 ) -> Result<(), VerifyError> {
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
+    ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     let mut state = EvalState::new();
     let mut snap = Snapshotter::from_env(method_name);
@@ -2134,6 +2211,7 @@ pub(crate) fn verify_resource(
 
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
+    ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     // The certificate recipe is built by the walk itself: each `acc` records a
     // footprint slot, `Deref`s resolve through chunk provenance. Installed
@@ -2261,6 +2339,7 @@ pub(crate) fn verify_function(
 
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
+    ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     // The certificate recipe is built by the walk itself (single pass): only the
     // limited-twin substitution set is fixed up front. The exported post is not

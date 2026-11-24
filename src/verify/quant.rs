@@ -244,7 +244,7 @@ fn intern_insts(
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
             // Its maps would have to be capture children of the enclosing
             // recipe's `AxiomInst::Forall`, which carries only its temps.
-            if !q.heap_reads().is_empty() {
+            if !q.heap_reads().is_empty() || !q.heap_calls().is_empty() {
                 return Err(VerifyError::Unimplemented(
                     "heap read in a nested quantifier",
                 ));
@@ -376,6 +376,64 @@ impl Stand {
     }
 }
 
+/// One heap-dependent call of a quantifier body ([`vmir::HeapCall`]),
+/// resolved: the snapshot its frame-only `exhale` stands for. Only binder-free
+/// calls are resolved so far, so the snapshot is one value for every binding,
+/// captured after the read stand-ins ([`Canonical`]).
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedCall {
+    /// The body temp the exhale yields.
+    pub(crate) temp: usize,
+    pub(crate) snap: egg::Id,
+    /// The snapshot's recipe in a certificate walk; `None` otherwise.
+    pub(crate) recipe: Option<Val>,
+}
+
+/// What stands for the heaps a quantifier body names: its resolved reads,
+/// then its resolved calls, captured in that order after its temps.
+#[derive(Debug, Clone)]
+pub(crate) struct Resolved {
+    pub(crate) reads: std::rc::Rc<[ResolvedRead]>,
+    pub(crate) calls: std::rc::Rc<[ResolvedCall]>,
+}
+
+impl Default for Resolved {
+    fn default() -> Self {
+        Resolved {
+            reads: std::rc::Rc::from([]),
+            calls: std::rc::Rc::from([]),
+        }
+    }
+}
+
+impl Resolved {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.reads.is_empty() && self.calls.is_empty()
+    }
+
+    /// The captured e-classes, in [`Canonical`]'s slot order.
+    pub(crate) fn cap_ids(&self) -> impl Iterator<Item = egg::Id> + '_ {
+        let reads = self.reads.iter().map(|r| r.stand.id());
+        reads.chain(self.calls.iter().map(|c| c.snap))
+    }
+
+    /// Whether each read is captured by value (see [`Canonical::new`]).
+    pub(crate) fn by_value(&self) -> Vec<bool> {
+        self.reads
+            .iter()
+            .map(|r| matches!(r.stand, Stand::Value(_)))
+            .collect()
+    }
+
+    /// The resolved call whose exhale yields body temp `temp`.
+    pub(crate) fn call_at(&self, temp: usize) -> &ResolvedCall {
+        self.calls
+            .iter()
+            .find(|c| c.temp == temp)
+            .unwrap_or_else(|| panic!("the heap-dependent call yielding e{temp} is not resolved"))
+    }
+}
+
 /// How [`prepare_body`] compiles a resolved `Deref` (see [`Stand`]).
 pub(crate) enum ReadStep {
     /// `lookup(map, addr)`, the map a capture already in the recipe's space.
@@ -408,8 +466,10 @@ pub(crate) struct Canonical {
     binder_base: usize,
     /// Enclosing temp -> capture slot.
     slot: HashMap<usize, usize>,
-    /// How many read stand-ins are captured after the temps (see [`ResolvedRead`]).
+    /// How many read stand-ins, then call snapshots, are captured after the
+    /// temps (see [`Resolved`]).
     n_reads: usize,
+    n_calls: usize,
     /// Body temp of a read captured by value -> its capture slot. Its step is
     /// dropped ([`ReadStep::Captured`]), so [`Self::rename`] closes the gaps
     /// those steps leave (`dropped`, ascending).
@@ -425,7 +485,8 @@ impl Canonical {
     /// `free` is the scope's capture list (enclosing temps, in child order);
     /// the stand-ins of its heap `reads` ([`vmir::HeapRead`], resolved at each
     /// use into [`ResolvedRead`]s) are captured after them, in order, read `j`
-    /// by value iff `by_value[j]`.
+    /// by value iff `by_value[j]`. Then the snapshot of each heap-dependent
+    /// call ([`ResolvedCall`]), in body order: its exhale's temp aliases it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         alloc: &mut FuncRegistry,
@@ -447,29 +508,40 @@ impl Canonical {
             Some((j, free.len() + j))
         };
         // The steps, as body temps from `binder_base + n_bound` on; a read
-        // captured by value aliases its capture and drops its step.
+        // captured by value, and every call's snapshot, aliases its capture
+        // and drops its step.
         let mut alias = HashMap::default();
         let mut dropped = Vec::new();
-        let steps = insts.iter().filter_map(|i| match &i.kind {
-            InstKind::Pure(_, pi) => Some(pi),
-            _ => None,
+        let steps = insts.iter().filter(|i| match &i.kind {
+            InstKind::Pure(..) => true,
+            InstKind::Heap(hi) => hi.frame_exhale().is_some(),
+            _ => false,
         });
-        let mut n_vals = 0;
-        for (t, pi) in (binder_base + n_bound..).zip(steps) {
+        let (mut n_vals, mut n_calls) = (0, 0);
+        for (t, inst) in (binder_base + n_bound..).zip(steps) {
             n_vals += 1;
-            if let PureInst::Deref(heap, addr) = pi
-                && let Some((j, slot)) = read_of(heap, addr)
-                && by_value[j]
-            {
-                alias.insert(t, slot);
-                dropped.push(t);
+            match &inst.kind {
+                InstKind::Pure(_, PureInst::Deref(heap, addr))
+                    if let Some((j, slot)) = read_of(heap, addr)
+                        && by_value[j] =>
+                {
+                    alias.insert(t, slot);
+                    dropped.push(t);
+                }
+                InstKind::Heap(_) => {
+                    alias.insert(t, free.len() + reads.len() + n_calls);
+                    dropped.push(t);
+                    n_calls += 1;
+                }
+                _ => {}
             }
         }
         let mut c = Self {
             binder_base,
             slot: free.iter().copied().zip(0..).collect(),
             n_reads: reads.len(),
-            next: free.len() + reads.len() + n_bound + n_vals - dropped.len(),
+            n_calls,
+            next: free.len() + reads.len() + n_calls + n_bound + n_vals - dropped.len(),
             alias,
             dropped,
             insts: Vec::new(),
@@ -497,9 +569,10 @@ impl Canonical {
         Ok(c)
     }
 
-    /// The capture arity: the captured temps, then the read stand-ins.
+    /// The capture arity: the captured temps, the read stand-ins, then the
+    /// call snapshots.
     pub(crate) fn n_caps(&self) -> usize {
-        self.slot.len() + self.n_reads
+        self.slot.len() + self.n_reads + self.n_calls
     }
 
     /// Canonicalize one operand. Below `binder_base` it is a capture, and its

@@ -92,6 +92,10 @@ pub(crate) struct VerifyContext<'a> {
     /// (see `rewrite::function_rule`). `None` in isolated contexts (unit tests)
     /// that never evaluate a `FunctionCall`.
     pub(crate) fn_certs: Option<&'a HashMap<MemberId, std::sync::Arc<FunctionDefinition>>>,
+    /// Verified resource certificates, keyed by `MemberId`: what a heap-dependent
+    /// call in a quantifier body walks to frame its precondition there
+    /// (`declaration::frame_snapshot`). `None` in isolated contexts.
+    pub(crate) certs: Option<&'a HashMap<MemberId, crate::verify::cert::ResourceDefinition>>,
     /// The certificate recipe under construction, mirrored step-by-step by the
     /// eval walk of a **function or resource** body (single walk — see
     /// `cert::RecipeBuilder`). `None` for methods — they produce no
@@ -207,6 +211,7 @@ impl<'a> VerifyContext<'a> {
             fresh_types: HashMap::default(),
             func_ret_types: HashMap::default(),
             fn_certs: None,
+            certs: None,
             recipe: None,
             clean: None,
             has_wildcard: decls_have_wildcard(decls),

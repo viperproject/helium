@@ -7,7 +7,7 @@ use crate::dhash::HashMap;
 use crate::verify::heap::Loc;
 
 use crate::verify::cert::PermRecipe;
-use crate::verify::quant::{ResolvedRead, Stand};
+use crate::verify::quant::{Resolved, ResolvedRead, Stand};
 
 use crate::vmir::display::VmirDisplay;
 use crate::{
@@ -62,14 +62,15 @@ pub(crate) struct EvalState {
     /// For the join block being evaluated: whether its (then, else) predecessor
     /// blocks are dead. The `Merge` reads this; `None` outside a method join.
     pub(crate) join_arms_dead: Option<(bool, bool)>,
-    /// The resolved heap reads of the quantified-permission body being
-    /// evaluated (see [`ResolvedRead`]): its `Deref`s read these maps, never a heap
-    /// (an instance frame has none). Empty in every other state.
-    pub(crate) read_maps: std::rc::Rc<[ResolvedRead]>,
-    /// The resolved heap reads of the pure `forall` about to be evaluated,
-    /// set by the body walk from its [`check_forall_wd`] right before it:
-    /// what the `Forall` step captures besides its temps.
-    pub(crate) forall_reads: std::rc::Rc<[ResolvedRead]>,
+    /// The resolved heap reads and calls of the quantified-permission body
+    /// being evaluated (see [`Resolved`]): its `Deref`s read these maps and its
+    /// calls take these snapshots, never a heap (an instance frame has none).
+    /// Empty in every other state.
+    pub(crate) read_maps: Resolved,
+    /// The resolved heap reads and calls of the pure `forall` about to be
+    /// evaluated, set by the body walk from its [`check_forall_wd`] right
+    /// before it: what the `Forall` step captures besides its temps.
+    pub(crate) forall_reads: Resolved,
     /// In the quantified-permission instance being evaluated: the held set's
     /// wildcard function `W` and the body's location temp. A `wildcard` leaf
     /// is then `W(loc)` (see `heap::Captures::wildcard`). `None` mints a fresh
@@ -89,8 +90,8 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
-            read_maps: std::rc::Rc::from([]),
-            forall_reads: std::rc::Rc::from([]),
+            read_maps: Resolved::default(),
+            forall_reads: Resolved::default(),
             wildcard: None,
         }
     }
@@ -109,8 +110,8 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
-            read_maps: std::rc::Rc::from([]),
-            forall_reads: std::rc::Rc::from([]),
+            read_maps: Resolved::default(),
+            forall_reads: Resolved::default(),
             wildcard: None,
         }
     }
@@ -191,8 +192,8 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
-            read_maps: std::rc::Rc::from([]),
-            forall_reads: std::rc::Rc::from([]),
+            read_maps: Resolved::default(),
+            forall_reads: Resolved::default(),
             wildcard: None,
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
@@ -238,8 +239,8 @@ impl EvalState {
             perm_defs: Vec::new(),
             dead_blocks: crate::dhash::HashSet::default(),
             join_arms_dead: None,
-            read_maps: std::rc::Rc::from([]),
-            forall_reads: std::rc::Rc::from([]),
+            read_maps: Resolved::default(),
+            forall_reads: Resolved::default(),
             wildcard: None,
         }
     }
@@ -484,31 +485,63 @@ pub(crate) type BodyPc<'a> =
 ///
 /// The caller runs this on a scratch graph with the recipe paused: whatever
 /// the fresh binders touch must not reach the live graph or a certificate.
-/// A quantifier body read's value at the walked binding, given the read's
-/// heap, address and pc: how a walk at fresh binders hands each `Deref` to a
-/// [`crate::verify::heap::ReadResolver`] instead of evaluating it.
-pub(crate) type OnRead<'s> = dyn FnMut(
-        &mut VerifyContext<'_>,
-        &EvalState,
-        &HeapVal,
-        &Val,
-        &[(egg::Id, Polarity)],
-    ) -> Result<egg::Id, VerifyError>
-    + 's;
+/// How a walk at fresh binders hands each heap access of a quantifier body to
+/// a [`crate::verify::heap::ReadResolver`] instead of evaluating it: a `Deref`
+/// ([`Self::read`]) and a heap-dependent call's frame-only exhale
+/// ([`Self::call`]), each given its pc, return their value at the walked
+/// binding.
+pub(crate) trait BodyReads {
+    fn read(
+        &mut self,
+        ctx: &mut VerifyContext<'_>,
+        state: &EvalState,
+        heap: &HeapVal,
+        addr: &Val,
+        pc: &[(egg::Id, Polarity)],
+    ) -> Result<egg::Id, VerifyError>;
+    fn call(
+        &mut self,
+        ctx: &mut VerifyContext<'_>,
+        state: &EvalState,
+        heap: HeapVal,
+        call: &vmir::ResourceCall,
+        pc: &[(egg::Id, Polarity)],
+    ) -> Result<egg::Id, VerifyError>;
+}
+
+/// A heap-dependent call's snapshot in a quantifier body walk: from `hook`
+/// when one resolves the body, else the resolved call the state carries.
+pub(crate) fn body_call_snapshot(
+    ctx: &mut VerifyContext<'_>,
+    state: &EvalState,
+    hook: Option<&mut &mut dyn BodyReads>,
+    heap: HeapVal,
+    call: &vmir::ResourceCall,
+    pc: &[(egg::Id, Polarity)],
+) -> Result<egg::Id, VerifyError> {
+    match hook {
+        Some(h) => h.call(ctx, state, heap, call, pc),
+        None => Ok(state.read_maps.call_at(state.vals.len()).snap),
+    }
+}
 
 pub(crate) fn eval_body_checked(
     ctx: &mut VerifyContext<'_>,
     state: &mut EvalState,
     insts: &[Inst],
     pc_of: &mut BodyPc<'_>,
-    mut on_read: Option<&mut OnRead<'_>>,
+    mut hook: Option<&mut dyn BodyReads>,
 ) -> Result<(), VerifyError> {
     for inst in insts {
         let pc_lits = pc_of(ctx, state, inst);
         match &inst.kind {
-            InstKind::Pure(ty, PureInst::Deref(heap, addr)) if let Some(f) = &mut on_read => {
-                let id = f(ctx, state, heap, addr, &pc_lits)?;
+            InstKind::Pure(ty, PureInst::Deref(heap, addr)) if let Some(h) = &mut hook => {
+                let id = h.read(ctx, state, heap, addr, &pc_lits)?;
                 state.push_val(id, ty.clone(), None);
+            }
+            InstKind::Heap(hi) if let Some((heap, call)) = hi.frame_exhale() => {
+                let id = body_call_snapshot(ctx, state, hook.as_mut(), heap, call, &pc_lits)?;
+                state.push_val(id, Type::Snap(call.resource), None);
             }
             InstKind::Pure(ty, pi) => {
                 for (goal, err) in pure_obligations(ctx, state, ty, pi) {
@@ -521,7 +554,7 @@ pub(crate) fn eval_body_checked(
                 if let PureInst::Forall(inner) = pi {
                     // Its maps would have to be resolved against heaps this
                     // frame does not hold.
-                    if !inner.heap_reads().is_empty() {
+                    if !inner.heap_reads().is_empty() || !inner.heap_calls().is_empty() {
                         return Err(VerifyError::Unimplemented(
                             "heap read in a nested quantifier",
                         ));
@@ -558,19 +591,6 @@ pub(crate) fn eval_body_checked(
     Ok(())
 }
 
-/// A heap-dependent call in a quantifier body (a frame-only exhale, see
-/// [`vmir::HeapCall`]) is not resolved yet: refused before the body is walked.
-/// Phase 1 of plans/heap-dependent-calls-in-quantifiers.md.
-pub(crate) fn reject_heap_calls(calls: &[vmir::HeapCall]) -> Result<(), VerifyError> {
-    if calls.is_empty() {
-        Ok(())
-    } else {
-        Err(VerifyError::Unimplemented(
-            "heap-dependent function call inside a quantifier",
-        ))
-    }
-}
-
 /// Check the well-definedness of a `forall` **at the point it is encountered**,
 /// in a throwaway clone of the live e-graph.
 ///
@@ -592,7 +612,7 @@ pub(crate) fn check_forall_wd(
     q: &vmir::Forall,
     host: &EvalState,
     host_pc: &[(egg::Id, Polarity)],
-) -> Result<std::rc::Rc<[ResolvedRead]>, VerifyError> {
+) -> Result<Resolved, VerifyError> {
     // A quantifier body holds no permission instruction.
     if q.body
         .insts
@@ -603,10 +623,19 @@ pub(crate) fn check_forall_wd(
             "permission instruction in a quantifier body",
         ));
     }
-    reject_heap_calls(&q.heap_calls())?;
-    // The same walk resolves the body's heap reads against the host's heaps.
-    let heap_of = |ctx: &mut VerifyContext<'_>, h: &HeapVal| get_heap(ctx, host, h, host_pc);
-    let mut resolver = crate::verify::heap::ReadResolver::new(heap_of);
+    // The same walk resolves the body's heap reads and calls against the
+    // host's heaps; a call's snapshot is built before it, in the live graph.
+    let mut heap_of = |ctx: &mut VerifyContext<'_>, h: &HeapVal| get_heap(ctx, host, h, host_pc);
+    let calls = crate::verify::heap::resolve_calls(
+        ctx,
+        &q.heap_calls(),
+        host.frame_for(q),
+        q.step_base(),
+        &q.body.insts,
+        &mut heap_of,
+        host_pc,
+    )?;
+    let mut resolver = crate::verify::heap::ReadResolver::new(heap_of, calls);
     // `ctx.egraph` is a scratch clone for the duration; the live graph, its
     // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
     // The certificate recipe (if one is being built) is paused: the WD walk's
@@ -627,10 +656,6 @@ pub(crate) fn check_forall_wd(
             // the ambient cube — the body's ambient *is* `host_pc`. Prepending
             // the cube a second time would break `cube_matches`'s length test
             // and silently disable the block scratch.
-            let mut on_read =
-                |ctx: &mut VerifyContext<'_>, state: &EvalState, heap: &_, addr: &_, pc: &_| {
-                    resolver.on_read(ctx, state, heap, addr, pc)
-                };
             let mut pc_of = |ctx: &mut VerifyContext<'_>, state: &EvalState, inst: &Inst| {
                 let mut pc = host_pc.to_vec();
                 pc.extend(pc_lits_raw(ctx, state, &inst.pc));
@@ -641,7 +666,7 @@ pub(crate) fn check_forall_wd(
                 &mut state,
                 &q.body.insts,
                 &mut pc_of,
-                Some(&mut on_read),
+                Some(&mut resolver),
             )
         })
     })?;
@@ -748,7 +773,7 @@ pub(crate) fn eval_pure_inst(
         }
         // A resolved read of a quantified permission's body: its stand-in.
         PureInst::Deref(hv, loc)
-            if let Some((_, read)) = ResolvedRead::find(&state.read_maps, hv, loc) =>
+            if let Some((_, read)) = ResolvedRead::find(&state.read_maps.reads, hv, loc) =>
         {
             let id = match read.stand {
                 Stand::Value(v) => v,
@@ -928,7 +953,9 @@ pub(crate) fn eval_pure_inst(
         PureInst::Forall(q) => {
             // Its heap reads, resolved by this program point's `check_forall_wd`.
             let reads = &state.forall_reads;
-            if reads.len() != q.heap_reads().len() {
+            if reads.reads.len() != q.heap_reads().len()
+                || reads.calls.len() != q.heap_calls().len()
+            {
                 return Err(VerifyError::Unimplemented(
                     "heap read in a quantifier evaluated outside a body walk",
                 ));
@@ -939,16 +966,13 @@ pub(crate) fn eval_pure_inst(
             // not borrow `ctx` across the `&mut ctx.alloc`.
             let (interner, decls) = (ctx.interner, ctx.decls);
             let names = move |m| crate::verify::context::member_name_in(interner, decls, m);
-            let by_value: Vec<bool> = reads
-                .iter()
-                .map(|r| matches!(r.stand, Stand::Value(_)))
-                .collect();
             let (recipe_id, free) =
-                crate::verify::quant::intern_forall(ctx.alloc, &names, q, &by_value)?;
+                crate::verify::quant::intern_forall(ctx.alloc, &names, q, &reads.by_value())?;
             let free: Vec<Val> = free.iter().map(|&k| Val::Temp(k)).collect();
-            // Children: the captured temps, then the read stand-ins (`Canonical`).
+            // Children: the captured temps, then the read stand-ins and call
+            // snapshots (`Canonical`).
             let temps = free.iter().map(|v| state.get_val(ctx, v));
-            let caps: Box<[egg::Id]> = temps.chain(reads.iter().map(|r| r.stand.id())).collect();
+            let caps: Box<[egg::Id]> = temps.chain(reads.cap_ids()).collect();
             // Stated directly (not inside an instantiated quantifier), so every
             // type parameter of a generic axiom's quantifier is still open.
             let type_args = ctx
@@ -970,8 +994,9 @@ pub(crate) fn eval_pure_inst(
                     .collect::<Result<_, _>>()?;
                 // A stand-in with no recipe cannot be rebuilt where the
                 // certificate is grafted.
-                for r in reads.iter() {
-                    caps.push(r.recipe.clone().ok_or(VerifyError::Unimplemented(
+                let stand_recipes = reads.reads.iter().map(|r| &r.recipe);
+                for r in stand_recipes.chain(reads.calls.iter().map(|c| &c.recipe)) {
+                    caps.push(r.clone().ok_or(VerifyError::Unimplemented(
                         "heap read in a quantifier of a resource body without a recipe",
                     ))?);
                 }
