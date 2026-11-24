@@ -1129,17 +1129,6 @@ fn translate_for_all(
 
     // One multi-pattern per trigger group; the groups are alternatives. MBQI is
     // off, so these are the only way Z3 instantiates the quantifier.
-    let mut patterns: Vec<z3::Pattern> = Vec::with_capacity(recipe.groups.len());
-    for group in &recipe.groups {
-        let terms: Vec<Dynamic> = group
-            .iter()
-            .map(|t| trigger_to_z3(ctxt, t, tys, caps, &bounds))
-            .collect::<Option<_>>()?;
-        let refs: Vec<&dyn Ast> = terms.iter().map(|t| t as &dyn Ast).collect();
-        patterns.push(z3::Pattern::new(&refs));
-    }
-    let pattern_refs: Vec<&z3::Pattern> = patterns.iter().collect();
-    let bound_refs: Vec<&dyn Ast> = bounds.iter().map(|b| b as &dyn Ast).collect();
     let weight = if table.is_coll_axiom(rid) {
         COLL_AXIOM_WEIGHT
     } else {
@@ -1152,27 +1141,60 @@ fn translate_for_all(
     } else {
         format!("forall#{}<{}>", rid.0, tys.iter().join(","))
     };
-
-    Some(z3::ast::quantifier_const(
-        true,
-        weight,
-        name.as_str(),
-        format!("{name}!sk").as_str(),
-        &bound_refs,
-        &pattern_refs,
-        &[],
-        &body,
-    ))
+    let quantifier = |bounds: &[Dynamic], patterns: &[z3::Pattern]| {
+        let pattern_refs: Vec<&z3::Pattern> = patterns.iter().collect();
+        let bound_refs: Vec<&dyn Ast> = bounds.iter().map(|b| b as &dyn Ast).collect();
+        z3::ast::quantifier_const(
+            true,
+            weight,
+            name.as_str(),
+            format!("{name}!sk").as_str(),
+            &bound_refs,
+            &pattern_refs,
+            &[],
+            &body,
+        )
+    };
+    let mut groups = Vec::with_capacity(recipe.groups.len());
+    for (g, group) in recipe.groups.iter().enumerate() {
+        let mut wilds = Vec::new();
+        let prefix = format!("q{}@g{g}", rid.0);
+        let terms: Vec<Dynamic> = group
+            .iter()
+            .map(|t| trigger_to_z3(ctxt, t, tys, caps, &bounds, &prefix, &mut wilds))
+            .collect::<Option<_>>()?;
+        let refs: Vec<&dyn Ast> = terms.iter().map(|t| t as &dyn Ast).collect();
+        groups.push((z3::Pattern::new(&refs), wilds));
+    }
+    if groups.iter().all(|(_, wilds)| wilds.is_empty()) {
+        let patterns: Vec<z3::Pattern> = groups.into_iter().map(|(p, _)| p).collect();
+        return Some(quantifier(&bounds, &patterns));
+    }
+    // A group with a `Wild` binds it to a variable of its own, which every
+    // pattern of the quantifier would have to mention: one quantifier per
+    // group, all over the same body (the extra variables occur in none).
+    let per_group: Vec<Bool> = groups
+        .into_iter()
+        .map(|(pattern, wilds)| {
+            let bounds: Vec<Dynamic> = bounds.iter().chain(&wilds).cloned().collect();
+            quantifier(&bounds, &[pattern])
+        })
+        .collect();
+    Some(Bool::and(&per_group))
 }
 
 /// A trigger term over the quantifier's captures and binders, at its type
 /// arguments `tys`.
+/// A `Wild` argument of an application becomes a fresh variable named after
+/// `prefix`, pushed onto `wilds` for the quantifier to bind.
 fn trigger_to_z3(
     ctxt: &mut VerifyContext,
     term: &PreparedTerm,
     tys: &[Type],
     caps: &[Dynamic],
     bounds: &[Dynamic],
+    prefix: &str,
+    wilds: &mut Vec<Dynamic>,
 ) -> Option<Dynamic> {
     match term {
         PreparedTerm::Bound(i) => Some(bounds[*i].clone()),
@@ -1182,9 +1204,27 @@ fn trigger_to_z3(
             unreachable!("a `Wild` occurs only in a quantifier without value binders")
         }
         PreparedTerm::App { head, args } => {
+            // The parameter types, for a `Wild` argument's variable.
+            let params = match head {
+                TermHead::Func { func, type_args } if args.contains(&PreparedTerm::Wild) => {
+                    let type_args: Vec<Type> =
+                        type_args.iter().map(|t| t.subst_generics(tys)).collect();
+                    param_types(ctxt, func, &type_args)
+                }
+                _ => Vec::new(),
+            };
             let args: Vec<Dynamic> = args
                 .iter()
-                .map(|a| trigger_to_z3(ctxt, a, tys, caps, bounds))
+                .enumerate()
+                .map(|(i, a)| match a {
+                    PreparedTerm::Wild => {
+                        let s = sort(ctxt, params.get(i)?);
+                        let w = Dynamic::new_const(format!("{prefix}@w{}", wilds.len()), &s);
+                        wilds.push(w.clone());
+                        Some(w)
+                    }
+                    a => trigger_to_z3(ctxt, a, tys, caps, bounds, prefix, wilds),
+                })
                 .collect::<Option<_>>()?;
             let ty = |t: &Type| t.subst_generics(tys);
             match head {

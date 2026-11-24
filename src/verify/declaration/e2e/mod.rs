@@ -2639,10 +2639,10 @@ method m() {
 }
 
 #[test]
-fn heap_dependent_call_on_a_binder_is_unimplemented() {
-    // A binder-free call is resolved (its snapshot is one value); a call on the
-    // binder needs a snapshot per binding, which is phase 3 of
-    // plans/heap-dependent-calls-in-quantifiers.md.
+fn heap_dependent_call_on_a_binder_verifies() {
+    // The call's footprint slot is framed by the chunk set for every binding;
+    // its snapshot is rebuilt per binding from the set's map, so an instance
+    // at a member gives the member's value.
     let input = r#"
 field f: Int
 
@@ -2650,23 +2650,18 @@ function get(x: Ref): Int
     requires acc(x.f)
 { x.f }
 
-method m(s: Set[Ref])
+method m(s: Set[Ref], a: Ref)
     requires forall x: Ref :: x in s ==> acc(x.f)
+    requires a in s
 {
     inhale forall x: Ref :: {get(x)} x in s ==> get(x) == 0
+    assert get(a) == 0
+    assert a.f == 0
 }
 "#;
     let program = lower(input);
     let result = verify_named_method(&program, "m");
-    assert!(
-        matches!(
-            result.as_ref().map_err(VerifyError::root_cause),
-            Err(VerifyError::Unimplemented(
-                "heap-dependent function call on a binder inside a quantifier"
-            ))
-        ),
-        "got {result:?}"
-    );
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
 }
 
 #[test]

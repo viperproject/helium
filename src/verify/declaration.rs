@@ -584,6 +584,10 @@ enum ValueSource {
     /// A fresh unconstrained value per slot. Used by `inhale`, which produces a
     /// resource's footprint with unknown location values.
     Fresh,
+    /// What stands for each (single) slot of a quantifier body's call on a
+    /// binder: the slot's value is `lookup(map, addr)` or the captured value
+    /// (see [`frame_snapshot`]).
+    Stands(std::rc::Rc<[crate::verify::quant::ResolvedSlot]>),
 }
 
 /// The direction of a footprint walk: consume a held footprint and **assert** the
@@ -607,6 +611,8 @@ struct FootprintResult {
     /// Recipe provenance of each slot value, in slot order (certificate walks
     /// only; all `None` otherwise).
     slot_recipes: Vec<Option<Val>>,
+    /// Each single slot's location, in slot order; `None` for a quantified one.
+    slot_locs: Vec<Option<Loc>>,
 }
 
 /// The single per-slot footprint loop behind `fold`, `unfold`, `snap` and
@@ -657,6 +663,7 @@ fn walk_footprint(
     let mut heap = base;
     let mut values: Vec<egg::Id> = Vec::with_capacity(def.footprint.len());
     let mut recipes: Vec<Option<Val>> = Vec::with_capacity(def.footprint.len());
+    let mut locs: Vec<Option<Loc>> = Vec::with_capacity(def.footprint.len());
     let mut members = Vec::with_capacity(def.footprint.len());
     let mut changed = Vec::new();
     let walk = SlotWalk {
@@ -675,6 +682,7 @@ fn walk_footprint(
             value,
             recipe,
             member,
+            loc,
         } = match &slot.shape {
             SlotShape::Single { addr, perm } => walk_single_slot(
                 ctx,
@@ -711,6 +719,7 @@ fn walk_footprint(
         members.push(member);
         values.push(value);
         recipes.push(recipe);
+        locs.push(loc);
     }
     // The body boolean over params ++ all slot values.
     // `bool_guard`, not `pc_lits`: it is the path condition at every call site
@@ -749,6 +758,7 @@ fn walk_footprint(
         heap,
         members,
         slot_recipes: recipes,
+        slot_locs: locs,
     })
 }
 
@@ -774,6 +784,8 @@ struct SlotOut {
     value: egg::Id,
     recipe: Option<Val>,
     member: egg::Id,
+    /// A single slot's location.
+    loc: Option<Loc>,
 }
 
 /// Walk footprint slot `i`, a single `acc(addr, perm)`: rebuild its address and
@@ -832,16 +844,20 @@ fn walk_single_slot(
         kind: kind.clone(),
         addr,
     };
-    let (value, recipe) = slot_value(ctx, w, i, elem, |ctx, h| {
-        // The bodies of its chunk sets evaluated once already, at their inhales.
-        let read = h
-            .read(ctx, &loc, w.pc_lits, None)
-            .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
-        match read {
-            Some(v) => (v.id, v.recipe),
-            None => (ctx.fresh_symbolic_value(elem.clone()), None),
-        }
-    });
+    let slot_loc = loc.clone();
+    let (value, recipe) = match w.source {
+        ValueSource::Stands(slots) => (stand_value(ctx, &slots[i], addr), None),
+        _ => slot_value(ctx, w, i, elem, |ctx, h| {
+            // The bodies of its chunk sets evaluated once already, at their inhales.
+            let read = h
+                .read(ctx, &loc, w.pc_lits, None)
+                .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
+            match read {
+                Some(v) => (v.id, v.recipe),
+                None => (ctx.fresh_symbolic_value(elem.clone()), None),
+            }
+        }),
+    };
     let present = if wc_slot {
         // A frame check: no heap effect; presence is the gating guard
         // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
@@ -869,6 +885,7 @@ fn walk_single_slot(
         value,
         recipe,
         member,
+        loc: Some(slot_loc),
     })
 }
 
@@ -963,6 +980,7 @@ fn walk_qp_slot(
         value: map,
         recipe,
         member: ctx.option_member(elem.clone(), present, map),
+        loc: None,
     })
 }
 
@@ -1010,6 +1028,7 @@ fn slot_value(
         }
         // Inhale: an unconstrained fresh value per slot.
         ValueSource::Fresh => (ctx.fresh_symbolic_value(elem.clone()), None),
+        ValueSource::Stands(_) => unreachable!("stand-ins rebuild single slots only"),
     }
 }
 
@@ -1227,6 +1246,7 @@ fn eval_resource_op(
         heap: out,
         members,
         slot_recipes,
+        ..
     } = walk_footprint(
         ctx,
         certs,
@@ -1329,44 +1349,80 @@ fn snapshot_recipe(
     })))
 }
 
-/// Whether [`frame_snapshot`] checks the frame-only exhale it builds.
-pub(crate) enum SnapshotCheck {
-    /// Framing and the precondition, under the given pc, as at a call.
-    Check,
-    /// Neither: they are checked elsewhere, under a stronger pc.
-    Build,
+/// What [`frame_snapshot`] builds a frame-only exhale's snapshot from.
+pub(crate) enum SnapshotFrom {
+    /// The heap, checking framing and the precondition under the given pc,
+    /// as at a call.
+    Check(Heap),
+    /// The heap, checking neither: they are checked elsewhere, under a
+    /// stronger pc.
+    Build(Heap),
+    /// What stands for each footprint slot of a quantifier body's call on a
+    /// binder (see [`ValueSource::Stands`]); nothing to check.
+    Stands(std::rc::Rc<[crate::verify::quant::ResolvedSlot]>),
 }
 
-/// The snapshot a frame-only exhale of `resource(args)` on `heap` yields (a
-/// heap-dependent call's), and its certificate recipe. A quantifier body's
-/// call is checked per binding and its snapshot built once (see
-/// `heap::resolve_calls`).
+/// A frame-only exhale's snapshot (see [`frame_snapshot`]).
+pub(crate) struct FrameSnapshot {
+    pub(crate) snap: egg::Id,
+    /// Its certificate recipe in a certificate walk.
+    pub(crate) recipe: Option<Val>,
+    /// Each single footprint slot's location; `None` for a quantified one.
+    pub(crate) locs: Vec<Option<Loc>>,
+}
+
+/// The snapshot a frame-only exhale of `resource(args)` yields (a
+/// heap-dependent call's). A quantifier body's call is checked per binding,
+/// and its snapshot built once (binder-free) or per binding from what stands
+/// for its slots (see `heap::resolve_calls`).
 pub(crate) fn frame_snapshot(
     ctx: &mut VerifyContext<'_>,
     resource: MemberId,
     args: &[egg::Id],
-    heap: Heap,
+    from: SnapshotFrom,
     pc: &[(egg::Id, Polarity)],
-    check: SnapshotCheck,
-) -> Result<(egg::Id, Option<Val>), VerifyError> {
+) -> Result<FrameSnapshot, VerifyError> {
     let certs = ctx
         .certs
         .expect("a verification context carries the certificates");
-    let direction = match check {
-        SnapshotCheck::Check => Direction::Consume,
-        SnapshotCheck::Build => Direction::Build,
+    let (heap, source, direction) = match from {
+        SnapshotFrom::Check(h) => (h.clone(), ValueSource::ReadHeap(h), Direction::Consume),
+        SnapshotFrom::Build(h) => (h.clone(), ValueSource::ReadHeap(h), Direction::Build),
+        SnapshotFrom::Stands(slots) => {
+            (Heap::empty(), ValueSource::Stands(slots), Direction::Build)
+        }
     };
-    let source = ValueSource::ReadHeap(heap.clone());
     let FootprintResult {
         members,
         slot_recipes,
+        slot_locs,
         ..
     } = walk_footprint(
         ctx, certs, resource, args, heap, source, direction, None, false, pc, pc, true,
     )?;
     let snap = build_snapshot(ctx, resource, members);
     let recipe = snapshot_recipe(ctx, certs, resource, &slot_recipes, pc)?;
-    Ok((snap, recipe))
+    Ok(FrameSnapshot {
+        snap,
+        recipe,
+        locs: slot_locs,
+    })
+}
+
+/// A footprint slot's value at `addr` from what stands for it.
+fn stand_value(
+    ctx: &mut VerifyContext<'_>,
+    slot: &crate::verify::quant::ResolvedSlot,
+    addr: egg::Id,
+) -> egg::Id {
+    use crate::verify::quant::Stand;
+    match slot.stand {
+        Stand::Value(v) => v,
+        Stand::Map(m) => {
+            let lookup = ctx.alloc.value_map(&slot.kind).lookup;
+            ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([m, addr])))
+        }
+    }
 }
 
 /// Evaluate a a bound `inhale`: widen a snapshot value back into a heap — the entry
@@ -1806,12 +1862,14 @@ pub(crate) fn prepare_body(
     insts: &[vmir::Inst],
     rename: &dyn Fn(&Val) -> Val,
     read: &dyn Fn(&vmir::HeapVal, &Val) -> Option<crate::verify::quant::ReadStep>,
+    spliced: &[Vec<crate::verify::rewrite::AxiomInst>],
 ) -> Result<Vec<crate::verify::rewrite::AxiomInst>, VerifyError> {
     use crate::verify::rewrite::{AxiomInst, AxiomPure};
     let mut out = Vec::with_capacity(insts.len());
     let push = |out: &mut Vec<AxiomInst>, i: AxiomInst| {
         out.push(crate::verify::cert::map_operands(&i, rename))
     };
+    let mut spliced = spliced.iter();
     for inst in insts {
         if let InstKind::Pure(_, PureInst::Deref(heap, addr)) = &inst.kind
             && let Some(step) = read(heap, addr)
@@ -1873,11 +1931,13 @@ pub(crate) fn prepare_body(
             );
             continue;
         }
-        // A heap-dependent call's snapshot: captured, and `Canonical` names
-        // it in place of the step's temp.
+        // A heap-dependent call's snapshot: captured, which `Canonical` names
+        // in place of the step's temp, or rebuilt by the steps it spliced,
+        // already in the recipe's space.
         if let InstKind::Heap(hi) = &inst.kind
             && hi.frame_exhale().is_some()
         {
+            out.extend(spliced.next().expect("a splice per call").iter().cloned());
             continue;
         }
         let prepared = match &inst.kind {

@@ -1109,10 +1109,17 @@ pub(crate) fn lower_trig_term<Ext: PureExt>(
             })?;
             // A Silver function has no `domain_fn_sigs` entry: no type arguments.
             let type_args = domain_call_type_args(b, function, &call.args, &b.lower_type(&term.ty));
+            let mut args = lower_args(&call.args)?;
+            // A heap-dependent function also takes its precondition's snapshot,
+            // which the trigger leaves open: it matches an application at any
+            // heap, and the instance builds the call at the quantifier's.
+            if b.contracts.get(&call.name.0).is_some_and(|c| c.heap_dep) {
+                args.push(vmir::TrigTerm::Wild);
+            }
             Ok(vmir::TrigTerm::App {
                 head: vmir::TrigHead::Func(function),
                 type_args,
-                args: lower_args(&call.args)?.into(),
+                args: args.into(),
             })
         }
         P::AdtConstructor(call) => {

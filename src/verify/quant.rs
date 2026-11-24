@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use typed_index_collections::TiVec;
 
+use crate::verify::cert::{BodyRecipe, PermRecipe, ResourceDefinition, SeedRef, SlotShape};
 use crate::verify::declaration::{prepare_body, prepare_trig_term};
 use crate::verify::error::VerifyError;
 use crate::verify::func_registry::FuncRegistry;
@@ -227,12 +228,17 @@ pub(crate) fn intern_forall(
     alloc: &mut FuncRegistry,
     names: &dyn Fn(vmir::MemberId) -> String,
     q: &vmir::Forall,
-    by_value: &[bool],
+    shape: &Shape,
+    certs: Certs<'_>,
 ) -> Result<(RecipeId, Arc<[usize]>), VerifyError> {
     let table = Arc::clone(alloc.quant_table());
     let mut table = table.write().expect("recipe table lock");
-    intern(alloc, &mut table, names, q, by_value)
+    intern(alloc, &mut table, names, q, shape, certs)
 }
+
+/// The resource certificates a call's snapshot is rebuilt from
+/// ([`Canonical::new`]); `None` where no call is compiled per binding.
+pub(crate) type Certs<'a> = Option<&'a HashMap<vmir::MemberId, ResourceDefinition>>;
 
 fn intern_insts(
     alloc: &mut FuncRegistry,
@@ -249,7 +255,7 @@ fn intern_insts(
                     "heap read in a nested quantifier",
                 ));
             }
-            intern(alloc, table, names, q, &[])?;
+            intern(alloc, table, names, q, &Shape::default(), None)?;
         }
     }
     Ok(())
@@ -269,15 +275,16 @@ fn intern_insts(
 ///   steps:  e6, e7                                         -->  t3, t4
 /// ```
 ///
-/// A body that reads the heap compiles by how its reads were resolved
-/// (`by_value`, see [`Stand`]), which can differ between uses: it is not
-/// cached by occurrence, and its recipe is found again by [`RecipeKey`].
+/// A body that reads the heap compiles by how its reads and calls were
+/// resolved (its [`Shape`]), which can differ between uses: it is not cached
+/// by occurrence, and its recipe is found again by [`RecipeKey`].
 fn intern(
     alloc: &mut FuncRegistry,
     table: &mut RecipeTable,
     names: &dyn Fn(vmir::MemberId) -> String,
     q: &vmir::Forall,
-    by_value: &[bool],
+    shape: &Shape,
+    certs: Certs<'_>,
 ) -> Result<(RecipeId, Arc<[usize]>), VerifyError> {
     intern_insts(alloc, table, names, &q.body.insts)?;
     if let Some(entry) = table.by_forall.get(q) {
@@ -289,11 +296,12 @@ fn intern(
         alloc,
         table,
         names,
+        certs,
         q.binder_base,
         q.bound.len(),
         &free,
         &q.heap_reads(),
-        by_value,
+        shape,
         &q.triggers,
         &q.body.insts,
     )?;
@@ -334,7 +342,7 @@ fn intern(
         }
     };
     let entry = (id, Arc::from(free));
-    if by_value.is_empty() {
+    if shape.fixed() {
         table.by_forall.insert(q.clone(), entry.clone());
     }
     Ok(entry)
@@ -377,16 +385,43 @@ impl Stand {
 }
 
 /// One heap-dependent call of a quantifier body ([`vmir::HeapCall`]),
-/// resolved: the snapshot its frame-only `exhale` stands for. Only binder-free
-/// calls are resolved so far, so the snapshot is one value for every binding,
-/// captured after the read stand-ins ([`Canonical`]).
+/// resolved: what its frame-only `exhale`'s snapshot is built from.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedCall {
     /// The body temp the exhale yields.
     pub(crate) temp: usize,
-    pub(crate) snap: egg::Id,
-    /// The snapshot's recipe in a certificate walk; `None` otherwise.
+    pub(crate) stand: CallStand,
+}
+
+/// What stands for a resolved call's snapshot.
+#[derive(Debug, Clone)]
+pub(crate) enum CallStand {
+    /// A binder-free call: the snapshot itself, one value for every binding,
+    /// with its recipe in a certificate walk.
+    Snapshot(egg::Id, Option<Val>),
+    /// A call on a binder: what stands for each footprint slot's value, the
+    /// snapshot rebuilt from them per binding.
+    Slots(std::rc::Rc<[ResolvedSlot]>),
+}
+
+/// One footprint slot of a call on a binder, resolved like a read: the one
+/// holder that frames it for every binding.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSlot {
+    pub(crate) kind: crate::verify::heap::LocationKind,
+    pub(crate) stand: Stand,
+    /// The stand-in's recipe in a certificate walk; `None` otherwise.
     pub(crate) recipe: Option<Val>,
+}
+
+impl CallStand {
+    /// The captured e-classes and their recipes, in [`Canonical`]'s order.
+    fn caps(&self) -> Vec<(egg::Id, &Option<Val>)> {
+        match self {
+            CallStand::Snapshot(snap, recipe) => vec![(*snap, recipe)],
+            CallStand::Slots(slots) => slots.iter().map(|s| (s.stand.id(), &s.recipe)).collect(),
+        }
+    }
 }
 
 /// What stands for the heaps a quantifier body names: its resolved reads,
@@ -412,17 +447,43 @@ impl Resolved {
     }
 
     /// The captured e-classes, in [`Canonical`]'s slot order.
-    pub(crate) fn cap_ids(&self) -> impl Iterator<Item = egg::Id> + '_ {
+    pub(crate) fn cap_ids(&self) -> Vec<egg::Id> {
         let reads = self.reads.iter().map(|r| r.stand.id());
-        reads.chain(self.calls.iter().map(|c| c.snap))
+        let calls = self.calls.iter().flat_map(|c| c.stand.caps());
+        reads.chain(calls.map(|(id, _)| id)).collect()
     }
 
-    /// Whether each read is captured by value (see [`Canonical::new`]).
-    pub(crate) fn by_value(&self) -> Vec<bool> {
-        self.reads
+    /// The captured stand-ins' recipes, in [`Canonical`]'s slot order.
+    pub(crate) fn cap_recipes(&self) -> Vec<Option<Val>> {
+        let reads = self.reads.iter().map(|r| r.recipe.clone());
+        let calls = self.calls.iter().flat_map(|c| c.stand.caps());
+        reads.chain(calls.map(|(_, r)| r.clone())).collect()
+    }
+
+    /// How a body with these stand-ins compiles.
+    pub(crate) fn shape(&self) -> Shape {
+        let by_value = self
+            .reads
             .iter()
             .map(|r| matches!(r.stand, Stand::Value(_)))
-            .collect()
+            .collect();
+        let calls = self
+            .calls
+            .iter()
+            .map(|c| match &c.stand {
+                CallStand::Snapshot(..) => CallShape::Snapshot,
+                CallStand::Slots(slots) => CallShape::Slots(
+                    slots
+                        .iter()
+                        .map(|s| match s.stand {
+                            Stand::Map(_) => Some(s.kind.clone()),
+                            Stand::Value(_) => None,
+                        })
+                        .collect(),
+                ),
+            })
+            .collect();
+        Shape { by_value, calls }
     }
 
     /// The resolved call whose exhale yields body temp `temp`.
@@ -431,6 +492,42 @@ impl Resolved {
             .iter()
             .find(|c| c.temp == temp)
             .unwrap_or_else(|| panic!("the heap-dependent call yielding e{temp} is not resolved"))
+    }
+}
+
+/// How a quantifier body compiles, given how its heap reads and calls were
+/// resolved ([`Resolved::shape`]): read `j` is captured by value iff
+/// `by_value[j]`, and each call as [`CallShape`] says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub(crate) struct Shape {
+    pub(crate) by_value: Vec<bool>,
+    pub(crate) calls: Vec<CallShape>,
+}
+
+/// How a heap-dependent call of a body compiles (see [`CallStand`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CallShape {
+    /// Its snapshot is a capture.
+    Snapshot,
+    /// Its snapshot is rebuilt per binding; per footprint slot, the kind of
+    /// a captured map to `lookup`, or `None` for a captured value.
+    Slots(Vec<Option<crate::verify::heap::LocationKind>>),
+}
+
+impl CallShape {
+    fn n_caps(&self) -> usize {
+        match self {
+            CallShape::Snapshot => 1,
+            CallShape::Slots(slots) => slots.len(),
+        }
+    }
+}
+
+impl Shape {
+    /// Whether every use of a body with this shape compiles alike: no read,
+    /// and only binder-free calls (whose snapshot is always one capture).
+    fn fixed(&self) -> bool {
+        self.by_value.is_empty() && self.calls.iter().all(|c| *c == CallShape::Snapshot)
     }
 }
 
@@ -466,10 +563,14 @@ pub(crate) struct Canonical {
     binder_base: usize,
     /// Enclosing temp -> capture slot.
     slot: HashMap<usize, usize>,
-    /// How many read stand-ins, then call snapshots, are captured after the
+    /// How many read stand-ins, then call stand-ins, are captured after the
     /// temps (see [`Resolved`]).
     n_reads: usize,
     n_calls: usize,
+    /// A call rebuilt per binding emits its snapshot's steps in place of its
+    /// own (`(temp, steps - 1)`, ascending): the temps after it shift by that
+    /// many, and its own temp names its last step.
+    extra: Vec<(usize, usize)>,
     /// Body temp of a read captured by value -> its capture slot. Its step is
     /// dropped ([`ReadStep::Captured`]), so [`Self::rename`] closes the gaps
     /// those steps leave (`dropped`, ascending).
@@ -485,21 +586,25 @@ impl Canonical {
     /// `free` is the scope's capture list (enclosing temps, in child order);
     /// the stand-ins of its heap `reads` ([`vmir::HeapRead`], resolved at each
     /// use into [`ResolvedRead`]s) are captured after them, in order, read `j`
-    /// by value iff `by_value[j]`. Then the snapshot of each heap-dependent
-    /// call ([`ResolvedCall`]), in body order: its exhale's temp aliases it.
+    /// by value iff `shape.by_value[j]`. Then the stand-ins of each
+    /// heap-dependent call ([`ResolvedCall`]), in body order: a binder-free
+    /// call's snapshot, which its exhale's temp aliases, or a call's slots,
+    /// from which [`snapshot_steps`] rebuild its snapshot (`certs`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         alloc: &mut FuncRegistry,
         table: &RecipeTable,
         names: &dyn Fn(vmir::MemberId) -> String,
+        certs: Certs<'_>,
         binder_base: usize,
         n_bound: usize,
         free: &[usize],
         reads: &[vmir::HeapRead],
-        by_value: &[bool],
+        shape: &Shape,
         triggers: &[vmir::QuantTrigger],
         insts: &[vmir::Inst],
     ) -> Result<Self, VerifyError> {
+        let by_value = &shape.by_value;
         // Read `j`'s stand-in is the capture after the temps': slot `free.len() + j`.
         let read_of = |heap: &vmir::HeapVal, addr: &Val| {
             let j = reads
@@ -507,17 +612,31 @@ impl Canonical {
                 .position(|r| r.heap == *heap && r.addr == *addr)?;
             Some((j, free.len() + j))
         };
-        // The steps, as body temps from `binder_base + n_bound` on; a read
-        // captured by value, and every call's snapshot, aliases its capture
-        // and drops its step.
-        let mut alias = HashMap::default();
-        let mut dropped = Vec::new();
+        let mut c = Self {
+            binder_base,
+            slot: free.iter().copied().zip(0..).collect(),
+            n_reads: reads.len(),
+            n_calls: shape.calls.iter().map(CallShape::n_caps).sum(),
+            extra: Vec::new(),
+            next: 0,
+            alias: HashMap::default(),
+            dropped: Vec::new(),
+            insts: Vec::new(),
+            groups: Vec::new(),
+        };
+        // The steps, as body temps from `binder_base + n_bound` on, in order:
+        // a read captured by value and a binder-free call's snapshot alias
+        // their capture and drop their step; a call on a binder emits its
+        // snapshot's steps instead (`spliced`, one entry per call).
         let steps = insts.iter().filter(|i| match &i.kind {
             InstKind::Pure(..) => true,
             InstKind::Heap(hi) => hi.frame_exhale().is_some(),
             _ => false,
         });
-        let (mut n_vals, mut n_calls) = (0, 0);
+        let mut call_shapes = shape.calls.iter();
+        let mut call_cap = free.len() + reads.len();
+        let mut spliced = Vec::new();
+        let mut n_vals = 0;
         for (t, inst) in (binder_base + n_bound..).zip(steps) {
             n_vals += 1;
             match &inst.kind {
@@ -525,28 +644,49 @@ impl Canonical {
                     if let Some((j, slot)) = read_of(heap, addr)
                         && by_value[j] =>
                 {
-                    alias.insert(t, slot);
-                    dropped.push(t);
+                    c.alias.insert(t, slot);
+                    c.dropped.push(t);
                 }
-                InstKind::Heap(_) => {
-                    alias.insert(t, free.len() + reads.len() + n_calls);
-                    dropped.push(t);
-                    n_calls += 1;
+                InstKind::Heap(hi) => {
+                    let (_, call) = hi.frame_exhale().expect("filtered above");
+                    match call_shapes.next().expect("a shape per heap-dependent call") {
+                        CallShape::Snapshot => {
+                            c.alias.insert(t, call_cap);
+                            c.dropped.push(t);
+                            call_cap += 1;
+                            spliced.push(Vec::new());
+                        }
+                        CallShape::Slots(slots) => {
+                            let def = certs
+                                .and_then(|m| m.get(&call.resource))
+                                .ok_or(VerifyError::DependencyFailed)?;
+                            let args: Vec<Val> = call.args.iter().map(|a| c.rename(a)).collect();
+                            let caps: Vec<Val> =
+                                (call_cap..call_cap + slots.len()).map(Val::Temp).collect();
+                            call_cap += slots.len();
+                            // Its first step takes the temp its own would.
+                            let Val::Temp(first) = c.rename(&Val::Temp(t)) else {
+                                unreachable!("a step renames to a temp")
+                            };
+                            let steps = snapshot_steps(
+                                alloc,
+                                def,
+                                call.resource,
+                                &args,
+                                slots,
+                                &caps,
+                                first,
+                            )?;
+                            c.extra.push((t, steps.len() - 1));
+                            spliced.push(steps);
+                        }
+                    }
                 }
                 _ => {}
             }
         }
-        let mut c = Self {
-            binder_base,
-            slot: free.iter().copied().zip(0..).collect(),
-            n_reads: reads.len(),
-            n_calls,
-            next: free.len() + reads.len() + n_calls + n_bound + n_vals - dropped.len(),
-            alias,
-            dropped,
-            insts: Vec::new(),
-            groups: Vec::new(),
-        };
+        let extra: usize = c.extra.iter().map(|&(_, n)| n).sum();
+        c.next = c.n_caps() + n_bound + n_vals - c.dropped.len() + extra;
         let read = |heap: &vmir::HeapVal, addr: &Val| {
             let (j, slot) = read_of(heap, addr)?;
             if by_value[j] {
@@ -556,7 +696,15 @@ impl Canonical {
                 .expect("a heap read's address is an address");
             Some(ReadStep::Lookup(Box::new(kind), Val::Temp(slot)))
         };
-        c.insts = prepare_body(alloc, table, names, insts, &|v| c.rename(v), &read)?;
+        c.insts = prepare_body(
+            alloc,
+            table,
+            names,
+            insts,
+            &|v| c.rename(v),
+            &read,
+            &spliced,
+        )?;
         c.groups = triggers
             .iter()
             .map(|g| {
@@ -585,7 +733,13 @@ impl Canonical {
             Val::Temp(k) if let Some(&s) = self.alias.get(k) => Val::Temp(s),
             Val::Temp(k) => {
                 let gaps = self.dropped.partition_point(|d| d < k);
-                Val::Temp(self.n_caps() + (k - self.binder_base) - gaps)
+                let extra: usize = self
+                    .extra
+                    .iter()
+                    .filter(|(t, _)| t <= k)
+                    .map(|&(_, n)| n)
+                    .sum();
+                Val::Temp(self.n_caps() + (k - self.binder_base) - gaps + extra)
             }
             lit => lit.clone(),
         }
@@ -649,6 +803,173 @@ impl Canonical {
         self.next += 1;
         Val::Temp(self.next - 1)
     }
+}
+
+/// The recipe steps that rebuild a call's snapshot at one binding, from the
+/// callee's certificate `def`, the call's `args` and the captures `caps` that
+/// stand for its footprint slots (`slots`, see [`CallShape::Slots`]). Per
+/// slot: its address (the slot's recipe over the arguments and earlier slot
+/// values), its value (`lookup` of the captured map, or the captured value),
+/// its presence (the permission, `wildcard` read as present), and its member;
+/// then the `cons`. Mirrors `declaration::frame_snapshot` over stand-ins. The
+/// steps' temps count from `first`; the last is the snapshot.
+fn snapshot_steps(
+    alloc: &mut FuncRegistry,
+    def: &ResourceDefinition,
+    resource: vmir::MemberId,
+    args: &[Val],
+    slots: &[Option<crate::verify::heap::LocationKind>],
+    caps: &[Val],
+    first: usize,
+) -> Result<Vec<AxiomInst>, VerifyError> {
+    let mut out = Vec::new();
+    let mut values: Vec<Val> = Vec::new();
+    let mut members = Vec::new();
+    for (i, slot) in def.footprint.iter().enumerate() {
+        let SlotShape::Single { addr, perm } = &slot.shape else {
+            return Err(VerifyError::Unimplemented(
+                "heap-dependent call on a binder whose precondition holds a quantified permission",
+            ));
+        };
+        let addr = splice(&mut out, first, addr, args, &values)?;
+        let value = match &slots[i] {
+            Some(kind) => push(
+                &mut out,
+                first,
+                AxiomPure::App {
+                    func: alloc.value_map(kind).lookup,
+                    type_args: vec![],
+                    args: vec![caps[i].clone(), addr],
+                },
+            ),
+            None => caps[i].clone(),
+        };
+        let elem = slot.elem.clone();
+        let some = push(
+            &mut out,
+            first,
+            AxiomPure::App {
+                func: alloc.option_some(),
+                type_args: vec![elem.clone()],
+                args: vec![value.clone()],
+            },
+        );
+        let member = match presence(&mut out, first, perm, &perm.res, args, &values)? {
+            None => some,
+            Some(present) => {
+                let none = push(
+                    &mut out,
+                    first,
+                    AxiomPure::App {
+                        func: alloc.option_none(),
+                        type_args: vec![elem],
+                        args: vec![],
+                    },
+                );
+                push(&mut out, first, AxiomPure::Ternary(present, some, none))
+            }
+        };
+        values.push(value);
+        members.push(member);
+    }
+    push(
+        &mut out,
+        first,
+        AxiomPure::App {
+            func: alloc.cons(resource, 0),
+            type_args: vec![],
+            args: members,
+        },
+    );
+    Ok(out)
+}
+
+/// Append a step to `out`, whose temps count from `first`; its temp.
+fn push(out: &mut Vec<AxiomInst>, first: usize, p: AxiomPure) -> Val {
+    out.push(AxiomInst::Val(p));
+    Val::Temp(first + out.len() - 1)
+}
+
+/// Append a certificate recipe's steps to `out` (temps from `first`), its
+/// parameters read as `args` and its slot values as `values`; its result.
+fn splice(
+    out: &mut Vec<AxiomInst>,
+    first: usize,
+    r: &BodyRecipe,
+    args: &[Val],
+    values: &[Val],
+) -> Result<Val, VerifyError> {
+    // A token step names a temp it releases; nothing here would release it.
+    if !r.token_steps.is_empty() {
+        return Err(VerifyError::Unimplemented(
+            "heap-dependent call on a binder whose footprint calls a function",
+        ));
+    }
+    let mut map: Vec<Val> = r
+        .seed_refs
+        .iter()
+        .map(|s| match s {
+            SeedRef::Param(k) => args[*k].clone(),
+            SeedRef::SlotValue(j) => values[*j].clone(),
+        })
+        .collect();
+    let rename = |map: &[Val], v: &Val| match v {
+        Val::Temp(k) => map[*k].clone(),
+        lit => lit.clone(),
+    };
+    for step in &r.steps {
+        match step {
+            AxiomInst::Val(_) | AxiomInst::Forall { .. } => {
+                out.push(crate::verify::cert::map_operands(step, |v| rename(&map, v)));
+                map.push(Val::Temp(first + out.len() - 1));
+            }
+            AxiomInst::Assume(_) | AxiomInst::Token { .. } => {
+                return Err(VerifyError::Unimplemented(
+                    "heap-dependent call on a binder whose footprint calls a function",
+                ));
+            }
+        }
+    }
+    Ok(rename(&map, &r.res))
+}
+
+/// Whether a footprint slot of permission `perm` (at `v`) is present, as a
+/// step of `out`: `None` when it always is (a `wildcard`, as every amount of
+/// a function's precondition is).
+fn presence(
+    out: &mut Vec<AxiomInst>,
+    first: usize,
+    perm: &PermRecipe,
+    v: &vmir::PermVal<BodyRecipe>,
+    args: &[Val],
+    values: &[Val],
+) -> Result<Option<Val>, VerifyError> {
+    Ok(match v {
+        vmir::PermVal::Wildcard => None,
+        vmir::PermVal::Amount(r) => {
+            let amount = splice(out, first, r, args, values)?;
+            let zero = Val::Literal(vmir::Literal::Real(num::BigInt::from(0).into()));
+            Some(push(
+                out,
+                first,
+                AxiomPure::Binary(vmir::BinOp::LtR, zero, amount),
+            ))
+        }
+        vmir::PermVal::Temp(i) => {
+            let vmir::PermInst::Ite(cond, then, els) = &perm.steps[*i];
+            let cond = splice(out, first, cond, args, values)?;
+            let then = presence(out, first, perm, then, args, values)?;
+            let els = presence(out, first, perm, els, args, values)?;
+            match (then, els) {
+                (None, None) => None,
+                (then, els) => Some(push(
+                    out,
+                    first,
+                    AxiomPure::Ternary(cond, then.unwrap_or(vmir::TRUE), els.unwrap_or(vmir::TRUE)),
+                )),
+            }
+        }
+    })
 }
 
 /// Every `Generic(i)` index `q` mentions: its binder types, its triggers' type

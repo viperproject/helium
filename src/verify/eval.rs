@@ -7,7 +7,7 @@ use crate::dhash::HashMap;
 use crate::verify::heap::Loc;
 
 use crate::verify::cert::PermRecipe;
-use crate::verify::quant::{Resolved, ResolvedRead, Stand};
+use crate::verify::quant::{CallStand, Resolved, ResolvedRead, Stand};
 
 use crate::vmir::display::VmirDisplay;
 use crate::{
@@ -519,10 +519,18 @@ pub(crate) fn body_call_snapshot(
     call: &vmir::ResourceCall,
     pc: &[(egg::Id, Polarity)],
 ) -> Result<egg::Id, VerifyError> {
-    match hook {
-        Some(h) => h.call(ctx, state, heap, call, pc),
-        None => Ok(state.read_maps.call_at(state.vals.len()).snap),
-    }
+    let Some(h) = hook else {
+        return Ok(match &state.read_maps.call_at(state.vals.len()).stand {
+            CallStand::Snapshot(snap, _) => *snap,
+            CallStand::Slots(slots) => {
+                let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
+                let from = crate::verify::declaration::SnapshotFrom::Stands(slots.clone());
+                crate::verify::declaration::frame_snapshot(ctx, call.resource, &args, from, pc)?
+                    .snap
+            }
+        });
+    };
+    h.call(ctx, state, heap, call, pc)
 }
 
 pub(crate) fn eval_body_checked(
@@ -966,8 +974,13 @@ pub(crate) fn eval_pure_inst(
             // not borrow `ctx` across the `&mut ctx.alloc`.
             let (interner, decls) = (ctx.interner, ctx.decls);
             let names = move |m| crate::verify::context::member_name_in(interner, decls, m);
-            let (recipe_id, free) =
-                crate::verify::quant::intern_forall(ctx.alloc, &names, q, &reads.by_value())?;
+            let (recipe_id, free) = crate::verify::quant::intern_forall(
+                ctx.alloc,
+                &names,
+                q,
+                &reads.shape(),
+                ctx.certs,
+            )?;
             let free: Vec<Val> = free.iter().map(|&k| Val::Temp(k)).collect();
             // Children: the captured temps, then the read stand-ins and call
             // snapshots (`Canonical`).
@@ -994,9 +1007,8 @@ pub(crate) fn eval_pure_inst(
                     .collect::<Result<_, _>>()?;
                 // A stand-in with no recipe cannot be rebuilt where the
                 // certificate is grafted.
-                let stand_recipes = reads.reads.iter().map(|r| &r.recipe);
-                for r in stand_recipes.chain(reads.calls.iter().map(|c| &c.recipe)) {
-                    caps.push(r.clone().ok_or(VerifyError::Unimplemented(
+                for r in reads.cap_recipes() {
+                    caps.push(r.ok_or(VerifyError::Unimplemented(
                         "heap read in a quantifier of a resource body without a recipe",
                     ))?);
                 }
