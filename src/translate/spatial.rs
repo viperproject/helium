@@ -226,7 +226,7 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
             Ok((h_out, None))
         }
         S::Forall(qp) => {
-            let q = Box::new(lower_quant_chunks(b, env, sink, qp)?);
+            let q = Box::new(lower_quant_chunks(b, env, sink, hctx, qp)?);
             if q.body.contains_wc_permission() {
                 return Err(TranslationError::Unsupported(
                     "wildcard permission in a quantified permission",
@@ -349,15 +349,20 @@ fn lower_acc<Ext: PureExt>(
 /// *next* temp without consuming it; the enclosing stream resumes at that same
 /// number and shadows the body.
 ///
+/// The body reads the host's heaps (`hctx`): a heap-dependent receiver
+/// (`x.next.f`) or a labelled `old` lowers to a `Deref` of an enclosing heap,
+/// which the verifier resolves per binding.
+///
 /// `cond` stays separate from the permission (it is the chunk set's domain).
 /// Only the enclosing **branch** conditions gate the permission, as
 /// [`Sink::gate_perm`] does for a single `acc`; the `ite`s are emitted into the
 /// body, which captures their (outer) conditions.
-fn lower_quant_chunks(
+fn lower_quant_chunks<Ext: PureExt>(
     b: &TranslationContext<'_>,
     env: &HashMap<Spur, Val>,
     sink: &mut Sink,
-    q: &typed::QuantPerm,
+    hctx: HeapCtx<'_>,
+    q: &typed::QuantPerm<Ext>,
 ) -> Result<vmir::QuantChunks, TranslationError> {
     let n = q.bound.len();
     let bound: Vec<Type> = q.bound.iter().map(|bv| b.lower_type(&bv.ty)).collect();
@@ -386,6 +391,7 @@ fn lower_quant_chunks(
             typed::ResourceExpKind::Field(e, f) => (f.0, std::slice::from_ref(e)),
             typed::ResourceExpKind::PredicateCall(c) => (c.name.0, &c.args[..]),
         };
+        let args: &[typed::TypedPureExp<Ext>] = args;
         let args = args
             .iter()
             .map(|a| pure_exp::lower_trig_term(b, a, &inner_env))
@@ -403,11 +409,8 @@ fn lower_quant_chunks(
     let mut inner = Sink::new(binder_base + n, 0);
     inner.read_only = sink.read_only;
     let hctx = HeapCtx {
-        value: HeapVal::Empty,
-        perm: HeapVal::Empty,
-        old: None,
-        result: None,
         in_quantifier: true,
+        ..hctx
     };
     let cond = pure_exp::lower(b, &inner_env, &mut inner, hctx, &q.cond)?;
     let loc = lower_resource_addr(b, &inner_env, &mut inner, hctx, &q.res)?;

@@ -312,7 +312,14 @@ fn set_share(
     i: usize,
     addr: egg::Id,
 ) -> Result<Share, VerifyError> {
-    set_share_seen(ctx, kind, set, i, addr, &mut crate::dhash::HashSet::default())
+    set_share_seen(
+        ctx,
+        kind,
+        set,
+        i,
+        addr,
+        &mut crate::dhash::HashSet::default(),
+    )
 }
 
 /// [`set_share`], with the handovers already assumed at `addr` in `seen`: a
@@ -750,7 +757,11 @@ fn value_at(ctx: &mut VerifyContext<'_>, holders: &[Share], ty: &Type, pc_lits: 
 
 /// For every two `holders`, `pc ∧ 0 < p_i ∧ 0 < p_j ⇒ v_i == v_j`. Returns the
 /// holders' amounts as ids, in order.
-fn assume_pairwise(ctx: &mut VerifyContext<'_>, holders: &[Share], pc_lits: &[Lit]) -> Vec<egg::Id> {
+fn assume_pairwise(
+    ctx: &mut VerifyContext<'_>,
+    holders: &[Share],
+    pc_lits: &[Lit],
+) -> Vec<egg::Id> {
     let perms: Vec<egg::Id> = holders.iter().map(|h| h.perm.to_id(ctx)).collect();
     for i in 0..holders.len() {
         for j in i + 1..holders.len() {

@@ -322,6 +322,7 @@ fn eval_heap_inst(
             base_h.produce(ctx, access, value, &pc_lits)
         }
         HeapInst::AddForall { base, q, bind } => {
+            crate::verify::eval::reject_heap_reads(&q.heap_reads())?;
             let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
             let spec = quant_spec_of(state, q);
             let value = match bind {
@@ -374,6 +375,7 @@ fn eval_heap_inst(
                     "quantified permission in a resource footprint",
                 ));
             }
+            crate::verify::eval::reject_heap_reads(&q.heap_reads())?;
             let spec = quant_spec_of(state, q);
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let region = state.region(ctx);

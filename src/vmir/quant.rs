@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{FunctionBody, InstKind, PermVal, PureInst, TyParams, Type, Val};
+use crate::vmir::{FunctionBody, HeapVal, InstKind, PermVal, PureInst, TyParams, Type, Val};
 use std::fmt::{self, Display, Formatter};
 
 /// A pure `forall`, **inline** in the enclosing instruction stream (it is an
@@ -76,6 +76,12 @@ impl Forall {
         free_temps_of(self.binder_base, &self.triggers, &self.body.insts, &[])
     }
 
+    /// The heap reads of this quantifier's own body, in instruction order (see
+    /// [`HeapRead`]). Derived, like [`Forall::free_temps`].
+    pub fn heap_reads(&self) -> Vec<HeapRead> {
+        heap_reads_of(&self.body.insts)
+    }
+
     /// Visit every type this quantifier mentions: its binder types, its
     /// triggers' type arguments, and every type of its body, nested quantifiers
     /// included.
@@ -127,6 +133,43 @@ fn free_temps_of(
     }
     extra.iter().for_each(&mut visit);
     out
+}
+
+/// A heap read in a quantifier body: a `Deref` of an **enclosing** heap. A body
+/// defines no heap, so every heap it mentions is captured, exactly as a temp
+/// below `binder_base` is. The verifier resolves each read to a value map of
+/// that heap before it uses the body, so the body it compiles is heap-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapRead {
+    /// The `Deref` instruction's index in the body.
+    pub inst: usize,
+    /// The enclosing heap it reads (`HeapVal::Temp(heap)`).
+    pub heap: usize,
+    /// The address it reads, a body operand.
+    pub addr: Val,
+}
+
+/// The heap reads of a quantified scope's own instructions, in order. A
+/// nested `forall`'s reads belong to that quantifier and are not listed: each
+/// level resolves its own. Panics on a read of `HeapVal::Empty`: translation
+/// gives a quantifier body its host's heaps, and a host that has none (a domain
+/// axiom) cannot express a read at all.
+fn heap_reads_of(insts: &[crate::vmir::Inst]) -> Vec<HeapRead> {
+    insts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, inst)| match &inst.kind {
+            InstKind::Pure(_, PureInst::Deref(heap, addr)) => match heap {
+                HeapVal::Temp(h) => Some(HeapRead {
+                    inst: i,
+                    heap: *h,
+                    addr: addr.clone(),
+                }),
+                HeapVal::Empty => panic!("a quantifier body reads the empty heap"),
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// A quantified set of heap chunks, `{ loc(xs) @ perm(xs) | cond(xs) }` — the
@@ -185,6 +228,12 @@ impl QuantChunks {
     /// One past the last temp this scope owns for binders.
     pub fn step_base(&self) -> usize {
         self.binder_base + self.bound.len()
+    }
+
+    /// The heap reads of this scope's body, in instruction order (see
+    /// [`HeapRead`]): a heap-dependent condition, receiver or amount.
+    pub fn heap_reads(&self) -> Vec<HeapRead> {
+        heap_reads_of(&self.body.insts)
     }
 
     /// The enclosing temps this scope mentions (its capture list), triggers

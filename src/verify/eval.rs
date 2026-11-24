@@ -523,13 +523,26 @@ pub(crate) fn eval_body_checked(
 /// A nested `forall` is checked recursively, with its encloser's binders
 /// already fresh, so no WD obligation survives into a recipe — instantiation runs
 /// inside a rewrite rule, where nothing can be proven.
+/// Refuse a quantifier body that reads an enclosing heap (see
+/// [`vmir::HeapRead`]). Such a body must have each read resolved to a value
+/// map before it is evaluated or compiled (`plans/heap-dependent-quantifier-reads.md`);
+/// until that exists, every place that uses a body calls this first, so no
+/// walk reads the live heap through it and no recipe meets a `Deref`.
+pub(crate) fn reject_heap_reads(reads: &[vmir::HeapRead]) -> Result<(), VerifyError> {
+    if reads.is_empty() {
+        Ok(())
+    } else {
+        Err(VerifyError::Unimplemented("heap read inside a quantifier"))
+    }
+}
+
 pub(crate) fn check_forall_wd(
     ctx: &mut VerifyContext<'_>,
     q: &vmir::Forall,
     host: &EvalState,
     host_pc: &[(egg::Id, Polarity)],
 ) -> Result<(), VerifyError> {
-    // A quantifier body is heap-free, hence permission-free.
+    // A quantifier body holds no permission instruction.
     if q.body
         .insts
         .iter()
@@ -539,6 +552,8 @@ pub(crate) fn check_forall_wd(
             "permission instruction in a quantifier body",
         ));
     }
+    // Before the walk below: it would read the enclosing heap live.
+    reject_heap_reads(&q.heap_reads())?;
     // `ctx.egraph` is a scratch clone for the duration; the live graph, its
     // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
     // The certificate recipe (if one is being built) is paused: the WD walk's
@@ -832,6 +847,7 @@ pub(crate) fn eval_pure_inst(
         // it is a `Forall` step: replayed at each call site, it rebuilds the
         // quantifier e-node with the caller's arguments as capture children.
         PureInst::Forall(q) => {
+            reject_heap_reads(&q.heap_reads())?;
             // Compile the quantifier the first time the walk reaches it. Its
             // capture list is derived, not stored — see `Forall::free_temps`.
             // Name resolution rides on copies of the two shared refs, so it does
