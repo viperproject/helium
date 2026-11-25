@@ -643,6 +643,22 @@ impl Shares {
             .unwrap_or_else(|| Value::plain(ctx.fresh_symbolic_value(self.kind.value.clone())))
     }
 
+    /// Whether the shares together hold a positive amount under their pc,
+    /// reusing what [`View::shares`] decided: a sole chunk was proven positive,
+    /// and a lone share whose proof already failed is not asked again (its
+    /// address-gated amount is positive exactly where the failed one is).
+    pub(super) fn frames(&self, ctx: &mut VerifyContext<'_>) -> bool {
+        match &self.shares[..] {
+            [] => false,
+            _ if self.sole => true,
+            [s] if s.positivity == Positivity::Unproven => false,
+            _ => {
+                let total = self.total(ctx);
+                prove_perm_positive(ctx, &total, &self.pc)
+            }
+        }
+    }
+
     pub(super) fn iter(&self) -> std::slice::Iter<'_, Share> {
         self.shares.iter()
     }

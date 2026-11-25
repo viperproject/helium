@@ -7,7 +7,7 @@ mod interface;
 mod quantified_permissions;
 mod view;
 
-pub(crate) use interface::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, ReadRecipe, Value};
+pub(crate) use interface::{Access, ConsumeMode, Framing, Loc, QpCheck, QuantSpec, ReadRecipe, Value};
 pub(crate) use quantified_permissions::{
     InverseAxioms, ReadResolver, resolve_calls, resolve_reads,
 };

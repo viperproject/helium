@@ -2125,7 +2125,10 @@ fn walk_body(
                 }
             }
         }
-        if let Err(err) = eval(ctx, program, state, inst, certs) {
+        let evaluated = eval(ctx, program, state, inst, certs);
+        // A framing decided for this instruction never serves a later one.
+        state.framed_read.take();
+        if let Err(err) = evaluated {
             let inst_text = inst_text(program);
             if snap.enabled() {
                 let heaps = display_heaps(state, &inst.kind, heaps_before);
@@ -2640,36 +2643,26 @@ fn inst_obligations(
         // outside the declared precondition. `chunk_under_pc` lets an address
         // that only aliases a held chunk under this instruction's branch (e.g.
         // `y.f` where `x == y` holds here) still frame.
-        InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
-            let heap = match get_heap(ctx, state, heap, pc_lits) {
+        InstKind::Pure(_, PureInst::Deref(hv, loc)) => {
+            let heap = match get_heap(ctx, state, hv, pc_lits) {
                 Ok(heap) => heap,
                 Err(e) => return vec![(expr!(ctx, false), e)],
             };
-            let perm = state.loc(ctx, loc).map(|l| {
-                // A chunk set's body evaluated once already, at its inhale.
-                heap.framing_perm(ctx, &l, pc_lits).unwrap_or_else(|e| {
-                    panic!("quantified chunk body failed to re-evaluate: {e:?}")
-                })
+            let Some(l) = state.loc(ctx, loc) else {
+                return vec![(expr!(ctx, false), VerifyError::InsufficientPermission)];
+            };
+            // A chunk set's body evaluated once already, at its inhale.
+            let framing = heap.framing(ctx, &l, pc_lits).unwrap_or_else(|e| {
+                panic!("quantified chunk body failed to re-evaluate: {e:?}")
             });
-            match perm {
-                None => vec![(expr!(ctx, false), VerifyError::InsufficientPermission)],
-                Some(p @ ChunkPerm::Leaf { .. }) => {
-                    let leaf = p.as_leaf().unwrap();
-                    let zero = expr!(ctx, 0 / 1);
-                    let goal = ctx.add(Symbolic::Binary(BinOp::LtR, [zero, leaf]));
-                    vec![(goal, VerifyError::InsufficientPermission)]
-                }
-                // A branch-structured held perm: prove `0 < perm` per leaf (never
-                // materialize the `Select`). On success emit no goal; on failure a
-                // trivially-false goal carries the error to the caller.
-                Some(p) => {
-                    if p.prove_positive(ctx, pc_lits) {
-                        vec![]
-                    } else {
-                        vec![(expr!(ctx, false), VerifyError::InsufficientPermission)]
-                    }
-                }
+            // Decided per leaf (a branch-structured held perm is never
+            // materialized); on failure a trivially-false goal carries the error.
+            if !framing.frames(ctx) {
+                return vec![(expr!(ctx, false), VerifyError::InsufficientPermission)];
             }
+            // The read takes its value from these same holders.
+            state.framed_read.set(Some((*hv, loc.clone(), framing)));
+            vec![]
         }
         // `not(perm < 0)` desugared to an `Ite`. Applies to a location combine, a
         // resource inhale/exhale, and fold/unfold (a consuming op with a negative

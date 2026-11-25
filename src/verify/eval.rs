@@ -76,6 +76,12 @@ pub(crate) struct EvalState {
     /// is then `W(loc)` (see `heap::Captures::wildcard`). `None` mints a fresh
     /// wildcard, as everywhere else.
     pub(crate) wildcard: Option<(crate::verify::lang::FuncId, vmir::Val)>,
+    /// The holders the framing obligation of the `Deref` being evaluated
+    /// decided (see `inst_obligations`), keyed by its heap and address
+    /// operands: its read takes the value from them instead of deciding the
+    /// holders' positivity again. Set right before that one instruction's
+    /// evaluation and taken by it; `None` everywhere else.
+    pub(crate) framed_read: std::cell::Cell<Option<(HeapVal, Val, crate::verify::heap::Framing)>>,
 }
 
 impl EvalState {
@@ -93,6 +99,7 @@ impl EvalState {
             read_maps: Resolved::default(),
             forall_reads: Resolved::default(),
             wildcard: None,
+            framed_read: std::cell::Cell::new(None),
         }
     }
 
@@ -113,6 +120,7 @@ impl EvalState {
             read_maps: Resolved::default(),
             forall_reads: Resolved::default(),
             wildcard: None,
+            framed_read: std::cell::Cell::new(None),
         }
     }
 
@@ -195,6 +203,7 @@ impl EvalState {
             read_maps: Resolved::default(),
             forall_reads: Resolved::default(),
             wildcard: None,
+            framed_read: std::cell::Cell::new(None),
         };
         // The step itself is not evaluated yet, so the table ends exactly at its
         // temp; the truncation is a no-op guard, not a cut.
@@ -242,6 +251,7 @@ impl EvalState {
             read_maps: Resolved::default(),
             forall_reads: Resolved::default(),
             wildcard: None,
+            framed_read: std::cell::Cell::new(None),
         }
     }
 
@@ -803,9 +813,17 @@ pub(crate) fn eval_pure_inst(
                 .then(|| crate::verify::heap::ReadRecipe {
                     addr: state.recipe_of(loc),
                 });
-            let held = match state.loc(ctx, loc) {
-                Some(l) => heap.read(ctx, &l, pc_lits, read_recipe.as_ref())?,
-                None => None,
+            // The holders the framing obligation already decided, when this
+            // walk checked one for this very read.
+            let framed = state
+                .framed_read
+                .take()
+                .filter(|(h, l, _)| h == hv && l == loc)
+                .map(|(_, _, f)| f);
+            let held = match (framed, state.loc(ctx, loc)) {
+                (Some(f), _) => f.value(ctx, read_recipe.as_ref()),
+                (None, Some(l)) => heap.read(ctx, &l, pc_lits, read_recipe.as_ref())?,
+                (None, None) => None,
             };
             match held {
                 // In a certificate walk the held value's provenance is the

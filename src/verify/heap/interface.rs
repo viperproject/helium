@@ -4,7 +4,7 @@
 //!
 //! | operation                 | method                 |
 //! |---------------------------|------------------------|
-//! | read a location           | [`Heap::read`], [`Heap::framing_perm`], [`Heap::covering_holder`] |
+//! | read a location           | [`Heap::read`], [`Heap::framing`], [`Heap::covering_holder`] |
 //! | `perm(loc)`               | [`Heap::perm`]         |
 //! | add permission            | [`Heap::produce`]      |
 //! | take permission / frame   | [`Heap::consume`]      |
@@ -21,7 +21,7 @@
 //! [`Heap::produce`] and [`Heap::consume`] take an [`Access`]: one location
 //! (`acc(e.f, p)`) or a quantified chunk set (`forall xs :: c ==> acc(e.f, p)`).
 //! A read's value ([`Heap::read`]) and the permission that frames it
-//! ([`Heap::framing_perm`]) are decided by the same holders, and a consume hands
+//! ([`Heap::framing`]) are decided by the same holders, and a consume hands
 //! back the value it took, so a value always comes from the holders whose
 //! permission was checked.
 //!
@@ -48,7 +48,7 @@ use crate::verify::heap::quantified_permissions::{
     covered_by_sum, find_covering_qp, mint_wildcard, quant_chunk_from_caps, take_from_qp,
     take_spread,
 };
-use crate::verify::heap::view::HolderAt;
+use crate::verify::heap::view::{HolderAt, Shares};
 use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
 use crate::verify::lang::{FuncId, Symbolic};
 use crate::verify::quant::Resolved;
@@ -181,19 +181,39 @@ pub(crate) enum ConsumeMode {
     Frame,
 }
 
+/// The holders of one read's location, decided once under its pc: whether
+/// they frame the read and the value it reads come from the same decision, so
+/// the framing check and the read do not each prove positivity again.
+pub(crate) struct Framing(Shares);
+
+impl Framing {
+    /// Whether the holders together hold a positive share (the read is framed).
+    pub(crate) fn frames(&self, ctx: &mut VerifyContext<'_>) -> bool {
+        self.0.frames(ctx)
+    }
+
+    /// The value read, as [`Heap::read`] resolves it.
+    pub(crate) fn value(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        read_recipe: Option<&ReadRecipe>,
+    ) -> Option<Value> {
+        self.0.value(ctx, read_recipe)
+    }
+}
+
 impl Heap {
-    /// A permission that frames `loc`: what the holders `View::shares` finds
-    /// there hold together. Enough to decide a read (its value is
-    /// [`Heap::read`], decided by the same holders); for the exact amount see
-    /// [`Heap::perm`].
-    pub(crate) fn framing_perm(
+    /// The holders that frame `loc` ([`View::shares`]), as a [`Framing`]: it
+    /// decides the read's framing and gives its value, the same as
+    /// [`Heap::read`]. For the exact amount see [`Heap::perm`].
+    pub(crate) fn framing(
         &self,
         ctx: &mut VerifyContext<'_>,
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
-    ) -> Result<ChunkPerm, VerifyError> {
+    ) -> Result<Framing, VerifyError> {
         let pc = &self.effective_pc(ctx, pc)[..];
-        Ok(self.view(pc).shares(ctx, &loc.kind, loc.addr)?.total(ctx))
+        Ok(Framing(self.view(pc).shares(ctx, &loc.kind, loc.addr)?))
     }
 
     /// The value at `loc`, `None` when nothing is known to hold it. Decided by
