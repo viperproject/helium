@@ -1,0 +1,33 @@
+// KNOWN LIMITATION: a label declared inside a loop body cannot be named by
+// `old[L]`. Typecheck's `collect_labels` (src/viper/typecheck/mod.rs) skips
+// `while` bodies, so this is rejected with "label is not defined in this
+// method" before verification. Silicon accepts it. Promote to
+// passing/labels_in_loops/ once old[L] on loop labels is supported.
+
+// The inner loop's invariant mentions a label of the enclosing loop body.
+// `x.g` is held by the inner loop but never written, so the invariant
+// `x.g == old[Outer](x.g)` holds on entry and is preserved.
+field f: Int
+field g: Int
+
+method outer_label_in_inner_invariant(x: Ref, n: Int, m: Int)
+  requires acc(x.f) && acc(x.g)
+  ensures acc(x.f) && acc(x.g)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f) && acc(x.g)
+  {
+    label Outer
+    var j: Int := 0
+    while (j < m)
+      invariant acc(x.f) && acc(x.g)
+      invariant x.g == old[Outer](x.g)
+    {
+      x.f := x.f + 1
+      j := j + 1
+    }
+    assert x.g == old[Outer](x.g)
+    i := i + 1
+  }
+}

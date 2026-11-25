@@ -1,0 +1,22 @@
+// NOTE: today this is rejected for the wrong reason (typecheck refuses
+// `old[L]` on a label inside a loop body). Once that is supported, it must
+// still be rejected by the verifier itself.
+
+// Label before an `if`; the else arm writes `+2`, so the claim of `+1` after
+// the merge does not hold on every path. Must FAIL.
+field f: Int
+
+method branch_arm_mismatch(x: Ref, n: Int, b: Bool)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    label L
+    if (b) { x.f := x.f + 1 } else { x.f := x.f + 2 }
+    assert x.f == old[L](x.f) + 1
+    i := i + 1
+  }
+}

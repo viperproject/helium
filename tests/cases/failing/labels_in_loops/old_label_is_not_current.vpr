@@ -1,0 +1,22 @@
+// NOTE: today this is rejected for the wrong reason (typecheck refuses
+// `old[L]` on a label inside a loop body). Once that is supported, it must
+// still be rejected by the verifier itself.
+
+// The write after `L` changes `x.f`, so it no longer equals `old[L](x.f)`.
+// Must FAIL.
+field f: Int
+
+method old_label_is_not_current(x: Ref, n: Int)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    label L
+    x.f := x.f + 1
+    assert x.f == old[L](x.f)
+    i := i + 1
+  }
+}

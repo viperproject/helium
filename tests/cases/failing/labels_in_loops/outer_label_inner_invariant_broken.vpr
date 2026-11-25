@@ -1,0 +1,28 @@
+// NOTE: today this is rejected for the wrong reason (typecheck refuses
+// `old[L]` on a label inside a loop body). Once that is supported, it must
+// still be rejected by the verifier itself.
+
+// The inner invariant ties `x.g` to the outer label, but the inner body
+// writes `x.g`, so the invariant is not preserved. Must FAIL.
+field g: Int
+
+method outer_label_inner_invariant_broken(x: Ref, n: Int, m: Int)
+  requires acc(x.g)
+  ensures acc(x.g)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.g)
+  {
+    label Outer
+    var j: Int := 0
+    while (j < m)
+      invariant acc(x.g)
+      invariant x.g == old[Outer](x.g)
+    {
+      x.g := x.g + 1
+      j := j + 1
+    }
+    i := i + 1
+  }
+}

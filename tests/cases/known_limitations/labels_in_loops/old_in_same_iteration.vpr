@@ -1,0 +1,24 @@
+// KNOWN LIMITATION: a label declared inside a loop body cannot be named by
+// `old[L]`. Typecheck's `collect_labels` (src/viper/typecheck/mod.rs) skips
+// `while` bodies, so this is rejected with "label is not defined in this
+// method" before verification. Silicon accepts it. Promote to
+// passing/labels_in_loops/ once old[L] on loop labels is supported.
+
+// The basic case: `old[L]` inside the loop body refers to the heap at `L`
+// in the *current* iteration.
+field f: Int
+
+method old_in_same_iteration(x: Ref, n: Int)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    label L
+    x.f := x.f + 1
+    assert x.f == old[L](x.f) + 1
+    i := i + 1
+  }
+}
