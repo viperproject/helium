@@ -82,12 +82,34 @@ pub(super) struct Share {
     /// aliases under. A debit from it and an agreement with it hold only there.
     when: Cube,
     pub(super) value: egg::Id,
-    /// Whether `perm` is already known positive here (so the value counts
-    /// without a proof): the sole chunk a read resolved to, or the one holder a
-    /// take of a positive amount proved covers it.
-    known: bool,
+    /// What is already settled about `perm` being positive here, so that
+    /// [`Share::positive`] does not ask again (see [`Positivity`]).
+    positivity: Positivity,
     source: ShareSource,
     pub(super) at: HolderAt,
+}
+
+/// Whether a [`Share`]'s amount is positive under the pc of its [`Shares`],
+/// as far as it has been asked.
+///
+/// A positivity proof that cannot be discharged by the e-graph falls through to
+/// the block scratch and Z3, and only successes are memoized there. A read
+/// that tried the sole chunk and failed would otherwise ask the very same
+/// question of the same chunk once more in [`Shares::value`] (through the
+/// address-gated amount [`chunk_share_at`] builds, which the memo cannot
+/// match), paying the whole fallback chain twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Positivity {
+    /// Not asked yet: [`Share::positive`] proves it.
+    Open,
+    /// Known positive: the sole chunk a read resolved to, or the one holder a
+    /// take of a positive amount proved covers it.
+    Proven,
+    /// Already asked under this pc and not proven. Treated as not positive:
+    /// every use of [`Share::positive`] then only gives up on this holder
+    /// (another holder names the value, or an agreement is not assumed), which
+    /// loses at most completeness, never soundness.
+    Unproven,
 }
 
 /// The holder behind a [`Share`], with its recipe provenance (certificate walks).
@@ -150,7 +172,7 @@ impl<'a> View<'a> {
             if prove_perm_positive(ctx, &perm, self.pc) {
                 let hold = c.perm_under(ctx, self.pc);
                 let mut share = chunk_share(c, perm, hold, when);
-                share.known = true;
+                share.positivity = Positivity::Proven;
                 return Ok(Shares {
                     kind: kind.clone(),
                     shares: vec![share],
@@ -158,6 +180,16 @@ impl<'a> View<'a> {
                     sole: true,
                 });
             }
+            // Not proven: the same chunk is among the holders below, and its
+            // share there is positive exactly where `perm` is. It sits at
+            // `addr` under the pc, so the address gate `chunk_share_at` may
+            // add holds there. Asking again would repeat the failed proof.
+            let at = HolderAt::Chunk(c.addr);
+            let mut shares = self.all_shares(ctx, kind, addr)?;
+            for s in shares.shares.iter_mut().filter(|s| s.at == at) {
+                s.positivity = Positivity::Unproven;
+            }
+            return Ok(shares);
         }
         self.all_shares(ctx, kind, addr)
     }
@@ -296,7 +328,7 @@ fn chunk_share(c: &Chunk, perm: ChunkPerm, hold: ChunkPerm, when: Cube) -> Share
         hold,
         when,
         value: c.stored_value(),
-        known: false,
+        positivity: Positivity::Open,
         source: ShareSource::Chunk(c.clone()),
         at: HolderAt::Chunk(c.addr),
     }
@@ -363,7 +395,7 @@ fn set_amount(
         perm,
         when: Cube::empty(),
         value,
-        known: false,
+        positivity: Positivity::Open,
         source: ShareSource::Set(set.recipe.clone()),
         at: HolderAt::Set(i),
     })
@@ -526,7 +558,9 @@ impl Shares {
             }
             // `held ≥ needed > 0`: the holder holds a positive share.
             let mut covered = self.clone_shares();
-            covered.shares[0].known = demand_positive(ctx, needed);
+            if demand_positive(ctx, needed) {
+                covered.shares[0].positivity = Positivity::Proven;
+            }
             let value = covered.resolve(ctx, None);
             let out = match &s.source {
                 ShareSource::Chunk(c) => {
@@ -691,9 +725,14 @@ impl Shares {
 }
 
 impl Share {
-    /// Whether this share is positive under `pc`: known, or proven per leaf.
+    /// Whether this share is positive under `pc`: known, or proven per leaf;
+    /// not asked again when it already failed (see [`Positivity`]).
     fn positive(&self, ctx: &mut VerifyContext<'_>, pc: &[Lit]) -> bool {
-        self.known || prove_perm_positive(ctx, &self.perm, pc)
+        match self.positivity {
+            Positivity::Proven => true,
+            Positivity::Unproven => false,
+            Positivity::Open => prove_perm_positive(ctx, &self.perm, pc),
+        }
     }
 }
 

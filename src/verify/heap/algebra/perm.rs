@@ -5,6 +5,7 @@ use crate::verify::{
     heap::{ChunkPerm, Shape},
     lang::Symbolic,
 };
+use crate::verify::heap::cond::meet;
 use crate::vmir::{BinOp, Bound, Literal, Polarity};
 
 /// [`perm_add`], but a leaf whose sum mentions a `wildcard` becomes a **fresh
@@ -209,14 +210,19 @@ fn prove_perm_leaves(
         }
         Shape::Leaf { id, .. } => mk(ctx, id, pc_lits),
         Shape::Branch { cond, then, els } => {
-            let mut pc_t = pc_lits.to_vec();
-            pc_t.push((cond, Polarity::Positive));
-            if !prove_perm_leaves(ctx, &then, &pc_t, mk) {
+            // An arm whose literal the pc already refutes (same e-class,
+            // opposite polarity, see `cond::meet`) is never reached: it holds
+            // vacuously and costs no proof. Only that arm is skipped; the
+            // other one still has to hold.
+            if let Some(pc_t) = meet(ctx, pc_lits, &[(cond, Polarity::Positive)])
+                && !prove_perm_leaves(ctx, &then, &pc_t, mk)
+            {
                 return false;
             }
-            let mut pc_e = pc_lits.to_vec();
-            pc_e.push((cond, Polarity::Negative));
-            prove_perm_leaves(ctx, &els, &pc_e, mk)
+            match meet(ctx, pc_lits, &[(cond, Polarity::Negative)]) {
+                Some(pc_e) => prove_perm_leaves(ctx, &els, &pc_e, mk),
+                None => true,
+            }
         }
     }
 }
