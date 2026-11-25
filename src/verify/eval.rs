@@ -7,7 +7,7 @@ use crate::dhash::HashMap;
 use crate::verify::heap::Loc;
 
 use crate::verify::cert::PermRecipe;
-use crate::verify::quant::{CallStand, Resolved, ResolvedRead, Stand};
+use crate::verify::quant::{Resolved, ResolvedRead, Stand};
 
 use crate::vmir::display::VmirDisplay;
 use crate::{
@@ -530,15 +530,17 @@ pub(crate) fn body_call_snapshot(
     pc: &[(egg::Id, Polarity)],
 ) -> Result<egg::Id, VerifyError> {
     let Some(h) = hook else {
-        return Ok(match &state.read_maps.call_at(state.vals.len()).stand {
-            CallStand::Snapshot(snap, _) => *snap,
-            CallStand::Slots(slots) => {
-                let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
-                let from = crate::verify::declaration::SnapshotFrom::Stands(slots.clone());
-                crate::verify::declaration::frame_snapshot(ctx, call.resource, &args, from, pc)?
-                    .snap
-            }
-        });
+        let slots = state.read_maps.call_at(state.vals.len()).slots.clone();
+        let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
+        let from = crate::verify::declaration::SnapshotFrom::Stands(slots);
+        return Ok(crate::verify::declaration::frame_snapshot(
+            ctx,
+            call.resource,
+            &args,
+            from,
+            pc,
+        )?
+        .snap);
     };
     h.call(ctx, state, heap, call, pc)
 }
@@ -642,18 +644,9 @@ pub(crate) fn check_forall_wd(
         ));
     }
     // The same walk resolves the body's heap reads and calls against the
-    // host's heaps; a call's snapshot is built before it, in the live graph.
-    let mut heap_of = |ctx: &mut VerifyContext<'_>, h: &HeapVal| get_heap(ctx, host, h, host_pc);
-    let calls = crate::verify::heap::resolve_calls(
-        ctx,
-        &q.heap_calls(),
-        host.frame_for(q),
-        q.step_base(),
-        &q.body.insts,
-        &mut heap_of,
-        host_pc,
-    )?;
-    let mut resolver = crate::verify::heap::ReadResolver::new(heap_of, calls);
+    // host's heaps.
+    let heap_of = |ctx: &mut VerifyContext<'_>, h: &HeapVal| get_heap(ctx, host, h, host_pc);
+    let mut resolver = crate::verify::heap::ReadResolver::new(heap_of);
     // `ctx.egraph` is a scratch clone for the duration; the live graph, its
     // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
     // The certificate recipe (if one is being built) is paused: the WD walk's

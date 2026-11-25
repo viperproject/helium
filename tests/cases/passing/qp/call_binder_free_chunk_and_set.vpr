@@ -1,0 +1,20 @@
+// A binder-free heap-dependent call whose footprint is held half by a single
+// chunk and half by a quantified chunk set (`y in s`).
+//
+// Must VERIFY.
+field f: Int
+
+function get(x: Ref): Int
+    requires acc(x.f)
+{ x.f }
+
+domain D { function t(i: Int): Bool }
+
+method m(y: Ref, s: Set[Ref])
+    requires y in s
+    requires acc(y.f, 1/2) && forall x: Ref :: x in s ==> acc(x.f, 1/2)
+{
+    inhale forall i: Int :: {t(i)} t(i) ==> get(y) == 4
+    inhale t(1)
+    assert y.f == 4
+}

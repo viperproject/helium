@@ -1,6 +1,6 @@
-// Binder-free heap-dependent calls inside quantifiers, over a field: the
-// snapshot is one value for every binding, framed and checked per binding
-// under the body's path condition.
+// Binder-free heap-dependent calls inside quantifiers, over a field: framed
+// and checked per binding under the body's path condition, the snapshot
+// rebuilt from the same holder for every binding.
 //
 // Must VERIFY.
 field val: Int

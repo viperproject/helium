@@ -1,0 +1,21 @@
+// KNOWN LIMITATION: "heap-dependent call in a quantifier whose precondition
+// holds a quantified permission".
+//
+// A heap-dependent call inside a quantifier is resolved per footprint slot
+// (`ReadResolver::call`), and a quantified slot has no single location to
+// resolve. This holds whether or not the call mentions the binder: `total(s)`
+// below does not.
+field f: Int
+
+function total(s: Set[Ref]): Int
+    requires forall x: Ref :: x in s ==> acc(x.f)
+
+domain D { function t(i: Int): Bool }
+
+method m(s: Set[Ref])
+    requires forall x: Ref :: x in s ==> acc(x.f)
+{
+    inhale forall i: Int :: {t(i)} t(i) ==> total(s) == 4
+    inhale t(1)
+    assert total(s) == 4
+}

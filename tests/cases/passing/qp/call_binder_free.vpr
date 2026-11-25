@@ -1,8 +1,8 @@
 // A heap-dependent call inside a `forall` that does not mention the binder:
-// its snapshot is one value, built once and captured by the quantifier, and
-// the call is framed for every binding (plans/heap-dependent-calls-in-
-// quantifiers.md, phase 2). The quantifier sits in a method postcondition, so
-// the snapshot is captured by its certificate recipe.
+// resolved like a call on a binder, framed for every binding and its snapshot
+// rebuilt per binding from the holder of each footprint slot. The quantifier
+// sits in a method postcondition, so the slots' stand-ins are captured by its
+// certificate recipe.
 //
 // Shape of Prusti's `memory_block_join` / `memory_block_split` (marco_benchmark
 // Ru2 suite; formerly `known_limitations/marco_benchmark/heap_function_in_quantifier.vpr`).

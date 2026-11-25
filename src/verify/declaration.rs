@@ -1354,27 +1354,22 @@ pub(crate) enum SnapshotFrom {
     /// The heap, checking framing and the precondition under the given pc,
     /// as at a call.
     Check(Heap),
-    /// The heap, checking neither: they are checked elsewhere, under a
-    /// stronger pc.
-    Build(Heap),
-    /// What stands for each footprint slot of a quantifier body's call on a
-    /// binder (see [`ValueSource::Stands`]); nothing to check.
+    /// What stands for each footprint slot of a quantifier body's call (see
+    /// [`ValueSource::Stands`]); nothing to check.
     Stands(std::rc::Rc<[crate::verify::quant::ResolvedSlot]>),
 }
 
 /// A frame-only exhale's snapshot (see [`frame_snapshot`]).
 pub(crate) struct FrameSnapshot {
     pub(crate) snap: egg::Id,
-    /// Its certificate recipe in a certificate walk.
-    pub(crate) recipe: Option<Val>,
     /// Each single footprint slot's location; `None` for a quantified one.
     pub(crate) locs: Vec<Option<Loc>>,
 }
 
 /// The snapshot a frame-only exhale of `resource(args)` yields (a
 /// heap-dependent call's). A quantifier body's call is checked per binding,
-/// and its snapshot built once (binder-free) or per binding from what stands
-/// for its slots (see `heap::resolve_calls`).
+/// and its snapshot rebuilt per binding from what stands for its slots (see
+/// `heap::ReadResolver`).
 pub(crate) fn frame_snapshot(
     ctx: &mut VerifyContext<'_>,
     resource: MemberId,
@@ -1387,24 +1382,18 @@ pub(crate) fn frame_snapshot(
         .expect("a verification context carries the certificates");
     let (heap, source, direction) = match from {
         SnapshotFrom::Check(h) => (h.clone(), ValueSource::ReadHeap(h), Direction::Consume),
-        SnapshotFrom::Build(h) => (h.clone(), ValueSource::ReadHeap(h), Direction::Build),
         SnapshotFrom::Stands(slots) => {
             (Heap::empty(), ValueSource::Stands(slots), Direction::Build)
         }
     };
     let FootprintResult {
-        members,
-        slot_recipes,
-        slot_locs,
-        ..
+        members, slot_locs, ..
     } = walk_footprint(
         ctx, certs, resource, args, heap, source, direction, None, false, pc, pc, true,
     )?;
     let snap = build_snapshot(ctx, resource, members);
-    let recipe = snapshot_recipe(ctx, certs, resource, &slot_recipes, pc)?;
     Ok(FrameSnapshot {
         snap,
-        recipe,
         locs: slot_locs,
     })
 }
@@ -2652,9 +2641,9 @@ fn inst_obligations(
                 return vec![(expr!(ctx, false), VerifyError::InsufficientPermission)];
             };
             // A chunk set's body evaluated once already, at its inhale.
-            let framing = heap.framing(ctx, &l, pc_lits).unwrap_or_else(|e| {
-                panic!("quantified chunk body failed to re-evaluate: {e:?}")
-            });
+            let framing = heap
+                .framing(ctx, &l, pc_lits)
+                .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
             // Decided per leaf (a branch-structured held perm is never
             // materialized); on failure a trivially-false goal carries the error.
             if !framing.frames(ctx) {

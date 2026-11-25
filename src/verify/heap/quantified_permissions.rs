@@ -53,7 +53,7 @@ use crate::verify::error::VerifyError;
 use crate::verify::heap::ChunkPerm;
 use crate::verify::lang::{FuncId, RecipeId, Symbolic};
 use crate::verify::quant::{
-    CallStand, Canonical, QuantRecipe, Resolved, ResolvedCall, ResolvedRead, ResolvedSlot, Stand,
+    Canonical, QuantRecipe, Resolved, ResolvedCall, ResolvedRead, ResolvedSlot, Stand,
 };
 use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{BinOp, InstKind, PermInst, PermVal, Polarity, PureInst, QuantChunks, Val};
@@ -520,17 +520,14 @@ fn eval_body_at(
 /// binding since every address it names is that chunk's. Only e-classes that
 /// predate the scratch graph are kept across it: a set's map, a chunk's value.
 ///
-/// A binder-free heap-dependent call's snapshot is built before the walk, in
-/// the live graph ([`resolve_calls`]); the walk checks every call per binding,
-/// and resolves each footprint slot of a call on a binder like a read
-/// ([`BodyReads::call`]).
+/// A heap-dependent call is checked per binding by the same walk, and each
+/// footprint slot of it is resolved like a read ([`BodyReads::call`]).
 pub(crate) struct ReadResolver<F> {
     /// The heap a body `Deref` names, as it is at the quantifier.
     heap_of: F,
     /// Per read in body order: what resolves it.
     covers: Vec<ResolvedRead>,
-    /// The binder-free calls, resolved before the walk; the walk adds the
-    /// calls on a binder.
+    /// Per call in body order: what resolves its footprint slots.
     calls: Vec<ResolvedCall>,
 }
 
@@ -538,11 +535,11 @@ impl<F> ReadResolver<F>
 where
     F: FnMut(&mut VerifyContext<'_>, &vmir::HeapVal) -> Result<Heap, VerifyError>,
 {
-    pub(crate) fn new(heap_of: F, calls: Vec<ResolvedCall>) -> Self {
+    pub(crate) fn new(heap_of: F) -> Self {
         ReadResolver {
             heap_of,
             covers: Vec::new(),
-            calls,
+            calls: Vec::new(),
         }
     }
 
@@ -577,8 +574,7 @@ where
     }
 
     /// The reads met, and the calls, resolved.
-    pub(crate) fn finish(mut self) -> Resolved {
-        self.calls.sort_by_key(|c| c.temp);
+    pub(crate) fn finish(self) -> Resolved {
         Resolved {
             reads: self.covers.into(),
             calls: self.calls.into(),
@@ -619,10 +615,10 @@ where
 
     /// The call's frame-only exhale at the walked binding: framing and the
     /// precondition checked under the call's pc, as at a call outside a
-    /// quantifier. A binder-free call's snapshot there is the one built before
-    /// the walk; a call on a binder's is rebuilt from the holders that frame
-    /// its slots, each resolved like a read. Either reads the same locations of
-    /// the same heap as the check.
+    /// quantifier. Its snapshot is rebuilt from the holders that frame its
+    /// slots, each resolved like a read, so it reads the same locations of the
+    /// same heap as the check. A call that names no binder is no different:
+    /// its slots are framed by the same holders for every binding.
     fn call(
         &mut self,
         ctx: &mut VerifyContext<'_>,
@@ -641,47 +637,35 @@ where
             SnapshotFrom::Check(h.clone()),
             pc,
         )?;
-        let snap = match self.calls.iter().find(|c| c.temp == temp) {
-            Some(ResolvedCall {
-                stand: CallStand::Snapshot(snap, _),
-                ..
-            }) => *snap,
-            Some(_) => unreachable!("only binder-free calls are resolved before the walk"),
-            None => {
-                let mut slots = Vec::with_capacity(here.locs.len());
-                for loc in &here.locs {
-                    let Some(loc) = loc else {
-                        return Err(VerifyError::Unimplemented(
-                            "heap-dependent call on a binder whose precondition holds a quantified permission",
-                        ));
-                    };
-                    let Some((at, value)) = h.covering_holder(ctx, loc, pc)? else {
-                        return Err(VerifyError::Unimplemented(
-                            "heap-dependent call in a quantifier framed by several holders",
-                        ));
-                    };
-                    let (stand, recipe) = stand_of(&h, &loc.kind, at, value);
-                    slots.push(ResolvedSlot {
-                        kind: loc.kind.clone(),
-                        stand,
-                        recipe,
-                    });
-                }
-                let slots: Rc<[ResolvedSlot]> = slots.into();
-                let built = frame_snapshot(
-                    ctx,
-                    call.resource,
-                    &args,
-                    SnapshotFrom::Stands(slots.clone()),
-                    pc,
-                )?;
-                self.calls.push(ResolvedCall {
-                    temp,
-                    stand: CallStand::Slots(slots),
-                });
-                built.snap
-            }
-        };
+        let mut slots = Vec::with_capacity(here.locs.len());
+        for loc in &here.locs {
+            let Some(loc) = loc else {
+                return Err(VerifyError::Unimplemented(
+                    "heap-dependent call in a quantifier whose precondition holds a quantified permission",
+                ));
+            };
+            let Some((at, value)) = h.covering_holder(ctx, loc, pc)? else {
+                return Err(VerifyError::Unimplemented(
+                    "heap-dependent call in a quantifier framed by several holders",
+                ));
+            };
+            let (stand, recipe) = stand_of(&h, &loc.kind, at, value);
+            slots.push(ResolvedSlot {
+                kind: loc.kind.clone(),
+                stand,
+                recipe,
+            });
+        }
+        let slots: Rc<[ResolvedSlot]> = slots.into();
+        let snap = frame_snapshot(
+            ctx,
+            call.resource,
+            &args,
+            SnapshotFrom::Stands(slots.clone()),
+            pc,
+        )?
+        .snap;
+        self.calls.push(ResolvedCall { temp, slots });
         if ctx.egraph.find(here.snap) != ctx.egraph.find(snap) {
             let here = here.snap;
             let eq = expr!(ctx, { here } == { snap });
@@ -689,137 +673,6 @@ where
         }
         Ok(snap)
     }
-}
-
-/// The snapshots of a quantifier body's binder-free heap-dependent `calls`
-/// ([`vmir::HeapCall`]), built in the live graph before the walk that checks
-/// them ([`ReadResolver`]): one value each, built from the enclosing heap
-/// under the host's `pc` without checks, since framing and the precondition
-/// need the body's pc. `frame` is the body's frame up to `binder_base`; the
-/// arguments the body computes are evaluated in it first
-/// ([`binder_free_values`]). A call whose arguments cannot be, and every call
-/// on a binder, is resolved by the walk, per binding.
-pub(crate) fn resolve_calls(
-    ctx: &mut VerifyContext<'_>,
-    calls: &[vmir::HeapCall],
-    frame: EvalState,
-    step_base: usize,
-    insts: &[vmir::Inst],
-    heap_of: &mut dyn FnMut(&mut VerifyContext<'_>, &vmir::HeapVal) -> Result<Heap, VerifyError>,
-    pc: &[(Id, Polarity)],
-) -> Result<Vec<ResolvedCall>, VerifyError> {
-    let calls: Vec<&vmir::HeapCall> = calls.iter().filter(|c| c.binder_free).collect();
-    if calls.is_empty() {
-        return Ok(Vec::new());
-    }
-    let (frame, calls) =
-        ctx.pause_recipe(|ctx| binder_free_values(ctx, frame, step_base, insts, &calls, pc))?;
-    let mut out = Vec::with_capacity(calls.len());
-    for c in calls {
-        let args: Vec<Id> = c.call.args.iter().map(|v| frame.get_val(ctx, v)).collect();
-        let h = heap_of(ctx, &c.heap)?;
-        let built = frame_snapshot(ctx, c.call.resource, &args, SnapshotFrom::Build(h), pc)?;
-        let Val::Temp(temp) = c.snap else {
-            unreachable!("a snapshot is a temp")
-        };
-        out.push(ResolvedCall {
-            temp,
-            stand: CallStand::Snapshot(built.snap, built.recipe),
-        });
-    }
-    Ok(out)
-}
-
-/// `frame` extended with the binders and body steps, where the steps the
-/// arguments of the binder-free `calls` are computed by hold their values in
-/// the live graph: they mention no binder, so they are the same for every
-/// binding. Every other temp holds a poison id that nothing evaluated here
-/// reads. Only steps that merely build a term are evaluated: a call whose
-/// arguments need a heap read, a nested heap-dependent call, or a call to a
-/// function with a precondition (whose token would release its facts outside
-/// the body's guards) is left out. Returns the calls kept.
-fn binder_free_values<'c>(
-    ctx: &mut VerifyContext<'_>,
-    mut frame: EvalState,
-    step_base: usize,
-    insts: &[vmir::Inst],
-    calls: &[&'c vmir::HeapCall],
-    pc: &[(Id, Polarity)],
-) -> Result<(EvalState, Vec<&'c vmir::HeapCall>), VerifyError> {
-    const POISON: usize = usize::MAX;
-    let steps: Vec<&vmir::Inst> = insts
-        .iter()
-        .filter(|i| match &i.kind {
-            InstKind::Pure(..) => true,
-            InstKind::Heap(hi) => hi.frame_exhale().is_some(),
-            _ => false,
-        })
-        .collect();
-    let builds_term = |inst: &vmir::Inst| match &inst.kind {
-        InstKind::Pure(_, pi) => match pi {
-            PureInst::Deref(..) | PureInst::Perm(..) | PureInst::Fresh => false,
-            PureInst::Forall(_) => false,
-            PureInst::FunctionCall(fc) => !matches!(
-                &ctx.decls[fc.function],
-                vmir::Declaration::Function(f) if f.requires.is_some()
-            ),
-            _ => true,
-        },
-        _ => false,
-    };
-    // The steps a call's arguments need, found backwards from them.
-    let slice = |call: &vmir::HeapCall| {
-        let mut needed = vec![false; steps.len()];
-        let need = |needed: &mut Vec<bool>, v: &Val| {
-            if let Val::Temp(k) = v
-                && *k >= step_base
-            {
-                needed[k - step_base] = true;
-            }
-        };
-        for v in &call.call.args {
-            need(&mut needed, v);
-        }
-        for (i, inst) in steps.iter().enumerate().rev() {
-            if needed[i]
-                && let InstKind::Pure(_, pi) = &inst.kind
-            {
-                pi.for_each_operand(&mut |v| need(&mut needed, v));
-            }
-        }
-        needed
-    };
-    let mut needed = vec![false; steps.len()];
-    let mut kept = Vec::with_capacity(calls.len());
-    for &c in calls {
-        let own = slice(c);
-        if own
-            .iter()
-            .zip(&steps)
-            .all(|(&n, inst)| !n || builds_term(inst))
-        {
-            needed.iter_mut().zip(own).for_each(|(n, o)| *n |= o);
-            kept.push(c);
-        }
-    }
-    while frame.vals.len() < step_base {
-        frame.push_val(Id::from(POISON), vmir::Type::Bool, None);
-    }
-    for (i, inst) in steps.iter().enumerate() {
-        let (id, ty) = match &inst.kind {
-            InstKind::Pure(ty, pi) if needed[i] => {
-                (eval_pure_inst(ctx, &frame, ty, pi, pc, None)?.0, ty.clone())
-            }
-            InstKind::Pure(ty, _) => (Id::from(POISON), ty.clone()),
-            InstKind::Heap(hi) => {
-                let (_, call) = hi.frame_exhale().expect("filtered above");
-                (Id::from(POISON), vmir::Type::Snap(call.resource))
-            }
-            _ => unreachable!("filtered above"),
-        };
-        frame.push_val(id, ty, None);
-    }
-    Ok((frame, kept))
 }
 
 /// The captures of `q`'s body: the captured `temps`, and its heap reads
@@ -836,22 +689,10 @@ pub(crate) fn resolve_reads(
         reads: Resolved::default(),
         wildcard: None,
     };
-    let calls = q.heap_calls();
-    if q.heap_reads().is_empty() && calls.is_empty() {
+    if q.heap_reads().is_empty() && q.heap_calls().is_empty() {
         return Ok(caps);
     }
-    let frame = EvalState::frame_from_caps(q.binder_base, &caps.temps);
-    let step_base = q.step_base();
-    let calls = resolve_calls(
-        ctx,
-        &calls,
-        frame,
-        step_base,
-        &q.body.insts,
-        &mut *heap_of,
-        pc,
-    )?;
-    let mut resolver = ReadResolver::new(heap_of, calls);
+    let mut resolver = ReadResolver::new(heap_of);
     ctx.pause_recipe(|ctx| {
         ctx.with_scratch_graph(|ctx| {
             let xs = fresh_binders(ctx, q);

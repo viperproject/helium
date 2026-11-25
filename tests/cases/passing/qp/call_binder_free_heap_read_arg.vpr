@@ -1,7 +1,6 @@
 // A binder-free heap-dependent call whose argument the body reads from the
-// heap (`get(y.next)`): its snapshot cannot be built before the body walk, so
-// the walk resolves it per binding, like a call on a binder
-// (plans/heap-dependent-calls-in-quantifiers.md, phase 3).
+// heap (`get(y.next)`): the walk resolves it per binding, like any call in a
+// quantifier body.
 //
 // Must VERIFY.
 field val: Int

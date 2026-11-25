@@ -1316,7 +1316,7 @@ fn heap_dependent_call_in_forall_body_is_a_frame_exhale_step() {
     // A heap-dependent call in a `forall` body lowers as outside one: a
     // frame-only exhale of `get#requires` yields the snapshot, then the call.
     // The exhale's snapshot is a body step, so the reads after it are numbered
-    // past it, and a call is binder-free iff no argument depends on a binder.
+    // past it.
     let input = r#"
 field f: Int
 function get(x: Ref): Int
@@ -1339,8 +1339,7 @@ method m(s: Set[Ref], y: Ref)
         panic!("expected one forall in the method body");
     };
     let calls = q.heap_calls();
-    let binder_free: Vec<bool> = calls.iter().map(|c| c.binder_free).collect();
-    assert_eq!(binder_free, vec![false, true], "get(x), then get(y)");
+    assert_eq!(calls.len(), 2, "get(x), then get(y)");
     // Each snapshot temp is the last argument of the call that follows it.
     let step_base = q.step_base();
     for c in &calls {

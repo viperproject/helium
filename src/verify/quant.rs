@@ -385,43 +385,24 @@ impl Stand {
 }
 
 /// One heap-dependent call of a quantifier body ([`vmir::HeapCall`]),
-/// resolved: what its frame-only `exhale`'s snapshot is built from.
+/// resolved: what its frame-only `exhale`'s snapshot is rebuilt from, per
+/// binding.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedCall {
     /// The body temp the exhale yields.
     pub(crate) temp: usize,
-    pub(crate) stand: CallStand,
+    /// What stands for each footprint slot's value.
+    pub(crate) slots: std::rc::Rc<[ResolvedSlot]>,
 }
 
-/// What stands for a resolved call's snapshot.
-#[derive(Debug, Clone)]
-pub(crate) enum CallStand {
-    /// A binder-free call: the snapshot itself, one value for every binding,
-    /// with its recipe in a certificate walk.
-    Snapshot(egg::Id, Option<Val>),
-    /// A call on a binder: what stands for each footprint slot's value, the
-    /// snapshot rebuilt from them per binding.
-    Slots(std::rc::Rc<[ResolvedSlot]>),
-}
-
-/// One footprint slot of a call on a binder, resolved like a read: the one
-/// holder that frames it for every binding.
+/// One footprint slot of a quantifier body's call, resolved like a read: the
+/// one holder that frames it for every binding.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSlot {
     pub(crate) kind: crate::verify::heap::LocationKind,
     pub(crate) stand: Stand,
     /// The stand-in's recipe in a certificate walk; `None` otherwise.
     pub(crate) recipe: Option<Val>,
-}
-
-impl CallStand {
-    /// The captured e-classes and their recipes, in [`Canonical`]'s order.
-    fn caps(&self) -> Vec<(egg::Id, &Option<Val>)> {
-        match self {
-            CallStand::Snapshot(snap, recipe) => vec![(*snap, recipe)],
-            CallStand::Slots(slots) => slots.iter().map(|s| (s.stand.id(), &s.recipe)).collect(),
-        }
-    }
 }
 
 /// What stands for the heaps a quantifier body names: its resolved reads,
@@ -449,15 +430,15 @@ impl Resolved {
     /// The captured e-classes, in [`Canonical`]'s slot order.
     pub(crate) fn cap_ids(&self) -> Vec<egg::Id> {
         let reads = self.reads.iter().map(|r| r.stand.id());
-        let calls = self.calls.iter().flat_map(|c| c.stand.caps());
-        reads.chain(calls.map(|(id, _)| id)).collect()
+        let calls = self.calls.iter().flat_map(|c| c.slots.iter());
+        reads.chain(calls.map(|s| s.stand.id())).collect()
     }
 
     /// The captured stand-ins' recipes, in [`Canonical`]'s slot order.
     pub(crate) fn cap_recipes(&self) -> Vec<Option<Val>> {
         let reads = self.reads.iter().map(|r| r.recipe.clone());
-        let calls = self.calls.iter().flat_map(|c| c.stand.caps());
-        reads.chain(calls.map(|(_, r)| r.clone())).collect()
+        let calls = self.calls.iter().flat_map(|c| c.slots.iter());
+        reads.chain(calls.map(|s| s.recipe.clone())).collect()
     }
 
     /// How a body with these stand-ins compiles.
@@ -470,17 +451,14 @@ impl Resolved {
         let calls = self
             .calls
             .iter()
-            .map(|c| match &c.stand {
-                CallStand::Snapshot(..) => CallShape::Snapshot,
-                CallStand::Slots(slots) => CallShape::Slots(
-                    slots
-                        .iter()
-                        .map(|s| match s.stand {
-                            Stand::Map(_) => Some(s.kind.clone()),
-                            Stand::Value(_) => None,
-                        })
-                        .collect(),
-                ),
+            .map(|c| {
+                c.slots
+                    .iter()
+                    .map(|s| match s.stand {
+                        Stand::Map(_) => Some(s.kind.clone()),
+                        Stand::Value(_) => None,
+                    })
+                    .collect()
             })
             .collect();
         Shape { by_value, calls }
@@ -504,30 +482,16 @@ pub(crate) struct Shape {
     pub(crate) calls: Vec<CallShape>,
 }
 
-/// How a heap-dependent call of a body compiles (see [`CallStand`]).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum CallShape {
-    /// Its snapshot is a capture.
-    Snapshot,
-    /// Its snapshot is rebuilt per binding; per footprint slot, the kind of
-    /// a captured map to `lookup`, or `None` for a captured value.
-    Slots(Vec<Option<crate::verify::heap::LocationKind>>),
-}
-
-impl CallShape {
-    fn n_caps(&self) -> usize {
-        match self {
-            CallShape::Snapshot => 1,
-            CallShape::Slots(slots) => slots.len(),
-        }
-    }
-}
+/// How a heap-dependent call of a body compiles (see [`ResolvedCall`]): its
+/// snapshot is rebuilt per binding; per footprint slot, the kind of a
+/// captured map to `lookup`, or `None` for a captured value.
+pub(crate) type CallShape = Vec<Option<crate::verify::heap::LocationKind>>;
 
 impl Shape {
-    /// Whether every use of a body with this shape compiles alike: no read,
-    /// and only binder-free calls (whose snapshot is always one capture).
+    /// Whether every use of a body with this shape compiles alike: no read
+    /// and no call, whose stand-ins may differ between uses.
     fn fixed(&self) -> bool {
-        self.by_value.is_empty() && self.calls.iter().all(|c| *c == CallShape::Snapshot)
+        self.by_value.is_empty() && self.calls.is_empty()
     }
 }
 
@@ -587,9 +551,8 @@ impl Canonical {
     /// the stand-ins of its heap `reads` ([`vmir::HeapRead`], resolved at each
     /// use into [`ResolvedRead`]s) are captured after them, in order, read `j`
     /// by value iff `shape.by_value[j]`. Then the stand-ins of each
-    /// heap-dependent call ([`ResolvedCall`]), in body order: a binder-free
-    /// call's snapshot, which its exhale's temp aliases, or a call's slots,
-    /// from which [`snapshot_steps`] rebuild its snapshot (`certs`).
+    /// heap-dependent call ([`ResolvedCall`]), in body order: its slots, from
+    /// which [`snapshot_steps`] rebuild its snapshot (`certs`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         alloc: &mut FuncRegistry,
@@ -616,7 +579,7 @@ impl Canonical {
             binder_base,
             slot: free.iter().copied().zip(0..).collect(),
             n_reads: reads.len(),
-            n_calls: shape.calls.iter().map(CallShape::n_caps).sum(),
+            n_calls: shape.calls.iter().map(Vec::len).sum(),
             extra: Vec::new(),
             next: 0,
             alias: HashMap::default(),
@@ -625,9 +588,9 @@ impl Canonical {
             groups: Vec::new(),
         };
         // The steps, as body temps from `binder_base + n_bound` on, in order:
-        // a read captured by value and a binder-free call's snapshot alias
-        // their capture and drop their step; a call on a binder emits its
-        // snapshot's steps instead (`spliced`, one entry per call).
+        // a read captured by value aliases its capture and drops its step; a
+        // call emits its snapshot's steps instead (`spliced`, one entry per
+        // call).
         let steps = insts.iter().filter(|i| match &i.kind {
             InstKind::Pure(..) => true,
             InstKind::Heap(hi) => hi.frame_exhale().is_some(),
@@ -649,38 +612,22 @@ impl Canonical {
                 }
                 InstKind::Heap(hi) => {
                     let (_, call) = hi.frame_exhale().expect("filtered above");
-                    match call_shapes.next().expect("a shape per heap-dependent call") {
-                        CallShape::Snapshot => {
-                            c.alias.insert(t, call_cap);
-                            c.dropped.push(t);
-                            call_cap += 1;
-                            spliced.push(Vec::new());
-                        }
-                        CallShape::Slots(slots) => {
-                            let def = certs
-                                .and_then(|m| m.get(&call.resource))
-                                .ok_or(VerifyError::DependencyFailed)?;
-                            let args: Vec<Val> = call.args.iter().map(|a| c.rename(a)).collect();
-                            let caps: Vec<Val> =
-                                (call_cap..call_cap + slots.len()).map(Val::Temp).collect();
-                            call_cap += slots.len();
-                            // Its first step takes the temp its own would.
-                            let Val::Temp(first) = c.rename(&Val::Temp(t)) else {
-                                unreachable!("a step renames to a temp")
-                            };
-                            let steps = snapshot_steps(
-                                alloc,
-                                def,
-                                call.resource,
-                                &args,
-                                slots,
-                                &caps,
-                                first,
-                            )?;
-                            c.extra.push((t, steps.len() - 1));
-                            spliced.push(steps);
-                        }
-                    }
+                    let slots = call_shapes.next().expect("a shape per heap-dependent call");
+                    let def = certs
+                        .and_then(|m| m.get(&call.resource))
+                        .ok_or(VerifyError::DependencyFailed)?;
+                    let args: Vec<Val> = call.args.iter().map(|a| c.rename(a)).collect();
+                    let caps: Vec<Val> =
+                        (call_cap..call_cap + slots.len()).map(Val::Temp).collect();
+                    call_cap += slots.len();
+                    // Its first step takes the temp its own would.
+                    let Val::Temp(first) = c.rename(&Val::Temp(t)) else {
+                        unreachable!("a step renames to a temp")
+                    };
+                    let steps =
+                        snapshot_steps(alloc, def, call.resource, &args, slots, &caps, first)?;
+                    c.extra.push((t, steps.len() - 1));
+                    spliced.push(steps);
                 }
                 _ => {}
             }
@@ -807,7 +754,7 @@ impl Canonical {
 
 /// The recipe steps that rebuild a call's snapshot at one binding, from the
 /// callee's certificate `def`, the call's `args` and the captures `caps` that
-/// stand for its footprint slots (`slots`, see [`CallShape::Slots`]). Per
+/// stand for its footprint slots (`slots`, see [`CallShape`]). Per
 /// slot: its address (the slot's recipe over the arguments and earlier slot
 /// values), its value (`lookup` of the captured map, or the captured value),
 /// its presence (the permission, `wildcard` read as present), and its member;
@@ -828,7 +775,7 @@ fn snapshot_steps(
     for (i, slot) in def.footprint.iter().enumerate() {
         let SlotShape::Single { addr, perm } = &slot.shape else {
             return Err(VerifyError::Unimplemented(
-                "heap-dependent call on a binder whose precondition holds a quantified permission",
+                "heap-dependent call in a quantifier whose precondition holds a quantified permission",
             ));
         };
         let addr = splice(&mut out, first, addr, args, &values)?;
@@ -902,7 +849,7 @@ fn splice(
     // A token step names a temp it releases; nothing here would release it.
     if !r.token_steps.is_empty() {
         return Err(VerifyError::Unimplemented(
-            "heap-dependent call on a binder whose footprint calls a function",
+            "heap-dependent call in a quantifier whose footprint calls a function",
         ));
     }
     let mut map: Vec<Val> = r
@@ -925,7 +872,7 @@ fn splice(
             }
             AxiomInst::Assume(_) | AxiomInst::Token { .. } => {
                 return Err(VerifyError::Unimplemented(
-                    "heap-dependent call on a binder whose footprint calls a function",
+                    "heap-dependent call in a quantifier whose footprint calls a function",
                 ));
             }
         }

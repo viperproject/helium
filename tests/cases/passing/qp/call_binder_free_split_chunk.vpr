@@ -1,0 +1,20 @@
+// A binder-free heap-dependent call whose footprint is held as two fractions
+// of one location (`acc(y.f, 1/4) && acc(y.f, 1/4)`): one holder frames the
+// call's slot for every binding.
+//
+// Must VERIFY.
+field f: Int
+
+function get(x: Ref): Int
+    requires acc(x.f, 1/2)
+{ x.f }
+
+domain D { function t(i: Int): Bool }
+
+method m(y: Ref)
+    requires acc(y.f, 1/4) && acc(y.f, 1/4)
+{
+    inhale forall i: Int :: {t(i)} t(i) ==> get(y) == 4
+    inhale t(1)
+    assert y.f == 4
+}

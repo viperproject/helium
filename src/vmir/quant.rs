@@ -85,7 +85,7 @@ impl Forall {
     /// The heap-dependent calls of this quantifier's own body, in instruction
     /// order (see [`HeapCall`]). Derived, like [`Forall::heap_reads`].
     pub fn heap_calls(&self) -> Vec<HeapCall> {
-        heap_calls_of(self.binder_base, self.step_base(), &self.body.insts)
+        heap_calls_of(self.step_base(), &self.body.insts)
     }
 
     /// Visit every type this quantifier mentions: its binder types, its
@@ -214,44 +214,26 @@ pub struct HeapCall {
     pub call: crate::vmir::ResourceCall,
     /// The snapshot temp the exhale yields.
     pub snap: Val,
-    /// No argument depends on a binder, so the snapshot is the same for every
-    /// binding.
-    pub binder_free: bool,
 }
 
 /// The heap-dependent calls of a quantified scope's own instructions, in
 /// order. A nested `forall`'s calls belong to that quantifier.
-fn heap_calls_of(
-    binder_base: usize,
-    step_base: usize,
-    insts: &[crate::vmir::Inst],
-) -> Vec<HeapCall> {
-    // Per body step: whether its value depends on a binder.
-    let mut dep: Vec<bool> = Vec::new();
-    let depends = |dep: &[bool], v: &Val| match v {
-        Val::Temp(k) if *k >= step_base => dep[k - step_base],
-        Val::Temp(k) => *k >= binder_base,
-        _ => false,
-    };
+fn heap_calls_of(step_base: usize, insts: &[crate::vmir::Inst]) -> Vec<HeapCall> {
+    // Per body step, in order: the temp it yields is `step_base + steps`.
+    let mut steps = 0;
     let mut out = Vec::new();
     for inst in insts {
         match &inst.kind {
-            InstKind::Pure(_, pi) => {
-                let mut d = false;
-                pi.for_each_operand(&mut |v| d |= depends(&dep, v));
-                dep.push(d);
-            }
+            InstKind::Pure(..) => steps += 1,
             InstKind::Heap(hi) => {
                 let call = frame_call(hi);
                 let (heap, _) = hi.frame_exhale().expect("checked by frame_call");
-                let d = call.args.iter().any(|v| depends(&dep, v));
                 out.push(HeapCall {
                     heap,
                     call: call.clone(),
-                    snap: Val::Temp(step_base + dep.len()),
-                    binder_free: !d,
+                    snap: Val::Temp(step_base + steps),
                 });
-                dep.push(d);
+                steps += 1;
             }
             _ => {}
         }
@@ -326,7 +308,7 @@ impl QuantChunks {
     /// The heap-dependent calls of this scope's body, in instruction order
     /// (see [`HeapCall`]).
     pub fn heap_calls(&self) -> Vec<HeapCall> {
-        heap_calls_of(self.binder_base, self.step_base(), &self.body.insts)
+        heap_calls_of(self.step_base(), &self.body.insts)
     }
 
     /// The enclosing temps this scope mentions (its capture list), triggers

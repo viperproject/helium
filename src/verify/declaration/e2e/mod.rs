@@ -2666,8 +2666,9 @@ method m(s: Set[Ref], a: Ref)
 
 #[test]
 fn binder_free_heap_dependent_call_in_a_forall_verifies() {
-    // The snapshot of `get(y)` is built once and captured; an instance gives
-    // the field's value at the quantifier.
+    // `get(y)` is resolved like a call on a binder: its slot is framed by
+    // `y.f`'s chunk for every binding, so an instance gives the field's value
+    // at the quantifier.
     let input = r#"
 field f: Int
 domain D { function t(i: Int): Bool }
