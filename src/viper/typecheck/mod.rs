@@ -543,9 +543,7 @@ impl PureExt for FuncEnsuresExt {
     fn trigger_shape(&self) -> TriggerShape<'_, Self> {
         match self {
             FuncEnsuresExt::Heap(node) => heap_node_trigger_shape(node),
-            FuncEnsuresExt::Old(_) | FuncEnsuresExt::Forall(_) => {
-                TriggerShape::NotMatchable
-            }
+            FuncEnsuresExt::Old(_) | FuncEnsuresExt::Forall(_) => TriggerShape::NotMatchable,
         }
     }
     const LOWER_FORALL: bool = true;
