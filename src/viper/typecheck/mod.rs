@@ -1946,6 +1946,9 @@ fn collect_labels(stmts: &[viper::Statement], labels: &mut HashSet<Spur>) {
                     collect_labels(&b.0, labels);
                 }
             }
+            viper::Statement::While(_, _, _, body) => {
+                collect_labels(&body.0, labels);
+            }
             _ => {}
         }
     }
