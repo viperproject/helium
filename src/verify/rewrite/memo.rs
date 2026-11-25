@@ -24,6 +24,12 @@ pub(crate) fn new_memo_unit() {
     UNIT_GEN.with(|g| g.set(g.get() + 1));
 }
 
+/// Whether a scratch scope is open: the saturation running now is on a clone
+/// (a probe, a well-definedness check, a block scratch), not the live graph.
+pub(crate) fn in_scratch_scope() -> bool {
+    SCRATCH_STACK.with(|s| !s.borrow().is_empty())
+}
+
 /// RAII marker for a scratch (throwaway-clone) saturation scope.
 pub(crate) struct ScratchScope;
 

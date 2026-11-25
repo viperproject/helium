@@ -1006,6 +1006,9 @@ pub(crate) fn eval_pure_inst(
                 .expect("recipe table lock")
                 .get(recipe_id)
                 .open_types();
+            if !reads.is_empty() {
+                crate::verify::qp_trace::recipe(ctx, "pure forall recipe", recipe_id, &caps);
+            }
             let id = ctx.add(Symbolic::Forall(
                 recipe_id,
                 type_args.iter().cloned().collect(),

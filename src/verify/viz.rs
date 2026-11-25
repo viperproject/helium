@@ -388,7 +388,7 @@ pub(crate) fn dump_term(ctx: &VerifyContext<'_>, root: egg::Id, depth: usize) ->
 
 /// One e-node rendered as `op(@child, ...)`, resolving `FuncApp` to its source
 /// name. Children are canonical class ids (`@n`).
-fn render_node(ctx: &VerifyContext<'_>, node: &Symbolic) -> String {
+pub(crate) fn render_node(ctx: &VerifyContext<'_>, node: &Symbolic) -> String {
     let kid = |c: &egg::Id| format!("@{}", usize::from(ctx.egraph.find(*c)));
     let kids: Vec<String> = node.children().iter().map(kid).collect();
     match node {

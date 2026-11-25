@@ -2078,6 +2078,7 @@ fn walk_body(
                 heaps_before,
             )
         };
+        crate::verify::qp_trace::at_inst(inst_idx, insts.len(), || inst_text(program));
         let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
         for (goal, err) in inst_obligations(ctx, state, &inst.kind, &pc_lits) {
             if !ctx.prove_under_pc(goal, &pc_lits) {
@@ -2087,6 +2088,7 @@ fn walk_body(
                         crate::verify::viz::dump_term(ctx, goal, 64),
                     );
                 }
+                crate::verify::qp_trace::flush_instances(ctx);
                 let inst_text = inst_text(program);
                 if snap.enabled() {
                     let heaps = display_heaps(state, &inst.kind, heaps_before);
@@ -2103,8 +2105,12 @@ fn walk_body(
         // It also resolves the quantifier's heap reads, which its step captures.
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
             match check_forall_wd(ctx, q, state, &pc_lits) {
-                Ok(reads) => state.forall_reads = reads,
+                Ok(reads) => {
+                    crate::verify::qp_trace::forall_resolved(ctx, q, &reads);
+                    state.forall_reads = reads;
+                }
                 Err(err) => {
+                    crate::verify::qp_trace::flush_instances(ctx);
                     let inst_text = inst_text(program);
                     if snap.enabled() {
                         let heaps = display_heaps(state, &inst.kind, heaps_before);
@@ -2115,6 +2121,7 @@ fn walk_body(
             }
         }
         let evaluated = eval(ctx, program, state, inst, certs);
+        crate::verify::qp_trace::flush_instances(ctx);
         // A framing decided for this instruction never serves a later one.
         state.framed_read.take();
         if let Err(err) = evaluated {
@@ -2149,6 +2156,7 @@ pub(crate) fn verify_method(
     ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     let mut state = EvalState::new();
+    crate::verify::qp_trace::begin_unit("method", method_name);
     let mut snap = Snapshotter::from_env(method_name);
     snap.snapshot(&ctx, &[], "init", None);
 
@@ -2283,6 +2291,7 @@ pub(crate) fn verify_resource(
     // heap, implicitly assuming the precondition resource's boolean.
     let mut state = EvalState::with_args(params, resource.params.clone());
 
+    crate::verify::qp_trace::begin_unit("resource", resource_name);
     let mut snap = Snapshotter::from_env(resource_name);
     snap.snapshot(&ctx, &[], "init", None);
 
@@ -2443,6 +2452,7 @@ pub(crate) fn verify_function(
     let param_types: Vec<Type> = function.params.iter().cloned().collect();
     let mut state = EvalState::with_args(params.clone(), param_types);
 
+    crate::verify::qp_trace::begin_unit("function", function_name);
     let mut snap = Snapshotter::from_env(function_name);
     snap.snapshot(&ctx, &[], "init", None);
     // The method-body eval path handles every inst a function body can contain

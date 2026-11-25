@@ -293,10 +293,18 @@ impl Heap {
                 if spec.q.body.contains_wc_permission() {
                     spec.caps.wildcard = Some(mint_wildcard(ctx, &spec.q));
                 }
+                crate::verify::qp_trace::qp_set(ctx, "produce", &spec.q, &spec.caps, spec.check);
                 let set = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, value.id, spec.check)?;
                 let mut set = set;
                 set.recipe = value.recipe;
-                Ok(self.with_qp_chunk(&kind, set))
+                let heap = self.with_qp_chunk(&kind, set);
+                crate::verify::qp_trace::note(|| {
+                    format!(
+                        "produced: now {} set(s) of this kind",
+                        heap.qp_chunks_of(&kind).len()
+                    )
+                });
+                Ok(heap)
             }
         }
     }
@@ -343,15 +351,37 @@ impl Heap {
                 // then it carries a placeholder map that is never read.
                 let placeholder =
                     ctx.fresh_symbolic_value(Type::ValueMap(Box::new(spec.q.loc_ty.clone())));
+                crate::verify::qp_trace::qp_set(
+                    ctx,
+                    match mode {
+                        ConsumeMode::Take => "consume",
+                        ConsumeMode::Frame => "frame",
+                    },
+                    &spec.q,
+                    &spec.caps,
+                    spec.check,
+                );
                 let exhaled =
                     quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, placeholder, spec.check)?;
                 let Some(i) = find_covering_qp(ctx, self, &kind, &exhaled)? else {
                     // No single set covers it: try all holders together. The
                     // exhaled set's values are then not tied to theirs yet (a
                     // fresh map: sound, but its snapshot says nothing).
+                    let n = self.qp_chunks_of(&kind).len();
+                    let n_points = self.chunks_of(&kind).len();
                     if !covered_by_sum(ctx, self, &kind, &exhaled)? {
+                        crate::verify::qp_trace::note(|| {
+                            format!(
+                                "no single set covers it, nor all {n} set(s) and {n_points} chunk(s) together: insufficient permission"
+                            )
+                        });
                         return Err(VerifyError::InsufficientPermission);
                     }
+                    crate::verify::qp_trace::note(|| {
+                        format!(
+                            "no single set covers it; covered by all {n} set(s) and {n_points} chunk(s) together (spread)"
+                        )
+                    });
                     if wild && mode == ConsumeMode::Take {
                         return Err(VerifyError::Unimplemented(
                             "wildcard exhale of a quantified permission across several holders",
@@ -371,6 +401,13 @@ impl Heap {
                     return Ok((heap, Value::plain(placeholder)));
                 };
                 let held = &self.qp_chunks_of(&kind)[i];
+                crate::verify::qp_trace::note(|| {
+                    format!(
+                        "covered by held set #{i} of {}; value map {}",
+                        self.qp_chunks_of(&kind).len(),
+                        crate::verify::qp_trace::eclass(ctx, held.value_map)
+                    )
+                });
                 let value = Value {
                     id: held.value_map,
                     recipe: held.recipe.clone(),

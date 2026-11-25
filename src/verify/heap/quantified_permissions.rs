@@ -231,6 +231,7 @@ fn mint_and_assume_inverse_axiom(
 ) -> Result<Rc<[FuncId]>, VerifyError> {
     // Without a trigger the axiom could never fire; assuming nothing is sound.
     if q.triggers.is_empty() && caps.reads.is_empty() {
+        crate::verify::qp_trace::note(|| "inverse axiom: none (no trigger)".to_string());
         return Ok(mint_inverses(ctx, q));
     }
 
@@ -259,7 +260,12 @@ fn mint_and_assume_inverse_axiom(
         let loc = c.rename(&q.body.loc);
         match c.pattern_of(&loc, q.bound.len()) {
             Some(pattern) => c.groups = vec![vec![pattern]],
-            None => return Ok(mint_inverses(ctx, q)),
+            None => {
+                crate::verify::qp_trace::note(|| {
+                    "inverse axiom: none (the location is not a trigger pattern)".to_string()
+                });
+                return Ok(mint_inverses(ctx, q));
+            }
         }
     }
 
@@ -292,7 +298,10 @@ fn mint_and_assume_inverse_axiom(
     let temp_ids = caps.temps.iter().map(|&(_, id)| id);
     let cap_ids: Vec<Id> = temp_ids.chain(caps.reads.cap_ids()).collect();
     let (rid, inv) = match ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
-        Some(found) => found,
+        Some(found) => {
+            crate::verify::qp_trace::note(|| "inverse axiom: reused".to_string());
+            found
+        }
         None => {
             let inv = mint_inverses(ctx, q);
             let mut concl = crate::vmir::TRUE;
@@ -327,6 +336,11 @@ fn mint_and_assume_inverse_axiom(
             (rid, inv)
         }
     };
+    if crate::verify::qp_trace::active() {
+        let names: Vec<String> = inv.iter().map(|&f| ctx.func_name(f)).collect();
+        let what = format!("inverse axiom (inverses {})", names.join(", "));
+        crate::verify::qp_trace::recipe(ctx, &what, rid, &cap_ids);
+    }
     let node = ctx.add(Symbolic::Forall(rid, Box::new([]), cap_ids.into()));
     ctx.assume_guarded(node, pc.iter().rev().copied());
     Ok(inv)
@@ -1067,7 +1081,14 @@ pub(super) fn quant_chunk_from_caps(
     value_map: egg::Id,
     check: QpCheck,
 ) -> Result<QuantChunk, VerifyError> {
-    check_qp_well_formed(ctx, q, &caps, pc_lits, check)?;
+    if let Err(e) = check_qp_well_formed(ctx, q, &caps, pc_lits, check) {
+        crate::verify::qp_trace::note(|| format!("well-formedness: FAILED ({e:?})"));
+        return Err(e);
+    }
+    crate::verify::qp_trace::note(|| match check {
+        QpCheck::Established => "well-formedness: established, not checked".to_string(),
+        _ => format!("well-formedness ({check:?}): proven"),
+    });
     // One binding per location: assume the inverse axiom that names it.
     let inv = mint_and_assume_inverse_axiom(ctx, q, &caps, pc_lits)?;
     Ok(QuantChunk::unconditional(SetBody {
