@@ -15,7 +15,7 @@ use crate::viper::typed::{
     DomainFunction, Field, Forall, FuncEnsuresExt, Function, HeapExt, HeapNode, Ident, Literal,
     Method, MethodBodyExt, MethodEnsuresExt, Predicate, PredicateWithPerm, Program, PureExpKind,
     ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, Statement, StmtBlock, Type,
-    TypedIdent, TypedPureExp, UnOp,
+    TriggerTerm, TypedIdent, TypedPureExp, UnOp,
 };
 
 /// Interner-aware formatting wrapper.
@@ -551,6 +551,19 @@ where
             self.with(&self.item.pred_call),
             self.with(&self.item.perm)
         )
+    }
+}
+
+impl<'a, Ext: ShowExt> Display for Show<'a, &'a TriggerTerm<Ext>>
+where
+    Show<'a, &'a TypedPureExp<Ext>>: Display,
+    Show<'a, &'a Call<Ext>>: Display,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.item {
+            TriggerTerm::Exp(e) => write!(f, "{}", self.with(e)),
+            TriggerTerm::Location(res) => write!(f, "{}", self.with(res)),
+        }
     }
 }
 

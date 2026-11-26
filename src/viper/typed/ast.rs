@@ -233,7 +233,7 @@ pub enum SpatialExpKind<PureExt> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuantPerm<Ext> {
     pub bound: Vec<TypedIdent>,
-    pub triggers: Vec<Vec<TypedPureExp<Ext>>>, // may be empty
+    pub triggers: Vec<Vec<TriggerTerm<Ext>>>, // may be empty
     /// No user triggers, and the location `f(e(xs))` can serve as the trigger.
     pub location_trigger: bool,
     pub cond: TypedPureExp<Ext>, // conjunction of the guards on the path
@@ -305,8 +305,22 @@ pub enum AxiomExt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Forall<Ext> {
     pub bound: Vec<TypedIdent>,
-    pub triggers: Vec<Vec<TypedPureExp<Ext>>>,
+    pub triggers: Vec<Vec<TriggerTerm<Ext>>>,
     pub body: TypedPureExp<Ext>,
+}
+
+/// One term of a trigger group (of a [`Forall`] or a [`QuantPerm`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriggerTerm<Ext> {
+    /// An application or a collection operation (typecheck's `check_triggers`
+    /// admits only those).
+    Exp(TypedPureExp<Ext>),
+    /// A location at the trigger's root: a field read `e.f` or a predicate
+    /// instance `P(args)`. It matches the location term `f(e)` / `P(args)`,
+    /// which every read, `acc`, `fold`, `unfold` and `unfolding` of it builds.
+    /// Only ever the root: below it, `e.f` would stand for the read's value,
+    /// which a pattern cannot name, and a predicate is not a value at all.
+    Location(ResourceExp<Ext>),
 }
 
 /// Extensions allowed in function postconditions: heap access. `result` is an
