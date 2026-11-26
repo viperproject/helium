@@ -1,0 +1,46 @@
+// A consume of a location that holds nothing owes nothing where the state is
+// infeasible. The zero-demand probe answers it; only the consume's retry asks
+// it, and it must ask even when the graph was already saturated before its own
+// saturate (the first pass never asks). These verify on this base either way:
+// a consume mints its value fresh before the lookup, which dirties the graph,
+// so the retry asks anyway. They guard the retry for a consume that does not.
+// Silicon verifies all four methods. Companions of
+// `zero_demand_on_settled_graph.vpr`.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+field f: Int
+
+// Infeasible precondition, postcondition predicate.
+method infeasible_post_predicate(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(Q(y))
+{
+  exhale false
+}
+
+// Infeasible precondition, postcondition field.
+method infeasible_post_field(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(y.f)
+{
+  exhale false
+}
+
+// Infeasible after a pure assert.
+method infeasible_after_assert(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(Q(y))
+{
+  assert false
+}
+
+method callee(y: Ref)
+  requires acc(Q(y))
+
+// Infeasible, call precondition.
+method infeasible_call(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+{
+  assert false
+  callee(y)
+}

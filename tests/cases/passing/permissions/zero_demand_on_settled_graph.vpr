@@ -1,0 +1,43 @@
+// A consume of a location that holds nothing owes nothing where its demand is
+// zero, or where the state is infeasible. The zero-demand probe answers it, and
+// it must be asked even when the graph is already saturated as the consume
+// starts, so that the consume's own saturate changes nothing.
+//
+// These verify even without that: a consume that mints its chunk value before
+// the lookup dirties the graph, so the retry asks anyway. So do the four
+// companions in `zero_demand_probe_on_settled_graph.vpr`; they need the probe
+// only for a consume that does not dirty the graph first.
+predicate P(x: Ref)
+predicate Q(x: Ref)
+field f: Int
+
+// Infeasible precondition, explicit exhale of a predicate.
+method infeasible_exhale(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+{
+  exhale false
+  exhale acc(Q(y))
+}
+
+// Infeasible, empty body.
+method infeasible_empty_body(x: Ref, y: Ref, b: Bool)
+  requires acc(P(x)) && b && !b
+  ensures acc(Q(y))
+{
+}
+
+// Feasible: the conditional demand is zero.
+method zero_post(x: Ref, y: Ref, c: Bool, d: Bool)
+  requires acc(P(x)) && c == !d && d
+  ensures c ==> acc(Q(y))
+{
+  assert !c
+}
+
+// Feasible: the conditional demand of an exhale is zero.
+method zero_exhale(x: Ref, y: Ref, c: Bool, d: Bool)
+  requires acc(P(x)) && c == !d && d
+{
+  assert !c
+  exhale c ==> acc(Q(y))
+}
