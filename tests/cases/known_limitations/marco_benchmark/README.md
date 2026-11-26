@@ -69,7 +69,6 @@ general heap-dependent quantifiers are not needed.
 | `field_permission_implies_non_null.vpr` | assertion failed: `acc(t.h)` does not give `t != null` | AVLTree.nokeys `rebalance*` |
 | `read_covered_by_complementary_conditional_permissions.vpr` | purify: deref outside footprint | PVL kernels `Ref__main_barrier` |
 | `function_through_nested_fold.vpr` | assertion failed | linkedlists `append`, `insert` |
-| `conditional_precondition_function_after_refold.vpr` | assertion failed | Gobra Tree / binary_tree `deleteLeftMost` |
 | `recursive_call_in_own_postcondition.vpr` | assertion failed | VerCors `Util.isPrefix` and its lemmas |
 | `unfolding_reads_permission_held_outside_predicate.vpr` | insufficient permission | AVLTree.iterative `has` (invariant) |
 | `../domain_tag_exhaustiveness_with_partial_arg.vpr` (existing) | assertion failed | Dafny-book chap04 `Eval`, `EvalList` |

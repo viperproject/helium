@@ -343,6 +343,19 @@ impl RecipeBuilder {
         v
     }
 
+    /// The temp index the next emitted step gets: steps prepared elsewhere
+    /// with their temps counting from here can be appended by
+    /// [`Self::emit_steps`].
+    pub(crate) fn next_index(&self) -> usize {
+        self.n_params + self.steps.len()
+    }
+
+    /// Append `steps`, whose temps count from [`Self::next_index`] as it was
+    /// when they were prepared.
+    pub(crate) fn emit_steps(&mut self, steps: Vec<AxiomInst>) {
+        self.steps.extend(steps.into_iter().map(RecipeStep::Inst));
+    }
+
     pub(crate) fn emit_forall(
         &mut self,
         recipe: crate::verify::lang::RecipeId,

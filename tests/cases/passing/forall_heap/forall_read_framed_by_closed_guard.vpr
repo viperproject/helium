@@ -1,0 +1,21 @@
+// KNOWN LIMITATION — should verify, currently rejected (insufficient permission).
+//
+// A heap read inside a quantifier that mentions no binder is evaluated, and its
+// framing checked, once where the quantifier is stated (translate::pure_exp,
+// `lower_forall`), under the enclosing path condition only. The body's own
+// guards on the way to the read are dropped, which makes the check stronger
+// than Silicon's per-instance one. Here the guard `b` is binder-free and is what
+// frames `x.f`; Silicon checks the read under `b && t(i)` and verifies this.
+// Carrying the binder-free guards along to the hoisted read would close it.
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref, b: Bool)
+  requires b ==> acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } b && t(i) ==> x.f == i
+}

@@ -1,0 +1,31 @@
+// A predicate held with an amount given by an abstract function,
+// `acc(P(x), rd())`: the precondition slot of `s` is present only where
+// `0 < rd()`, which the path condition of the call in `g`'s postcondition does
+// not carry. The slot is read under that presence, as for any conditional
+// precondition slot.
+//
+// Prusti (`Ru1/prusti`) declares `function read$(): Perm` (with
+// `none < result < write`) and uses it for every shared borrow. Its enum
+// `discriminant` functions (`Option`, `Tree`, `Link`, ...) have exactly this
+// shape: `ensures discriminant(snap(self)) == result`.
+field d: Int
+
+predicate P(x: Ref) {
+  acc(x.d)
+}
+
+function rd(): Perm
+  ensures none < result && result < write
+
+function s(x: Ref): Int
+  requires acc(P(x), rd())
+{
+  unfolding acc(P(x), rd()) in x.d
+}
+
+function g(x: Ref): Int
+  requires acc(P(x), rd())
+  ensures s(x) == result
+{
+  unfolding acc(P(x), rd()) in x.d
+}

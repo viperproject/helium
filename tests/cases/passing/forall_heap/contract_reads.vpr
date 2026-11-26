@@ -1,0 +1,49 @@
+// Field reads, heap-dependent function calls and `old` inside quantifiers of
+// method and function contracts. Each read mentions no binder, so it is
+// evaluated once where the contract is stated; the callers instantiate the
+// quantifier and must see the post-state and pre-state values it fixed.
+// Silicon verifies this.
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+function get(x: Ref): Int
+  requires acc(x.f)
+{ x.f }
+
+method shift(x: Ref)
+  requires acc(x.f)
+  ensures acc(x.f)
+  ensures forall i: Int :: { t(i) } t(i) ==> x.f == old(x.f) + i
+
+method shift_get(x: Ref)
+  requires acc(x.f)
+  ensures acc(x.f)
+  ensures forall i: Int :: { t(i) } t(i) ==> get(x) == old(get(x)) + i
+
+// A quantified precondition reading the heap it is inhaled into.
+method bounded(x: Ref)
+  requires acc(x.f) && forall i: Int :: { t(i) } t(i) ==> x.f > i
+{
+  assume t(4)
+  assert x.f > 4
+}
+
+// A function postcondition with `result` and a heap read under a binder guard.
+function above(x: Ref): Int
+  requires acc(x.f)
+  ensures forall i: Int :: { t(i) } i > 0 && t(i) ==> result == x.f + i
+
+method client(x: Ref)
+  requires acc(x.f) && x.f == 5
+{
+  shift(x)
+  assume t(3)
+  assert x.f == 8
+  shift_get(x)
+  assert x.f == 11
+  assert above(x) == 14
+}
