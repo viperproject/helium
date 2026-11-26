@@ -1,9 +1,10 @@
-// KNOWN LIMITATION: "assertion failed" on `!contains(t, v)` right after
-// unfolding and re-folding `tree(t)`, which leaves the state unchanged.
-//
-// What matters is the *conditional* precondition `t != null ==> acc(tree(t))`
-// of the recursive function: with `requires acc(tree(t))` and the null test
-// moved into the body, or without the recursive call, it verifies.
+// A recursive call whose conditional precondition `t != null ==> acc(tree(t))`
+// is reached where the path condition leaves `t.left != null` open. The call's
+// snapshot member is `t.left != null ? Some(v) : None`: its value is read under
+// that presence, and the certificate mirrors the member as that `ite`, so the
+// definitional axiom names the snapshot every caller builds. `m` then needs the
+// axiom: unfolding and re-folding `tree(t)` alone does not give back an equal
+// snapshot.
 //
 // Reduced from `Go/gobra/.../tour/Tree.gobra` and `.../evaluation/binary_tree.gobra`
 // (`deleteLeftMost`): Gobra encodes `nil`-able pointers this way.
