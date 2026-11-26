@@ -1374,6 +1374,73 @@ method m(s: Set[Ref], y: Ref)
 }
 
 #[test]
+fn location_triggers_lower_to_location_terms() {
+    // A field read and a predicate instance at a trigger's root match their
+    // location terms `f(x)` and `P(x)`: the address calls every read, `acc`,
+    // `fold` and `unfold` of them builds.
+    let input = r#"
+field f: Int
+predicate P(x: Ref)
+method m(s: Set[Ref]) {
+    inhale forall x: Ref :: {x.f} {P(x)} x in s ==> x != null
+}
+"#;
+    let p = run(input);
+    let m_id = p.id("m").expect("missing method m");
+    let vmir::Declaration::Method(m) = &p.decls[m_id] else {
+        panic!("m must be a Method");
+    };
+    let insts = m.flatten();
+    let [q] = foralls(&insts)[..] else {
+        panic!("expected one forall in the method body");
+    };
+    let [field, pred] = &q.triggers[..] else {
+        panic!("expected two trigger groups");
+    };
+    let binder = [vmir::TrigTerm::Var(q.binder_base)];
+    assert_eq!(only_app(field), (&vmir::TrigHead::Loc(p.id("f").unwrap()), &binder[..]));
+    assert_eq!(only_app(pred), (&vmir::TrigHead::Loc(p.id("P").unwrap()), &binder[..]));
+}
+
+#[test]
+fn explicit_predicate_trigger_of_qp_is_its_location_trigger() {
+    // `{P(x)}` on `forall x :: x in s ==> acc(P(x))` names the trigger the
+    // quantified permission gets without one.
+    let quant_chunks = |src: &str| {
+        let p = run(src);
+        let m_id = p.id("m").expect("missing method m");
+        let vmir::Declaration::Method(m) = &p.decls[m_id] else {
+            panic!("m must be a Method");
+        };
+        let triggers: Vec<_> = m
+            .flatten()
+            .iter()
+            .filter_map(|i| match &i.kind {
+                vmir::InstKind::Heap(vmir::HeapInst::AddForall { q, .. }) => {
+                    Some(q.triggers.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let [t] = &triggers[..] else {
+            panic!("expected one quantified permission");
+        };
+        (t.clone(), p.id("P").unwrap())
+    };
+    let (explicit, p_id) = quant_chunks(
+        "predicate P(x: Ref)\nmethod m(s: Set[Ref]) { inhale forall x: Ref :: {P(x)} x in s ==> acc(P(x)) }",
+    );
+    let (default, _) = quant_chunks(
+        "predicate P(x: Ref)\nmethod m(s: Set[Ref]) { inhale forall x: Ref :: x in s ==> acc(P(x)) }",
+    );
+    assert_eq!(explicit, default);
+    let [group] = &explicit[..] else {
+        panic!("expected one trigger group");
+    };
+    assert_eq!(only_app(group).0, &vmir::TrigHead::Loc(p_id));
+}
+
+#[test]
 fn nested_trigger_lowers_to_nested_app() {
     // A trigger may be an arbitrarily nested application: `{f(g(i))}` binds the
     // binder at depth 1.

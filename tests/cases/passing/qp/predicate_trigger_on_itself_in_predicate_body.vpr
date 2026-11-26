@@ -1,0 +1,20 @@
+// A recursive predicate whose body holds a quantified permission over itself,
+// triggered on itself: the trigger head names the predicate being defined,
+// which must not make it a dependency of itself.
+//
+// Must VERIFY.
+predicate Tree(x: Ref) {
+  forall y: Ref :: { Tree(y) } y in kids(x) ==> acc(Tree(y))
+}
+
+domain K {
+  function kids(x: Ref): Set[Ref]
+}
+
+method m(x: Ref)
+  requires Tree(x)
+  ensures Tree(x)
+{
+  unfold Tree(x)
+  fold Tree(x)
+}
