@@ -222,6 +222,23 @@ pub enum SpatialExpKind<PureExt> {
     Acc(ResourceExp<PureExt>, TypedPureExp<PureExt>),
     /// Lifts a pure boolean expression into the spatial context.
     Pure(TypedPureExp<PureExt>),
+
+    Forall(Box<QuantPerm<PureExt>>),
+}
+
+/// A quantified permission `forall xs :: cond ==> acc(res, perm)`. Its innards
+/// are typed with the **host's** extension, like a pure [`Forall`]'s: a heap
+/// read in the condition, receiver or amount (`x.next.f`) is legal wherever the
+/// host allows one. Translation decides what a quantifier body can lower.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuantPerm<Ext> {
+    pub bound: Vec<TypedIdent>,
+    pub triggers: Vec<Vec<TypedPureExp<Ext>>>, // may be empty
+    /// No user triggers, and the location `f(e(xs))` can serve as the trigger.
+    pub location_trigger: bool,
+    pub cond: TypedPureExp<Ext>, // conjunction of the guards on the path
+    pub res: ResourceExp<Ext>,
+    pub perm: TypedPureExp<Ext>,
 }
 
 /// The valid targets for acc or perm queries.
@@ -249,9 +266,8 @@ pub struct PredicateWithPerm<PureExt> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeapExt {
     Heap(HeapNode<HeapExt>),
-    /// A pure `forall` quantifier. Its innards are always [`AxiomExt`]-typed:
-    /// quantifier bodies are pure and heap-free regardless of host position.
-    Forall(Box<Forall>),
+    /// A pure `forall` quantifier (innards typed with this extension; see [`Forall`]).
+    Forall(Box<Forall<HeapExt>>),
 }
 
 /// The extensions allowed in a domain axiom: a call to a Silver `function`
@@ -265,13 +281,12 @@ pub enum HeapExt {
 /// `TypeError::PreconditionedFunctionInAxiom`) — not after lowering. That check
 /// runs *only* over domain axioms, and it bars **any** precondition, heap-free
 /// ones included. A `forall` hosted in a contract, a statement, or a predicate
-/// body is `AxiomExt`-typed too but never reaches it; there the only gate on a
-/// heap-dependent callee is at lowering (see `translate::pure_exp`'s
-/// `in_quantifier` rejection).
+/// body is typed with its host's extension instead (see [`Forall`]) and never
+/// reaches it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AxiomExt {
     FunctionCall(Call<AxiomExt>),
-    Forall(Box<Forall>),
+    Forall(Box<Forall<AxiomExt>>),
 }
 
 /// A pure universal quantifier: `forall x: T, ... :: { trig } body`. The `body`
@@ -279,17 +294,19 @@ pub enum AxiomExt {
 /// conjunction of trigger terms (Silver's `{ .. }{ .. }` syntax). Only
 /// `forall` reaches here — `exists` is rejected at typechecking.
 ///
-/// Triggers and body are [`AxiomExt`]-typed in **every** host position
-/// (axioms, contracts, predicate bodies, method statements): quantifier
-/// bodies are pure and heap-free, so heap derefs, `unfolding`, `old`, and
-/// `perm` inside a `forall` are rejected by `AxiomExt`'s rules. Free variables
-/// of the enclosing scope, `result` among them, are permitted — translation turns
-/// them into capture parameters.
+/// Triggers and body are typed with the **host's** extension `Ext`: a
+/// quantifier body allows what its host allows (a domain axiom's nothing
+/// heap-flavoured, a method body's field reads and labelled `old`, ...).
+/// Typecheck states only what the host permits; which of those constructs a
+/// quantifier body can be *lowered* with is translation's call
+/// (`translate::pure_exp`, `HeapCtx::in_quantifier`). Free variables of the
+/// enclosing scope, `result` among them, are permitted — translation turns
+/// them into captures.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Forall {
+pub struct Forall<Ext> {
     pub bound: Vec<TypedIdent>,
-    pub triggers: Vec<Vec<TypedPureExp<AxiomExt>>>,
-    pub body: TypedPureExp<AxiomExt>,
+    pub triggers: Vec<Vec<TypedPureExp<Ext>>>,
+    pub body: TypedPureExp<Ext>,
 }
 
 /// Extensions allowed in function postconditions: heap access. `result` is an
@@ -298,8 +315,8 @@ pub struct Forall {
 pub enum FuncEnsuresExt {
     Heap(HeapNode<FuncEnsuresExt>),
     Old(TypedPureExp<FuncEnsuresExt>),
-    /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
-    Forall(Box<Forall>),
+    /// A pure `forall` quantifier (innards typed with this extension; see [`Forall`]).
+    Forall(Box<Forall<Self>>),
 }
 
 /// Extensions allowed in method postconditions: heap access + `old`.
@@ -307,8 +324,8 @@ pub enum FuncEnsuresExt {
 pub enum MethodEnsuresExt {
     Heap(HeapNode<MethodEnsuresExt>),
     Old(TypedPureExp<MethodEnsuresExt>),
-    /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
-    Forall(Box<Forall>),
+    /// A pure `forall` quantifier (innards typed with this extension; see [`Forall`]).
+    Forall(Box<Forall<Self>>),
 }
 
 /// Extensions allowed in imperative method bodies: heap access + labelled `old`
@@ -318,8 +335,8 @@ pub enum MethodBodyExt {
     Heap(HeapNode<MethodBodyExt>),
     Old(Option<Spur>, TypedPureExp<MethodBodyExt>),
     Perm(ResourceExp<MethodBodyExt>),
-    /// A pure `forall` quantifier (innards [`AxiomExt`]-typed; see [`Forall`]).
-    Forall(Box<Forall>),
+    /// A pure `forall` quantifier (innards typed with this extension; see [`Forall`]).
+    Forall(Box<Forall<Self>>),
 }
 
 pub type PureMethodExp = TypedPureExp<MethodBodyExt>;

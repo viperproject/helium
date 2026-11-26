@@ -1,0 +1,17 @@
+// A binder-free heap-dependent call inside a `forall` whose precondition's
+// boolean is not known, at any binding.
+//
+// Must FAIL (the precondition of `pos`).
+field val: Int
+
+function pos(x: Ref): Int
+  requires acc(x.val, wildcard) && x.val > 0
+{ x.val }
+
+domain D { function t(i: Int): Bool }
+
+method precondition_false(y: Ref)
+  requires acc(y.val)
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> pos(y) > i
+}

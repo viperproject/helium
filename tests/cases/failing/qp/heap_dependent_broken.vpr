@@ -1,0 +1,15 @@
+// QP hard: the write sets one member to 0, breaking the heap-dependent
+// postcondition that every member is positive.
+//
+// Must FAIL (postcondition).
+field f: Int
+
+method heap_dependent_broken(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: { x.f } x in s ==> x.f > 0
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: { x.f } x in s ==> x.f > 0
+{
+  a.f := 0
+}

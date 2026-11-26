@@ -1,0 +1,25 @@
+// A field read inside a pure `forall` in a method contract. A single chunk
+// frames `x.val` for every binding, so the read is that chunk's value,
+// captured by the quantifier through the value's recipe (`heap::ReadResolver`).
+//
+// Seen in `Vi/viper/examples/quickselect/arrays_quickselect_rec_index-shifting`
+// (formerly a marco_benchmark known limitation).
+//
+// Must VERIFY.
+domain D {
+  function h(i: Int): Bool
+}
+
+field val: Int
+
+method m(x: Ref)
+  requires acc(x.val)
+  ensures acc(x.val)
+  ensures forall i: Int :: { h(i) } h(i) ==> x.val > i
+
+method client(x: Ref)
+  requires acc(x.val) && h(5)
+{
+  m(x)
+  assert x.val > 5
+}

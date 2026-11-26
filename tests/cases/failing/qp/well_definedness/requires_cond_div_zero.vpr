@@ -1,0 +1,10 @@
+// QP well-definedness: a precondition's condition divides by `n`, which may
+// be 0.
+//
+// Must FAIL (divisor may be zero). Silicon: "Contract might not be well-formed".
+field f: Int
+
+method requires_cond_div_zero(s: Set[Ref], n: Int)
+  requires forall x: Ref :: x in s && 10 / n > 0 ==> acc(x.f)
+{
+}

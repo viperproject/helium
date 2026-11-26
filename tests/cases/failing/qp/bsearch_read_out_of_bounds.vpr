@@ -1,0 +1,42 @@
+// QP hard: `bsearch_found` with the classic off-by-one: `hi` starts at
+// `len(a)` but the loop runs while `lo <= hi`, so `mid` can be `len(a)`,
+// outside the chunk set.
+//
+// Must FAIL (insufficient permission).
+field val: Int
+
+domain IArray {
+  function slot(a: IArray, i: Int): Ref
+  function len(a: IArray): Int
+  function first(r: Ref): IArray
+  function second(r: Ref): Int
+
+  axiom slot_injective {
+    forall a: IArray, i: Int :: { slot(a, i) } first(slot(a, i)) == a && second(slot(a, i)) == i
+  }
+  axiom len_nonneg {
+    forall a: IArray :: { len(a) } len(a) >= 0
+  }
+}
+
+method bsearch_read_out_of_bounds(a: IArray, key: Int) returns (res: Int)
+  requires forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+  ensures  forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+{
+  var lo: Int := 0
+  var hi: Int := len(a)
+  res := -1
+  while (lo <= hi && res == -1)
+    invariant 0 <= lo && lo <= hi + 1 && hi <= len(a)
+    invariant forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+  {
+    var mid: Int := lo + (hi - lo) / 2
+    if (slot(a, mid).val == key) {
+      res := mid
+    } elseif (slot(a, mid).val < key) {
+      lo := mid + 1
+    } else {
+      hi := mid - 1
+    }
+  }
+}

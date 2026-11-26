@@ -1,0 +1,9 @@
+// QP injectivity by index into a sequence of length one: the only index is
+// `0`, so equal elements come from equal indices.
+field f: Int
+
+method singleton_seq_by_index(xs: Seq[Ref])
+{
+  inhale |xs| == 1
+  inhale forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+}

@@ -1,0 +1,12 @@
+// QP medium: a single `acc` is carved out of the chunk set and handed back in
+// the postcondition; the rest of the set is leaked.
+//
+// Must VERIFY.
+field f: Int
+
+method extract_single(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures acc(a.f)
+{
+}

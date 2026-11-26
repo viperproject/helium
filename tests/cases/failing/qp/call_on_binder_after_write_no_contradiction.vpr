@@ -1,0 +1,17 @@
+// A write to a member after a quantifier over calls on the binder makes
+// nothing inconsistent.
+//
+// Must FAIL (assertion).
+field val: Int
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+method m(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s
+{
+  inhale forall x: Ref :: { get(x) } x in s ==> get(x) == 7
+  a.val := 1
+  assert false
+}

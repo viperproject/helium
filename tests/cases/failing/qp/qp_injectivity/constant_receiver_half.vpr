@@ -1,0 +1,10 @@
+// QP injectivity is required whatever the amount: a constant receiver with
+// half permission is rejected just like with full permission.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method constant_receiver_half(s: Set[Ref], r: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(r.f, 1/2)
+}

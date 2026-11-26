@@ -1,0 +1,11 @@
+// QP injectivity: a constant receiver over a set that may have two elements.
+// The singleton contrast is
+// `passing/qp_injectivity/singleton_set_constant_receiver.vpr`.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method two_element_set_constant_receiver(r: Ref, q: Ref)
+{
+  inhale forall x: Ref :: x in Set(r, q) ==> acc(r.f)
+}

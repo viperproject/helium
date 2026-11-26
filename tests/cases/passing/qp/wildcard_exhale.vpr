@@ -1,0 +1,81 @@
+// Exhaling a wildcard quantified permission takes a fresh positive amount
+// below what the covering set holds at each member, recorded as a debit of
+// that set (`plans/wildcard-quantified-permissions.md`, phase 3). A share
+// always remains, and values are kept.
+//
+// Must VERIFY.
+field f: Int
+
+method exhale_twice(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  inhale a.f == 3
+  exhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  exhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  assert perm(a.f) > none
+  assert perm(a.f) < write
+  assert a.f == 3
+}
+
+method exhale_from_wildcard_set(s: Set[Ref], a: Ref)
+  requires a in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  exhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  var v: Int := a.f
+}
+
+method exhale_subset(s: Set[Ref], t: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires t subset s && a in t && b in s && !(b in t)
+{
+  exhale forall x: Ref :: x in t ==> acc(x.f, wildcard)
+  b.f := 2
+  var v: Int := a.f
+}
+
+method loop_invariant(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  var i: Int := 0
+  while (i < 3)
+    invariant forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  {
+    var v: Int := a.f
+    i := i + 1
+  }
+  var w: Int := a.f
+}
+
+method callee(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+
+method call(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  callee(s, a)
+  assert perm(a.f) > none
+}
+
+domain Grid {
+  function cell(g: Int, i: Int): Ref
+  function gx(r: Ref): Int
+  function gy(r: Ref): Int
+
+  axiom {
+    forall g: Int, i: Int :: {cell(g, i)} gx(cell(g, i)) == g && gy(cell(g, i)) == i
+  }
+}
+
+method two_binders(a: Int, b: Int)
+  requires 0 <= a && a < 3 && 0 <= b && b < 3
+{
+  inhale forall g: Int, i: Int :: {cell(g, i)} 0 <= g && g < 3 && 0 <= i && i < 3 ==> acc(cell(g, i).f)
+  exhale forall g: Int, i: Int :: {cell(g, i)} 0 <= g && g < 3 && 0 <= i && i < 3 ==> acc(cell(g, i).f, wildcard)
+  var v: Int := cell(a, b).f
+  assert perm(cell(a, b).f) < write
+}

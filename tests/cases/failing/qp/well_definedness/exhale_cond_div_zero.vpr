@@ -1,0 +1,11 @@
+// QP well-definedness: an exhaled set's condition divides by `n`, which may
+// be 0.
+//
+// Must FAIL (divisor may be zero). Silicon: "Divisor n might be zero".
+field f: Int
+
+method exhale_cond_div_zero(s: Set[Ref], n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+{
+  exhale forall x: Ref :: x in s && 10 / n > 0 ==> acc(x.f)
+}

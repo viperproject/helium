@@ -1,0 +1,15 @@
+// QP easy: writing a field of one element of the quantified domain (needs
+// full permission from the chunk set) and reading the value back.
+//
+// Must VERIFY.
+field f: Int
+
+method write_member(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+  ensures a.f == 5
+{
+  a.f := 5
+  assert a.f == 5
+}

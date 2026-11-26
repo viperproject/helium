@@ -1,0 +1,21 @@
+// The summary map of a spread `fold` reads the holders' values, not any value:
+// `x.f` is 5 after the round trip, so `x.f == 6` must not verify.
+//
+// Must FAIL (assertion).
+field f: Int
+
+predicate all(s: Set[Ref]) {
+  forall y: Ref :: y in s ==> acc(y.f)
+}
+
+method fold_wrong(s1: Set[Ref], s2: Set[Ref], x: Ref)
+  requires x in s1
+  requires s1 intersection s2 == Set[Ref]()
+  requires forall y: Ref :: y in s1 ==> acc(y.f)
+  requires forall y: Ref :: y in s2 ==> acc(y.f)
+  requires x.f == 5
+{
+  fold all(s1 union s2)
+  unfold all(s1 union s2)
+  assert x.f == 6
+}

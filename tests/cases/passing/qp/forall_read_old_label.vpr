@@ -1,0 +1,16 @@
+// A pure `forall` that reads the heap now and at a label: after writing one
+// member, every other member still has its labelled value. The body reads two
+// enclosing heaps (`old[L]` is the one captured at the label).
+//
+// Must VERIFY.
+field f: Int
+
+method write_one(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  label L
+  a.f := a.f + 1
+  assert forall x: Ref :: { x.f } x in s && x != a ==> x.f == old[L](x.f)
+  assert a.f == old[L](a.f) + 1
+}

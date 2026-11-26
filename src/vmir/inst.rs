@@ -121,9 +121,14 @@ impl Inst {
             // The condition of a permission `ite` is a *value* operand and must
             // be walked; the arms are permissions, not `Val`s.
             InstKind::Perm(PermInst::Ite(c, _, _)) => f(c),
-            // Heap instructions cannot occur in a quantifier body, the only place
-            // operand walking is used today.
-            InstKind::Heap(_) => {}
+            // Operand walking is used only on quantifier bodies, whose one heap
+            // step is a heap-dependent call's frame-only exhale.
+            InstKind::Heap(hi) => match hi.frame_exhale() {
+                Some((_, call)) => call.args.iter().for_each(&mut *f),
+                None => panic!(
+                    "a quantifier body holds a heap step other than a frame-only exhale: {hi:?}"
+                ),
+            },
         }
     }
 }

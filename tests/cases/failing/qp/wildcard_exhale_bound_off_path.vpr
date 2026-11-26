@@ -1,0 +1,18 @@
+// A wildcard take from a set bounds what it took by what the set held, but
+// only on the exhale's path. The exhaled set shares its inverses with `Z`,
+// held on every path, so its debit at `a` is `D(a)` on every path too;
+// bounding it everywhere by `c ? 1/2 : none` would force `c`.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method wildcard_exhale_bound_off_path(s: Set[Ref], a: Ref, c: Bool) {
+  inhale forall x: Ref :: { x.f } x in s ==> acc(x.f, c ? 1/2 : none)
+  inhale forall x: Ref :: { x.f } x in s ==> acc(x.f, wildcard) // Z
+  inhale a in s
+  if (c) {
+    exhale forall x: Ref :: { x.f } x in s ==> acc(x.f, wildcard)
+    var v: Int := a.f
+  }
+  assert c
+}

@@ -248,10 +248,17 @@ fn heap_subgraph(ctx: &VerifyContext<'_>, idx: usize, label: &str, heap: &Heap) 
     let mut edges = String::new();
     for (_, chunk) in heap.entries() {
         let c_addr = ctx.egraph.find(chunk.addr);
-        let c_val = ctx.egraph.find(chunk.value);
-        let c_perm = ctx.egraph.find(chunk.perm_repr_id());
+        let c_val = ctx.egraph.find(chunk.stored_value());
+        // `None` for a structural `Zero` amount, which has no e-class: the chunk
+        // is still held (and drawn), with no permission edge.
+        let c_perm = chunk.perm_repr_id().map(|p| ctx.egraph.find(p));
         let node = format!("chunk_{idx}_{}", usize::from(chunk.addr));
-        s.push_str(&format!("    {node}[label=\"chunk\", shape=box]\n"));
+        let label = if c_perm.is_some() {
+            "chunk"
+        } else {
+            "chunk (perm 0)"
+        };
+        s.push_str(&format!("    {node}[label=\"{label}\", shape=box]\n"));
         // Edges target an arbitrary node `.0` in the destination cluster.
         edges.push_str(&format!(
             "  {node} -> {ca}.0 [lhead=cluster_{ca}, color=blue, label=\"@\"]\n",
@@ -261,10 +268,12 @@ fn heap_subgraph(ctx: &VerifyContext<'_>, idx: usize, label: &str, heap: &Heap) 
             "  {node} -> {cv}.0 [lhead=cluster_{cv}, color=black, label=\"v\"]\n",
             cv = usize::from(c_val),
         ));
-        edges.push_str(&format!(
-            "  {node} -> {cp}.0 [lhead=cluster_{cp}, color=red, label=\"p\"]\n",
-            cp = usize::from(c_perm),
-        ));
+        if let Some(c_perm) = c_perm {
+            edges.push_str(&format!(
+                "  {node} -> {cp}.0 [lhead=cluster_{cp}, color=red, label=\"p\"]\n",
+                cp = usize::from(c_perm),
+            ));
+        }
     }
     s.push_str("  }\n");
     s.push_str(&edges);
@@ -379,7 +388,7 @@ pub(crate) fn dump_term(ctx: &VerifyContext<'_>, root: egg::Id, depth: usize) ->
 
 /// One e-node rendered as `op(@child, ...)`, resolving `FuncApp` to its source
 /// name. Children are canonical class ids (`@n`).
-fn render_node(ctx: &VerifyContext<'_>, node: &Symbolic) -> String {
+pub(crate) fn render_node(ctx: &VerifyContext<'_>, node: &Symbolic) -> String {
     let kid = |c: &egg::Id| format!("@{}", usize::from(ctx.egraph.find(*c)));
     let kids: Vec<String> = node.children().iter().map(kid).collect();
     match node {

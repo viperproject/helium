@@ -8,7 +8,7 @@ use lasso::Spur;
 use crate::translate::pure_exp::{self, HeapCtx, OldHeaps, PureExt};
 use crate::translate::resource::lower_resource_addr;
 use crate::translate::sink::{PcKind, Sink};
-use crate::translate::{TranslationContext, TranslationError};
+use crate::translate::{TranslationContext, TranslationError, resource};
 use crate::viper::typed;
 use crate::vmir::{self, FALSE, HeapInst, HeapVal, PermVal, Polarity, PureInst, TRUE, Type, Val};
 
@@ -94,6 +94,7 @@ pub(crate) fn spatial_contains_acc<Ext>(exp: &typed::SpatialExp<Ext>) -> bool {
         S::Conj(l, r) => spatial_contains_acc(l) || spatial_contains_acc(r),
         S::Implies(_, r) => spatial_contains_acc(r),
         S::Ternary { then, else_, .. } => spatial_contains_acc(then) || spatial_contains_acc(else_),
+        S::Forall(_) => true,
     }
 }
 
@@ -224,6 +225,20 @@ pub(crate) fn lower_spatial<Ext: PureExt>(
             let h_out = sink.emit_heap_guarded(inst);
             Ok((h_out, None))
         }
+        S::Forall(qp) => {
+            let q = Box::new(lower_quant_chunks(b, env, sink, hctx, qp)?);
+            // Inhale adds the chunk set; exhale subtracts it. The pc rides on the
+            // inst exactly as for a single `acc` (see the `Acc` arm).
+            let inst = match mode {
+                SpatialMode::Inhale => HeapInst::AddForall {
+                    base: acc_heap,
+                    q,
+                    bind: sink.acc_bind(),
+                },
+                SpatialMode::Exhale { .. } => HeapInst::SubForall { base: acc_heap, q },
+            };
+            Ok((sink.emit_heap_guarded(inst), None))
+        }
         S::Conj(l, r) => {
             let (h_mid, b_l) = lower_spatial(b, env, sink, acc_heap, mode, old, l)?;
             // `A && B`: by short-circuit semantics B is only reached when A
@@ -319,6 +334,109 @@ fn lower_acc<Ext: PureExt>(
     Ok((addr, perm))
 }
 
+/// Lower a quantified permission `forall xs :: cond ==> acc(res, perm)` into a
+/// [`vmir::QuantChunks`]. Scoped like a pure `forall` (see
+/// `pure_exp::lower_forall`): the body is lowered in an inner sink that
+/// continues this sink's temp numbering, so free identifiers resolve to the
+/// enclosing temps (implicit capture).
+///
+/// The hosting heap inst defines no `Val`, so the binders start at this sink's
+/// *next* temp without consuming it; the enclosing stream resumes at that same
+/// number and shadows the body.
+///
+/// The body reads the host's heaps (`hctx`): a heap-dependent receiver
+/// (`x.next.f`) or a labelled `old` lowers to a `Deref` of an enclosing heap,
+/// which the verifier resolves per binding.
+///
+/// `cond` stays separate from the permission (it is the chunk set's domain).
+/// Only the enclosing **branch** conditions gate the permission, as
+/// [`Sink::gate_perm`] does for a single `acc`; the `ite`s are emitted into the
+/// body, which captures their (outer) conditions.
+fn lower_quant_chunks<Ext: PureExt>(
+    b: &TranslationContext<'_>,
+    env: &HashMap<Spur, Val>,
+    sink: &mut Sink,
+    hctx: HeapCtx<'_>,
+    q: &typed::QuantPerm<Ext>,
+) -> Result<vmir::QuantChunks, TranslationError> {
+    let n = q.bound.len();
+    let bound: Vec<Type> = q.bound.iter().map(|bv| b.lower_type(&bv.ty)).collect();
+    let binder_base = sink.val_base + sink.val_count;
+
+    let mut inner_env = env.clone();
+    for (k, bv) in q.bound.iter().enumerate() {
+        inner_env.insert(bv.name.0, Val::Temp(binder_base + k));
+    }
+
+    let mut triggers = Vec::with_capacity(q.triggers.len());
+    for group in &q.triggers {
+        let terms = group
+            .iter()
+            .map(|t| pure_exp::lower_trig_term(b, t, &inner_env))
+            .collect::<Result<Vec<_>, _>>()?;
+        triggers.push(vmir::QuantTrigger {
+            terms: terms.into(),
+        });
+    }
+    // Without user triggers, the location `f(e(xs))` is the trigger: the term
+    // every read or write of a member builds. Only when typecheck found it
+    // matchable (`location_can_trigger`); otherwise there is none.
+    if q.location_trigger {
+        let (name, args) = match &*q.res.0 {
+            typed::ResourceExpKind::Field(e, f) => (f.0, std::slice::from_ref(e)),
+            typed::ResourceExpKind::PredicateCall(c) => (c.name.0, &c.args[..]),
+        };
+        let args: &[typed::TypedPureExp<Ext>] = args;
+        let args = args
+            .iter()
+            .map(|a| pure_exp::lower_trig_term(b, a, &inner_env))
+            .collect::<Result<Vec<_>, _>>()?;
+        triggers.push(vmir::QuantTrigger {
+            terms: Box::new([vmir::TrigTerm::App {
+                head: vmir::TrigHead::Func(b.name_map[&name]),
+                type_args: vec![],
+                args: args.into(),
+            }]),
+        });
+    }
+
+    // Body permission temps are local to the body, so its counter starts at 0.
+    let mut inner = Sink::new(binder_base + n, 0);
+    inner.read_only = sink.read_only;
+    let hctx = HeapCtx {
+        in_quantifier: true,
+        ..hctx
+    };
+    let cond = pure_exp::lower(b, &inner_env, &mut inner, hctx, &q.cond)?;
+    let loc = lower_resource_addr(b, &inner_env, &mut inner, hctx, &q.res)?;
+    let loc_ty = resource::resource_addr_type(b, &q.res)?;
+    let mut perm = if is_wildcard(&q.perm) {
+        PermVal::Wildcard
+    } else {
+        let v = pure_exp::lower(b, &inner_env, &mut inner, hctx, &q.perm)?;
+        inner.perm_amount(v)
+    };
+    for (lit, pol) in sink.branch_conds().into_iter().rev() {
+        perm = match pol {
+            Polarity::Positive => inner.emit_perm(vmir::PermInst::Ite(lit, perm, PermVal::none())),
+            Polarity::Negative => inner.emit_perm(vmir::PermInst::Ite(lit, PermVal::none(), perm)),
+        };
+    }
+
+    Ok(vmir::QuantChunks {
+        binder_base,
+        bound: bound.into(),
+        triggers: triggers.into(),
+        body: vmir::QuantBody {
+            insts: inner.insts,
+            cond,
+            loc,
+            perm,
+        },
+        loc_ty,
+    })
+}
+
 /// Whether a permission expression is the `wildcard` literal.
 pub(crate) fn is_wildcard<Ext>(perm: &typed::TypedPureExp<Ext>) -> bool {
     matches!(
@@ -398,5 +516,11 @@ pub(crate) fn lower_assertion_bool<Ext: PureExt>(
             })
         }
         S::Pure(p) => Ok(Some(pure_exp::lower(b, env, sink, hctx, p)?)),
+        // `forall xs :: c ==> acc(e.f, p)` as a boolean would be
+        // `forall xs :: c ==> perm(e.f) >= p`, a heap read inside a quantifier
+        // body, which a `forall` cannot host.
+        S::Forall(_) => Err(TranslationError::Unsupported(
+            "quantified permission in assert/assume",
+        )),
     }
 }

@@ -1,0 +1,14 @@
+// QP medium: each arm writes a different value through the chunk set; after
+// the join the value depends on the branch.
+//
+// Must VERIFY.
+field f: Int
+
+method branch_write_each_arm(s: Set[Ref], a: Ref, b: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (b) { a.f := 1 } else { a.f := 2 }
+  assert b ==> a.f == 1
+  assert !b ==> a.f == 2
+}

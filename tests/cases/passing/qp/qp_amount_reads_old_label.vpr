@@ -1,0 +1,15 @@
+// A quantified permission whose amount reads the heap at a label: what was
+// inhaled with amount `x.p` is exhaled with `old[L](x.p)`, the same values.
+//
+// Must VERIFY.
+field p: Perm
+field g: Int
+
+method give_back(s: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.p, 1/2)
+  requires forall x: Ref :: { x.p } x in s ==> none <= x.p
+  requires forall x: Ref :: x in s ==> acc(x.g, x.p)
+{
+  label L
+  exhale forall x: Ref :: x in s ==> acc(x.g, old[L](x.p))
+}

@@ -1,0 +1,16 @@
+// `wildcard_exhale_bound_off_path`, asked on the sibling path: the bound on
+// the take inside `if (c)` must not make `!c` unreachable.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method wildcard_exhale_bound_sibling(s: Set[Ref], a: Ref, c: Bool) {
+  inhale forall x: Ref :: { x.f } x in s ==> acc(x.f, c ? 1/2 : none)
+  inhale forall x: Ref :: { x.f } x in s ==> acc(x.f, wildcard)
+  inhale a in s
+  if (c) {
+    exhale forall x: Ref :: { x.f } x in s ==> acc(x.f, wildcard)
+    var v: Int := a.f
+  }
+  if (!c) { assert false }
+}

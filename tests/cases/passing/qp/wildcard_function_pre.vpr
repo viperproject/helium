@@ -1,0 +1,52 @@
+// A function whose precondition is a quantified permission (every amount in
+// a function precondition is a wildcard). A call frames it: each member must
+// hold a positive share, and nothing is taken. Its value follows the
+// members' values, and a write to another member leaves it alone.
+//
+// Must VERIFY.
+field f: Int
+
+function get(s: Set[Ref], a: Ref): Int
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  a.f
+}
+
+function twice(s: Set[Ref], a: Ref): Int
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  get(s, a) + get(s, a)
+}
+
+method call_after_write(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b
+{
+  a.f := 5
+  assert get(s, a) == 5
+  b.f := 7
+  assert get(s, a) == 5
+}
+
+method call_from_fractions(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires a in s
+{
+  assert twice(s, a) == 2 * a.f
+}
+
+method call_from_wildcard_set(s: Set[Ref], a: Ref)
+  requires a in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  inhale a.f == 4
+  assert get(s, a) == 4
+}
+
+method call_from_single_chunks(a: Ref, b: Ref)
+  requires acc(a.f) && acc(b.f, 1/2)
+{
+  var v: Int := get(Set(a, b), a)
+}

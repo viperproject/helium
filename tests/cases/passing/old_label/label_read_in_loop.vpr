@@ -1,0 +1,23 @@
+// Control for `failing/old_label_not_reached`: `L` sits in the `d` arm and is read
+// in a loop in that arm and after it. Every block the loop lowers to is dominated
+// by `L`'s, so the label heap frames the read in each.
+//
+// Must VERIFY.
+field f: Int
+
+method m(a: Ref, d: Bool, n: Int)
+  requires acc(a.f) && a.f == 2
+  ensures acc(a.f)
+{
+  if (d) {
+    label L
+    var i: Int := 0
+    while (i < n)
+      invariant acc(a.f)
+    {
+      a.f := old[L](a.f) + i
+      i := i + 1
+    }
+    assert old[L](a.f) == 2
+  }
+}

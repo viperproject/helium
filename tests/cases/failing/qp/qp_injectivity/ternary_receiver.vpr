@@ -1,0 +1,9 @@
+// QP injectivity: on the `!b` branch every binding names `r.f`.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method ternary_receiver(s: Set[Ref], r: Ref, b: Bool)
+{
+  inhale forall x: Ref :: x in s ==> acc((b ? x : r).f)
+}

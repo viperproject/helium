@@ -1,0 +1,16 @@
+// QP hard: a graph closed under `next`: every non-null successor of a node is
+// again a node, so following `next` twice stays within the held permissions.
+//
+// Must VERIFY.
+field next: Ref
+
+method closed_graph(nodes: Set[Ref], a: Ref) returns (r: Ref)
+  requires forall x: Ref :: x in nodes ==> acc(x.next)
+  requires forall x: Ref :: { x.next } x in nodes && x.next != null ==> x.next in nodes
+  requires a in nodes
+{
+  r := a.next
+  if (r != null) {
+    r := r.next
+  }
+}

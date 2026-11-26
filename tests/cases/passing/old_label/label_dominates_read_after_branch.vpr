@@ -1,0 +1,16 @@
+// Control for `failing/old_label_not_reached`: `L` is at method level, so it is
+// reached on every path to the reads after the branch. Its heap must still frame
+// `old[L](a.f)` there, and the value it holds is the one before the branch.
+//
+// Must VERIFY.
+field f: Int
+
+method m(a: Ref, d: Bool)
+  requires acc(a.f) && a.f == 3
+  ensures acc(a.f) && a.f == 3
+{
+  label L
+  if (d) { a.f := 5 } else { a.f := 7 }
+  assert old[L](a.f) == 3
+  a.f := old[L](a.f)
+}

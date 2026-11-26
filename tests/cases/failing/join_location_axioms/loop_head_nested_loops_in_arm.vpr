@@ -1,0 +1,18 @@
+// `loop_head_in_arm.vpr` with a second loop nested in the first: both heads
+// re-inhale the invariant in a join phase, each under its own reach condition,
+// and `x != y` from either must stay under the arm. Silicon rejects.
+field f: Int
+
+method loop_head_nested_loops_in_arm(x: Ref, y: Ref, c: Bool, n: Int)
+{
+  if (c) {
+    inhale acc(x.f) && acc(y.f)
+    var i: Int := 0
+    while (i < n) invariant acc(x.f) && acc(y.f) {
+      var j: Int := 0
+      while (j < n) invariant acc(x.f) && acc(y.f) { j := j + 1 }
+      i := i + 1
+    }
+  }
+  assert x != y
+}

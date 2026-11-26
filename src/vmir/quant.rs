@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{FunctionBody, InstKind, PureInst, TyParams, Type, Val};
+use crate::vmir::{FunctionBody, HeapVal, InstKind, PermVal, PureInst, TyParams, Type, Val};
 use std::fmt::{self, Display, Formatter};
 
 /// A pure `forall`, **inline** in the enclosing instruction stream (it is an
@@ -73,25 +73,19 @@ impl Forall {
     /// `binder_base` — the two levels are filtered by the same rule, so an inner
     /// reference to an outer binder stops here rather than escaping further out.
     pub fn free_temps(&self) -> Vec<usize> {
-        let mut out = Vec::new();
-        let mut seen = crate::dhash::HashSet::default();
-        let mut visit = |v: &Val| {
-            if let Val::Temp(k) = v
-                && *k < self.binder_base
-                && seen.insert(*k)
-            {
-                out.push(*k);
-            }
-        };
-        for group in self.triggers.iter() {
-            for term in group.terms.iter() {
-                term.for_each_var(&mut visit);
-            }
-        }
-        for inst in &self.body.insts {
-            inst.for_each_operand(&mut visit);
-        }
-        out
+        free_temps_of(self.binder_base, &self.triggers, &self.body.insts, &[])
+    }
+
+    /// The heap reads of this quantifier's own body, in instruction order (see
+    /// [`HeapRead`]). Derived, like [`Forall::free_temps`].
+    pub fn heap_reads(&self) -> Vec<HeapRead> {
+        heap_reads_of(self.step_base(), &self.body.insts)
+    }
+
+    /// The heap-dependent calls of this quantifier's own body, in instruction
+    /// order (see [`HeapCall`]). Derived, like [`Forall::heap_reads`].
+    pub fn heap_calls(&self) -> Vec<HeapCall> {
+        heap_calls_of(self.step_base(), &self.body.insts)
     }
 
     /// Visit every type this quantifier mentions: its binder types, its
@@ -111,6 +105,220 @@ impl Forall {
             term.for_each_type_mut(f);
         }
         self.body.for_each_type_mut(f);
+    }
+}
+
+/// The enclosing temps (`< binder_base`) a quantified scope mentions, in
+/// first-appearance order: triggers first, then the body's instructions, then
+/// `extra` (operands the scope's result carries outside its instruction
+/// stream). Shared by [`Forall`] and [`QuantChunks`], so the two capture rules
+/// cannot drift apart.
+fn free_temps_of(
+    binder_base: usize,
+    triggers: &[QuantTrigger],
+    insts: &[crate::vmir::Inst],
+    extra: &[Val],
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut seen = crate::dhash::HashSet::default();
+    let mut visit = |v: &Val| {
+        if let Val::Temp(k) = v
+            && *k < binder_base
+            && seen.insert(*k)
+        {
+            out.push(*k);
+        }
+    };
+    for group in triggers {
+        for term in group.terms.iter() {
+            term.for_each_var(&mut visit);
+        }
+    }
+    for inst in insts {
+        inst.for_each_operand(&mut visit);
+    }
+    extra.iter().for_each(&mut visit);
+    out
+}
+
+/// A heap read in a quantifier body: a `Deref` of an **enclosing** heap. A body
+/// defines no heap, so every heap it mentions is captured, exactly as a temp
+/// below `binder_base` is. The verifier resolves each read to a value map of
+/// that heap before it uses the body, so the body it compiles is heap-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapRead {
+    /// The enclosing heap it reads (`Empty` in a resource body's first slots).
+    pub heap: HeapVal,
+    /// The address it reads, a body operand.
+    pub addr: Val,
+    /// The address's `Type::Addr`: which kind of location it reads.
+    pub addr_ty: Type,
+}
+
+/// The heap reads of a quantified scope's own instructions (its steps from
+/// `step_base` on), in order. A nested `forall`'s reads belong to that
+/// quantifier and are not listed: each level resolves its own. Panics on a
+/// read at an address the body does not compute: translation builds every
+/// address inside the body (`resource::field_addr` in the body's sink).
+fn heap_reads_of(step_base: usize, insts: &[crate::vmir::Inst]) -> Vec<HeapRead> {
+    let step_types = step_types(insts);
+    insts
+        .iter()
+        .filter_map(|inst| match &inst.kind {
+            InstKind::Pure(_, PureInst::Deref(heap, addr)) => {
+                let addr_ty = match addr {
+                    Val::Temp(t) if *t >= step_base => step_types[t - step_base].clone(),
+                    _ => panic!("a quantifier body reads at {addr:?}, which it does not compute"),
+                };
+                Some(HeapRead {
+                    heap: *heap,
+                    addr: addr.clone(),
+                    addr_ty,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The type of the `Val` each step of a quantifier body yields, in order: a
+/// body's temps from `step_base` on name these. A pure step yields its own
+/// type, a heap-dependent call's frame-only exhale its snapshot.
+fn step_types(insts: &[crate::vmir::Inst]) -> Vec<Type> {
+    insts
+        .iter()
+        .filter_map(|i| match &i.kind {
+            InstKind::Pure(ty, _) => Some(ty.clone()),
+            InstKind::Heap(hi) => Some(Type::Snap(frame_call(hi).resource)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The call of a quantifier body's heap step, which is always a frame-only
+/// exhale (see [`HeapCall`]).
+fn frame_call(hi: &crate::vmir::HeapInst) -> &crate::vmir::ResourceCall {
+    hi.frame_exhale().map(|(_, call)| call).unwrap_or_else(|| {
+        panic!("a quantifier body holds a heap step other than a frame-only exhale: {hi:?}")
+    })
+}
+
+/// A heap-dependent function call in a quantifier body: the frame-only
+/// `exhale` of the callee's `#requires` on an **enclosing** heap, which yields
+/// the snapshot the call takes. Like a [`HeapRead`], the verifier resolves it
+/// before it uses the body: framed per binding, then replaced by stand-ins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeapCall {
+    /// The enclosing heap it frames against.
+    pub heap: HeapVal,
+    pub call: crate::vmir::ResourceCall,
+    /// The snapshot temp the exhale yields.
+    pub snap: Val,
+}
+
+/// The heap-dependent calls of a quantified scope's own instructions, in
+/// order. A nested `forall`'s calls belong to that quantifier.
+fn heap_calls_of(step_base: usize, insts: &[crate::vmir::Inst]) -> Vec<HeapCall> {
+    // Per body step, in order: the temp it yields is `step_base + steps`.
+    let mut steps = 0;
+    let mut out = Vec::new();
+    for inst in insts {
+        match &inst.kind {
+            InstKind::Pure(..) => steps += 1,
+            InstKind::Heap(hi) => {
+                let call = frame_call(hi);
+                let (heap, _) = hi.frame_exhale().expect("checked by frame_call");
+                out.push(HeapCall {
+                    heap,
+                    call: call.clone(),
+                    snap: Val::Temp(step_base + steps),
+                });
+                steps += 1;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A quantified set of heap chunks, `{ loc(xs) @ perm(xs) | cond(xs) }` — the
+/// payload of a quantified permission. Scoped exactly like [`Forall`]: the body
+/// shares the enclosing temp space, binder `i` is `Val::Temp(binder_base + i)`,
+/// and a temp below `binder_base` is a free (captured) enclosing value.
+///
+/// Unlike a `Forall`, the hosting heap instruction defines no `Val` of its own,
+/// so `binder_base` is the enclosing stream's *next* temp and the stream resumes
+/// at that same number afterwards (the body is shadowed, never overlapped).
+///
+/// `cond` is kept apart from `perm` on purpose: it is the chunk set's domain,
+/// which lookup, inverse functions and injectivity all need. Only the
+/// *enclosing* branch conditions are folded into `perm`, as for a single `acc`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QuantChunks {
+    /// The first temp this scope owns; binder `i` is `Val::Temp(binder_base + i)`.
+    pub binder_base: usize,
+    /// The binder types.
+    pub bound: Box<[Type]>,
+    /// Trigger groups, as alternatives. Without user triggers, translation
+    /// uses the location's address call `f(e(xs))`; empty only when that
+    /// cannot serve as one either (e.g. a constant receiver).
+    pub triggers: Box<[QuantTrigger]>,
+    pub loc_ty: Type,
+    pub body: QuantBody,
+}
+
+/// The body of a [`QuantChunks`]: `Pure` and `Perm` instructions, plus the
+/// `Assert`/`Assume` a call to a contract-bearing function stitches in, then the
+/// per-binding condition, location and permission.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QuantBody {
+    pub insts: Vec<crate::vmir::Inst>,
+    /// `Bool`: whether the binding contributes a chunk.
+    pub cond: Val,
+    /// `Addr<T>`: every instance has the same location kind.
+    pub loc: Val,
+    /// The amount; a `Temp` names a `Perm` instruction of *this body* (body
+    /// permission temps count from 0).
+    pub perm: PermVal,
+}
+
+impl QuantBody {
+    /// Returns true iff in any instruction a wildcard appears or the permission is a wildcard.
+    pub fn contains_wc_permission(&self) -> bool {
+        self.perm.is_wildcard()
+            || self
+                .insts
+                .iter()
+                .any(|i| matches!(&i.kind, InstKind::Perm(p) if p.has_wildcard_arm()))
+    }
+}
+
+impl QuantChunks {
+    /// One past the last temp this scope owns for binders.
+    pub fn step_base(&self) -> usize {
+        self.binder_base + self.bound.len()
+    }
+
+    /// The heap reads of this scope's body, in instruction order (see
+    /// [`HeapRead`]): a heap-dependent condition, receiver or amount.
+    pub fn heap_reads(&self) -> Vec<HeapRead> {
+        heap_reads_of(self.step_base(), &self.body.insts)
+    }
+
+    /// The heap-dependent calls of this scope's body, in instruction order
+    /// (see [`HeapCall`]).
+    pub fn heap_calls(&self) -> Vec<HeapCall> {
+        heap_calls_of(self.step_base(), &self.body.insts)
+    }
+
+    /// The enclosing temps this scope mentions (its capture list), triggers
+    /// first, then the body, then `cond`, `loc` and the permission amount.
+    pub fn free_temps(&self) -> Vec<usize> {
+        let mut extra = vec![self.body.cond.clone(), self.body.loc.clone()];
+        if let PermVal::Amount(a) = &self.body.perm {
+            extra.push(a.clone());
+        }
+        free_temps_of(self.binder_base, &self.triggers, &self.body.insts, &extra)
     }
 }
 
@@ -136,6 +344,9 @@ impl FunctionBody {
                     }
                 }
                 InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {}
+                // A heap-dependent call's snapshot: `Snap(..)` has no type
+                // arguments.
+                InstKind::Heap(hi) if hi.frame_exhale().is_some() => {}
                 InstKind::Heap(_) | InstKind::Perm(_) => {
                     panic!(
                         "a quantifier or axiom body is pure, but has {:?}",
@@ -165,6 +376,9 @@ impl FunctionBody {
                     }
                 }
                 InstKind::Assume(_) | InstKind::Assert(_) | InstKind::Refute(_) => {}
+                // A heap-dependent call's snapshot: `Snap(..)` has no type
+                // arguments.
+                InstKind::Heap(hi) if hi.frame_exhale().is_some() => {}
                 InstKind::Heap(_) | InstKind::Perm(_) => {
                     panic!(
                         "a quantifier or axiom body is pure, but has {:?}",
@@ -405,6 +619,56 @@ impl<'a> Display for VmirDisplay<'a, &'a Forall> {
             self.with_nested((q.step_base(), 0usize, 0usize, &q.body.insts[..]))
         )?;
         writeln!(f, "{body_indent}result: {}", q.body.res)?;
+        write!(f, "{}}}", self.indent())
+    }
+}
+
+/// A quantified chunk set, rendered as a nested block whose result is the
+/// guarded chunk `cond ? loc @ perm`:
+///
+/// ```text
+/// forall e2: Ref :: {
+///   e3: Bool := contains(e0, e2)
+///   e4: &[f] Int @ 1/1 := f(e2)
+///   result: e3 ? e4 @ 1/1
+/// }
+/// ```
+///
+/// Triggers are printed only when present (` :: {f(e2)}`).
+impl<'a> Display for VmirDisplay<'a, &'a QuantChunks> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let q = self.item;
+        write!(f, "forall ")?;
+        for (k, ty) in q.bound.iter().enumerate() {
+            if k > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "e{}: {}", q.binder_base + k, self.with(ty))?;
+        }
+        write!(f, " ::")?;
+        for group in q.triggers.iter() {
+            write!(f, " {{")?;
+            for (k, term) in group.terms.iter().enumerate() {
+                if k > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}", self.with(term))?;
+            }
+            write!(f, "}}")?;
+        }
+        writeln!(f, " {{")?;
+        let body_indent = self.with_nested(()).indent();
+        // Body permission temps are local to the body, so they count from `p0`.
+        write!(
+            f,
+            "{}",
+            self.with_nested((q.step_base(), 0usize, 0usize, &q.body.insts[..]))
+        )?;
+        writeln!(
+            f,
+            "{body_indent}result: {} ? {} @ {}",
+            q.body.cond, q.body.loc, q.body.perm
+        )?;
         write!(f, "{}}}", self.indent())
     }
 }

@@ -1,0 +1,13 @@
+// QP medium: `perm` sums a chunk set's share and a single chunk at the same
+// location.
+//
+// Must VERIFY.
+field f: Int
+
+method perm_qp_plus_single(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires a in s
+  requires acc(a.f, 1/2)
+{
+  assert perm(a.f) == write
+}

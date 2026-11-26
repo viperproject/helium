@@ -1,0 +1,24 @@
+// Location axioms recomputed at a join *inside* a branch must stay under that
+// branch's reach condition.
+//
+// The inner join at the end of the `e` arm merges two heaps that both hold
+// `acc(a.f)` and `acc(b.f)`, and states the non-aliasing axiom over the result:
+// two full permissions, so `a != b`. A join phase has no ambient block cube —
+// the join block's reach condition rides on the merge's own pc — but the axioms
+// were gated by the (empty) ambient cube, so `a != b` landed on ground and held
+// on the `!e` path too. Silicon rejects.
+field f: Int
+
+method inner_join_in_arm(a: Ref, b: Ref, e: Bool, d: Bool)
+  requires acc(a.f)
+{
+  if (e) {
+    inhale acc(b.f)
+    if (d) {
+      inhale a.f == 1
+    } else {
+      inhale a.f == 2
+    }
+  }
+  assert a != b
+}

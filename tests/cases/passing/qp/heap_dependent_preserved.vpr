@@ -1,0 +1,15 @@
+// QP hard: a write to one member re-establishes a heap-dependent pure
+// `forall` over the whole domain (the other members are framed).
+//
+// Must VERIFY.
+field f: Int
+
+method heap_dependent_preserved(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires forall x: Ref :: { x.f } x in s ==> x.f > 0
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: { x.f } x in s ==> x.f > 0
+{
+  a.f := a.f + 1
+}

@@ -1,0 +1,21 @@
+// A write to a member that may be the one the function reads can change the
+// function's value.
+//
+// Must FAIL (assertion).
+field f: Int
+
+function get(s: Set[Ref], a: Ref): Int
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  a.f
+}
+
+method wildcard_function_pre_aliased_write(s: Set[Ref], a: Ref, b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s
+{
+  var v: Int := get(s, a)
+  b.f := 7
+  assert get(s, a) == v
+}

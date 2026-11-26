@@ -1,0 +1,22 @@
+// QP medium (loop exit / heap sum): the body writes a member each iteration;
+// the invariant tracks its value.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_invariant_writes(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && 0 <= n
+{
+  a.f := 0
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f)
+    invariant a.f == i
+  {
+    a.f := a.f + 1
+    i := i + 1
+  }
+  assert a.f == n
+}

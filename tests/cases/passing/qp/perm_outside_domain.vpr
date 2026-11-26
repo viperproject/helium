@@ -1,0 +1,12 @@
+// QP easy: a location whose receiver is outside the domain gets nothing from
+// the chunk set, so its permission is `none`.
+//
+// Must VERIFY.
+field f: Int
+
+method perm_outside_domain(s: Set[Ref], b: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires !(b in s)
+{
+  assert perm(b.f) == none
+}

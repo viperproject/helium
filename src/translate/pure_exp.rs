@@ -31,11 +31,13 @@ pub(crate) struct HeapCtx<'a> {
     pub value: HeapVal,
     pub perm: HeapVal,
     pub old: Option<&'a OldHeaps<'a>>,
-    /// Set while lowering a `forall` body. There is no heap in there (`value` and
-    /// `perm` are the inert `Empty`) and there cannot be one: the body is compiled
-    /// into a recipe the verifier rebuilds inside a rewrite rule, which can
-    /// neither read the symbolic heap nor discharge an obligation. It gates the
-    /// one construct that would need both — a heap-dependent call's `Snap`.
+    /// Set while lowering a `forall` body (pure or a quantified permission's).
+    /// The body keeps the host's heaps: a field read lowers to a `Deref` of an
+    /// enclosing heap, and a heap-dependent call to a frame-only `exhale` of it,
+    /// which the verifier resolves per binding before the body is compiled into
+    /// a recipe (a recipe is rebuilt inside a rewrite rule, which can neither
+    /// read the symbolic heap nor discharge an obligation). It gates the
+    /// constructs that cannot be resolved that way yet: `unfolding` and `perm`.
     pub in_quantifier: bool,
 }
 
@@ -782,39 +784,12 @@ fn lower_func_app<Ext: PureExt>(
         // Narrow the current value heap to the callee's precondition snapshot.
         // `Snap` implicitly asserts the precondition under the running pc.
         let req_id = requires.expect("heap-dep implies a requires");
-        // A quantifier body has no heap to narrow, and could not have one (see
-        // `HeapCtx::in_quantifier`). A binder-dependent footprint would need
-        // quantified permissions besides.
-        //
-        // The obvious workaround — emit the `Snap` in the *host* scope and let
-        // `vmir::Forall::free_temps` capture it — does not work, for two reasons
-        // worth recording so they are not re-derived:
-        //
-        //  * `Snap` bundles two jobs: it narrows the footprint to a snapshot
-        //    *and* asserts the resource's boolean. Those pull opposite ways here.
-        //    The snapshot wants to be binder-free (one captured value), but the
-        //    boolean must be checked per-binding **under the quantifier's
-        //    antecedent** — for `get(xs, i)` it is typically `0 <= i && i < len(xs)`,
-        //    which only the antecedent establishes. Hoisting asserts it outside the
-        //    antecedent, so it fails exactly where the feature would be wanted.
-        //  * `f#requires` is parameterized by the callee's *whole* param list, so a
-        //    `Snap` for `get(xs, i)` carries `args = [xs, i]` and mentions the
-        //    binder even when no footprint slot does. Hoisting is therefore only
-        //    ever applicable to calls that are already fully binder-free.
-        //
-        // Supporting this properly means splitting those two jobs: a
-        // param-independence analysis over the footprint recipes, a snapshot term
-        // that omits the irrelevant params, and per-binding checking of the
-        // resource boolean under the antecedent.
-        if hctx.in_quantifier {
-            return Err(TranslationError::HeapDepFunctionInQuantifier(
-                b.interner.resolve(&call.name.0).to_string(),
-            ));
-        }
         // The implicit precondition check: a frame-only exhale of the callee's
         // `#requires` resource, yielding its snapshot but no heap. `1/1`, not
         // `wildcard`: the scale multiplies each footprint slot's own permission,
         // so `1 * p` reproduces the amounts the dedicated `Snap` instruction used.
+        // The same inside a quantifier body: the verifier resolves the exhale
+        // like a field read, per binding under the body's path condition.
         let s = sink.emit_resource_frame_exhale(
             hctx.value,
             vmir::ResourceCall {
@@ -876,6 +851,9 @@ pub(crate) fn lower_heap_node<Ext: PureExt>(
         }
         // A heap-dependent Silver `function` — not generic yet, so no type args.
         H::FunctionCall(call) => lower_func_app(b, env, sink, hctx, ty, call),
+        H::Unfolding(_, _) if hctx.in_quantifier => Err(TranslationError::Unsupported(
+            "`unfolding` inside a quantifier",
+        )),
         H::Unfolding(pwp, body) => {
             // `unfolding acc(P(args), perm) in body`: a scoped unfold. Emit an
             // `Unfold`, evaluate `body` against the unfolded heap, then discard it
@@ -901,6 +879,32 @@ pub(crate) trait PureExt: Sized + Clone + std::fmt::Debug {
         ty: vmir::Type,
         ext: &Self,
     ) -> Result<Val, TranslationError>;
+
+    /// What a trigger term rooted at this extension node matches on. Typecheck
+    /// (`check_triggers`) admits only the [`TrigNode::Call`] and
+    /// [`TrigNode::Field`] shapes.
+    fn trig_node(&self) -> TrigNode<'_, Self>;
+}
+
+/// The trigger view of an extension node (see [`PureExt::trig_node`]).
+pub(crate) enum TrigNode<'a, Ext> {
+    /// A Silver `function` application.
+    Call(&'a typed::Call<Ext>),
+    /// A field read `e.f`: it matches the field's location term `f(e)`, which
+    /// every read of the field builds (as a quantified permission's default
+    /// location trigger does).
+    Field(&'a typed::TypedPureExp<Ext>, Spur),
+    /// Anything else; rejected by typecheck.
+    NotMatchable,
+}
+
+/// [`PureExt::trig_node`] of a heap node.
+fn heap_trig_node<Ext>(node: &typed::HeapNode<Ext>) -> TrigNode<'_, Ext> {
+    match node {
+        typed::HeapNode::Field(e, f) => TrigNode::Field(e, f.0),
+        typed::HeapNode::FunctionCall(call) => TrigNode::Call(call),
+        typed::HeapNode::Unfolding(..) => TrigNode::NotMatchable,
+    }
 }
 
 impl PureExt for ! {
@@ -913,6 +917,9 @@ impl PureExt for ! {
         ext: &Self,
     ) -> Result<Val, TranslationError> {
         match *ext {}
+    }
+    fn trig_node(&self) -> TrigNode<'_, Self> {
+        match *self {}
     }
 }
 
@@ -927,7 +934,13 @@ impl PureExt for typed::HeapExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::HeapExt::Heap(node) => lower_heap_node(b, env, sink, hctx, ty, node),
-            typed::HeapExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::HeapExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn trig_node(&self) -> TrigNode<'_, Self> {
+        match self {
+            typed::HeapExt::Heap(node) => heap_trig_node(node),
+            typed::HeapExt::Forall(_) => TrigNode::NotMatchable,
         }
     }
 }
@@ -947,7 +960,13 @@ impl PureExt for typed::AxiomExt {
     ) -> Result<Val, TranslationError> {
         match ext {
             typed::AxiomExt::FunctionCall(call) => lower_func_app(b, env, sink, hctx, ty, call),
-            typed::AxiomExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::AxiomExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn trig_node(&self) -> TrigNode<'_, Self> {
+        match self {
+            typed::AxiomExt::FunctionCall(call) => TrigNode::Call(call),
+            typed::AxiomExt::Forall(_) => TrigNode::NotMatchable,
         }
     }
 }
@@ -964,11 +983,16 @@ impl PureExt for typed::AxiomExt {
 /// counter is left at `p + 1`, so the enclosing stream shadows the body's temps
 /// rather than skipping past them; the two scopes never overlap in time, so that
 /// is sound and it keeps the verifier's positional value table dense.
-fn lower_forall(
+///
+/// The body reads the host's heaps (`hctx`, with `in_quantifier` set): a field
+/// read, `old(..)` or `old[L](..)` lowers to a `Deref` of an enclosing heap,
+/// resolved by the verifier.
+fn lower_forall<Ext: PureExt>(
     b: &TranslationContext<'_>,
     env: &HashMap<Spur, Val>,
     sink: &mut Sink,
-    q: &typed::Forall,
+    hctx: HeapCtx<'_>,
+    q: &typed::Forall<Ext>,
 ) -> Result<Val, TranslationError> {
     let n = q.bound.len();
     let bound: Vec<vmir::Type> = q.bound.iter().map(|bv| b.lower_type(&bv.ty)).collect();
@@ -1006,10 +1030,8 @@ fn lower_forall(
     // the binders) occupy `Val::Temp(0..binder_base + n)`.
     let mut inner = Sink::new(binder_base + n, 0);
     let hctx = HeapCtx {
-        value: HeapVal::Empty,
-        perm: HeapVal::Empty,
-        old: None,
         in_quantifier: true,
+        ..hctx
     };
     let res = lower(b, &inner_env, &mut inner, hctx, &q.body)?;
     let body = vmir::FunctionBody {
@@ -1037,17 +1059,39 @@ fn lower_forall(
 /// lowered to the same head the body's `PureInst` would produce, with its
 /// arguments lowered recursively (a trigger may nest arbitrarily). Shapes outside
 /// this grammar were rejected at typecheck (`check_triggers`).
-fn lower_trig_term(
+pub(crate) fn lower_trig_term<Ext: PureExt>(
     b: &TranslationContext<'_>,
-    term: &typed::TypedPureExp<typed::AxiomExt>,
+    term: &typed::TypedPureExp<Ext>,
     env: &HashMap<Spur, Val>,
 ) -> Result<vmir::TrigTerm, TranslationError> {
     use typed::PureExpKind as P;
-    let lower_args = |args: &[typed::TypedPureExp<typed::AxiomExt>]| {
+    let lower_args = |args: &[typed::TypedPureExp<Ext>]| {
         args.iter()
             .map(|a| lower_trig_term(b, a, env))
             .collect::<Result<Vec<_>, _>>()
     };
+    // An extension node is a trigger application only as a Silver `function`
+    // call or a field read (typecheck's `check_triggers`).
+    let ext_node = match term.exp.as_ref() {
+        P::Ext(ext) => Some(ext.trig_node()),
+        _ => None,
+    };
+    let call = match (term.exp.as_ref(), &ext_node) {
+        (P::DomainFunctionCall(call), _) => Some(call),
+        (_, Some(TrigNode::Call(call))) => Some(*call),
+        _ => None,
+    };
+    if let Some(TrigNode::Field(base, field)) = ext_node {
+        // `e.f` matches the location term `f(e)` every read of `f` builds.
+        let function = *b.name_map.get(&field).ok_or_else(|| {
+            TranslationError::UnknownIdent(b.interner.resolve(&field).to_string())
+        })?;
+        return Ok(vmir::TrigTerm::App {
+            head: vmir::TrigHead::Func(function),
+            type_args: Vec::new(),
+            args: Box::new([lower_trig_term(b, base, env)?]),
+        });
+    }
     match term.exp.as_ref() {
         P::Ident(id) => match env.get(&id.0) {
             Some(Val::Temp(k)) => Ok(vmir::TrigTerm::Var(*k)),
@@ -1059,16 +1103,23 @@ fn lower_trig_term(
             )),
         },
         P::Const(lit) => Ok(vmir::TrigTerm::Lit(lower_literal(lit)?)),
-        P::DomainFunctionCall(call) | P::Ext(typed::AxiomExt::FunctionCall(call)) => {
+        P::DomainFunctionCall(_) | P::Ext(_) if let Some(call) = call => {
             let function = *b.name_map.get(&call.name.0).ok_or_else(|| {
                 TranslationError::UnknownIdent(b.interner.resolve(&call.name.0).to_string())
             })?;
             // A Silver function has no `domain_fn_sigs` entry: no type arguments.
             let type_args = domain_call_type_args(b, function, &call.args, &b.lower_type(&term.ty));
+            let mut args = lower_args(&call.args)?;
+            // A heap-dependent function also takes its precondition's snapshot,
+            // which the trigger leaves open: it matches an application at any
+            // heap, and the instance builds the call at the quantifier's.
+            if b.contracts.get(&call.name.0).is_some_and(|c| c.heap_dep) {
+                args.push(vmir::TrigTerm::Wild);
+            }
             Ok(vmir::TrigTerm::App {
                 head: vmir::TrigHead::Func(function),
                 type_args,
-                args: lower_args(&call.args)?.into(),
+                args: args.into(),
             })
         }
         P::AdtConstructor(call) => {
@@ -1237,7 +1288,8 @@ fn lower_trig_term(
         | P::Binary(..)
         | P::Ternary { .. }
         | P::LetIn { .. }
-        | P::Ext(typed::AxiomExt::Forall(_)) => {
+        | P::DomainFunctionCall(_)
+        | P::Ext(_) => {
             unreachable!("typecheck rejects non-matchable trigger subterms")
         }
     }
@@ -1360,7 +1412,15 @@ impl PureExt for typed::MethodEnsuresExt {
                     inner,
                 )
             }
-            typed::MethodEnsuresExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::MethodEnsuresExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn trig_node(&self) -> TrigNode<'_, Self> {
+        match self {
+            typed::MethodEnsuresExt::Heap(node) => heap_trig_node(node),
+            typed::MethodEnsuresExt::Old(_) | typed::MethodEnsuresExt::Forall(_) => {
+                TrigNode::NotMatchable
+            }
         }
     }
 }
@@ -1404,11 +1464,22 @@ impl PureExt for typed::MethodBodyExt {
             }
             // perm(loc): query the permission held at `loc` in the perm heap.
             typed::MethodBodyExt::Perm(res) => {
+                if hctx.in_quantifier {
+                    return Err(TranslationError::Unsupported("`perm` inside a quantifier"));
+                }
                 let addr =
                     crate::translate::resource::lower_resource_addr(b, env, sink, hctx, res)?;
                 Ok(sink.emit_pure(ty, PureInst::Perm(hctx.perm, addr)))
             }
-            typed::MethodBodyExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::MethodBodyExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn trig_node(&self) -> TrigNode<'_, Self> {
+        match self {
+            typed::MethodBodyExt::Heap(node) => heap_trig_node(node),
+            typed::MethodBodyExt::Old(..)
+            | typed::MethodBodyExt::Perm(_)
+            | typed::MethodBodyExt::Forall(_) => TrigNode::NotMatchable,
         }
     }
 }
@@ -1428,7 +1499,15 @@ impl PureExt for typed::FuncEnsuresExt {
             // postcondition is framed by, so it re-reads `e` against the current
             // context.
             typed::FuncEnsuresExt::Old(inner) => lower(b, env, sink, hctx, inner),
-            typed::FuncEnsuresExt::Forall(q) => lower_forall(b, env, sink, q),
+            typed::FuncEnsuresExt::Forall(q) => lower_forall(b, env, sink, hctx, q),
+        }
+    }
+    fn trig_node(&self) -> TrigNode<'_, Self> {
+        match self {
+            typed::FuncEnsuresExt::Heap(node) => heap_trig_node(node),
+            typed::FuncEnsuresExt::Old(_) | typed::FuncEnsuresExt::Forall(_) => {
+                TrigNode::NotMatchable
+            }
         }
     }
 }

@@ -1,0 +1,14 @@
+// QP medium: the receiver is `xs[i]`, a function of the binder; the
+// distinctness precondition makes it injective, as Viper requires.
+//
+// Must VERIFY.
+field f: Int
+
+method seq_index_injective(xs: Seq[Ref])
+  requires forall i: Int, j: Int :: { xs[i], xs[j] } 0 <= i && i < j && j < |xs| ==> xs[i] != xs[j]
+  requires forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+  requires 0 < |xs|
+  ensures forall i: Int :: 0 <= i && i < |xs| ==> acc(xs[i].f)
+{
+  xs[0].f := 1
+}

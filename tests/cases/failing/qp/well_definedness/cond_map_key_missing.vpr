@@ -1,0 +1,10 @@
+// QP well-definedness: `mp[x]` needs `x` in the map's domain.
+//
+// Must FAIL (map may not contain the key). Silicon: "Map mp might not contain
+// an entry at key x".
+field f: Int
+
+method cond_map_key_missing(s: Set[Ref], mp: Map[Ref, Int])
+{
+  inhale forall x: Ref :: x in s && mp[x] > 0 ==> acc(x.f)
+}

@@ -1,0 +1,40 @@
+// Must VERIFY. Was a known limitation (`known_limitations/marco_benchmark/`):
+// "unimplemented: purify: snap value outside footprint"
+// (`src/verify/declaration.rs`, `eval_snap`) on `snapO#ensures`.
+//
+// The second postcondition calls `snapU(result)`, which needs `U(result)`.
+// The unfolded footprint of `O(a)` holds `U(from_b(bytes(a)))`; the two
+// instances are the same only through the *first* postcondition
+// (`bytes(a) == to_b(result)`) plus the axiom `from_b(to_b(r)) == r`.
+// The permission check finds the chunk, but the `ReadHeap` value lookup
+// matches chunk addresses by plain e-class equality, misses, and the
+// certificate walk has no recipe for the slot.
+//
+// Reduced from Prusti's `snap_owned_non_aliased$ref$Unique$T` (Ru2 suite):
+// blocks 796 of the 838 listed marco_benchmark files, and is the only blocker
+// in 294. Same root cause as `functions/snap_value_outside_footprint.vpr`
+// (there the equality is a plain `result == y`).
+domain Bytes {
+  function from_b(b: Int): Ref
+  function to_b(r: Ref): Int
+  axiom { forall r: Ref :: { to_b(r) } from_b(to_b(r)) == r }
+}
+
+predicate MB(a: Ref)
+
+function bytes(a: Ref): Int
+  requires acc(MB(a), wildcard)
+
+predicate U(x: Ref)
+
+function snapU(x: Ref): Int
+  requires acc(U(x), wildcard)
+
+predicate O(a: Ref) {
+  acc(MB(a)) && acc(U(from_b(bytes(a))))
+}
+
+function snapO(a: Ref): Ref
+  requires acc(O(a), wildcard)
+  ensures unfolding acc(O(a), wildcard) in bytes(a) == to_b(result)
+  ensures unfolding acc(O(a), wildcard) in snapU(result) == snapU(result)

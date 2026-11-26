@@ -491,6 +491,7 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
         let mut skipped = 0;
         for (rid, tys, caps) in &quants {
             let recipe = table.get(*rid);
+            let trace = crate::verify::qp_trace::wants_instances(*rid);
             let caps: Vec<Id> = caps.iter().map(|&c| egraph.find(c)).collect();
             let empty = caps.iter().fold(
                 Sigma {
@@ -544,6 +545,12 @@ impl Applier<Symbolic, ConstFold> for ForallApplier {
                         continue;
                     }
                     if self.memo.insert((*rid, sigma.tys.clone(), vals.clone())) {
+                        if trace {
+                            let binders = &vals[caps.len()..];
+                            crate::verify::qp_trace::record_instance(
+                                egraph, *rid, binders, generation,
+                            );
+                        }
                         instances.push((*rid, sigma.tys, vals, generation));
                     }
                 }

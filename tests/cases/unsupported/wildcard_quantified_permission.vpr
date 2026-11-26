@@ -1,0 +1,15 @@
+// A wildcard amount inside a quantified permission is rejected at translation:
+// the member is reported unsupported instead of failing verification.
+field f: Int
+
+method read_all(s: Set[Ref])
+  requires forall r: Ref :: r in s ==> acc(r.f, wildcard)
+{
+  assert true
+}
+
+method conditional_wildcard(s: Set[Ref], b: Bool)
+  requires forall r: Ref :: r in s ==> acc(r.f, b ? wildcard : write)
+{
+  assert true
+}

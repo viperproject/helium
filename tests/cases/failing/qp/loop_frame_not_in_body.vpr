@@ -1,0 +1,19 @@
+// QP medium (loop exit / heap sum): the chunk set stays in the frame, so the
+// body may not use it, even though it is held again after the exit.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method loop_frame_not_in_body(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+  {
+    a.f := i
+    i := i + 1
+  }
+  a.f := 0
+}

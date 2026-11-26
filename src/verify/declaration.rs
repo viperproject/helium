@@ -1,857 +1,29 @@
 use crate::dhash::HashMap;
+use crate::verify::eval::{
+    EvalState, OPERAND_RECIPE, check_forall_wd, collect_pc_lits, display_heaps, eval_perm,
+    eval_perm_inst, eval_perm_structural, eval_pure_inst, format_inst, get_heap,
+    get_heap_unrehomed, pc_lits_raw, perm_recipe, pure_obligations,
+};
+use crate::verify::heap::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, Value};
+use std::rc::Rc;
 
-use crate::verify::cert::PermRecipe;
-use crate::vmir::display::VmirDisplay;
-use crate::vmir::{CollKind, CollOp, MapOp, SeqOp};
+use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
+use crate::vmir::CollKind;
 use crate::{
     verify::{
         cert::{FunctionDefinition, ResourceDefinition},
         context::VerifyContext,
         error::VerifyError,
-        heap::{
-            Chunk, ChunkPerm, Heap, LocationKind,
-            algebra::{
-                Demand, chunk_under_pc, find_chunk_consolidated, heap_subtract, heap_union,
-                merge_heaps, perm_held_at, prove_perm_positive, prove_perm_write,
-                summarize_perm_at, union_heaps,
-            },
-            gate_perm_by_guard,
-        },
+        heap::{ChunkPerm, Heap, LocationKind},
         lang::Symbolic,
         stats,
         viz::Snapshotter,
     },
     vmir::{
-        self, Assign, BinOp, Bind, Declaration, Function, HeapInst, HeapVal, Inst, InstKind,
-        Literal, MemberId, Method, PathConds, Polarity, PureInst, Resource, Type, Val,
+        self, Assign, BinOp, Bind, Function, HeapInst, Inst, InstKind, Literal, MemberId, Method,
+        PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
-
-struct EvalState {
-    vals: Vec<egg::Id>,
-    /// The VMIR `Type` of each `vals` entry, kept in lockstep. The location kind
-    /// of an address operand is read straight from here (`loc_kind`) — no e-graph
-    /// inference. Params seed the initial slots; every `Pure` inst pushes its type.
-    val_types: Vec<Type>,
-    /// Recipe provenance of each `vals` entry, kept in lockstep: the
-    /// recipe-space `Val` a certificate walk associates with the body temp
-    /// (`None` when no recipe is built — method bodies — or the value has no
-    /// pure recipe). One counter with `vals`, so the recipe column cannot
-    /// desync from the eval column.
-    recipes: Vec<Option<Val>>,
-    heaps: Vec<Heap>,
-    /// Permission temps (`p`), evaluated at their defining instruction. A `p`
-    /// temp denotes ONE permission: a `wildcard` under it is minted once here, so
-    /// reading the temp twice reads the same share.
-    perms: Vec<ChunkPerm>,
-    /// The defining instruction of each `perms` entry, kept in lockstep. The
-    /// certificate walk needs the permission's *shape* (not its e-classes) to
-    /// slice a [`PermRecipe`], and a `ChunkPerm` has already lost which operands
-    /// it came from.
-    perm_defs: Vec<vmir::PermInst>,
-    /// Blocks proven **unreachable** (method bodies): the block's cube is
-    /// refuted in the ground graph — e.g. after `bb_unreach`'s `inhale false` —
-    /// or every predecessor is. The Stage-4 join merge drops such an arm outright
-    /// instead of selecting a `0`-leaf against it (which would need an
-    /// exhaustiveness split).
-    ///
-    /// Deadness is a property of a BLOCK, not of its exit heap temp: an empty
-    /// block's exit heap is its predecessor's temp, so tagging the temp also
-    /// tagged every live block that passes the same heap through, and a later
-    /// join dropped a live arm.
-    dead_blocks: crate::dhash::HashSet<usize>,
-    /// For the join block being evaluated: whether its (then, else) predecessor
-    /// blocks are dead. The `Merge` reads this; `None` outside a method join.
-    join_arms_dead: Option<(bool, bool)>,
-}
-
-impl EvalState {
-    fn new() -> Self {
-        Self {
-            vals: Vec::new(),
-            val_types: Vec::new(),
-            recipes: Vec::new(),
-            heaps: Vec::new(),
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        }
-    }
-
-    fn with_args(args: Vec<egg::Id>, arg_types: Vec<Type>) -> Self {
-        debug_assert_eq!(args.len(), arg_types.len());
-        // Params are the identity in recipe space.
-        let recipes = (0..args.len()).map(|i| Some(Val::Temp(i))).collect();
-        Self {
-            vals: args,
-            val_types: arg_types,
-            recipes,
-            heaps: Vec::new(),
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        }
-    }
-
-    fn get_val(&self, ctx: &mut VerifyContext<'_>, val: &Val) -> egg::Id {
-        match val {
-            Val::Temp(n) => self.vals[*n],
-            Val::Literal(lit) => ctx.add(Symbolic::Lit(lit.clone())),
-        }
-    }
-
-    /// The recipe-space term of a body operand: a temp's tracked provenance
-    /// (`None` if it has none), a literal as itself.
-    fn recipe_of(&self, val: &Val) -> Option<Val> {
-        match val {
-            Val::Temp(n) => self.recipes[*n].clone(),
-            Val::Literal(lit) => Some(Val::Literal(lit.clone())),
-        }
-    }
-
-    /// `recipe_of` for a certificate-walk operand that must have a recipe.
-    fn require_recipe(&self, val: &Val, what: &'static str) -> Result<Val, VerifyError> {
-        self.recipe_of(val).ok_or(VerifyError::Unimplemented(what))
-    }
-
-    /// The path condition translated into recipe space (guards of an exported
-    /// fact). Errors if a guard value has no recipe.
-    fn recipe_pc(&self, pc: &PathConds) -> Result<Vec<(Val, Polarity)>, VerifyError> {
-        pc.conds
-            .iter()
-            .map(|(v, p)| {
-                self.require_recipe(v, "purify: path-condition value without a recipe")
-                    .map(|r| (r, *p))
-            })
-            .collect()
-    }
-
-    /// The location kind of an address operand, from its tracked VMIR type. A
-    /// non-`Temp` or non-`Addr`-typed operand has no kind (`None`).
-    fn loc_kind(&self, val: &Val) -> Option<LocationKind> {
-        match val {
-            Val::Temp(n) => LocationKind::from_addr_type(&self.val_types[*n]),
-            Val::Literal(_) => None,
-        }
-    }
-
-    /// The evaluation state a quantifier body starts from. Capture is implicit —
-    /// the body indexes *this* table directly (see [`vmir::Forall`]) — so the frame
-    /// is this state cut to `binder_base`, which is the `forall` step's own temp:
-    /// the first binder takes that slot, so the step's own boolean is unnameable
-    /// from inside. Heaps are dropped; a quantifier body is heap-free by
-    /// construction.
-    fn frame_for(&self, q: &vmir::Forall) -> Self {
-        let mut frame = Self {
-            vals: self.vals.clone(),
-            val_types: self.val_types.clone(),
-            recipes: self.recipes.clone(),
-            heaps: Vec::new(),
-            // A quantifier body is permission-free, like it is heap-free.
-            perms: Vec::new(),
-            perm_defs: Vec::new(),
-            dead_blocks: crate::dhash::HashSet::default(),
-            join_arms_dead: None,
-        };
-        // The step itself is not evaluated yet, so the table ends exactly at its
-        // temp; the truncation is a no-op guard, not a cut.
-        debug_assert!(frame.vals.len() >= q.binder_base);
-        frame.vals.truncate(q.binder_base);
-        frame.val_types.truncate(q.binder_base);
-        frame.recipes.truncate(q.binder_base);
-        frame
-    }
-
-    fn push_val(&mut self, id: egg::Id, ty: Type, recipe: Option<Val>) {
-        self.vals.push(id);
-        self.val_types.push(ty);
-        self.recipes.push(recipe);
-    }
-    fn push_heap(&mut self, heap: Heap) {
-        self.heaps.push(heap);
-    }
-    fn push_perm(&mut self, perm: ChunkPerm, def: vmir::PermInst) {
-        self.perms.push(perm);
-        self.perm_defs.push(def);
-    }
-
-    /// Whether a permission operand is wildcard-derived, without evaluating it.
-    /// A `Temp` answers from its already-evaluated `ChunkPerm`, whose `wild` flag
-    /// carries the provenance the e-graph cannot.
-    fn perm_is_wild(&self, pv: &vmir::PermVal) -> bool {
-        match pv {
-            vmir::PermVal::Amount(_) => false,
-            vmir::PermVal::Wildcard => true,
-            vmir::PermVal::Temp(i) => self.perms[*i].has_wild(),
-        }
-    }
-}
-
-/// Render a single instruction (method or resource body) for error context.
-fn format_inst(
-    inst: &Inst,
-    decls: &typed_index_collections::TiVec<MemberId, Declaration>,
-    interner: &lasso::Rodeo,
-    groups: &lasso::Rodeo<lasso::Spur>,
-    val_base: usize,
-    heap_base: usize,
-) -> String {
-    VmirDisplay::new(
-        (val_base, heap_base, 0usize, std::slice::from_ref(inst)),
-        decls,
-        interner,
-        groups,
-    )
-    .to_string()
-    .trim()
-    .to_string()
-}
-
-/// Heap-fetch is monomorphic — `HeapVal` carries no ctx-heap variant. The
-/// caller-supplied ctx heap of a resource body lives at
-/// `state.heaps[0]` by convention (mirroring how params occupy the
-/// initial `vals` slots).
-fn get_heap(state: &EvalState, hv: &HeapVal) -> Heap {
-    match hv {
-        HeapVal::Empty => Heap::empty(),
-        HeapVal::Temp(n) => state.heaps[*n].clone(),
-    }
-}
-
-/// Heaps to visualize for an instruction, labeled as in VMIR (`h0`, `h1`, …).
-/// For a heap `combine` this is the base operand plus the result; for any other
-/// instruction it is the current working heap (if any). Called after the
-/// instruction has been evaluated, so the result heap sits at `heaps_before`.
-fn display_heaps(state: &EvalState, kind: &InstKind, heaps_before: usize) -> Vec<(String, Heap)> {
-    match kind {
-        InstKind::Heap(
-            HeapInst::Add { base, .. }
-            | HeapInst::Sub { base, .. }
-            | HeapInst::Inhale { base, .. }
-            | HeapInst::Exhale { base, .. },
-        ) => {
-            let mut res = vec![(base.to_string(), get_heap(state, base))];
-            if heaps_before < state.heaps.len() {
-                res.push((
-                    format!("h{heaps_before}"),
-                    state.heaps[heaps_before].clone(),
-                ));
-            }
-            res
-        }
-        _ => state
-            .heaps
-            .last()
-            .map(|h| (format!("h{}", state.heaps.len() - 1), h.clone()))
-            .into_iter()
-            .collect(),
-    }
-}
-
-/// Lower `pc.conds` to live ids, and nothing else. Use this only where the
-/// ambient cube is already accounted for by the caller; every ordinary inst
-/// wants [`collect_pc_lits`].
-fn pc_lits_raw(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    pc: &PathConds,
-) -> Vec<(egg::Id, Polarity)> {
-    pc.conds
-        .iter()
-        .map(|(v, p)| (state.get_val(ctx, v), *p))
-        .collect()
-}
-
-/// The **effective** path condition of an instruction:
-///
-/// ```text
-/// effective_pc(inst) = ambient_cube(phase) ++ inst.pc
-/// ```
-///
-/// `Inst.pc` is a delta (see [`Sink::ambient`](crate::translate::sink)), so the
-/// ambient cube has to be prepended here. `ctx.current_cube()` *is* that ambient:
-/// it is set by `begin_block` before a block's body walk and cleared by
-/// `end_block` before its join walk, which is exactly the phase split the delta
-/// rule names — a join materializes its own cube literals, so there the ambient
-/// is empty and the delta is the whole pc.
-fn collect_pc_lits(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    pc: &PathConds,
-) -> Vec<(egg::Id, Polarity)> {
-    // Owned first: `state.get_val` needs `&mut ctx`.
-    let mut lits = ctx.current_cube().to_vec();
-    lits.extend(pc_lits_raw(ctx, state, pc));
-    lits
-}
-
-/// Error tag for a certificate-walk operand whose recipe is missing — cannot
-/// happen for a value produced by a purifiable inst, so hitting it means an
-/// unsupported source leaked into a function/resource body.
-const OPERAND_RECIPE: &str = "purify: operand without a recipe";
-
-/// Evaluate a `PureInst` into its symbolic e-class id, plus — when a
-/// certificate recipe is being built (`ctx.recipe`) — the recipe-space `Val`
-/// mirroring it (the single-walk replacement of the old purify pass). `pc_lits`
-/// is the path condition of the owning instruction. A `Deref` consults it to
-/// resolve an address that only aliases a held chunk under the branch (e.g.
-/// `y.f` where `x == y` holds on this path); a `FunctionCall` assumes the
-/// callee's `f%pre` token under it (the token's truth is what releases the
-/// callee's body equality and exported facts). Every other variant ignores it.
-///
-/// `recipe_pc` is the *same* path condition before lowering, needed only when a
-/// recipe is being built: a propagated `g%pre` token records it in recipe space
-/// (via [`EvalState::recipe_pc`]) so the token is released only under the
-/// body-internal condition guarding its call. `None` where no recipe-space pc can
-/// be recovered — a trusted axiom body, or a `forall` WD check whose pc is the
-/// concatenation `host_pc ++ inst.pc` with the host half already lowered to ids.
-/// `None` records empty guards, i.e. exactly the pre-guard behavior: it can only
-/// release a token too eagerly, never too late, so it cannot mask a real failure.
-fn eval_pure_inst(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    ty: &Type,
-    pi: &PureInst,
-    pc_lits: &[(egg::Id, Polarity)],
-    recipe_pc: Option<&PathConds>,
-) -> Result<(egg::Id, Option<Val>), VerifyError> {
-    use crate::verify::rewrite::AxiomPure;
-    Ok(match pi {
-        PureInst::Fresh => (ctx.fresh_symbolic_value(ty.clone()), None),
-        PureInst::Binary(op, l, r) => {
-            let lhs = state.get_val(ctx, l);
-            let rhs = state.get_val(ctx, r);
-            let id = ctx.add(Symbolic::Binary(*op, [lhs, rhs]));
-            let recipe = if ctx.recipe.is_some() {
-                let l = state.require_recipe(l, OPERAND_RECIPE)?;
-                let r = state.require_recipe(r, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Binary(*op, l, r)))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::Ternary(c, t, e) => {
-            let cond = state.get_val(ctx, c);
-            let then_ = state.get_val(ctx, t);
-            let else_ = state.get_val(ctx, e);
-            let id = expr!(ctx, if {cond} then {then_} else {else_});
-            let recipe = if ctx.recipe.is_some() {
-                let c = state.require_recipe(c, OPERAND_RECIPE)?;
-                let t = state.require_recipe(t, OPERAND_RECIPE)?;
-                let e = state.require_recipe(e, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Ternary(c, t, e)))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::RealCast(v) => {
-            let inner = state.get_val(ctx, v);
-            let id = ctx.add(Symbolic::RealCast(inner));
-            let recipe = if ctx.recipe.is_some() {
-                let v = state.require_recipe(v, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::RealCast(v)))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::Deref(hv, loc) => {
-            let heap = get_heap(state, hv);
-            let addr = state.get_val(ctx, loc);
-            let chunk = state
-                .loc_kind(loc)
-                .and_then(|k| chunk_under_pc(ctx, heap.chunks_of(&k), addr, pc_lits).cloned());
-            match chunk {
-                Some(c) => {
-                    // The chunk's recipe provenance is the deref's pure term —
-                    // per heap state, so a two-state resource reading the same
-                    // address in `h0` and `h1` stays distinct.
-                    let recipe = if ctx.recipe.is_some() {
-                        Some(c.recipe.clone().ok_or(VerifyError::Unimplemented(
-                            "purify: deref outside footprint",
-                        ))?)
-                    } else {
-                        None
-                    };
-                    (c.value, recipe)
-                }
-                None => {
-                    if ctx.recipe.is_some() {
-                        return Err(VerifyError::Unimplemented(
-                            "purify: deref outside footprint",
-                        ));
-                    }
-                    (ctx.fresh_symbolic_value(ty.clone()), None)
-                }
-            }
-        }
-        PureInst::FunctionCall(fc) => {
-            // A (possibly generic) Silver `function`: `type_args` are the
-            // result-type vars, part of the `FuncApp` node identity (discriminant);
-            // empty for a monomorphic call. Always heap-free: a heap-dependent
-            // function receives its precondition snapshot as an ordinary arg.
-            //
-            // Just add the uninterpreted application, for abstract, heap-free and
-            // heap-dependent callees alike. A verified callee's definitional
-            // equality `f(args) == body` is installed lazily by its own
-            // `rewrite::function_rule`, not eagerly here.
-            let args: Vec<egg::Id> = fc.args.iter().map(|v| state.get_val(ctx, v)).collect();
-            let func_id = crate::verify::func_registry::func_id_for_member(fc.function);
-            let id = ctx.add_func_app_id(
-                func_id,
-                fc.type_args.clone().into(),
-                ty.clone(),
-                args.clone().into(),
-            );
-            // Silicon's `f%pre`, assumed only at call sites. Every genuine
-            // value-position call mints the callee's `f%pre(args)` token node,
-            // whose *presence* lets `rewrite::function_rule` materialize the
-            // callee's body here, and whose *truth* is what releases the resulting
-            // axioms (`tok ==> f == body`, `tok ==> each exported fact`). The one
-            // non-value position is a **contract-function body** (a lowered
-            // pre/post), handled below.
-            //
-            // The truth is assumed under this call's path condition, so a call
-            // under a ternary/implication cannot release the callee's facts onto a
-            // sibling intra-block path. This is the only place a pc enters the
-            // function-unfold encoding; every axiom above inherits it transitively
-            // through the token. `.rev()` because `pc_lits` is outermost-first and
-            // `implication` folds innermost-first (cf. `InstKind::Assume`).
-            //
-            // A callee in the recursion cycle being verified has no cert yet, but
-            // still gets its token: the spec-derived post rule of the batch
-            // (`rewrite::post_rule`) replays the induction hypothesis only behind
-            // it, i.e. only on the path that makes the call.
-            let in_scc = ctx
-                .recipe
-                .as_ref()
-                .is_some_and(|rb| rb.is_recursive_callee(fc.function));
-            if in_scc
-                || ctx
-                    .fn_certs
-                    .is_none_or(|certs| certs.contains_key(&fc.function))
-            {
-                let name = ctx.member_name(fc.function);
-                let tok = ctx.alloc.fn_pre_token(fc.function, &name);
-                let tok_id = ctx.add(Symbolic::FuncApp(tok, Box::new([]), args.into()));
-                ctx.assume_token_guarded(tok_id, pc_lits.iter().rev().copied());
-            }
-            let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = fc
-                    .args
-                    .iter()
-                    .map(|a| state.require_recipe(a, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                // A recursive call (callee in this function's SCC) targets the
-                // limited twin `f'` — uninterpreted, so unfolding this recipe
-                // at a call site stops after one level. Every other callee
-                // keeps its full id and unfolds normally.
-                let rb = ctx.recipe.as_ref().unwrap();
-                let recursive = rb.is_recursive_callee(fc.function);
-                let propagates_recursive = rb.propagates_recursive_token();
-                let func = if recursive {
-                    let name = ctx.member_name(fc.function);
-                    ctx.alloc.limited(fc.function, &name)
-                } else {
-                    func_id
-                };
-                // Precondition propagation (Silicon's `bodyPreconditionPropagation`):
-                // emit the callee's `g%pre(gargs)` token as an orphan recipe step so
-                // that when *this* body is unfolded (its own token present), the
-                // nested token re-materializes and `g` may unfold in turn — the
-                // cascade proceeds down genuine value chains.
-                //
-                // Which calls those are is the **translator's** call, carried on the
-                // inst as `FunctionCall::export`: a value-position use of a Silver
-                // function exports, an obligation call / a call inside a contract
-                // definition / an `@addr` or domain application does not.
-                //
-                // A recursive call propagates too, although it targets the limited
-                // twin `f'`, which has no unfold rule for the token to trigger: the
-                // token is what releases `f`'s post at `f'(gargs)`
-                // (`rewrite::function_post_rule`), and nothing else may. Except in a
-                // postcondition, which is a verifier fact (SCC membership) rather
-                // than the translator's: see
-                // `RecipeBuilder::propagates_recursive_token`.
-                let propagate = fc.export && (!recursive || propagates_recursive);
-                let g_pre = propagate.then(|| {
-                    let name = ctx.member_name(fc.function);
-                    ctx.alloc.fn_pre_token(fc.function, &name)
-                });
-                let rb = ctx.recipe.as_mut().unwrap();
-                let call = rb.emit(AxiomPure::App {
-                    func,
-                    type_args: fc.type_args.clone(),
-                    args: args.clone(),
-                });
-                if let Some(g_pre) = g_pre {
-                    let tok = rb.emit(AxiomPure::App {
-                        func: g_pre,
-                        type_args: Vec::new(),
-                        args,
-                    });
-                    // The callee-internal pc of *this* call, in recipe space: the
-                    // release becomes `f%pre(a) ==> (pc[x:=a] ==> g%pre(gargs))`, so
-                    // a conditionally-called callee's axioms do not fire at args the
-                    // body never calls it at.
-                    let guards = match recipe_pc {
-                        Some(pc) => state.recipe_pc(pc)?,
-                        None => Vec::new(),
-                    };
-                    // The token's value is never consumed, so `RecipeBuilder::slice`
-                    // would prune it as unreachable from the result. Register it as
-                    // a slice root.
-                    rb.record_token_step(tok, guards);
-                }
-                Some(call)
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // A `forall` is a single e-node: the compiled body (its `RecipeId`, interned
-        // program-wide) as payload, the captured terms as children. Nothing is
-        // instantiated here — the one generic rule (`rewrite::forall_rule`) does that
-        // at the next saturation, guarded on this node merging `true`. In a recipe
-        // it is a `Forall` step: replayed at each call site, it rebuilds the
-        // quantifier e-node with the caller's arguments as capture children.
-        PureInst::Forall(q) => {
-            // Compile the quantifier the first time the walk reaches it. Its
-            // capture list is derived, not stored — see `Forall::free_temps`.
-            // Name resolution rides on copies of the two shared refs, so it does
-            // not borrow `ctx` across the `&mut ctx.alloc`.
-            let (interner, decls) = (ctx.interner, ctx.decls);
-            let names = move |m| crate::verify::context::member_name_in(interner, decls, m);
-            let (recipe_id, free) = crate::verify::quant::intern_forall(ctx.alloc, &names, q)?;
-            let free: Vec<Val> = free.iter().map(|&k| Val::Temp(k)).collect();
-            let caps: Box<[egg::Id]> = free.iter().map(|v| state.get_val(ctx, v)).collect();
-            // Stated directly (not inside an instantiated quantifier), so every
-            // type parameter of a generic axiom's quantifier is still open.
-            let type_args = ctx
-                .alloc
-                .quant_table()
-                .read()
-                .expect("recipe table lock")
-                .get(recipe_id)
-                .open_types();
-            let id = ctx.add(Symbolic::Forall(
-                recipe_id,
-                type_args.iter().cloned().collect(),
-                caps,
-            ));
-            let recipe = if ctx.recipe.is_some() {
-                let caps: Vec<Val> = free
-                    .iter()
-                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit_forall(recipe_id, type_args, caps))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // `unwrap(v)`: the `Some` payload of an `Option`. The result type IS the
-        // element type, so it needs no type argument. A certificate walk mirrors
-        // the projection, exactly as a footprint slot's `unwrap(proj_i(s))` does.
-        PureInst::OptionUnwrap(v) => {
-            let opt = state.get_val(ctx, v);
-            let id = ctx.option_unwrap(ty.clone(), opt);
-            let recipe = if ctx.recipe.is_some() {
-                let vr = state.require_recipe(v, OPERAND_RECIPE)?;
-                let unwrap_id = ctx.alloc.option_value();
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                    func: unwrap_id,
-                    type_args: vec![ty.clone()],
-                    args: vec![vr],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // perm(loc): permission amount held at `loc` in the given heap. Has no
-        // pure recipe — a certificate walk rejects it.
-        PureInst::Perm(hv, loc) => {
-            if ctx.recipe.is_some() {
-                return Err(VerifyError::Unimplemented(
-                    "purify: perm in a function or resource body",
-                ));
-            }
-            let heap = get_heap(state, hv);
-            let addr = state.get_val(ctx, loc);
-            let id = match state.loc_kind(loc) {
-                Some(k) => {
-                    let chunks = heap.chunks_of(&k).to_vec();
-                    perm_held_at(ctx, &chunks, addr, pc_lits)
-                }
-                None => expr!(ctx, 0 / 1),
-            };
-            (id, None)
-        }
-        // Semantic ADT nodes. Each is a `FuncApp` over a verifier-minted **concept**
-        // id (one per `(head, variant[, field])`, see `verify::func_registry`); the
-        // ground `type_args` ride in the node's operator identity (the discriminant),
-        // so distinct instantiations never merge and the ADT reductions fire
-        // per concept regardless of instantiation.
-        PureInst::AdtCons {
-            adt,
-            type_args,
-            variant,
-            args,
-        } => {
-            let cons = ctx.alloc.cons(*adt, *variant);
-            let arg_ids: Vec<egg::Id> = args.iter().map(|v| state.get_val(ctx, v)).collect();
-            let id =
-                ctx.add_func_app_id(cons, type_args.clone().into(), ty.clone(), arg_ids.into());
-            let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = args
-                    .iter()
-                    .map(|a| state.require_recipe(a, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: cons,
-                    type_args: type_args.clone(),
-                    args,
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::AdtProj {
-            adt,
-            type_args,
-            variant,
-            field,
-            base,
-        } => {
-            let proj = ctx.alloc.proj(*adt, *variant, *field);
-            let base_id = state.get_val(ctx, base);
-            let id = ctx.add_func_app_id(
-                proj,
-                type_args.clone().into(),
-                ty.clone(),
-                Box::new([base_id]),
-            );
-            let recipe = if ctx.recipe.is_some() {
-                let base = state.require_recipe(base, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: proj,
-                    type_args: type_args.clone(),
-                    args: vec![base],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        // A discriminator is the tester `Adt::Ctor?(base)`, a `Bool` application;
-        // the `is` / `variant-narrow` rules give it its meaning.
-        PureInst::AdtIs {
-            adt,
-            type_args,
-            variant,
-            base,
-        } => {
-            let tester = ctx.alloc.adt_is(*adt, *variant);
-            let base_id = state.get_val(ctx, base);
-            let id = ctx.add_func_app_id(
-                tester,
-                type_args.clone().into(),
-                Type::Bool,
-                Box::new([base_id]),
-            );
-            let recipe = if ctx.recipe.is_some() {
-                let base = state.require_recipe(base, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::App {
-                    func: tester,
-                    type_args: type_args.clone(),
-                    args: vec![base],
-                }))
-            } else {
-                None
-            };
-            (id, recipe)
-        }
-        PureInst::Coll { tys, op, args } => {
-            let ids: Box<[egg::Id]> = args.iter().map(|v| state.get_val(ctx, v)).collect();
-            let recipe = if ctx.recipe.is_some() {
-                let args: Vec<Val> = args
-                    .iter()
-                    .map(|v| state.require_recipe(v, OPERAND_RECIPE))
-                    .collect::<Result<_, _>>()?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::Coll {
-                    tys: tys.clone(),
-                    op: *op,
-                    args,
-                }))
-            } else {
-                None
-            };
-            let id = ctx.add(Symbolic::Coll(tys.clone(), *op, ids.clone()));
-            // A collection equality (`CollOp::is_eq`) shares its class with the
-            // untyped `l == r`, which the rest of equality reasoning reads.
-            if op.is_eq() {
-                let eq = ctx.add(Symbolic::Binary(BinOp::Eq, [ids[0], ids[1]]));
-                ctx.union(id, eq);
-            }
-            (id, recipe)
-        }
-        PureInst::CollLit {
-            kind,
-            elem_ty,
-            elem,
-        } => {
-            let id = state.get_val(ctx, elem);
-            let recipe = if ctx.recipe.is_some() {
-                let elem = state.require_recipe(elem, OPERAND_RECIPE)?;
-                let rb = ctx.recipe.as_mut().unwrap();
-                Some(rb.emit(AxiomPure::CollLit {
-                    kind: *kind,
-                    elem_ty: elem_ty.clone(),
-                    elem,
-                }))
-            } else {
-                None
-            };
-            (
-                ctx.add(Symbolic::CollLit(*kind, Box::new(elem_ty.clone()), id)),
-                recipe,
-            )
-        }
-    })
-}
-
-fn heap_acc(ctx: &mut VerifyContext<'_>, loc: &Val, perm: ChunkPerm, state: &EvalState) -> Heap {
-    let addr = state.get_val(ctx, loc);
-    // The location kind (group + held value type + bound) comes straight from the
-    // address operand's VMIR `Type::Addr` — no e-graph inference.
-    let kind = state
-        .loc_kind(loc)
-        .expect("acc location must be Addr-typed");
-    let value = ctx.fresh_symbolic_value(kind.value.clone());
-    Heap::empty().with_chunk(&kind, Chunk::new_perm(addr, perm, value))
-}
-
-/// Resolve a [`vmir::PermVal`] to its e-class id, minting a fresh positive share
-/// for a bare `wildcard`. A concrete `Amount` is exactly the value it wraps, so a
-/// non-wildcard program builds the same term it always did.
-///
-/// A `Temp` was evaluated at its defining instruction, so it costs a lookup and
-/// mints nothing: a `p` temp denotes one permission however many times it is read.
-fn eval_perm(ctx: &mut VerifyContext<'_>, state: &EvalState, perm: &vmir::PermVal) -> egg::Id {
-    eval_perm_structural(ctx, state, perm).to_id(ctx)
-}
-
-/// [`eval_perm`], but keeping the permission's **branch structure** as a
-/// [`ChunkPerm`] instead of flattening it into one `Ite` term — the method-body
-/// twin of [`build_perm`], which does the same for a footprint slot.
-///
-/// The term is identical either way (`ChunkPerm::to_id` rebuilds exactly the `Ite`
-/// this used to add); what differs is that the structure is visible ABOVE the
-/// e-graph, so a consume can align the demand's arms against the held permission's
-/// (`prove_sufficient_aligned`, `perm_sub_aligned`) rather than proving against an
-/// opaque `ite`. Without this, `exhale c ==> acc(x.f)` in a *method* stays opaque
-/// even though the same assertion inside a predicate does not.
-///
-/// `ChunkPerm::select` is the smart constructor, so an ungated permission still
-/// builds exactly the `Leaf` it did before.
-fn eval_perm_structural(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    perm: &vmir::PermVal,
-) -> ChunkPerm {
-    match perm {
-        vmir::PermVal::Amount(v) => ChunkPerm::leaf(state.get_val(ctx, v)),
-        vmir::PermVal::Wildcard => ChunkPerm::wild_leaf(ctx.fresh_wildcard()),
-        vmir::PermVal::Temp(i) => state.perms[*i].clone(),
-    }
-}
-
-/// Evaluate a permission *instruction*, the definition of a `p` temp. The one
-/// place a permission gains branch structure in a method body.
-fn eval_perm_inst(
-    ctx: &mut VerifyContext<'_>,
-    state: &EvalState,
-    inst: &vmir::PermInst,
-) -> ChunkPerm {
-    match inst {
-        vmir::PermInst::Ite(c, t, e) => {
-            let c = state.get_val(ctx, c);
-            let t = eval_perm_structural(ctx, state, t);
-            let e = eval_perm_structural(ctx, state, e);
-            ChunkPerm::select(ctx, c, t, e)
-        }
-    }
-}
-
-/// Which consume rule a permission demand selects. Read off the *evaluated*
-/// permission's provenance, which `ChunkPerm::Leaf`'s `wild` flag carries
-/// structurally -- not recognised in the e-graph after the fact, where congruence
-/// can put a wildcard-bearing term into a literal's class. See [`Demand`].
-fn demand_of(perm: &ChunkPerm) -> Demand {
-    if perm.has_wild() {
-        Demand::Wildcard
-    } else {
-        Demand::Concrete
-    }
-}
-
-/// The recipe-space form of a footprint-slot permission (resource certificate
-/// build): the `p` steps the slot's permission reaches, in dependency order, with
-/// each operand replaced by its recipe temp.
-///
-/// Deliberately *not* flattened into pure steps — see [`PermRecipe`] for why the
-/// `wildcard` must stay out of a rebuilt step stream.
-///
-/// The walk memoizes per body temp, so a permission read twice yields one step and
-/// hence one wildcard at graft time, matching what the IR says: a `p` temp is one
-/// permission.
-fn perm_recipe(state: &EvalState, perm: &vmir::PermVal) -> Result<PermRecipe<Val>, VerifyError> {
-    fn leaf(
-        state: &EvalState,
-        pv: &vmir::PermVal,
-        steps: &mut Vec<vmir::PermInst<Val>>,
-        memo: &mut HashMap<usize, usize>,
-    ) -> Result<vmir::PermVal<Val>, VerifyError> {
-        Ok(match pv {
-            vmir::PermVal::Amount(v) => {
-                vmir::PermVal::Amount(state.require_recipe(v, OPERAND_RECIPE)?)
-            }
-            vmir::PermVal::Wildcard => vmir::PermVal::Wildcard,
-            vmir::PermVal::Temp(i) => {
-                if let Some(j) = memo.get(i) {
-                    return Ok(vmir::PermVal::Temp(*j));
-                }
-                let vmir::PermInst::Ite(c, t, e) = &state.perm_defs[*i];
-                let t = leaf(state, t, steps, memo)?;
-                let e = leaf(state, e, steps, memo)?;
-                let c = state.require_recipe(c, OPERAND_RECIPE)?;
-                steps.push(vmir::PermInst::Ite(c, t, e));
-                let j = steps.len() - 1;
-                memo.insert(*i, j);
-                vmir::PermVal::Temp(j)
-            }
-        })
-    }
-    let mut steps = Vec::new();
-    let mut memo = HashMap::default();
-    let res = leaf(state, perm, &mut steps, &mut memo)?;
-    Ok(PermRecipe { steps, res })
-}
 
 /// What a `wildcard` leaf becomes when a footprint slot's permission is grafted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -941,12 +113,17 @@ fn scale_perm(
     perm: ChunkPerm,
 ) -> ChunkPerm {
     match perm {
+        ChunkPerm::Zero => ChunkPerm::Zero,
         // A wildcard *scale* (an `unfolding` inside a function body) makes every
         // scaled leaf wildcard-derived, whatever the slot's own amount was.
         ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
             id: ctx.add(Symbolic::Binary(BinOp::MulR, [pm, id])),
             wild: wild || pm_wild,
         },
+        ChunkPerm::Gate { when, then } => {
+            let t = scale_perm(ctx, pm, pm_wild, *then);
+            ChunkPerm::gate(ctx, &when, t)
+        }
         ChunkPerm::Select { cond, then, els } => {
             let t = scale_perm(ctx, pm, pm_wild, *then);
             let e = scale_perm(ctx, pm, pm_wild, *els);
@@ -1012,8 +189,9 @@ fn eval_heap_inst(
         // location add and values there must agree. Contrast `Merge`, which
         // selects between mutually exclusive predecessor states.
         HeapInst::Union { a, b } => {
-            let ha = get_heap(state, a).clone();
-            let hb = get_heap(state, b).clone();
+            let region = state.region(ctx);
+            let ha = get_heap(ctx, state, a, &region)?;
+            let hb = get_heap(ctx, state, b, &region)?;
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
@@ -1022,7 +200,13 @@ fn eval_heap_inst(
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
-            Ok(union_heaps(ctx, &ha, &hb, &pc_lits))
+            Ok(ha.union(ctx, &hb, &pc_lits))
+        }
+        // The heap at a `label`: unchanged, but defined in the label's block,
+        // so its region is that block's cube (see `HeapInst::Label`).
+        HeapInst::Label { base } => {
+            let region = state.region(ctx);
+            get_heap(ctx, state, base, &region)
         }
         // Block-IR heap join: structural per-chunk SELECT of the two predecessor
         // exit heaps. Emitted at every CFG join by the block lowering.
@@ -1035,17 +219,25 @@ fn eval_heap_inst(
             // `bb_unreach` after `inhale false`) is dropped outright — selecting
             // a `0`-leaf against it would need an exhaustiveness case split.
             match state.join_arms_dead.unwrap_or((false, false)) {
-                (false, true) => return Ok(get_heap(state, then_h)),
-                (true, false) => return Ok(get_heap(state, els_h)),
+                (false, true) => {
+                    let region = state.region(ctx);
+                    return get_heap(ctx, state, then_h, &region);
+                }
+                (true, false) => {
+                    let region = state.region(ctx);
+                    return get_heap(ctx, state, els_h, &region);
+                }
                 _ => {}
             }
             let cond_id = state.get_val(ctx, cond);
-            let h_then = get_heap(state, then_h);
-            let h_els = get_heap(state, els_h);
-            Ok(merge_heaps(ctx, cond_id, &h_then, &h_els))
+            // Unrehomed: the merge rehomes each arm itself, appending the arm
+            // literal to every chunk that arm holds.
+            let h_then = get_heap_unrehomed(state, then_h);
+            let h_els = get_heap_unrehomed(state, els_h);
+            let region = state.region(ctx);
+            Ok(Heap::merge(ctx, cond_id, &h_then, &h_els, &region))
         }
-        // `base ± acc loc perm`: build the single chunk, then union (Add) or
-        // subtract (Sub) it.
+        // `base + acc(loc, perm)` / `base - acc(loc, perm)`.
         HeapInst::Add {
             base, loc, perm, ..
         }
@@ -1057,123 +249,153 @@ fn eval_heap_inst(
                 HeapInst::Add { bind, .. } => Some(bind),
                 _ => None,
             };
-            let base_h = get_heap(state, base);
-            let cperm = eval_perm_structural(ctx, state, perm);
-            let chunk = heap_acc(ctx, loc, cperm.clone(), state);
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
-            let (kind, ch) = chunk.entries().next().unwrap();
-            let (kind, mut ch) = (kind.clone(), ch.clone());
-            if let Some(bind) = bind {
-                {
-                    // The bind selects the value source. `Fresh` and `SelfSlot`
-                    // agree on the *value* today — `heap_acc` mints a fresh
-                    // symbolic either way — and differ only in provenance: a
-                    // resource body's slot records a `SlotValue(i)` seed that is
-                    // resolved at graft time by whatever the caller passed. So
-                    // this reads the bind rather than inferring the context, but
-                    // is behavior-preserving.
-                    match bind {
-                        // A resource body's footprint slot. Recorded below.
-                        Bind::SelfSlot => debug_assert!(
-                            ctx.recipe.is_some(),
-                            "`with self` outside a resource-body (certificate) walk"
-                        ),
-                        // A method-body produce: an unconstrained value, and no
-                        // certificate is under construction to record it in.
-                        Bind::Fresh => debug_assert!(
-                            ctx.recipe.is_none(),
-                            "`with fresh` inside a resource body — a body that \
-                             mints an observable value is not deterministic"
-                        ),
-                        // The produce half of a desugared `fold`: the chunk
-                        // holds the snapshot the paired `exhale` handed back,
-                        // rather than a fresh value. That shared term IS the
-                        // equation `snap(P(x)) = cons(body)` -- the binding the
-                        // dedicated `Fold` instruction had to preserve is now
-                        // emergent from naming the same `Val` twice.
-                        Bind::Bound(v) => {
-                            let bound = state.get_val(ctx, v);
-                            ch = Chunk::new_perm(ch.addr, cperm.clone(), bound)
-                                .with_recipe(state.recipe_of(v));
-                        }
-                    }
-                    // A resource body's `acc` records a footprint slot in the
-                    // certificate under construction: its value is the seed
-                    // placeholder `SlotValue(i)` (supplied at graft time), its
-                    // address/permission recipes are sliced at the end of the
-                    // walk. The seed doubles as the chunk's recipe provenance,
-                    // so a later `Deref` purifies to the slot value.
-                    if ctx.recipe.is_some() {
-                        let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
-                        let perm_r = perm_recipe(state, perm)?;
-                        let elem = kind.value.clone();
-                        let rb = ctx.recipe.as_mut().unwrap();
-                        let i = rb.pending_slots.len();
-                        let seed = rb.emit_seed(crate::verify::cert::SeedRef::SlotValue(i));
-                        rb.pending_slots.push((kind.clone(), elem, addr_r, perm_r));
-                        ch = ch.with_recipe(Some(seed));
-                    }
-                    Ok(heap_union(ctx, &base_h, &kind, ch, &pc_lits))
-                }
-            } else {
+            let region = state.region(ctx);
+            let base_h = get_heap(ctx, state, base, &region)?;
+            let l = state
+                .loc(ctx, loc)
+                .expect("acc location must be Addr-typed");
+            let access = Access::Single {
+                loc: l.clone(),
+                perm: eval_perm_structural(ctx, state, perm),
+            };
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            let Some(bind) = bind else {
                 if ctx.recipe.is_some() {
                     return Err(VerifyError::Unimplemented(
                         "purify: unsupported heap inst in a resource body",
                     ));
                 }
-                heap_subtract(ctx, &base_h, &kind, ch, &pc_lits, demand_of(&cperm))
+                return Ok(base_h.consume(ctx, access, ConsumeMode::Take, &pc_lits)?.0);
+            };
+            // The bind selects the value source.
+            let mut value = match bind {
+                // A resource body's footprint slot: a placeholder value, named
+                // by the seed recorded below.
+                Bind::SelfSlot => {
+                    debug_assert!(
+                        ctx.recipe.is_some(),
+                        "`with self` outside a resource-body (certificate) walk"
+                    );
+                    Value::plain(ctx.fresh_symbolic_value(l.kind.value.clone()))
+                }
+                // A method-body produce: an unconstrained value, and no
+                // certificate is under construction to record it in.
+                Bind::Fresh => {
+                    debug_assert!(
+                        ctx.recipe.is_none(),
+                        "`with fresh` inside a resource body — a body that \
+                         mints an observable value is not deterministic"
+                    );
+                    Value::plain(ctx.fresh_symbolic_value(l.kind.value.clone()))
+                }
+                // The produce half of a desugared `fold`: the chunk holds the
+                // snapshot the paired `exhale` handed back, rather than a fresh
+                // value. That shared term IS the equation `snap(P(x)) =
+                // cons(body)`.
+                Bind::Bound(v) => Value {
+                    id: state.get_val(ctx, v),
+                    recipe: state.recipe_of(v),
+                },
+            };
+            // A resource body's `acc` records a footprint slot in the
+            // certificate under construction: its value is the seed placeholder
+            // `SlotValue(i)` (supplied at graft time), its address/permission
+            // recipes are sliced at the end of the walk. The seed doubles as the
+            // chunk's recipe provenance, so a later `Deref` purifies to the slot
+            // value.
+            if ctx.recipe.is_some() {
+                let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
+                let perm_r = perm_recipe(state, perm)?;
+                let rb = ctx.recipe.as_mut().unwrap();
+                let i = rb.pending_slots.len();
+                let seed = rb.emit_seed(SeedRef::SlotValue(i));
+                rb.pending_slots.push((
+                    l.kind.clone(),
+                    l.kind.value.clone(),
+                    SlotShape::Single {
+                        addr: addr_r,
+                        perm: perm_r,
+                    },
+                ));
+                value.recipe = Some(seed);
             }
+            base_h.produce(ctx, access, value, &pc_lits)
+        }
+        HeapInst::AddForall { base, q, bind } => {
+            let map_ty = Type::ValueMap(Box::new(q.loc_ty.clone()));
+            let spec = quant_spec_of(ctx, state, q, pc)?;
+            let value = match bind {
+                Bind::Fresh => {
+                    debug_assert!(ctx.recipe.is_none(), "`with fresh` inside a resource body");
+                    Value::plain(ctx.fresh_symbolic_value(map_ty))
+                }
+                Bind::Bound(v) => Value {
+                    id: state.get_val(ctx, v),
+                    recipe: state.recipe_of(v),
+                },
+                // A resource body's footprint slot: record the chunk set in the
+                // certificate under construction. Its value map is the seed
+                // `SlotValue(i)`, supplied at graft time; the captured values
+                // are kept as recipes so a call site can re-evaluate the body.
+                Bind::SelfSlot => {
+                    let caps = q
+                        .free_temps()
+                        .into_iter()
+                        .map(|k| Ok((k, state.require_recipe(&Val::Temp(k), OPERAND_RECIPE)?)))
+                        .collect::<Result<Vec<_>, VerifyError>>()?;
+                    let rb = ctx
+                        .recipe
+                        .as_mut()
+                        .expect("`with self` outside a resource-body (certificate) walk");
+                    let i = rb.pending_slots.len();
+                    let seed = rb.emit_seed(SeedRef::SlotValue(i));
+                    rb.pending_slots.push((
+                        spec.kind(),
+                        map_ty.clone(),
+                        SlotShape::Quant {
+                            q: spec.q.clone(),
+                            caps,
+                        },
+                    ));
+                    Value {
+                        id: ctx.fresh_symbolic_value(map_ty),
+                        recipe: Some(seed),
+                    }
+                }
+            };
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            let region = state.region(ctx);
+            get_heap(ctx, state, base, &region)?.produce(ctx, Access::Set(spec), value, &pc_lits)
+        }
+        // Exhale a chunk set: one held set must cover it.
+        HeapInst::SubForall { base, q } => {
+            if ctx.recipe.is_some() {
+                return Err(VerifyError::Unimplemented(
+                    "quantified permission in a resource footprint",
+                ));
+            }
+            let spec = quant_spec_of(ctx, state, q, pc)?;
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            let region = state.region(ctx);
+            let base_h = get_heap(ctx, state, base, &region)?;
+            Ok(base_h
+                .consume(ctx, Access::Set(spec), ConsumeMode::Take, &pc_lits)?
+                .0)
         }
         // Resource inhale/exhale need the program + certificates; method-only.
         HeapInst::Inhale { .. } | HeapInst::Exhale { .. } => Err(VerifyError::Unimplemented(
             "resource inhale/exhale outside method body",
         )),
-        // Field assignment `loc := val`: requires write permission at `loc`,
-        // then updates the chunk's value (permission unchanged).
+        // Field assignment `loc := val`: write permission at `loc`, then every
+        // holder of `loc` takes the new value (permissions unchanged).
         HeapInst::Assign(heap, Assign { loc, val }) => {
-            let h = get_heap(state, heap);
-            let addr = state.get_val(ctx, loc);
-            let new_val = state.get_val(ctx, val);
-            let kind = state
-                .loc_kind(loc)
+            let l = state
+                .loc(ctx, loc)
                 .expect("assign location must be Addr-typed");
-            let held = h.chunk(&kind, addr).cloned();
-            let perm = held
-                .as_ref()
-                .map(|c| c.ungated_perm().clone())
-                .unwrap_or_else(|| ChunkPerm::leaf(expr!(ctx, 0 / 1)));
-            let guard = held
-                .as_ref()
-                .map(|c| c.guard_pc())
-                .unwrap_or_else(|| std::rc::Rc::from(Vec::new()));
-            // SIDECOND: prove `not(perm < cap)` (full/write permission, `cap` =
-            // the location's own permission bound, `1/1` for a field) under pc —
-            // per leaf, so a branch-structured held perm never materializes. Under
-            // the guarded-merge path the write obligation is proven against the
-            // guard-gated perm (write required only where the chunk is present).
-            let pc_lits: Vec<(egg::Id, Polarity)> = pc
-                .conds
-                .iter()
-                .map(|(v, p)| (state.get_val(ctx, v), *p))
-                .collect();
-            let proof_perm = if !guard.is_empty() {
-                gate_perm_by_guard(ctx, &perm, &guard)
-            } else {
-                perm.clone()
-            };
-            if !prove_perm_write(ctx, &proof_perm, &kind.bound, &pc_lits) {
-                return Err(VerifyError::InsufficientPermission);
-            }
-            // Permission (and its presence guard) unchanged by the write; keep it
-            // structural.
-            Ok(h.with_chunk(
-                &kind,
-                Chunk::new_perm(addr, perm, new_val).with_guard(guard),
-            ))
+            let new_val = state.get_val(ctx, val);
+            let pc_lits = pc_lits_raw(ctx, state, pc);
+            let region = state.region(ctx);
+            get_heap(ctx, state, heap, &region)?.write(ctx, &l, new_val, &pc_lits)
         }
     }
 }
@@ -1217,7 +439,7 @@ fn eval_resource_body_inst(
             bind: Bind::Bound(_),
             ..
         }) => {
-            let heap = eval_from_snap(ctx, program, state, inst, certs)?;
+            let heap = eval_from_snap(ctx, state, inst, certs)?;
             state.push_heap(heap);
         }
         InstKind::Heap(hi) => {
@@ -1362,14 +584,20 @@ enum ValueSource {
     /// A fresh unconstrained value per slot. Used by `inhale`, which produces a
     /// resource's footprint with unknown location values.
     Fresh,
+    /// What stands for each (single) slot of a quantifier body's call on a
+    /// binder: the slot's value is `lookup(map, addr)` or the captured value
+    /// (see [`frame_snapshot`]).
+    Stands(std::rc::Rc<[crate::verify::quant::ResolvedSlot]>),
 }
 
 /// The direction of a footprint walk: consume a held footprint and **assert** the
 /// resource's boolean (`fold`/`snap`), or produce one and **assume** it
-/// (`unfold`/`from_snap`).
+/// (`unfold`/`from_snap`). `Build` only builds the snapshot a frame-only exhale
+/// yields, with no heap effect and no check (see [`frame_snapshot`]).
 enum Direction {
     Consume,
     Produce,
+    Build,
 }
 
 /// The result of a footprint walk: the accumulator heap after all slot effects,
@@ -1383,15 +611,8 @@ struct FootprintResult {
     /// Recipe provenance of each slot value, in slot order (certificate walks
     /// only; all `None` otherwise).
     slot_recipes: Vec<Option<Val>>,
-}
-
-/// A footprint slot's permission as built for the current walk: either the real
-/// `Amount` (drives the heap effect), or, for a wildcard slot at a `Snap`, a
-/// `Presence` indicator `ite(guard, 1, 0)` standing in for the wildcard (drives
-/// only the snapshot member + a "holds a positive share" sufficiency prove).
-enum SlotPerm {
-    Amount(ChunkPerm),
-    Presence(ChunkPerm),
+    /// Each single slot's location, in slot order; `None` for a quantified one.
+    slot_locs: Vec<Option<Loc>>,
 }
 
 /// The single per-slot footprint loop behind `fold`, `unfold`, `snap` and
@@ -1409,7 +630,6 @@ enum SlotPerm {
 #[allow(clippy::too_many_arguments)]
 fn walk_footprint(
     ctx: &mut VerifyContext<'_>,
-    _program: &vmir::Program,
     certs: &HashMap<MemberId, ResourceDefinition>,
     resource: MemberId,
     args: &[egg::Id],
@@ -1437,204 +657,80 @@ fn walk_footprint(
     // bit — its one `true` caller passes `frame_only` — so it is now that bit.
     frame_only: bool,
 ) -> Result<FootprintResult, VerifyError> {
-    use crate::verify::cert::SeedRef;
     let def = certs.get(&resource).ok_or(VerifyError::DependencyFailed)?;
 
+    let before = base.clone();
     let mut heap = base;
     let mut values: Vec<egg::Id> = Vec::with_capacity(def.footprint.len());
     let mut recipes: Vec<Option<Val>> = Vec::with_capacity(def.footprint.len());
+    let mut locs: Vec<Option<Loc>> = Vec::with_capacity(def.footprint.len());
     let mut members = Vec::with_capacity(def.footprint.len());
     let mut changed = Vec::new();
+    let walk = SlotWalk {
+        resource,
+        args,
+        source: &source,
+        direction: &direction,
+        scale,
+        scale_wild,
+        pc_lits,
+        frame_only,
+        before: &before,
+    };
     for (i, slot) in def.footprint.iter().enumerate() {
-        // Rebuild the slot's address and permission from their recipes, resolving
-        // params to `args` and any earlier-slot value refs to `values` (so a
-        // value-dependent inner address like `list(this.next)` resolves).
-        let resolve = |r: &SeedRef| -> egg::Id {
-            match r {
-                SeedRef::Param(k) => args[*k],
-                SeedRef::SlotValue(j) => values[*j],
-            }
-        };
-        // Heap framing is a *syntactic* e-class match (`heap_subtract`,
-        // `ValueSource::ReadHeap`), so a slot address has to be in normal form
-        // before we look it up: an address reaching through a snapshot
-        // (`Pt(f(r, cons(Some(unwrap(proj_0(s))))))`) only becomes e-class-equal to
-        // the held chunk's address once `proj∘cons` / `unwrap∘Some` have fired.
-        //
-        // Reduce only when the rebuild actually introduced something to reduce: the
-        // recipe is add-only, so if `build` added no e-node then every term it named
-        // was already present, hence already normalized. Reducing unconditionally
-        // per slot re-runs the ADT rule set over the whole graph and costs ~3.5x.
-        // A wildcard slot at a frame-only exhale (bare or gated): build its
-        // **presence** indicator rather than the wildcard perm — the same shape with
-        // the wildcard leaf built as full permission `1`, so `ite(guard, 1, 0)`
-        // whose `0 < …` folds to the gating guard.
-        // The slot's permission shape is also the static source for the consume rule
-        // its demand selects, at the `SlotPerm::Amount` consume below -- see
-        // [`Demand`]. Shape-only, so it is the same predicate the IR side asks.
-        let slot_wildcard = slot.perm.has_wildcard();
-        let slot_demand = if slot_wildcard {
-            Demand::Wildcard
-        } else {
-            Demand::Concrete
-        };
-        let wc_slot = frame_only && slot_wildcard;
-        let before = ctx.egraph.total_number_of_nodes();
-        let addr = slot
-            .addr
-            .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
-        let wildcard_as = if wc_slot {
-            WildcardAs::One
-        } else {
-            WildcardAs::Fresh
-        };
-        let bperm = {
-            let p = build_perm(
+        let SlotOut {
+            value,
+            recipe,
+            member,
+            loc,
+        } = match &slot.shape {
+            SlotShape::Single { addr, perm } => walk_single_slot(
                 ctx,
-                &slot.perm,
-                &resolve,
-                pc_lits,
+                &walk,
+                i,
+                &slot.kind,
+                &slot.elem,
+                addr,
+                perm,
+                &values,
+                &mut heap,
                 &mut changed,
-                wildcard_as,
-            );
-            if wc_slot {
-                SlotPerm::Presence(p)
-            } else {
-                SlotPerm::Amount(p)
-            }
-        };
-        if ctx.egraph.total_number_of_nodes() != before {
-            ctx.reduce();
-        }
-        let addr = ctx.egraph.find(addr);
-        let elem = slot.elem.clone();
-        let (value, recipe) = match &source {
-            // Values are read from the *original* heap (aliased slots agree);
-            // the hit chunk's recipe provenance rides along.
-            ValueSource::ReadHeap(h) => h
-                .entries()
-                .find_map(|(_, c)| {
-                    (ctx.egraph.find(c.addr) == ctx.egraph.find(addr))
-                        .then(|| (c.value, c.recipe.clone()))
-                })
-                .unwrap_or_else(|| (ctx.fresh_symbolic_value(elem.clone()), None)),
-            // `proj_i(s)` recovers the optional member (collapsing to the `cons`
-            // argument when `s` is concrete); `unwrap` peels to the field value.
-            // A certificate walk mirrors the projection into the recipe.
-            ValueSource::ProjectSnap(s, s_recipe) => {
-                let proj_id = ctx.alloc.proj(resource, 0, i);
-                let opt_ty = ctx.alloc.option_type(elem.clone());
-                let opt = ctx.add_func_app_id(proj_id, Box::new([]), opt_ty, Box::new([*s]));
-                let value = ctx.option_unwrap(elem.clone(), opt);
-                let recipe = match (ctx.recipe.is_some(), s_recipe) {
-                    (true, Some(sr)) => {
-                        use crate::verify::rewrite::AxiomPure;
-                        let unwrap_id = ctx.alloc.option_value();
-                        let rb = ctx.recipe.as_mut().unwrap();
-                        let opt = rb.emit(AxiomPure::App {
-                            func: proj_id,
-                            type_args: Vec::new(),
-                            args: vec![sr.clone()],
-                        });
-                        Some(rb.emit(AxiomPure::App {
-                            func: unwrap_id,
-                            type_args: vec![elem.clone()],
-                            args: vec![opt],
-                        }))
+            )?,
+            SlotShape::Quant { q, caps } => {
+                if let Some(pm) = walk.scale {
+                    let is_one = expr!(ctx, { pm } == (1 / 1));
+                    if !ctx.prove_under_pc(is_one, walk.pc_lits) {
+                        return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
                     }
-                    _ => None,
-                };
-                (value, recipe)
-            }
-            // Inhale: an unconstrained fresh value per slot.
-            ValueSource::Fresh => (ctx.fresh_symbolic_value(elem.clone()), None),
-        };
-        // Snapshot member `present ? Some(v) : None`, plus the slot's heap effect.
-        let present = match bperm {
-            // Normal path: apply the (optionally scaled) permission to the heap
-            // (subtract/union), presence is `0 < perm`.
-            SlotPerm::Amount(bperm) => {
-                let p = match scale {
-                    Some(pm) => scale_perm(ctx, pm, scale_wild, bperm.clone()),
-                    None => bperm.clone(),
-                };
-                let chunk = Chunk::new_perm(addr, p, value).with_recipe(recipe.clone());
-                heap = match direction {
-                    Direction::Consume => {
-                        heap_subtract(ctx, &heap, &slot.kind, chunk, pc_lits, slot_demand)?
-                    }
-                    Direction::Produce => heap_union(ctx, &heap, &slot.kind, chunk, pc_lits),
-                };
-                let bperm_id = bperm.to_id(ctx);
-                expr!(ctx, (0 / 1) < r { bperm_id })
-            }
-            // Wildcard `Snap` slot: no heap effect (Snap frames). Presence is the
-            // gating guard `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when
-            // unconditional). Sufficiency: where the slot is required, the caller
-            // must hold a positive share — prove `guard ⇒ 0 < held` against the
-            // caller's (concrete) held permission; no wildcard is ever built.
-            SlotPerm::Presence(pp) => {
-                let pp = pp.to_id(ctx);
-                let guard = expr!(ctx, (0 / 1) < r { pp });
-                let (_, existing) =
-                    find_chunk_consolidated(ctx, &heap, &slot.kind, addr, pc_lits, true);
-                let suff = match existing {
-                    Some(c) => {
-                        // `guard ⇒ 0 < held`, proven per leaf (never materialize
-                        // the held `Select`): assume `guard` in the pc, prove
-                        // `0 < leaf` on each branch. Gated, so presence is
-                        // respected: a conditionally-held slot frames only where
-                        // its guard holds.
-                        let held = c.gated_perm(ctx);
-                        let mut pc = pc_lits.to_vec();
-                        pc.push((guard, Polarity::Positive));
-                        prove_perm_positive(ctx, &held, &pc)
-                    }
-                    // No chunk held here: sound only if the slot is not required
-                    // on this path (`guard` is false).
-                    None => {
-                        let not_guard = expr!(ctx, not { guard });
-                        ctx.prove_under_pc(not_guard, pc_lits)
-                    }
-                };
-                // Last resort, the framing twin of what `heap_subtract_inner` does
-                // on a miss: no chunk matched this address on ground (or the one
-                // that did could not be shown positive), but another chunk of the
-                // group may sit here — under an equality the pc does not mention,
-                // or under its own presence guard, which is the `&mut`-reborrow
-                // shape. Summarize the group at `addr` and ask for positivity per
-                // leaf. Reached only by a check that would otherwise fail, so no
-                // framing check that succeeds outright pays for it.
-                let suff = suff || {
-                    let chunks = heap.chunks_of(&slot.kind).to_vec();
-                    let (total, set) = summarize_perm_at(ctx, &chunks, addr, pc_lits);
-                    let mut pc = pc_lits.to_vec();
-                    pc.push((guard, Polarity::Positive));
-                    !set.is_empty() && prove_perm_positive(ctx, &total, &pc)
-                };
-                if !suff {
-                    return Err(VerifyError::InsufficientPermission);
                 }
-                guard
+                walk_qp_slot(
+                    ctx,
+                    &walk,
+                    i,
+                    &slot.elem,
+                    q,
+                    caps,
+                    &values,
+                    &mut heap,
+                    &mut changed,
+                )?
             }
         };
-        members.push(ctx.option_member(elem, present, value));
+        members.push(member);
         values.push(value);
         recipes.push(recipe);
+        locs.push(loc);
     }
     // The body boolean over params ++ all slot values.
-    let resolve = |r: &SeedRef| -> egg::Id {
-        match r {
-            SeedRef::Param(k) => args[*k],
-            SeedRef::SlotValue(j) => values[*j],
-        }
-    };
     // `bool_guard`, not `pc_lits`: it is the path condition at every call site
     // (an `inhale` extends it with `0 < scale`, the others pass `pc_lits`
     // itself), so it is the tighter of the two and always a superset.
-    let bool_id = def
-        .bool
-        .build(&mut ctx.egraph, resolve, pc_lits, &mut changed);
+    let bool_id = def.bool.build(
+        &mut ctx.egraph,
+        |r| r.resolve(args, &values),
+        pc_lits,
+        &mut changed,
+    );
     match direction {
         // The precondition/predicate body must hold over the consumed values.
         Direction::Consume => {
@@ -1653,12 +749,321 @@ fn walk_footprint(
         Direction::Produce => {
             ctx.assume_guarded(bool_id, bool_guard.iter().rev().copied());
         }
+        Direction::Build => {}
     }
+    // Two slots that may hold one location need no fact here: the heap ties
+    // their values itself, at a read that meets both or at an exhale that
+    // takes from one (`Heap::consume`), as it does for any two holders.
     Ok(FootprintResult {
         heap,
         members,
         slot_recipes: recipes,
+        slot_locs: locs,
     })
+}
+
+/// The call-site inputs shared by every slot of one [`walk_footprint`] (see
+/// its parameters).
+struct SlotWalk<'a> {
+    resource: MemberId,
+    args: &'a [egg::Id],
+    source: &'a ValueSource,
+    direction: &'a Direction,
+    scale: Option<egg::Id>,
+    scale_wild: bool,
+    pc_lits: &'a [(egg::Id, Polarity)],
+    frame_only: bool,
+    /// The heap the walk started from.
+    before: &'a Heap,
+}
+
+/// What one walked footprint slot contributes: its value (seen by later slots
+/// and the body boolean), that value's recipe (certificate walks only), and its
+/// snapshot member `present ? Some(value) : None`.
+struct SlotOut {
+    value: egg::Id,
+    recipe: Option<Val>,
+    member: egg::Id,
+    /// A single slot's location.
+    loc: Option<Loc>,
+}
+
+/// Walk footprint slot `i`, a single `acc(addr, perm)`: rebuild its address and
+/// permission from their recipes, take its value from `w.source`, and apply its
+/// effect to `heap` (subtract for `Consume`, union for `Produce`, or only prove
+/// a positive share for a wildcard slot at a frame-only exhale).
+#[allow(clippy::too_many_arguments)]
+fn walk_single_slot(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    i: usize,
+    kind: &LocationKind,
+    elem: &Type,
+    addr_r: &crate::verify::cert::BodyRecipe,
+    perm_r: &PermRecipe,
+    values: &[egg::Id],
+    heap: &mut Heap,
+    changed: &mut Vec<egg::Id>,
+) -> Result<SlotOut, VerifyError> {
+    // Rebuild the slot's address and permission from their recipes, resolving
+    // params to `args` and any earlier-slot value refs to `values` (so a
+    // value-dependent inner address like `list(this.next)` resolves).
+    // Heap framing is a *syntactic* e-class match (`heap_subtract`,
+    // `ValueSource::ReadHeap`), so a slot address has to be in normal form
+    // before we look it up: an address reaching through a snapshot
+    // (`Pt(f(r, cons(Some(unwrap(proj_0(s))))))`) only becomes e-class-equal to
+    // the held chunk's address once `proj∘cons` / `unwrap∘Some` have fired.
+    //
+    // Reduce only when the rebuild actually introduced something to reduce: the
+    // recipe is add-only, so if `build` added no e-node then every term it named
+    // was already present, hence already normalized. Reducing unconditionally
+    // per slot re-runs the ADT rule set over the whole graph and costs ~3.5x.
+    // A wildcard slot at a frame-only exhale (bare or gated): build its
+    // **presence** indicator rather than the wildcard perm — the same shape with
+    // the wildcard leaf built as full permission `1`, so `ite(guard, 1, 0)`
+    // whose `0 < …` folds to the gating guard (see [`frame_wildcard_slot`]).
+    let resolve = |r: &SeedRef| r.resolve(w.args, values);
+    let wc_slot = w.frame_only && perm_r.has_wildcard();
+    let before = ctx.egraph.total_number_of_nodes();
+    let addr = addr_r.build(&mut ctx.egraph, resolve, w.pc_lits, changed);
+    let wildcard_as = if wc_slot {
+        WildcardAs::One
+    } else {
+        WildcardAs::Fresh
+    };
+    let perm = build_perm(ctx, perm_r, &resolve, w.pc_lits, changed, wildcard_as);
+    if ctx.egraph.total_number_of_nodes() != before {
+        ctx.reduce();
+    }
+    let addr = ctx.egraph.find(addr);
+    // Values are read from the *original* heap (aliased slots agree); the hit
+    // chunk's recipe provenance rides along. With a chunk set of this kind the
+    // location is read through all its holders, as a `Deref` is (a set's value
+    // has no recipe here: the slot address has none).
+    let loc = Loc {
+        kind: kind.clone(),
+        addr,
+    };
+    let slot_loc = loc.clone();
+    let (value, recipe) = match w.source {
+        ValueSource::Stands(slots) => (stand_value(ctx, &slots[i], addr), None),
+        _ => slot_value(ctx, w, i, elem, |ctx, h| {
+            // The bodies of its chunk sets evaluated once already, at their inhales.
+            let read = h
+                .read(ctx, &loc, w.pc_lits, None)
+                .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
+            match read {
+                Some(v) => (v.id, v.recipe),
+                None => (ctx.fresh_symbolic_value(elem.clone()), None),
+            }
+        }),
+    };
+    let present = if wc_slot {
+        // A frame check: no heap effect; presence is the gating guard
+        // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
+        let pp = perm.to_id(ctx);
+        let guard = expr!(ctx, (0 / 1) < r { pp });
+        if !matches!(w.direction, Direction::Build) {
+            let access = Access::Single { loc, perm };
+            heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
+        }
+        guard
+    } else {
+        // A function's precondition is read-only: every amount is a wildcard.
+        assert!(
+            !matches!(w.direction, Direction::Build),
+            "a snapshot is built only for a function precondition, whose slots are wildcards"
+        );
+        let value = Value {
+            id: value,
+            recipe: recipe.clone(),
+        };
+        apply_slot_perm(ctx, w, loc, perm, value, heap)?
+    };
+    let member = ctx.option_member(elem.clone(), present, value);
+    Ok(SlotOut {
+        value,
+        recipe,
+        member,
+        loc: Some(slot_loc),
+    })
+}
+
+fn walk_qp_slot(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    i: usize,
+    elem: &Type,
+    q: &Rc<vmir::QuantChunks>,
+    caps_r: &[(usize, BodyRecipe)],
+    values: &[egg::Id],
+    heap: &mut Heap,
+    changed: &mut Vec<egg::Id>,
+) -> Result<SlotOut, VerifyError> {
+    debug_assert!(
+        matches!(elem, Type::ValueMap(..)),
+        "element type of a qp must be a value map"
+    );
+    let resolve = |r: &SeedRef| r.resolve(w.args, values);
+    let before = ctx.egraph.total_number_of_nodes();
+    let caps = caps_r
+        .iter()
+        .map(|(k, recipe)| {
+            (
+                *k,
+                recipe.build(&mut ctx.egraph, resolve, w.pc_lits, changed),
+            )
+        })
+        .collect::<Rc<_>>();
+
+    if ctx.egraph.total_number_of_nodes() != before {
+        ctx.reduce()
+    }
+    let caps = caps
+        .iter()
+        .map(|&(k, id)| (k, ctx.egraph.find(id)))
+        .collect();
+    // The body's heap reads, resolved against the caller's heap, which is the
+    // one heap every footprint heap of the resource body stands for here: as
+    // produced so far on a produce, as before the walk on a consume (an exhale
+    // reads values in the state before it).
+    let reads_from = match w.direction {
+        Direction::Produce => heap.clone(),
+        Direction::Consume | Direction::Build => w.before.clone(),
+    };
+    let mut heap_of = |_: &mut VerifyContext<'_>, _: &_| Ok(reads_from.clone());
+    let caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
+
+    let value = match w.direction {
+        Direction::Produce => {
+            let (map, recipe) = slot_value(ctx, w, i, elem, |_, _| {
+                unreachable!("ReadHeap only consumes")
+            });
+            // Well-formedness was proven by the certificate walk; the body
+            // boolean assumed after the slots carries the facts it relied on.
+            let spec = QuantSpec {
+                q: q.clone(),
+                caps,
+                check: QpCheck::Established,
+            };
+            let value = Value { id: map, recipe };
+            *heap = heap.produce(ctx, Access::Set(spec), value.clone(), w.pc_lits)?;
+            value
+        }
+        Direction::Consume => {
+            let spec = QuantSpec {
+                q: q.clone(),
+                caps,
+                check: QpCheck::Injectivity,
+            };
+            let mode = if w.frame_only {
+                ConsumeMode::Frame
+            } else {
+                ConsumeMode::Take
+            };
+            let (out, held) = heap.consume(ctx, Access::Set(spec), mode, w.pc_lits)?;
+            *heap = out;
+            held
+        }
+        // Its value is the covering set's map, found only by the containment
+        // check this direction skips.
+        Direction::Build => {
+            return Err(VerifyError::Unimplemented(
+                "heap-dependent call inside a quantifier whose precondition holds a quantified permission",
+            ));
+        }
+    };
+    let (map, recipe) = (value.id, value.recipe);
+
+    let present = expr!(ctx, true);
+    Ok(SlotOut {
+        value: map,
+        recipe,
+        member: ctx.option_member(elem.clone(), present, map),
+        loc: None,
+    })
+}
+
+/// A footprint slot's value, by `w.source`: a fresh value for `Fresh`, and
+/// `unwrap(proj_i(s))` for `ProjectSnap(s)` (mirrored into the recipe during a
+/// certificate walk). `ReadHeap(h)` depends on the slot's shape, so the caller
+/// supplies it as `read_heap`. Works for any `elem`, so a quantified slot (whose
+/// value is its `ValueMap`) can share it.
+fn slot_value(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    i: usize,
+    elem: &Type,
+    read_heap: impl FnOnce(&mut VerifyContext<'_>, &Heap) -> (egg::Id, Option<Val>),
+) -> (egg::Id, Option<Val>) {
+    match w.source {
+        ValueSource::ReadHeap(h) => read_heap(ctx, h),
+        // `proj_i(s)` recovers the optional member (collapsing to the `cons`
+        // argument when `s` is concrete); `unwrap` peels to the field value.
+        // A certificate walk mirrors the projection into the recipe.
+        ValueSource::ProjectSnap(s, s_recipe) => {
+            let proj_id = ctx.alloc.proj(w.resource, 0, i);
+            let opt_ty = ctx.alloc.option_type(elem.clone());
+            let opt = ctx.add_func_app_id(proj_id, Box::new([]), opt_ty, Box::new([*s]));
+            let value = ctx.option_unwrap(elem.clone(), opt);
+            let recipe = match (ctx.recipe.is_some(), s_recipe) {
+                (true, Some(sr)) => {
+                    use crate::verify::rewrite::AxiomPure;
+                    let unwrap_id = ctx.alloc.option_value();
+                    let rb = ctx.recipe.as_mut().unwrap();
+                    let opt = rb.emit(AxiomPure::App {
+                        func: proj_id,
+                        type_args: Vec::new(),
+                        args: vec![sr.clone()],
+                    });
+                    Some(rb.emit(AxiomPure::App {
+                        func: unwrap_id,
+                        type_args: vec![elem.clone()],
+                        args: vec![opt],
+                    }))
+                }
+                _ => None,
+            };
+            (value, recipe)
+        }
+        // Inhale: an unconstrained fresh value per slot.
+        ValueSource::Fresh => (ctx.fresh_symbolic_value(elem.clone()), None),
+        ValueSource::Stands(_) => unreachable!("stand-ins rebuild single slots only"),
+    }
+}
+
+/// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
+/// (`Consume`) or add it (`Produce`), with `perm` scaled by `w.scale` when set.
+/// Returns the slot's presence `0 < perm` (unscaled).
+fn apply_slot_perm(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    loc: Loc,
+    perm: ChunkPerm,
+    value: Value,
+    heap: &mut Heap,
+) -> Result<egg::Id, VerifyError> {
+    let scaled = match w.scale {
+        Some(pm) => scale_perm(ctx, pm, w.scale_wild, perm.clone()),
+        None => perm.clone(),
+    };
+    let access = Access::Single { loc, perm: scaled };
+    *heap = match w.direction {
+        Direction::Consume => {
+            let (out, taken) = heap.consume(ctx, access, ConsumeMode::Take, w.pc_lits)?;
+            // The slot value was read before (from the walk's source heap) and
+            // the consume read the same location of the same state: they agree.
+            if ctx.egraph.find(taken.id) != ctx.egraph.find(value.id) {
+                let eq = expr!(ctx, { taken.id } == { value.id });
+                ctx.assume_guarded(eq, w.pc_lits.iter().rev().copied());
+            }
+            out
+        }
+        Direction::Produce => heap.produce(ctx, access, value, w.pc_lits)?,
+        Direction::Build => unreachable!("a built snapshot has no heap effect"),
+    };
+    let perm_id = perm.to_id(ctx);
+    Ok(expr!(ctx, (0 / 1) < r { perm_id }))
 }
 
 /// The `cons` of a resource's snapshot from its per-slot `members`
@@ -1694,52 +1099,27 @@ fn eval_sub_yield(
     else {
         unreachable!("eval_sub_yield called on a non-yielding-Sub instruction");
     };
-    let base_h = get_heap(state, base);
-    let addr = state.get_val(ctx, loc);
-    let kind = state
-        .loc_kind(loc)
+    let region = state.region(ctx);
+    let base_h = get_heap(ctx, state, base, &region)?;
+    let l = state
+        .loc(ctx, loc)
         .expect("acc location must be Addr-typed");
+    let kind = l.kind.clone();
     let cperm = eval_perm_structural(ctx, state, perm);
-    let pc_lits: Vec<(egg::Id, Polarity)> = pc
-        .conds
-        .iter()
-        .map(|(v, p)| (state.get_val(ctx, v), *p))
-        .collect();
-
-    // The held value, and (certificate walks) its provenance. The `Option` below
-    // is concretely `Some` on every path that continues: `heap_subtract` fails
-    // unless the permission is held, so `None` is reachable only at a
-    // provably-non-positive permission.
-    //
-    // A miss of this canonical-address scan is not yet a missing permission: the
-    // subtraction below also matches a chunk whose address equals the demand only
-    // under the path condition, and owes nothing on a dead path -- a plain
-    // `exhale` of the same location succeeds in both cases. So stand in a fresh
-    // value, as the plain `Sub` does, and let `heap_subtract` bind it to what it
-    // consumes. A certificate walk needs the held chunk's recipe, so there a miss
-    // stays a failure.
-    let a = ctx.egraph.find(addr);
-    let hit = base_h
-        .entries()
-        .find_map(|(_, c)| (ctx.egraph.find(c.addr) == a).then(|| (c.value, c.recipe.clone())));
-    let (held, held_recipe) = match hit {
-        Some(x) => x,
-        None if ctx.recipe.is_none() => (ctx.fresh_symbolic_value(kind.value.clone()), None),
-        None => return Err(VerifyError::InsufficientPermission),
+    let pc_lits = pc_lits_raw(ctx, state, pc);
+    // The consume hands back the value it took, read from the holders whose
+    // permission it took, and (certificate walks) its provenance.
+    let access = Access::Single {
+        loc: l,
+        perm: cperm.clone(),
     };
-    if ctx.recipe.is_some() && held_recipe.is_none() {
+    let (out, taken) = base_h.consume(ctx, access, ConsumeMode::Take, &pc_lits)?;
+    if ctx.recipe.is_some() && taken.recipe.is_none() {
         return Err(VerifyError::Unimplemented(
             "purify: consume of an unheld location",
         ));
     }
-    let out = heap_subtract(
-        ctx,
-        &base_h,
-        &kind,
-        Chunk::new_perm(addr, cperm.clone(), held),
-        &pc_lits,
-        demand_of(&cperm),
-    )?;
+    let (held, held_recipe) = (taken.id, taken.recipe);
     state.push_heap(out);
 
     // Presence is `0 < perm`, built from the permission the instruction names.
@@ -1814,10 +1194,11 @@ fn eval_resource_op(
             ..
         }
     );
-    let base_h = get_heap(state, base);
+    let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
+    let region = state.region(ctx);
+    let base_h = get_heap(ctx, state, base, &region)?;
     let args: Vec<egg::Id> = call.args.iter().map(|v| state.get_val(ctx, v)).collect();
     let scale = eval_perm(ctx, state, perm);
-    let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
     // Inhale: produce fresh chunks, assume the bool guarded by `0 < scale`
     // (it carries no path condition — the branch lives in the perm scale).
     // Exhale: consume the held chunks, assert the bool under `pc`.
@@ -1865,9 +1246,9 @@ fn eval_resource_op(
         heap: out,
         members,
         slot_recipes,
+        ..
     } = walk_footprint(
         ctx,
-        program,
         certs,
         call.resource,
         &args,
@@ -1896,61 +1277,141 @@ fn eval_resource_op(
         // (a function's precondition check) is ever reached during a
         // recipe walk; a consuming inhale/exhale is method-only, where no
         // recipe is in flight and this yields `None` as before.
-        let recipe = if ctx.recipe.is_some() {
-            let def = certs.get(&res_id).ok_or(VerifyError::DependencyFailed)?;
-            let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
-            let some_id = ctx.alloc.option_some();
-            let cons_id = ctx.alloc.cons(res_id, 0);
-            // A slot read without provenance on a path the walk proves dead
-            // (e.g. under `unfolding` of a predicate whose body is `false` — a
-            // Prusti enum variant that cannot occur) may take any value: the
-            // definitional axiom's ite never selects this branch. `unwrap(None)`
-            // is that unspecified value, as a term the certificate can carry.
-            let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
-                let f = expr!(ctx, false);
-                ctx.is_inconsistent() || ctx.prove_under_pc(f, &pc_lits)
-            };
-            let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
-            let rb = ctx.recipe.as_mut().unwrap();
-            let mut members_r = Vec::with_capacity(slot_recipes.len());
-            for (i, r) in slot_recipes.iter().enumerate() {
-                let v = match r.clone() {
-                    Some(v) => v,
-                    None if dead_path => {
-                        let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
-                            func: none_id,
-                            type_args: vec![elems[i].clone()],
-                            args: Vec::new(),
-                        });
-                        rb.emit(crate::verify::rewrite::AxiomPure::App {
-                            func: value_id,
-                            type_args: vec![elems[i].clone()],
-                            args: vec![none],
-                        })
-                    }
-                    None => {
-                        return Err(VerifyError::Unimplemented(
-                            "purify: snap value outside footprint",
-                        ));
-                    }
-                };
-                members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                    func: some_id,
-                    type_args: vec![elems[i].clone()],
-                    args: vec![v],
-                }));
-            }
-            Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
-                func: cons_id,
-                type_args: Vec::new(),
-                args: members_r,
-            }))
-        } else {
-            None
-        };
+        let recipe = snapshot_recipe(ctx, certs, res_id, &slot_recipes, &pc_lits)?;
         state.push_val(s, Type::Snap(res_id), recipe);
     }
     Ok(())
+}
+
+/// The certificate recipe of a frame-only exhale's snapshot (`None` outside a
+/// certificate walk): `cons(Some(v_i))` over the read slot values' recipes --
+/// a self-framed footprint is fully held, so every slot is `Some`. Only a
+/// frame-only exhale (a function's precondition check) is ever reached during
+/// a recipe walk; a consuming inhale/exhale is method-only, where no recipe is
+/// in flight.
+fn snapshot_recipe(
+    ctx: &mut VerifyContext<'_>,
+    certs: &HashMap<MemberId, ResourceDefinition>,
+    res_id: MemberId,
+    slot_recipes: &[Option<Val>],
+    pc_lits: &[(egg::Id, Polarity)],
+) -> Result<Option<Val>, VerifyError> {
+    if ctx.recipe.is_none() {
+        return Ok(None);
+    }
+    let def = certs.get(&res_id).ok_or(VerifyError::DependencyFailed)?;
+    let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
+    let some_id = ctx.alloc.option_some();
+    let cons_id = ctx.alloc.cons(res_id, 0);
+    // A slot read without provenance on a path the walk proves dead
+    // (e.g. under `unfolding` of a predicate whose body is `false` — a
+    // Prusti enum variant that cannot occur) may take any value: the
+    // definitional axiom's ite never selects this branch. `unwrap(None)`
+    // is that unspecified value, as a term the certificate can carry.
+    let dead_path = slot_recipes.iter().any(|r| r.is_none()) && {
+        let f = expr!(ctx, false);
+        ctx.is_inconsistent() || ctx.prove_under_pc(f, pc_lits)
+    };
+    let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
+    let rb = ctx.recipe.as_mut().unwrap();
+    let mut members_r = Vec::with_capacity(slot_recipes.len());
+    for (i, r) in slot_recipes.iter().enumerate() {
+        let v = match r.clone() {
+            Some(v) => v,
+            None if dead_path => {
+                let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
+                    func: none_id,
+                    type_args: vec![elems[i].clone()],
+                    args: Vec::new(),
+                });
+                rb.emit(crate::verify::rewrite::AxiomPure::App {
+                    func: value_id,
+                    type_args: vec![elems[i].clone()],
+                    args: vec![none],
+                })
+            }
+            None => {
+                return Err(VerifyError::Unimplemented(
+                    "purify: snap value outside footprint",
+                ));
+            }
+        };
+        members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
+            func: some_id,
+            type_args: vec![elems[i].clone()],
+            args: vec![v],
+        }));
+    }
+    Ok(Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
+        func: cons_id,
+        type_args: Vec::new(),
+        args: members_r,
+    })))
+}
+
+/// What [`frame_snapshot`] builds a frame-only exhale's snapshot from.
+pub(crate) enum SnapshotFrom {
+    /// The heap, checking framing and the precondition under the given pc,
+    /// as at a call.
+    Check(Heap),
+    /// What stands for each footprint slot of a quantifier body's call (see
+    /// [`ValueSource::Stands`]); nothing to check.
+    Stands(std::rc::Rc<[crate::verify::quant::ResolvedSlot]>),
+}
+
+/// A frame-only exhale's snapshot (see [`frame_snapshot`]).
+pub(crate) struct FrameSnapshot {
+    pub(crate) snap: egg::Id,
+    /// Each single footprint slot's location; `None` for a quantified one.
+    pub(crate) locs: Vec<Option<Loc>>,
+}
+
+/// The snapshot a frame-only exhale of `resource(args)` yields (a
+/// heap-dependent call's). A quantifier body's call is checked per binding,
+/// and its snapshot rebuilt per binding from what stands for its slots (see
+/// `heap::ReadResolver`).
+pub(crate) fn frame_snapshot(
+    ctx: &mut VerifyContext<'_>,
+    resource: MemberId,
+    args: &[egg::Id],
+    from: SnapshotFrom,
+    pc: &[(egg::Id, Polarity)],
+) -> Result<FrameSnapshot, VerifyError> {
+    let certs = ctx
+        .certs
+        .expect("a verification context carries the certificates");
+    let (heap, source, direction) = match from {
+        SnapshotFrom::Check(h) => (h.clone(), ValueSource::ReadHeap(h), Direction::Consume),
+        SnapshotFrom::Stands(slots) => {
+            (Heap::empty(), ValueSource::Stands(slots), Direction::Build)
+        }
+    };
+    let FootprintResult {
+        members, slot_locs, ..
+    } = walk_footprint(
+        ctx, certs, resource, args, heap, source, direction, None, false, pc, pc, true,
+    )?;
+    let snap = build_snapshot(ctx, resource, members);
+    Ok(FrameSnapshot {
+        snap,
+        locs: slot_locs,
+    })
+}
+
+/// A footprint slot's value at `addr` from what stands for it.
+fn stand_value(
+    ctx: &mut VerifyContext<'_>,
+    slot: &crate::verify::quant::ResolvedSlot,
+    addr: egg::Id,
+) -> egg::Id {
+    use crate::verify::quant::Stand;
+    match slot.stand {
+        Stand::Value(v) => v,
+        Stand::Map(m) => {
+            let lookup = ctx.alloc.value_map(&slot.kind).lookup;
+            ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([m, addr])))
+        }
+    }
 }
 
 /// Evaluate a a bound `inhale`: widen a snapshot value back into a heap — the entry
@@ -1961,7 +1422,6 @@ fn eval_resource_op(
 /// **assumed** over the projected values. Returns the reconstructed heap.
 fn eval_from_snap(
     ctx: &mut VerifyContext<'_>,
-    program: &vmir::Program,
     state: &EvalState,
     inst: &Inst,
     certs: &HashMap<MemberId, ResourceDefinition>,
@@ -1991,7 +1451,6 @@ fn eval_from_snap(
     // (guarded by the path condition — a a bound `inhale` may sit under a branch).
     let FootprintResult { heap: out, .. } = walk_footprint(
         ctx,
-        program,
         certs,
         *resource,
         &arg_ids,
@@ -2012,6 +1471,79 @@ fn eval_from_snap(
 /// that mentions one (a parameter, a local, a field read, an operation's
 /// result) or an operation on one (`|s|` is an `Int` over one). Every
 /// collection the program can build or compare is one of these.
+/// The location kinds of every quantified permission in the program, in first
+/// appearance order and without duplicates: the kinds whose value map needs
+/// its axiom.
+fn decls_qp_kinds(
+    decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
+) -> Vec<LocationKind> {
+    let mut out: Vec<LocationKind> = Vec::new();
+    let mut scan = |insts: &[vmir::Inst]| {
+        for i in insts {
+            if let InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) =
+                &i.kind
+            {
+                let kind = LocationKind::from_addr_type(&q.loc_ty).expect("QP loc_ty must be Addr");
+                if !out.contains(&kind) {
+                    out.push(kind);
+                }
+            }
+        }
+    };
+    for d in decls.iter() {
+        match d {
+            vmir::Declaration::Method(m) => scan(&m.flatten()),
+            vmir::Declaration::Resource(r) => scan(&r.body.insts),
+            vmir::Declaration::Function(f) => {
+                if let Some(b) = &f.body {
+                    scan(&b.insts)
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The address functions (field and predicate locations, applied with an
+/// address result type) anywhere in the program: method, resource and function
+/// bodies and the bodies of quantified permissions. Only these are injective;
+/// a resource's member also names its boolean contract function, which is why
+/// the result type decides.
+fn decls_addr_funcs(
+    decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
+) -> crate::dhash::HashSet<crate::verify::lang::FuncId> {
+    fn scan(insts: &[vmir::Inst], out: &mut crate::dhash::HashSet<crate::verify::lang::FuncId>) {
+        for i in insts {
+            match &i.kind {
+                InstKind::Pure(Type::Addr { .. }, PureInst::FunctionCall(fc)) => {
+                    out.insert(crate::verify::func_registry::func_id_for_member(
+                        fc.function,
+                    ));
+                }
+                InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
+                    scan(&q.body.insts, out)
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = crate::dhash::HashSet::default();
+    for d in decls.iter() {
+        match d {
+            vmir::Declaration::Method(m) => scan(&m.flatten(), &mut out),
+            vmir::Declaration::Resource(r) => scan(&r.body.insts, &mut out),
+            vmir::Declaration::Function(f) => {
+                if let Some(b) = &f.body {
+                    scan(&b.insts, &mut out)
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn decls_use_coll(
     decls: &typed_index_collections::TiVec<MemberId, vmir::Declaration>,
     kind: CollKind,
@@ -2025,7 +1557,10 @@ fn decls_use_coll(
             _ => false,
         }
     }
-    let insts_use = |insts: &[vmir::Inst]| {
+    // Recurses into quantifier bodies (a pure `forall`'s, a quantified
+    // permission's) and their binder types: a collection used only there still
+    // needs its axioms.
+    fn insts_use(insts: &[vmir::Inst], kind: CollKind) -> bool {
         insts.iter().any(|i| match &i.kind {
             InstKind::Pure(ty, pi) => {
                 mentions(ty, kind)
@@ -2036,12 +1571,20 @@ fn decls_use_coll(
                         PureInst::CollLit {
                             kind: k, elem_ty, ..
                         } => *k == kind || mentions(elem_ty, kind),
+                        PureInst::Forall(q) => {
+                            q.bound.iter().any(|t| mentions(t, kind))
+                                || insts_use(&q.body.insts, kind)
+                        }
                         _ => false,
                     }
             }
+            InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
+                q.bound.iter().any(|t| mentions(t, kind)) || insts_use(&q.body.insts, kind)
+            }
             _ => false,
         })
-    };
+    }
+    let insts_use = |insts: &[vmir::Inst]| insts_use(insts, kind);
     decls.iter().any(|d| match d {
         vmir::Declaration::Method(m) => insts_use(&m.flatten()),
         vmir::Declaration::Function(f) => {
@@ -2119,7 +1662,7 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
         ctx.union(res, true_);
         ctx.egraph.rebuild();
     }
-    // The built-in collection axioms (`verify::coll_axioms`): each a closed
+    // The built-in collection axioms (`verify::builtin_axioms`): each a closed
     // `forall` node, true, whose element type stays open for its trigger
     // matches to fix. Only a program that has collections of a kind gets that
     // kind's axioms, so others pay nothing. A map brings the set axioms too:
@@ -2149,6 +1692,32 @@ fn assume_axioms(ctx: &mut VerifyContext<'_>, program: &vmir::Program) -> Result
             ctx.union(q, true_);
         }
         ctx.egraph.rebuild();
+    }
+    // The axioms of each value map a quantified permission uses
+    // (`verify::builtin_axioms::value_map`): closed and ground, true on
+    // every path, so assumed unguarded like the collection axioms.
+    let qp_kinds = decls_qp_kinds(&program.decls);
+    for kind in &qp_kinds {
+        for rid in ctx.alloc.value_map_axioms(kind) {
+            let q = ctx.add(Symbolic::Forall(rid, Box::new([]), Box::new([])));
+            let true_ = expr!(ctx, true);
+            ctx.union(q, true_);
+        }
+    }
+    if !qp_kinds.is_empty() {
+        for (f, ret) in ctx.alloc.skolem_ret_types() {
+            ctx.func_ret_types.entry(f).or_insert(ret);
+        }
+        ctx.egraph.rebuild();
+    }
+    // Field and predicate addresses are injective
+    // (`rewrite::address_injectivity_rule`): `a != b` decides `f(a) != f(b)`,
+    // which value maps (a read after a write), single takes from a chunk set
+    // and the aliasing gates of single chunks compare.
+    let addr_funcs = decls_addr_funcs(&program.decls);
+    if !addr_funcs.is_empty() {
+        ctx.axiom_rules
+            .push(crate::verify::rewrite::address_injectivity_rule(addr_funcs));
     }
     // One lazy unfold rule per already-verified function certificate. `analyze`
     // guarantees a function only calls functions verified earlier, so every
@@ -2271,27 +1840,52 @@ pub(crate) fn prepare_trig_term(
 /// steps (every callee down to its verifier `FuncId`), ready for the applier —
 /// which has no registry access at rule-application time. `names` resolves a
 /// member to its source name, needed for the display label of a minted `f%pre`
-/// token (the registry holds no interner).
+/// token (the registry holds no interner). Every operand is passed through
+/// `rename` (into the recipe's temp space). A `Deref` that `read` resolves
+/// compiles as its [`ReadStep`](crate::verify::quant::ReadStep) says; any other
+/// `Deref` is refused.
 pub(crate) fn prepare_body(
     alloc: &mut crate::verify::func_registry::FuncRegistry,
     quants: &crate::verify::quant::RecipeTable,
     names: &dyn Fn(MemberId) -> String,
     insts: &[vmir::Inst],
+    rename: &dyn Fn(&Val) -> Val,
+    read: &dyn Fn(&vmir::HeapVal, &Val) -> Option<crate::verify::quant::ReadStep>,
+    spliced: &[Vec<crate::verify::rewrite::AxiomInst>],
 ) -> Result<Vec<crate::verify::rewrite::AxiomInst>, VerifyError> {
     use crate::verify::rewrite::{AxiomInst, AxiomPure};
     let mut out = Vec::with_capacity(insts.len());
+    let push = |out: &mut Vec<AxiomInst>, i: AxiomInst| {
+        out.push(crate::verify::cert::map_operands(&i, rename))
+    };
+    let mut spliced = spliced.iter();
     for inst in insts {
+        if let InstKind::Pure(_, PureInst::Deref(heap, addr)) = &inst.kind
+            && let Some(step) = read(heap, addr)
+        {
+            if let crate::verify::quant::ReadStep::Lookup(kind, map) = step {
+                out.push(AxiomInst::Val(AxiomPure::App {
+                    func: alloc.value_map(&kind).lookup,
+                    type_args: vec![],
+                    args: vec![map, rename(addr)],
+                }));
+            }
+            continue;
+        }
         // A nested `forall` is a step like any other: it materializes the inner
         // e-node with the enclosing instance's values as capture children. Its
         // capture list is derived (`Forall::free_temps`) and cached on the table by
         // the innermost-first intern that ran just before this one.
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
             let (recipe, free) = quants.entry_of(q)?;
-            out.push(AxiomInst::Forall {
-                recipe: *recipe,
-                type_args: quants.get(*recipe).open_types(),
-                caps: free.iter().map(|&k| Val::Temp(k)).collect(),
-            });
+            push(
+                &mut out,
+                AxiomInst::Forall {
+                    recipe: *recipe,
+                    type_args: quants.get(*recipe).open_types(),
+                    caps: free.iter().map(|&k| Val::Temp(k)).collect(),
+                },
+            );
             continue;
         }
         // A call is two steps, exactly as on the eval walk (`eval_pure_inst`'s
@@ -2302,22 +1896,37 @@ pub(crate) fn prepare_body(
         // so the application keeps this inst's slot.
         if let InstKind::Pure(_, PureInst::FunctionCall(fc)) = &inst.kind {
             let args: Vec<Val> = fc.args.iter().cloned().collect();
-            out.push(AxiomInst::Val(AxiomPure::App {
-                func: crate::verify::func_registry::func_id_for_member(fc.function),
-                type_args: fc.type_args.clone(),
-                args: args.clone(),
-            }));
+            push(
+                &mut out,
+                AxiomInst::Val(AxiomPure::App {
+                    func: crate::verify::func_registry::func_id_for_member(fc.function),
+                    type_args: fc.type_args.clone(),
+                    args: args.clone(),
+                }),
+            );
             // The token's truth is released under this inst's own path condition —
             // a call under `i > 0 ==> ..` inside the body must not fire the
             // callee's axioms at a σ where `i > 0` fails. No `recipe_pc` needed:
             // a prepared body's `Val`s *are* the host body's temps, used
             // identity-wise, so `inst.pc`'s literals transfer directly.
-            out.push(AxiomInst::Token {
-                func: alloc.fn_pre_token(fc.function, &names(fc.function)),
-                type_args: fc.type_args.clone(),
-                args,
-                guards: inst.pc.conds.clone(),
-            });
+            push(
+                &mut out,
+                AxiomInst::Token {
+                    func: alloc.fn_pre_token(fc.function, &names(fc.function)),
+                    type_args: fc.type_args.clone(),
+                    args,
+                    guards: inst.pc.conds.clone(),
+                },
+            );
+            continue;
+        }
+        // A heap-dependent call's snapshot: captured, which `Canonical` names
+        // in place of the step's temp, or rebuilt by the steps it spliced,
+        // already in the recipe's space.
+        if let InstKind::Heap(hi) = &inst.kind
+            && hi.frame_exhale().is_some()
+        {
+            out.extend(spliced.next().expect("a splice per call").iter().cloned());
             continue;
         }
         let prepared = match &inst.kind {
@@ -2382,119 +1991,36 @@ pub(crate) fn prepare_body(
             InstKind::Assume(v) => AxiomInst::Assume(v.clone()),
             // Never verified; nothing to record.
             InstKind::Assert(_) => continue,
+            // A permission step defines no value (only a quantified permission's
+            // body has them; its inverse axiom reads them itself).
+            InstKind::Perm(_) => continue,
             _ => return Err(VerifyError::Unimplemented("non-pure inst in axiom body")),
         };
-        out.push(prepared);
+        push(&mut out, prepared);
     }
     Ok(out)
 }
 
-/// Check the well-definedness of a `forall` **at the point it is encountered**,
-/// in a throwaway clone of the live e-graph.
-///
-/// Cloning (rather than seeding a blank graph) makes every ambient fact — the
-/// host's path condition, the assumed axioms, grafted certificates — available
-/// for free, with no seeding policy and no pollution of the real graph: whatever
-/// the binders' fresh values touch dies with the scratch graph.
-///
-/// The binders become fresh values while every enclosing value keeps its real
-/// e-class, so the body's side conditions are discharged *for an arbitrary
-/// binding*. Those conditions are exactly a pure expression's: `Div`/`Mod`
-/// divisors, and the `assert f#requires(..)` stitched at a call to a
-/// contract-bearing function. Body-local path conditions come along (short-circuit
-/// lowering emits them), so a guard proves its own consequent's WD:
-/// `forall x :: {f(x)} x != 0 ==> f(10 / x)` discharges the division under
-/// `<x != 0>`.
-///
-/// A nested `forall` is checked recursively here, with its encloser's binders
-/// already fresh, so no WD obligation survives into a recipe — instantiation runs
-/// inside a rewrite rule, where nothing can be proven.
-fn check_forall_wd(
+/// The chunk set a quantified permission denotes at this program point: its
+/// body plus the values its captured temps have in the live state and its heap
+/// reads resolved against the live heaps (`heap::resolve_reads`), to be
+/// checked whole when it is added or taken ([`QpCheck::Body`]).
+fn quant_spec_of(
     ctx: &mut VerifyContext<'_>,
-    q: &vmir::Forall,
-    host: &EvalState,
-    host_pc: &[(egg::Id, Polarity)],
-) -> Result<(), VerifyError> {
-    // `ctx.egraph` is a scratch clone for the duration; the live graph, its
-    // fixpoint cache and the memo scope are handled by `with_scratch_graph`.
-    // The certificate recipe (if one is being built) is paused: the WD walk's
-    // scratch evaluation must not mirror steps into the host's recipe.
-    let recipe = ctx.recipe.take();
-    let res = ctx.with_scratch_graph(|ctx| check_forall_wd_in_scratch(ctx, q, host, host_pc));
-    ctx.recipe = recipe;
-    res
-}
-
-fn check_forall_wd_in_scratch(
-    ctx: &mut VerifyContext<'_>,
-    q: &vmir::Forall,
-    host: &EvalState,
-    host_pc: &[(egg::Id, Polarity)],
-) -> Result<(), VerifyError> {
-    // Capture is implicit: the body indexes the *enclosing* value table directly,
-    // so the body's state is that table cut to the quantifier's frame — which
-    // starts at the `forall` step's own temp, shadowed by the first binder.
-    let mut state = host.frame_for(q);
-    for ty in q.bound.iter() {
-        let fresh = ctx.fresh_symbolic_value(ty.clone());
-        state.push_val(fresh, ty.clone(), None);
-    }
-
-    for inst in &q.body.insts {
-        // The body's own guards sit *under* the host's: a side condition must hold
-        // wherever the quantifier is stated, and wherever the body reaches it.
-        // `host_pc` came from a `collect_pc_lits` at the enclosing inst, so it
-        // already carries the ambient cube — the body's ambient *is* `host_pc`.
-        // Prepending the cube a second time here would break `cube_matches`'s
-        // length test and silently disable the block scratch.
-        let mut pc_lits = host_pc.to_vec();
-        pc_lits.extend(pc_lits_raw(ctx, &state, &inst.pc));
-
-        for (goal, err) in inst_obligations(ctx, &state, &inst.kind, &pc_lits) {
-            if !ctx.prove_under_pc(goal, &pc_lits) {
-                return Err(err);
-            }
-        }
-        match &inst.kind {
-            // A nested quantifier: check it under this level's fresh binders, then
-            // build its node like any other step.
-            InstKind::Pure(ty, pi @ PureInst::Forall(inner)) => {
-                check_forall_wd(ctx, inner, &state, &pc_lits)?;
-                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                state.push_val(id, ty.clone(), None);
-            }
-            InstKind::Pure(ty, pi) => {
-                let (id, _) = eval_pure_inst(ctx, &state, ty, pi, &pc_lits, None)?;
-                state.push_val(id, ty.clone(), None);
-            }
-            // A callee's postcondition, stitched at the call: assume it under the
-            // guards it was emitted with.
-            InstKind::Assume(val) => {
-                let id = state.get_val(ctx, val);
-                ctx.assume_guarded(id, pc_lits.iter().rev().copied());
-            }
-            // A quantifier body is heap-free, hence permission-free.
-            InstKind::Perm(_) => {
-                return Err(VerifyError::Unimplemented(
-                    "permission instruction in a quantifier body",
-                ));
-            }
-            // A callee's precondition, stitched at the call site: the other half of
-            // a quantifier body's well-definedness, and the reason a WD check needs
-            // the *ambient* facts (the guard establishing it may be the body's own
-            // implication, or a fact the host already knows).
-            InstKind::Assert(val) => {
-                let id = state.get_val(ctx, val);
-                if !ctx.prove_under_pc(id, &pc_lits) {
-                    return Err(VerifyError::AssertionFailed);
-                }
-            }
-            InstKind::Refute(_) | InstKind::Heap(_) => {
-                return Err(VerifyError::Unimplemented("impure inst in a forall body"));
-            }
-        }
-    }
-    Ok(())
+    state: &EvalState,
+    q: &vmir::QuantChunks,
+    pc: &PathConds,
+) -> Result<QuantSpec, VerifyError> {
+    let temps = q.free_temps().into_iter().map(|k| (k, state.vals[k]));
+    let pc_lits = pc_lits_raw(ctx, state, pc);
+    let mut heap_of = |ctx: &mut VerifyContext<'_>, h: &_| get_heap(ctx, state, h, &pc_lits);
+    let caps = crate::verify::heap::resolve_reads(ctx, q, temps.collect(), &mut heap_of, &pc_lits)?;
+    Ok(QuantSpec {
+        q: Rc::new(q.clone()),
+        caps,
+        // Stated here, so nothing about it is established yet.
+        check: QpCheck::Body,
+    })
 }
 
 /// Per-instruction evaluator: the shared signature of [`eval_method_inst`] and
@@ -2552,6 +2078,7 @@ fn walk_body(
                 heaps_before,
             )
         };
+        crate::verify::qp_trace::at_inst(inst_idx, insts.len(), || inst_text(program));
         let pc_lits = collect_pc_lits(ctx, state, &inst.pc);
         for (goal, err) in inst_obligations(ctx, state, &inst.kind, &pc_lits) {
             if !ctx.prove_under_pc(goal, &pc_lits) {
@@ -2561,6 +2088,7 @@ fn walk_body(
                         crate::verify::viz::dump_term(ctx, goal, 64),
                     );
                 }
+                crate::verify::qp_trace::flush_instances(ctx);
                 let inst_text = inst_text(program);
                 if snap.enabled() {
                     let heaps = display_heaps(state, &inst.kind, heaps_before);
@@ -2574,17 +2102,29 @@ fn walk_body(
         // [`check_forall_wd`]). It happens here, not in the evaluator, because it
         // needs the path condition — and here it cannot be forgotten by one of the
         // three drivers. Axiom bodies never reach this walk: they stay trusted.
+        // It also resolves the quantifier's heap reads, which its step captures.
         if let InstKind::Pure(_, PureInst::Forall(q)) = &inst.kind {
-            if let Err(err) = check_forall_wd(ctx, q, state, &pc_lits) {
-                let inst_text = inst_text(program);
-                if snap.enabled() {
-                    let heaps = display_heaps(state, &inst.kind, heaps_before);
-                    snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), None);
+            match check_forall_wd(ctx, q, state, &pc_lits) {
+                Ok(reads) => {
+                    crate::verify::qp_trace::forall_resolved(ctx, q, &reads);
+                    state.forall_reads = reads;
                 }
-                return Err(err.with_inst(inst_text, inst_idx, insts.len()));
+                Err(err) => {
+                    crate::verify::qp_trace::flush_instances(ctx);
+                    let inst_text = inst_text(program);
+                    if snap.enabled() {
+                        let heaps = display_heaps(state, &inst.kind, heaps_before);
+                        snap.snapshot(ctx, &heaps, &format!("FAIL: {}", inst_text), None);
+                    }
+                    return Err(err.with_inst(inst_text, inst_idx, insts.len()));
+                }
             }
         }
-        if let Err(err) = eval(ctx, program, state, inst, certs) {
+        let evaluated = eval(ctx, program, state, inst, certs);
+        crate::verify::qp_trace::flush_instances(ctx);
+        // A framing decided for this instruction never serves a later one.
+        state.framed_read.take();
+        if let Err(err) = evaluated {
             let inst_text = inst_text(program);
             if snap.enabled() {
                 let heaps = display_heaps(state, &inst.kind, heaps_before);
@@ -2613,8 +2153,10 @@ pub(crate) fn verify_method(
 ) -> Result<(), VerifyError> {
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
+    ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     let mut state = EvalState::new();
+    crate::verify::qp_trace::begin_unit("method", method_name);
     let mut snap = Snapshotter::from_env(method_name);
     snap.snapshot(&ctx, &[], "init", None);
 
@@ -2650,6 +2192,7 @@ pub(crate) fn verify_method(
             )),
             _ => None,
         };
+        state.block_cube = Some(block.cube.clone());
         walk_body(
             &mut ctx,
             program,
@@ -2728,6 +2271,7 @@ pub(crate) fn verify_resource(
 
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
+    ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     // The certificate recipe is built by the walk itself: each `acc` records a
     // footprint slot, `Deref`s resolve through chunk provenance. Installed
@@ -2747,6 +2291,7 @@ pub(crate) fn verify_resource(
     // heap, implicitly assuming the precondition resource's boolean.
     let mut state = EvalState::with_args(params, resource.params.clone());
 
+    crate::verify::qp_trace::begin_unit("resource", resource_name);
     let mut snap = Snapshotter::from_env(resource_name);
     snap.snapshot(&ctx, &[], "init", None);
 
@@ -2771,15 +2316,28 @@ pub(crate) fn verify_resource(
     let footprint = rb
         .pending_slots
         .iter()
-        .map(|(kind, elem, addr, perm)| {
+        .map(|(kind, elem, shape)| {
+            let shape = match shape {
+                SlotShape::Single { addr, perm } => SlotShape::Single {
+                    addr: rb.slice(addr)?,
+                    // One `slice` per operand, shape preserved. Permission step
+                    // lists are short (a `PermInst::Ite` only arises from a
+                    // branch gate or a read-only weakening — see
+                    // `Sink::gate_perm`).
+                    perm: perm.try_map(&mut |v: &Val| rb.slice(v))?,
+                },
+                SlotShape::Quant { q, caps } => SlotShape::Quant {
+                    q: q.clone(),
+                    caps: caps
+                        .iter()
+                        .map(|(k, v)| Ok((*k, rb.slice(v)?)))
+                        .collect::<Result<_, VerifyError>>()?,
+                },
+            };
             Ok(SlotRecipe {
                 kind: kind.clone(),
                 elem: elem.clone(),
-                addr: rb.slice(addr)?,
-                // One `slice` per operand, shape preserved. Permission step lists
-                // are short (a `PermInst::Ite` only arises from a branch gate or a
-                // read-only weakening — see `Sink::gate_perm`).
-                perm: perm.try_map(&mut |v: &Val| rb.slice(v))?,
+                shape,
             })
         })
         .collect::<Result<Vec<_>, VerifyError>>()?;
@@ -2842,6 +2400,7 @@ pub(crate) fn verify_function(
 
     let mut ctx = VerifyContext::new(&program.interner, &program.decls, &program.groups, alloc);
     ctx.fn_certs = Some(fn_certs);
+    ctx.certs = Some(certs);
     assume_axioms(&mut ctx, program)?;
     // The certificate recipe is built by the walk itself (single pass): only the
     // limited-twin substitution set is fixed up front. The exported post is not
@@ -2893,6 +2452,7 @@ pub(crate) fn verify_function(
     let param_types: Vec<Type> = function.params.iter().cloned().collect();
     let mut state = EvalState::with_args(params.clone(), param_types);
 
+    crate::verify::qp_trace::begin_unit("function", function_name);
     let mut snap = Snapshotter::from_env(function_name);
     snap.snapshot(&ctx, &[], "init", None);
     // The method-body eval path handles every inst a function body can contain
@@ -3082,40 +2642,26 @@ fn inst_obligations(
         // outside the declared precondition. `chunk_under_pc` lets an address
         // that only aliases a held chunk under this instruction's branch (e.g.
         // `y.f` where `x == y` holds here) still frame.
-        InstKind::Pure(_, PureInst::Deref(heap, loc)) => {
-            let addr = state.get_val(ctx, loc);
-            let held = get_heap(state, heap);
-            let perm = state.loc_kind(loc).and_then(|k| {
-                let c = chunk_under_pc(ctx, held.chunks_of(&k), addr, pc_lits)?.clone();
-                // Frame against the gated perm: a conditionally-held location
-                // frames only where its guard holds.
-                Some(c.gated_perm(ctx))
-            });
-            match perm {
-                // A bare (or absent) perm: the goal `0 < leaf` is discharged by
-                // the caller exactly as before (flag-OFF byte-identical).
-                None => {
-                    let zero = expr!(ctx, 0 / 1);
-                    let goal = ctx.add(Symbolic::Binary(BinOp::LtR, [zero, zero]));
-                    vec![(goal, VerifyError::InsufficientPermission)]
-                }
-                Some(p @ ChunkPerm::Leaf { .. }) => {
-                    let leaf = p.as_leaf().unwrap();
-                    let zero = expr!(ctx, 0 / 1);
-                    let goal = ctx.add(Symbolic::Binary(BinOp::LtR, [zero, leaf]));
-                    vec![(goal, VerifyError::InsufficientPermission)]
-                }
-                // A branch-structured held perm: prove `0 < perm` per leaf (never
-                // materialize the `Select`). On success emit no goal; on failure a
-                // trivially-false goal carries the error to the caller.
-                Some(p) => {
-                    if prove_perm_positive(ctx, &p, pc_lits) {
-                        vec![]
-                    } else {
-                        vec![(expr!(ctx, false), VerifyError::InsufficientPermission)]
-                    }
-                }
+        InstKind::Pure(_, PureInst::Deref(hv, loc)) => {
+            let heap = match get_heap(ctx, state, hv, pc_lits) {
+                Ok(heap) => heap,
+                Err(e) => return vec![(expr!(ctx, false), e)],
+            };
+            let Some(l) = state.loc(ctx, loc) else {
+                return vec![(expr!(ctx, false), VerifyError::InsufficientPermission)];
+            };
+            // A chunk set's body evaluated once already, at its inhale.
+            let framing = heap
+                .framing(ctx, &l, pc_lits)
+                .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
+            // Decided per leaf (a branch-structured held perm is never
+            // materialized); on failure a trivially-false goal carries the error.
+            if !framing.frames(ctx) {
+                return vec![(expr!(ctx, false), VerifyError::InsufficientPermission)];
             }
+            // The read takes its value from these same holders.
+            state.framed_read.set(Some((*hv, loc.clone(), framing)));
+            vec![]
         }
         // `not(perm < 0)` desugared to an `Ite`. Applies to a location combine, a
         // resource inhale/exhale, and fold/unfold (a consuming op with a negative
@@ -3159,80 +2705,10 @@ fn inst_obligations(
                 VerifyError::SideCondition("permission may be negative"),
             )]
         }
-        // `not(divisor == 0)` desugared to an `Ite`. The divisor is homogeneous
-        // with the result (casts), so the VMIR result type gives the zero's type.
-        InstKind::Pure(ty, PureInst::Binary(op, _, r)) if op.is_div_or_mod() => {
-            let rv = state.get_val(ctx, r);
-            let zero = zero_of(ctx, ty);
-            // Divisor must be non-zero: not (divisor == 0).
-            let goal = expr!(ctx, not({ rv } == { zero }));
-            vec![(goal, VerifyError::SideCondition("divisor may be zero"))]
-        }
-
-        // A map lookup `m[k]` needs `k in m`, i.e. `k in domain(m)`.
-        InstKind::Pure(
-            _,
-            PureInst::Coll {
-                tys,
-                op: CollOp::Map(MapOp::Lookup),
-                args: val,
-            },
-        ) => {
-            let m = state.get_val(ctx, &val[0]);
-            let k = state.get_val(ctx, &val[1]);
-            let domain = ctx.add(Symbolic::Coll(
-                tys.clone(),
-                MapOp::Domain.into(),
-                Box::new([m]),
-            ));
-            let present = ctx.add(Symbolic::Coll(
-                Box::new([tys[0].clone()]),
-                vmir::SetOp::Contains.into(),
-                Box::new([domain, k]),
-            ));
-            vec![(
-                present,
-                VerifyError::SideCondition("map may not contain the key"),
-            )]
-        }
-        InstKind::Pure(
-            _,
-            PureInst::Coll {
-                tys,
-                op: op @ CollOp::Seq(_),
-                args: val,
-            },
-        ) if op.has_side_condition() => {
-            // `Index` is [s, i] and `Update` is [s, i, v], so both start with s and i.
-            let s = state.get_val(ctx, &val[0]);
-            let i = state.get_val(ctx, &val[1]);
-            let len = ctx.add(Symbolic::Coll(
-                tys.clone(),
-                SeqOp::Len.into(),
-                Box::new([s]),
-            ));
-            let lower = expr!(ctx, not({ i } <i 0));
-            let upper = expr!(ctx, { i } < i { len });
-            vec![
-                (
-                    lower,
-                    VerifyError::SideCondition("sequence index may be negative"),
-                ),
-                (
-                    upper,
-                    VerifyError::SideCondition("sequence index may be out of bounds"),
-                ),
-            ]
-        }
+        // A pure expression's own side conditions: a divisor, a map key, a
+        // sequence index (shared with the quantifier bodies' checked walk).
+        InstKind::Pure(ty, pi) => pure_obligations(ctx, state, ty, pi),
         _ => vec![],
-    }
-}
-
-/// Zero literal of the given numeric type (`Real` fallback for non-numeric).
-fn zero_of(ctx: &mut VerifyContext<'_>, ty: &Type) -> egg::Id {
-    match ty {
-        Type::Int => ctx.add(Symbolic::Lit(Literal::Int(num::BigInt::from(0)))),
-        _ => expr!(ctx, 0 / 1),
     }
 }
 

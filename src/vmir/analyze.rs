@@ -329,6 +329,17 @@ fn inst_deps(insts: &[Inst], out: &mut Vec<MemberId>) {
                     }
                 }
             }
+            // A quantified permission likewise: its condition, receiver and
+            // amount call functions whose postconditions its well-formedness
+            // check needs (`in_bounds(x, s) ==> acc(s[x].f)`).
+            InstKind::Heap(HeapInst::AddForall { q, .. } | HeapInst::SubForall { q, .. }) => {
+                inst_deps(&q.body.insts, out);
+                for group in q.triggers.iter() {
+                    for term in group.terms.iter() {
+                        trig_term_deps(term, out);
+                    }
+                }
+            }
             _ => {}
         }
     }

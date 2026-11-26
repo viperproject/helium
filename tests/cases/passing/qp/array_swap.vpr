@@ -1,0 +1,31 @@
+// QP hard: swap two array elements; every other element is framed.
+//
+// Must VERIFY.
+field val: Int
+
+domain IArray {
+  function slot(a: IArray, i: Int): Ref
+  function len(a: IArray): Int
+  function first(r: Ref): IArray
+  function second(r: Ref): Int
+
+  axiom slot_injective {
+    forall a: IArray, i: Int :: { slot(a, i) } first(slot(a, i)) == a && second(slot(a, i)) == i
+  }
+  axiom len_nonneg {
+    forall a: IArray :: { len(a) } len(a) >= 0
+  }
+}
+
+method swap(a: IArray, i: Int, j: Int)
+  requires 0 <= i && i < len(a) && 0 <= j && j < len(a)
+  requires forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val)
+  ensures forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val)
+  ensures slot(a, i).val == old(slot(a, j).val)
+  ensures slot(a, j).val == old(slot(a, i).val)
+  ensures forall k: Int :: { slot(a, k).val } 0 <= k && k < len(a) && k != i && k != j ==> slot(a, k).val == old(slot(a, k).val)
+{
+  var t: Int := slot(a, i).val
+  slot(a, i).val := slot(a, j).val
+  slot(a, j).val := t
+}

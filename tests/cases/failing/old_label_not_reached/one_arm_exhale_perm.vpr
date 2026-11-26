@@ -1,0 +1,14 @@
+// `old[l]` after a join at which `l` was reached on one arm only: on the
+// path that skipped it, the label's state does not exist ("Did not reach
+// labelled state l"), so the read is not well-defined.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f, 1/2)
+{
+  if (c) {
+    exhale acc(x.f, 1/2)
+    label l
+  }
+  assert old[l](perm(x.f)) == none
+}

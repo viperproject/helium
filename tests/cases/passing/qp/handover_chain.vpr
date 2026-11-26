@@ -1,0 +1,18 @@
+// QP medium: three chunk sets each hold a third of `a.f`. Exhaling two of them
+// in turn hands the value from the first to the second and on to the third
+// (`Handover` read through its `from` set).
+//
+// Must VERIFY.
+field f: Int
+
+method chain(s: Set[Ref], t: Set[Ref], u: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/3)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/3)
+  requires forall x: Ref :: x in u ==> acc(x.f, 1/3)
+  requires a in s && a in t && a in u
+  requires a.f == 3
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/3)
+  exhale forall x: Ref :: x in t ==> acc(x.f, 1/3)
+  assert a.f == 3
+}

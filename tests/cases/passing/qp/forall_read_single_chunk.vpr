@@ -1,0 +1,18 @@
+// A pure `forall` in a method body that reads `x.val`, held by a single chunk.
+// The read is the same location for every binding, so the chunk frames it on
+// its own (`heap::ReadResolver`).
+//
+// Must VERIFY.
+domain D {
+  function h(i: Int): Bool
+}
+
+field val: Int
+
+method m(x: Ref)
+{
+  inhale acc(x.val) && x.val > 5
+  assert forall i: Int :: { h(i) } h(i) && i < 5 ==> x.val > i
+  x.val := 0
+  assert forall i: Int :: { h(i) } h(i) && i < 0 ==> x.val > i
+}

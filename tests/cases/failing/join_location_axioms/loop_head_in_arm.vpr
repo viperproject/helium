@@ -1,0 +1,19 @@
+// A loop head is a join phase too: it re-inhales the invariant under the loop's
+// reach condition, carried on the inhale's own pc. Inside a branch that pc is the
+// arm's, and the location axioms over the invariant's footprint (`x != y`, from
+// two full permissions) must stay under it. Silicon rejects.
+field f: Int
+
+method loop_head_in_arm(x: Ref, y: Ref, c: Bool, n: Int)
+{
+  var i: Int := 0
+  if (c) {
+    inhale acc(x.f) && acc(y.f)
+    while (i < n)
+      invariant acc(x.f) && acc(y.f)
+    {
+      i := i + 1
+    }
+  }
+  assert x != y
+}

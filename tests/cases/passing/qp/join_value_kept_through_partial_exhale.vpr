@@ -1,0 +1,16 @@
+// QP medium (branch join): an exhale in one branch lowers the permission but
+// changes no value. After the join the member still holds its old value on
+// both paths.
+//
+// Must VERIFY.
+field f: Int
+
+method join_value_kept_through_partial_exhale(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3
+{
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/4)
+  }
+  assert a.f == 3
+}

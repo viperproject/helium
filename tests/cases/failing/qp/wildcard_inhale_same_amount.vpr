@@ -1,0 +1,12 @@
+// Each member of a wildcard quantified permission has its own unknown amount:
+// one shared wildcard would prove the two equal.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method wildcard_inhale_same_amount(s: Set[Ref], a: Ref, b: Ref)
+  requires a in s && b in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  assert perm(a.f) == perm(b.f)
+}

@@ -1,0 +1,13 @@
+field f : Int
+
+function in_bounds(n: Int, seq: Seq[Ref]) : Bool
+    ensures result == n >= 0 && n < |seq|
+
+
+method test(seq: Seq[Ref])
+    requires forall x: Int, y:Int :: {seq[x], seq[y]} in_bounds(x,seq) && in_bounds(y,seq) ==> seq[x] != seq[y]
+    requires forall x: Int :: in_bounds(x, seq) ==> acc(seq[x].f)
+    {
+        assert true
+
+    }

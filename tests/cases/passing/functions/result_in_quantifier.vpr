@@ -1,0 +1,16 @@
+// `result` inside a `forall` in a function postcondition: a quantifier body
+// allows what its host allows, and `result` is an ordinary captured value.
+//
+// Nagini's `int___unbox__` prelude function has this shape, as do VerCors'
+// `toBag` functions (6 of the 838 listed marco_benchmark files; formerly a
+// known limitation).
+//
+// Must VERIFY.
+function g(y: Int): Int
+
+function f(x: Int): Int
+  ensures forall y: Int :: { g(y) } y == x ==> g(y) == result
+
+method client() {
+  assert f(1) == g(1)
+}

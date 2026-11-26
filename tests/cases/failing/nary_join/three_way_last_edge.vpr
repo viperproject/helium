@@ -1,0 +1,15 @@
+// REGRESSION (soundness). The inhale is on the fall-through edge, the last of
+// three into `L`. The inner merge level reaches only `!a`, where its edge value
+// is `b`, so its heap's `x != y` held under `!b` alone, also on `a && !b`.
+//
+// Must FAIL.
+field f: Int
+
+method m(x: Ref, y: Ref, a: Bool, b: Bool)
+{
+  if (a) { goto L }
+  if (b) { goto L }
+  inhale acc(x.f) && acc(y.f)
+  label L
+  assert !b ==> x != y
+}

@@ -1,0 +1,17 @@
+// A method whose precondition is a wildcard quantified permission keeps part
+// of every member: the caller cannot write one afterwards.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method callee(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+
+method wildcard_call_then_write(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  callee(s, a)
+  a.f := 1
+}

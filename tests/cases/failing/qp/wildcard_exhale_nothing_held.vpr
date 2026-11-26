@@ -1,0 +1,10 @@
+// A wildcard exhale needs a positive share of every member.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method wildcard_exhale_nothing_held(s: Set[Ref], a: Ref)
+  requires a in s
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+}

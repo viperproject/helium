@@ -1,0 +1,20 @@
+// QP hard: a heap-dependent function whose precondition is a quantified
+// permission; its value follows a write to the member it reads.
+//
+// Must VERIFY.
+field f: Int
+
+function get(s: Set[Ref], a: Ref): Int
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  a.f
+}
+
+method function_with_qp_pre(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  a.f := 5
+  assert get(s, a) == 5
+}

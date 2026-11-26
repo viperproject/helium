@@ -1,0 +1,22 @@
+// A call on the binder whose precondition (`i < len(a)`) the antecedent
+// does not give at `i == len(a)`.
+//
+// Must FAIL (insufficient permission / precondition).
+field val: Int
+domain Array {
+  function loc(a: Ref, i: Int): Ref
+  function len(a: Ref): Int
+  function first(r: Ref): Ref
+  function second(r: Ref): Int
+  axiom inj { forall a: Ref, i: Int :: { loc(a, i) } first(loc(a, i)) == a && second(loc(a, i)) == i }
+}
+function elem(a: Ref, i: Int): Int
+  requires 0 <= i && i < len(a)
+  requires acc(loc(a, i).val, wildcard)
+{ loc(a, i).val }
+
+method m(a: Ref)
+  requires forall i: Int :: 0 <= i && i < len(a) ==> acc(loc(a, i).val)
+{
+  inhale forall i: Int :: { elem(a, i) } 0 <= i && i <= len(a) ==> elem(a, i) == 0
+}

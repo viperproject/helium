@@ -1,0 +1,10 @@
+// QP easy: the postcondition gives out a chunk set the method never received.
+//
+// Must FAIL (insufficient permission in the postcondition).
+field f: Int
+
+method ensures_without_requires(s: Set[Ref], a: Ref)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+{
+}

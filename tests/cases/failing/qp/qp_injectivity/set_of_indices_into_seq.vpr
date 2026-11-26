@@ -1,0 +1,10 @@
+// QP injectivity: the indices are distinct (they form a set), but `xs` may hold
+// the same reference at two of them.
+//
+// Must FAIL (quantified permission might not be injective).
+field f: Int
+
+method set_of_indices_into_seq(xs: Seq[Ref], is: Set[Int])
+{
+  inhale forall i: Int :: i in is ==> acc(xs[i].f)
+}

@@ -39,14 +39,23 @@ impl Scan {
     }
 }
 
-/// Whether an expression mentions `acc(..)` anywhere — what makes a `forall`
-/// body a quantified permission rather than a pure fact.
-fn mentions_acc(exp: &Exp) -> bool {
+/// Whether an expression mentions `acc(..)` anywhere, or asserts a predicate
+/// by its shorthand `P(..)` (`acc(P(..), write)`) — what makes a `forall` body
+/// a quantified permission rather than a pure fact. The predicate an
+/// `unfolding` or `perm` names is a pure use, so those are not descended into
+/// (an `unfolding`'s body still is).
+pub(crate) fn mentions_acc(exp: &Exp) -> bool {
     struct FindAcc(bool);
     impl<'a> AstWalker<'a> for FindAcc {
         fn walk_exp_kind(&mut self, exp: &'a ExpKind) {
-            if matches!(exp, ExpKind::Acc(_)) {
-                self.0 = true;
+            match exp {
+                ExpKind::Acc(_) => self.0 = true,
+                ExpKind::Call(call) if matches!(call.kind, Some(ExpCallKind::Predicate)) => {
+                    self.0 = true
+                }
+                ExpKind::HeapUpdate(_, _, body) => return body.walk(self),
+                ExpKind::UnOp(UnOp::Perm, _) => return,
+                _ => {}
             }
             exp.walk_children(self);
         }
@@ -63,11 +72,6 @@ impl<'a> AstWalker<'a> for Scan {
             ExpKind::MagicWand(..) => self.hit("magic wand `--*`"),
             ExpKind::ForPerm(..) => self.hit("forperm"),
             ExpKind::Quantifier(QuantifierKind::Exists, ..) => self.hit("exists"),
-            // `forall x: Ref :: acc(x.f)` — a quantified permission. The
-            // quantifier's body has to stay heap-free.
-            ExpKind::Quantifier(QuantifierKind::Forall, _, _, body) if mentions_acc(body) => {
-                self.hit("quantified permission")
-            }
             ExpKind::HeapUpdate(HeapUpdateOp::Fold, ..) => self.hit("folding"),
             ExpKind::HeapUpdate(HeapUpdateOp::Apply, ..) => self.hit("applying"),
             ExpKind::HeapUpdate(HeapUpdateOp::Package, ..) => self.hit("packaging"),

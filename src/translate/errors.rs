@@ -14,14 +14,6 @@ pub enum TranslationError {
     /// it, and the verifier instantiates a generic axiom only at the types its
     /// trigger matches fix, so the axiom could never be assumed.
     UntypedGenericAxiom(String),
-    /// A heap-dependent function called inside a `forall` body. Its snapshot
-    /// (a frame-only `exhale`) would have to be taken *per instance*, over a footprint
-    /// that may mention the binders — quantified permissions, which are not
-    /// supported. Even a binder-independent footprint is rejected for now: the
-    /// quantifier's compiled body must stay pure and heap-free, since the
-    /// verifier rebuilds it inside a rewrite rule, where the symbolic heap is out
-    /// of reach and no obligation can be discharged.
-    HeapDepFunctionInQuantifier(String),
 }
 
 impl fmt::Display for TranslationError {
@@ -37,10 +29,6 @@ impl fmt::Display for TranslationError {
                 f,
                 "axiom `{name}` uses a domain type parameter that no trigger fixes: no application in it has the parameter in its type arguments"
             ),
-            TranslationError::HeapDepFunctionInQuantifier(name) => write!(
-                f,
-                "heap-dependent function `{name}` called inside a `forall`: a quantifier body must be heap-free (this needs quantified permissions)"
-            ),
         }
     }
 }
@@ -52,9 +40,7 @@ impl TranslationError {
     pub fn is_unsupported(&self) -> bool {
         matches!(
             self,
-            TranslationError::Unsupported(_)
-                | TranslationError::UntypedGenericAxiom(_)
-                | TranslationError::HeapDepFunctionInQuantifier(_)
+            TranslationError::Unsupported(_) | TranslationError::UntypedGenericAxiom(_)
         )
     }
 }

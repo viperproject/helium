@@ -1,0 +1,13 @@
+// QP medium: after writes on both arms the value is not the same on both
+// paths.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method branch_write_wrong_value(s: Set[Ref], a: Ref, b: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (b) { a.f := 1 } else { a.f := 2 }
+  assert a.f == 1
+}

@@ -1,0 +1,47 @@
+// QP well-definedness: expressions that are well-defined where they are
+// evaluated. The condition guards its own division and index (short-circuit),
+// and the location and amount are evaluated only where the condition holds.
+//
+// Must VERIFY.
+field f: Int
+
+function g(i: Int): Ref
+  requires i > 0
+
+method cond_guards_division(s: Set[Ref], n: Int, a: Ref)
+  requires a in s && n != 0
+{
+  inhale forall x: Ref :: x in s && 10 / n == 10 / n ==> acc(x.f)
+  a.f := 1
+}
+
+method cond_short_circuit_division(s: Set[Ref], n: Int)
+{
+  inhale forall x: Ref :: x in s && n != 0 && 10 / n > 0 ==> acc(x.f)
+}
+
+method cond_guards_index(xs: Seq[Int], s: Set[Ref])
+{
+  inhale forall x: Ref :: x in s && 0 < |xs| && xs[0] > 0 ==> acc(x.f)
+}
+
+method cond_guards_receiver_call(a: Ref)
+  requires g(1) == a
+{
+  inhale forall i: Int :: 0 < i && i < 2 ==> acc(g(i).f)
+  a.f := 1
+}
+
+method cond_guards_amount(s: Set[Ref], n: Int)
+  requires 0 < n
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, 1 / n)
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1 / n)
+}
+
+method exhale_guarded_division(s: Set[Ref], n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires n != 0
+{
+  exhale forall x: Ref :: x in s && 10 / n == 10 / n ==> acc(x.f)
+}

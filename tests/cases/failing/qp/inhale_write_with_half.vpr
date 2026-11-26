@@ -1,0 +1,12 @@
+// QP easy: the inhaled chunk set grants only 1/2, a write needs full
+// permission.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method inhale_write_with_half(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  inhale a in s
+  a.f := 5
+}

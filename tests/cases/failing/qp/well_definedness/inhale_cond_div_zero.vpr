@@ -1,0 +1,12 @@
+// QP well-definedness: the condition divides by `n`, which may be 0. The
+// body of a quantified permission is checked like any other expression.
+//
+// Must FAIL (divisor may be zero). Silicon: "Divisor n might be zero".
+field f: Int
+
+method inhale_cond_div_zero(s: Set[Ref], n: Int, a: Ref)
+  requires a in s
+{
+  inhale forall x: Ref :: x in s && 10 / n == 10 / n ==> acc(x.f)
+  a.f := 1
+}

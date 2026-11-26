@@ -1,0 +1,16 @@
+// A binder-free heap-dependent call inside a `forall` without permission to
+// its precondition's footprint.
+//
+// Must FAIL (insufficient permission).
+field val: Int
+
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+domain D { function t(i: Int): Bool }
+
+method unframed(y: Ref)
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> get(y) == i
+}

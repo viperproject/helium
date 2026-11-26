@@ -1,0 +1,15 @@
+// QP medium (branch join): the write happened on one path only, so after the
+// join the value is not known to be the written one.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method join_write_one_branch_unknown(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && a.f == 3
+{
+  if (c) {
+    a.f := 1
+  }
+  assert a.f == 1
+}

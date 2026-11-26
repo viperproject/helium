@@ -1,0 +1,18 @@
+// QP medium: a callee takes and returns the chunk set; the caller can still
+// write a member after the call.
+//
+// Must VERIFY.
+field f: Int
+
+method callee(s: Set[Ref])
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+
+method caller(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+  ensures forall x: Ref :: x in s ==> acc(x.f)
+{
+  callee(s)
+  a.f := 7
+}

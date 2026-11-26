@@ -1,0 +1,29 @@
+// Like `passing/qp/heap_dependent_receiver_set.vpr`, but the assertion names a
+// value that was not written.
+//
+// Must FAIL (assertion).
+domain Cells {
+  function cell(i: Int): Ref
+  function cell_idx(r: Ref): Int
+  function loc(a: Ref, i: Int): Ref
+  function idx(r: Ref): Int
+
+  axiom cell_injective {
+    forall i: Int :: { cell(i) } cell_idx(cell(i)) == i
+  }
+  axiom loc_injective {
+    forall a: Ref, i: Int :: { loc(a, i) } idx(loc(a, i)) == i
+  }
+}
+
+field arr: Ref
+field val: Int
+
+method write_one(s: Set[Int], k: Int)
+  requires forall i: Int :: { cell(i) } i in s ==> acc(cell(i).arr)
+  requires forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+  requires k in s
+{
+  loc(cell(k).arr, k).val := 3
+  assert loc(cell(k).arr, k).val == 4
+}

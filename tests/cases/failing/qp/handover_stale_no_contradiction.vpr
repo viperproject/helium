@@ -1,0 +1,20 @@
+// QP medium: `t` holds half of `a.f` and a single chunk holds the other half.
+// `t` is exhaled, then the single chunk is topped up to full, overwritten, and
+// half of it handed to a new set. A handover from the stale `t` must not equate
+// the new value with the old one (which would make `assert false` pass).
+//
+// Must FAIL (assertion).
+field f: Int
+
+method stale_no_contradiction(t: Set[Ref], a: Ref)
+  requires acc(a.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in t
+  requires a.f == 3
+{
+  exhale forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  inhale acc(a.f, 1/2)
+  a.f := 4
+  exhale acc(a.f, 1/2)
+  assert false
+}

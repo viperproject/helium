@@ -1,0 +1,19 @@
+// Must FAIL.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f) }
+
+method set5(r: Ref)
+  requires acc(r.f)
+  ensures acc(r.f) && r.f == 5
+
+method zero_residue_fold(x: Ref, y: Ref, b: Bool)
+  requires acc(x.f) && x.f == 4
+{
+  if (b) {
+    assume y == x
+    set5(y)
+    fold P(x)
+    assert false
+  }
+}

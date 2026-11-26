@@ -1,0 +1,17 @@
+// QP medium: a set exhaled in one branch only hands its value over to the set
+// that stays; after the join the location still reads the value on both paths.
+//
+// Must VERIFY.
+field f: Int
+
+method in_branch(s: Set[Ref], t: Set[Ref], a: Ref, b: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in s && a in t
+  requires a.f == 3
+{
+  if (b) {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  }
+  assert a.f == 3
+}

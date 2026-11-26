@@ -1,0 +1,7 @@
+// QP injectivity over a set domain built with `intersection`.
+field f: Int
+
+method set_intersection_domain(s: Set[Ref], t: Set[Ref])
+{
+  inhale forall x: Ref :: x in (s intersection t) ==> acc(x.f)
+}

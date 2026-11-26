@@ -1,0 +1,32 @@
+// The receiver `loc(cell(i).arr, i)` reads the heap when the set is stated.
+// Writing `cell(k).arr` afterwards does not move the held permission: the
+// postcondition names `loc(r, k).val`, which is not held unless `r` is the
+// old value.
+//
+// Must FAIL (postcondition: insufficient permission).
+domain Cells {
+  function cell(i: Int): Ref
+  function cell_idx(r: Ref): Int
+  function loc(a: Ref, i: Int): Ref
+  function idx(r: Ref): Int
+
+  axiom cell_injective {
+    forall i: Int :: { cell(i) } cell_idx(cell(i)) == i
+  }
+  axiom loc_injective {
+    forall a: Ref, i: Int :: { loc(a, i) } idx(loc(a, i)) == i
+  }
+}
+
+field arr: Ref
+field val: Int
+
+method retarget(s: Set[Int], k: Int, r: Ref)
+  requires forall i: Int :: { cell(i) } i in s ==> acc(cell(i).arr)
+  requires forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+  requires k in s
+  ensures forall i: Int :: { cell(i) } i in s ==> acc(cell(i).arr)
+  ensures forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+{
+  cell(k).arr := r
+}

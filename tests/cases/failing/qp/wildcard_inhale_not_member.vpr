@@ -1,0 +1,11 @@
+// A wildcard quantified permission holds nothing outside its condition.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method wildcard_inhale_not_member(s: Set[Ref], a: Ref)
+  requires !(a in s)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  var v: Int := a.f
+}

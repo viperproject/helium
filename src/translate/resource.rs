@@ -65,6 +65,23 @@ fn addr_call(
     ))
 }
 
+/// The `Type::Addr` of a resource's location, as published in `addr_types`:
+/// a function of the field/predicate name alone, never of the arguments.
+pub(crate) fn resource_addr_type<Ext>(
+    b: &TranslationContext<'_>,
+    res: &typed::ResourceExp<Ext>,
+) -> Result<vmir::Type, TranslationError> {
+    use typed::ResourceExpKind as R;
+    let name = match &*res.0 {
+        R::Field(_, f) => f.0,
+        R::PredicateCall(call) => call.name.0,
+    };
+    b.addr_types
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| TranslationError::UnknownIdent(b.interner.resolve(&name).to_string()))
+}
+
 /// Emit `field(base)`: the field's heap-independent address function applied to
 /// the receiver, typed `Addr<field_ty>`. Its own entry point because field
 /// assignment and `new` reach a field location without a `ResourceExp`.

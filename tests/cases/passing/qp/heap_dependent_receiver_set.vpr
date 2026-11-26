@@ -1,0 +1,45 @@
+// A quantified permission whose receiver reads the heap per binding:
+// `loc(cell(i).arr, i)`, with every `cell(i).arr` held by another chunk set.
+// That set frames the read for every binding on its own, so the receiver
+// reads its value map (`heap::resolve_reads`). Injectivity comes from `idx`.
+//
+// Must VERIFY.
+domain Cells {
+  function cell(i: Int): Ref
+  function cell_idx(r: Ref): Int
+  function loc(a: Ref, i: Int): Ref
+  function idx(r: Ref): Int
+
+  axiom cell_injective {
+    forall i: Int :: { cell(i) } cell_idx(cell(i)) == i
+  }
+  axiom loc_injective {
+    forall a: Ref, i: Int :: { loc(a, i) } idx(loc(a, i)) == i
+  }
+}
+
+field arr: Ref
+field val: Int
+
+method write_one(s: Set[Int], k: Int)
+  requires forall i: Int :: { cell(i) } i in s ==> acc(cell(i).arr)
+  requires forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+  requires k in s
+  ensures forall i: Int :: { cell(i) } i in s ==> acc(cell(i).arr)
+  ensures forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+{
+  loc(cell(k).arr, k).val := 3
+  assert loc(cell(k).arr, k).val == 3
+}
+
+// The call consumes both sets (the receivers read the caller's `arr` set) and
+// gives them back, so the caller can write again.
+method client(s: Set[Int], k: Int)
+  requires forall i: Int :: { cell(i) } i in s ==> acc(cell(i).arr)
+  requires forall i: Int :: i in s ==> acc(loc(cell(i).arr, i).val)
+  requires k in s
+{
+  write_one(s, k)
+  loc(cell(k).arr, k).val := 5
+  assert loc(cell(k).arr, k).val == 5
+}

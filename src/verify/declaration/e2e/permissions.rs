@@ -120,7 +120,7 @@ method m(y: Ref)
 fn conditionally_held_perm_reads_back_gated() {
     // A guard-hoisted merge stores a conditionally-held chunk as a flat guard
     // cube over a guard-free `1/1` amount. A `perm()` read must reconstruct that
-    // gating (`perm_held_at`), or it reports the chunk as fully held on the arm
+    // gating (`perm_value`), or it reports the chunk as fully held on the arm
     // that gave it away — and `assert acc(x.f, write)` then succeeds on a state
     // where `exhale acc(x.f)` fails.
     let input = r#"

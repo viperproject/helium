@@ -1,0 +1,35 @@
+// An inhaled wildcard quantified permission frames reads of its members, and
+// each member's amount stays the same across reads (`heap::Captures::wildcard`).
+// A contract that holds one verifies its body.
+//
+// Must VERIFY.
+field f: Int
+
+method wildcard_inhale_read(s: Set[Ref], a: Ref)
+  requires a in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  inhale a.f == 3
+  var p: Perm := perm(a.f)
+  assert p > none
+  var v: Int := a.f
+  assert v == 3
+  assert perm(a.f) == p
+}
+
+method wildcard_in_contract(s: Set[Ref], a: Ref) returns (v: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  v := a.f
+}
+
+method wildcard_plus_full(s: Set[Ref], a: Ref)
+  requires a in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  inhale acc(a.f)
+  assert perm(a.f) > write
+  a.f := 2
+  assert a.f == 2
+}

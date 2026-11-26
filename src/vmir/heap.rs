@@ -1,5 +1,5 @@
 use crate::vmir::display::VmirDisplay;
-use crate::vmir::{MemberId, ResourceCall, Type, Val};
+use crate::vmir::{MemberId, QuantChunks, ResourceCall, Type, Val};
 use std::fmt::{self, Display, Formatter};
 
 /// Heap-typed value.
@@ -160,6 +160,17 @@ pub enum HeapInst {
         /// unchanged. Output arity, exactly like `Exhale::frame_only`.
         yields_value: bool,
     },
+
+    AddForall {
+        base: HeapVal,
+        q: Box<QuantChunks>,
+        bind: Bind,
+    },
+    SubForall {
+        base: HeapVal,
+        q: Box<QuantChunks>,
+    },
+
     /// `h[, s] := base inhale <call> @ <perm>`. Add the resource's delta (scaled by
     /// `perm`) to `base` **and assume** its boolean condition. When the callee is
     /// **self-framed** the inst additionally yields a pure `Val` `s : Snap(callee)`
@@ -218,7 +229,19 @@ pub enum HeapInst {
     /// the head set the rest aside as the frame, so the state after the loop is
     /// their sum. Silicon does the same at a `Kind.Out` edge; our heaps are explicit
     /// values, so the frame is simply named.
-    Union { a: HeapVal, b: HeapVal },
+    Union {
+        a: HeapVal,
+        b: HeapVal,
+    },
+    /// `h := label <base>` — `base` unchanged, named as the heap **of this
+    /// block**: emitted at `label L`, so `old[L]` reads a temp defined where `L`
+    /// is. A heap temp exists only where its defining block is reached (its
+    /// region), and `label L`'s entry heap is usually a predecessor's temp,
+    /// defined on a wider region. Read through that temp, `old[L]` would see the
+    /// label heap as held on paths that never reached `L`.
+    Label {
+        base: HeapVal,
+    },
 }
 
 impl HeapInst {
@@ -241,6 +264,21 @@ impl HeapInst {
                 ..
             }
         ) || self.snap_yield(decls).is_some()
+    }
+
+    /// The base heap and resource call of a **frame-only** exhale: a
+    /// heap-dependent function call's snapshot, the one heap step a quantifier
+    /// body may hold.
+    pub fn frame_exhale(&self) -> Option<(HeapVal, &ResourceCall)> {
+        match self {
+            HeapInst::Exhale {
+                frame_only: true,
+                base,
+                call,
+                ..
+            } => Some((*base, call)),
+            _ => None,
+        }
     }
 
     /// Whether this instruction produces a heap. Everything does except a
@@ -390,6 +428,9 @@ impl<'a> Display for VmirDisplay<'a, &'a HeapInst> {
                 perm,
                 bind,
             } => write!(f, "{base} + {loc} @ {perm} with {bind}"),
+            HeapInst::AddForall { q, bind, base } => {
+                write!(f, "{base} + {} with {bind}", self.with(&**q))
+            }
             HeapInst::Sub {
                 base, loc, perm, ..
             } => write!(f, "{base} - {loc} @ {perm}"),
@@ -414,6 +455,9 @@ impl<'a> Display for VmirDisplay<'a, &'a HeapInst> {
                 els_h,
             } => write!(f, "merge {cond} ? {then_h} : {els_h}"),
             HeapInst::Union { a, b } => write!(f, "union {a} {b}"),
+            HeapInst::Label { base } => write!(f, "label {base}"),
+
+            HeapInst::SubForall { base, q } => write!(f, "{base} - {}", self.with(&**q)),
         }
     }
 }

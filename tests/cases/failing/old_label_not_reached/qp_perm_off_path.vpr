@@ -1,0 +1,14 @@
+// `perm` through a quantified permission at a label reached on one arm only.
+field f: Int
+
+method m(s: Set[Ref], a: Ref, c: Bool)
+  requires (forall x: Ref :: x in s ==> acc(x.f)) && a in s
+{
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f)
+    label l
+    inhale forall x: Ref :: x in s ==> acc(x.f)
+  }
+  assert old[l](perm(a.f)) == none
+  assert c
+}

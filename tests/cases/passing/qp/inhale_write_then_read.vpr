@@ -1,0 +1,14 @@
+// QP easy: a write to a member of the chunk set leaves it readable. Only the
+// permission is checked here, not the value read back.
+//
+// Must VERIFY.
+field f: Int
+
+method inhale_write_then_read(s: Set[Ref], a: Ref)
+{
+  inhale forall x: Ref :: x in s ==> acc(x.f)
+  inhale a in s
+  a.f := 5
+  var v: Int := a.f
+  assert v == 5
+}

@@ -1,0 +1,18 @@
+// A call to a function with a quantified precondition needs a share of every
+// member: here `b.f` is not held.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+function get(s: Set[Ref], a: Ref): Int
+  requires forall x: Ref :: x in s ==> acc(x.f, wildcard)
+  requires a in s
+{
+  a.f
+}
+
+method wildcard_function_pre_partial(a: Ref, b: Ref)
+  requires acc(a.f)
+{
+  var v: Int := get(Set(a, b), a)
+}

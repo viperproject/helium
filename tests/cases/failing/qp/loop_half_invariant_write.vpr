@@ -1,0 +1,19 @@
+// QP medium (loop exit / heap sum): the invariant carries only half of the
+// chunk set; the frame half is not available inside the body.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method loop_half_invariant_write(s: Set[Ref], a: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  {
+    a.f := i
+    i := i + 1
+  }
+}

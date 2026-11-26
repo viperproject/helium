@@ -1,0 +1,20 @@
+// A quantified field permission in a predicate body whose trigger is a field
+// read `{ r.v }` (matched as the location term `v(r)`).
+//
+// Prusti's `FracRef`, `UniqueRef` and `OwnedNonAliased` range predicates have
+// this shape (formerly a marco_benchmark known limitation).
+//
+// Must VERIFY.
+field v: Int
+
+predicate Arr(s: Set[Ref]) {
+  forall r: Ref :: { r.v } r in s ==> acc(r.v)
+}
+
+method client(x: Ref)
+  requires acc(x.v)
+{
+  fold Arr(Set(x))
+  unfold Arr(Set(x))
+  x.v := 1
+}

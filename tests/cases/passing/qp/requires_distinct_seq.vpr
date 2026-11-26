@@ -1,0 +1,18 @@
+// QP medium: the receiver's injectivity follows from an earlier precondition
+// conjunct (the sequence is distinct). Inhaling the precondition must not
+// re-prove injectivity before that conjunct is assumed.
+//
+// Must VERIFY.
+field f: Int
+
+method requires_distinct_seq(s: Seq[Ref], k: Int)
+  requires forall i: Int, j: Int :: { s[i], s[j] } 0 <= i && i < j && j < |s| ==> s[i] != s[j]
+  requires forall j: Int :: 0 <= j && j < |s| ==> acc(s[j].f)
+{
+  inhale 0 <= k && k < |s|
+  inhale |s| > 10
+  s[k].f := 5
+  exhale forall j: Int :: 0 <= j && j < |s| - 5 ==> acc(s[j].f)
+  s[|s| - 2].f := 10
+  assert s[|s| - 2].f == 10
+}

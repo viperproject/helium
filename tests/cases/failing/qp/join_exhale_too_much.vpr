@@ -1,0 +1,18 @@
+// QP medium (branch join): the branches leave 1/2 and 3/4 behind. Exhaling
+// 3/4 afterwards only works on one path. Catches a join that takes the
+// larger remainder (or the else side) for both.
+//
+// Must FAIL (insufficient permission).
+field f: Int
+
+method join_exhale_too_much(s: Set[Ref], a: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  if (c) {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  } else {
+    exhale forall x: Ref :: x in s ==> acc(x.f, 1/4)
+  }
+  exhale forall x: Ref :: x in s ==> acc(x.f, 3/4)
+}

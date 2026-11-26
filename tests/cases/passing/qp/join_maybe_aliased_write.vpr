@@ -1,0 +1,18 @@
+// QP medium (branch join): the branch writes `b`, which may or may not be `a`.
+// After the join, the value of `a` is the written one only when the branch
+// was taken and the two alias.
+//
+// Must VERIFY.
+field f: Int
+
+method join_maybe_aliased_write(s: Set[Ref], a: Ref, b: Ref, c: Bool)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a.f == 3 && b.f == 3
+{
+  if (c) {
+    b.f := 5
+  }
+  assert c && a == b ==> a.f == 5
+  assert a != b ==> a.f == 3
+  assert !c ==> a.f == 3
+}

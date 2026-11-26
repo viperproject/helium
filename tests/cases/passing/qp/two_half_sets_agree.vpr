@@ -1,0 +1,20 @@
+// QP medium: two chunk sets each hold half of the same location; both shares
+// are positive, so both maps hold the one value there.
+//
+// The precondition's `a.f == 3` names one set's map only, and the method never
+// reads `a.f` while both sets are held. The exhale of `s`'s set hands its value
+// over to `t`'s (a `Handover`), so after it `t`'s map still reads 3.
+// (`two_half_sets_read_agree` reads with both sets held, outside a certificate.)
+//
+// Must VERIFY.
+field f: Int
+
+method two_half_sets_agree(s: Set[Ref], t: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  requires forall x: Ref :: x in t ==> acc(x.f, 1/2)
+  requires a in s && a in t
+  requires a.f == 3
+{
+  exhale forall x: Ref :: x in s ==> acc(x.f, 1/2)
+  assert a.f == 3
+}

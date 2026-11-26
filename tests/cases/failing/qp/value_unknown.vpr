@@ -1,0 +1,11 @@
+// QP easy: holding permission to `a.f` says nothing about its value.
+//
+// Must FAIL (assertion).
+field f: Int
+
+method value_unknown(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s
+{
+  assert a.f == 0
+}

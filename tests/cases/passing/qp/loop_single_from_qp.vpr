@@ -1,0 +1,23 @@
+// QP medium (loop exit / heap sum): the invariant holds one member as a single
+// chunk, carved out of the chunk set; the frame keeps the set with a hole. At
+// the exit the whole set must be exhalable again.
+//
+// Must VERIFY.
+field f: Int
+
+method loop_single_from_qp(s: Set[Ref], a: Ref, b: Ref, n: Int)
+  requires forall x: Ref :: x in s ==> acc(x.f)
+  requires a in s && b in s && a != b && b.f == 7 && 0 <= n
+{
+  var i: Int := 0
+  while (i < n)
+    invariant 0 <= i && i <= n
+    invariant acc(a.f)
+  {
+    a.f := i
+    i := i + 1
+  }
+  assert b.f == 7
+  assert perm(a.f) == write && perm(b.f) == write
+  exhale forall x: Ref :: x in s ==> acc(x.f)
+}

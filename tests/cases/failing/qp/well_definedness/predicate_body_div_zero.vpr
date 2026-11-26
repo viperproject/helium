@@ -1,0 +1,15 @@
+// QP well-definedness: a predicate body's quantified permission divides by
+// `n`, which may be 0.
+//
+// Must FAIL (divisor may be zero). Silicon: "Predicate might not be well-formed".
+field f: Int
+
+predicate P(s: Set[Ref], n: Int) {
+  forall x: Ref :: x in s && 10 / n > 0 ==> acc(x.f)
+}
+
+method predicate_body_div_zero(s: Set[Ref])
+{
+  inhale P(s, 0)
+  unfold P(s, 0)
+}

@@ -46,6 +46,9 @@ pub enum Type {
     /// `Multiset[E]` have one, the element type `E`; `Map[K, V]` has two, the
     /// key and value types (see [`CollKind::arity`]).
     Coll(CollKind, Box<[Type]>),
+
+    /// The value map for values of QPs. The contained type is the address type.
+    ValueMap(Box<Type>),
 }
 
 /// Permission bound of a heap location (cap on total permission per cell).
@@ -149,6 +152,7 @@ impl Type {
                     t.collect_generics(out);
                 }
             }
+            Type::ValueMap(t) => t.collect_generics(out),
         }
     }
 
@@ -173,6 +177,7 @@ impl Type {
             Type::Coll(kind, tys) => {
                 Type::Coll(*kind, tys.iter().map(|t| t.subst_generics(args)).collect())
             }
+            Type::ValueMap(t) => Type::ValueMap(Box::new(t.subst_generics(args))),
         }
     }
 
@@ -245,6 +250,7 @@ impl Display for Type {
                 write!(f, "{}", kind.name())?;
                 fmt_args(f, tys, |a, f| write!(f, "{a}"))
             }
+            Type::ValueMap(t) => write!(f, "Vmap<{t}>"),
         }
     }
 }

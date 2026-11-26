@@ -1,0 +1,15 @@
+// REGRESSION (soundness). join_merge_nonaliasing_leak.vpr asked after the outer
+// join: `a != b` holds only where the arm that inhaled ran, not on `!d`.
+//
+// Must FAIL.
+field f: Int
+
+method m(a: Ref, b: Ref, c: Bool, d: Bool)
+  requires acc(a.f, 1/2) && acc(b.f, 1/2)
+{
+  if (d) {
+    inhale acc(a.f, 1/2)
+    if (c) {}
+  }
+  assert !d ==> a != b
+}

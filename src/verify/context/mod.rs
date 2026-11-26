@@ -63,6 +63,13 @@ pub(crate) struct VerifyContext<'a> {
     /// counter means no id is ever reused across them — so folding `Wildcard` into
     /// `Fresh` later needs no id migration.
     fresh_counter: u32,
+    /// Monotonic source of heap identities: the origin of a chunk set and the
+    /// id of each exhale recorded against one (see [`Self::fresh_heap_id`]).
+    heap_id_counter: u32,
+    /// The inverse axioms assumed so far, for chunk sets to share (see
+    /// `heap::quantified_permissions::InverseAxioms`). Holds e-class ids, so a
+    /// scratch graph's additions are dropped with it.
+    pub(crate) inverse_axioms: crate::verify::heap::InverseAxioms,
     /// Cheap string repr for member/constructor names.
     pub(crate) interner: &'a Rodeo,
     /// Member names indexed by `MemberId` (for `member_name`/`func_name`).
@@ -85,6 +92,10 @@ pub(crate) struct VerifyContext<'a> {
     /// (see `rewrite::function_rule`). `None` in isolated contexts (unit tests)
     /// that never evaluate a `FunctionCall`.
     pub(crate) fn_certs: Option<&'a HashMap<MemberId, std::sync::Arc<FunctionDefinition>>>,
+    /// Verified resource certificates, keyed by `MemberId`: what a heap-dependent
+    /// call in a quantifier body walks to frame its precondition there
+    /// (`declaration::frame_snapshot`). `None` in isolated contexts.
+    pub(crate) certs: Option<&'a HashMap<MemberId, crate::verify::cert::ResourceDefinition>>,
     /// The certificate recipe under construction, mirrored step-by-step by the
     /// eval walk of a **function or resource** body (single walk — see
     /// `cert::RecipeBuilder`). `None` for methods — they produce no
@@ -191,6 +202,8 @@ impl<'a> VerifyContext<'a> {
             static_reduce: rewrite::reduce_rules(),
             axiom_rules: Vec::new(),
             fresh_counter: 0,
+            heap_id_counter: 0,
+            inverse_axioms: Default::default(),
             interner,
             decls,
             groups,
@@ -198,6 +211,7 @@ impl<'a> VerifyContext<'a> {
             fresh_types: HashMap::default(),
             func_ret_types: HashMap::default(),
             fn_certs: None,
+            certs: None,
             recipe: None,
             clean: None,
             has_wildcard: decls_have_wildcard(decls),
@@ -265,6 +279,49 @@ impl<'a> VerifyContext<'a> {
         member_name_in(self.interner, self.decls, m)
     }
 
+    /// Run `f` with the certificate recipe (if one is being built) switched
+    /// off, and switch it back on afterwards. For evaluation that only feeds a
+    /// proof — a scratch-graph side check, re-evaluating a quantified
+    /// permission's body at an address — and must not mirror steps into the
+    /// certificate: none of its terms are part of the body's pure meaning.
+    pub(crate) fn pause_recipe<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let recipe = self.recipe.take();
+        let res = f(self);
+        debug_assert!(self.recipe.is_none(), "a recipe was started while paused");
+        self.recipe = recipe;
+        res
+    }
+
+    /// Parameter and return types of function declaration `func` at
+    /// instantiation `tys`: ordinary, domain, and field/predicate address
+    /// functions alike.
+    pub(crate) fn function_signature(&self, func: MemberId, tys: &[Type]) -> (Vec<Type>, Type) {
+        match &self.decls[func] {
+            Declaration::Function(fun) => {
+                let params = fun.params.iter().map(|t| t.subst_generics(tys)).collect();
+                (params, fun.ret.subst_generics(tys))
+            }
+            Declaration::Resource(r) => {
+                let params = r.params.iter().map(|t| t.subst_generics(tys)).collect();
+                let group = self
+                    .groups
+                    .get(self.interner.resolve(&r.name))
+                    .expect("predicate group tag");
+                (params, r.derive_location(func, group).ret)
+            }
+            Declaration::Domain(_) => {
+                unreachable!("a domain declaration only holds a name, never a function")
+            }
+            Declaration::Axiom(_) => unreachable!("an axiom declaration is never a function"),
+            Declaration::Method(_) => {
+                unreachable!("methods are lowered to exhale/inhale; a method is never called")
+            }
+            Declaration::Adt(_) => {
+                unreachable!("ADTs are lowered to dedicated pure insts, never a function call")
+            }
+        }
+    }
+
     /// Display name for an e-graph function id: a real declaration index resolves
     /// via the interner; an allocator-minted id via its name table.
     pub(crate) fn func_name(&self, f: FuncId) -> String {
@@ -314,6 +371,7 @@ impl<'a> VerifyContext<'a> {
                 let tys: Vec<String> = tys.iter().map(|t| self.type_name(t)).collect();
                 format!("{}<{}>", kind.name(), tys.join(", "))
             }
+            Type::ValueMap(ty) => format!("Vmap<{}>", self.type_name(ty)),
         }
     }
 
@@ -469,6 +527,16 @@ impl<'a> VerifyContext<'a> {
     ) -> egg::Id {
         self.func_ret_types.entry(id).or_insert(ret_ty);
         self.add(Symbolic::FuncApp(id, type_args, args))
+    }
+
+    /// A heap identity never handed out before in this context: the origin of
+    /// a chunk set (`heap::SetId`) or the id of a recorded exhale
+    /// (`heap::TakeId`). Unique per context, so two copies of a heap item
+    /// carry the same id exactly when they descend from one creation.
+    pub(crate) fn fresh_heap_id(&mut self) -> u32 {
+        let id = self.heap_id_counter;
+        self.heap_id_counter += 1;
+        id
     }
 
     pub(crate) fn fresh_symbolic_value(&mut self, ty: Type) -> egg::Id {

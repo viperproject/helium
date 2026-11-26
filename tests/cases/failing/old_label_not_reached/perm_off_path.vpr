@@ -1,0 +1,11 @@
+// `perm` at a label reached on one arm only. Off the label's path its heap
+// does not exist, so the read is not well-defined, although an empty heap
+// would make `perm(x.f) == none` hold.
+field f: Int
+
+method m(x: Ref, b: Bool)
+  requires acc(x.f)
+{
+  if (b) { label L }
+  assert !b ==> old[L](perm(x.f)) == none
+}

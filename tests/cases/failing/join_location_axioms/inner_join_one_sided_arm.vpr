@@ -1,0 +1,16 @@
+// `inner_join_in_arm.vpr` with a one-armed inner `if` that consumes and
+// restores part of `b.f`, so the two merged heaps differ. Silicon rejects.
+field f: Int
+
+method inner_join_one_sided_arm(a: Ref, b: Ref, e: Bool, d: Bool)
+  requires acc(a.f)
+{
+  if (e) {
+    inhale acc(b.f)
+    if (d) {
+      exhale acc(b.f, 1/2)
+      inhale acc(b.f, 1/2)
+    }
+  }
+  assert a != b
+}

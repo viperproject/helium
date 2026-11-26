@@ -1,0 +1,71 @@
+// Binder-free heap-dependent calls inside quantifiers, over a field: framed
+// and checked per binding under the body's path condition, the snapshot
+// rebuilt from the same holder for every binding.
+//
+// Must VERIFY.
+field val: Int
+
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+function pos(x: Ref): Int
+  requires acc(x.val, wildcard) && x.val > 0
+{ x.val }
+
+domain D { function t(i: Int): Bool }
+
+// The call's value is the field's. (Asserting the `forall` needs `get(y)`
+// unfolded, which the call outside does; the same holds for a heap-free
+// function.)
+method read(y: Ref)
+  requires acc(y.val) && y.val == 5
+{
+  assert get(y) == 5
+  assert forall i: Int :: { t(i) } t(i) ==> get(y) == 5
+}
+
+// Framed only under the antecedent: `b` gives the permission.
+method framed_by_antecedent(y: Ref, b: Bool)
+  requires b ==> acc(y.val)
+{
+  inhale forall i: Int :: { t(i) } b && t(i) ==> get(y) == i
+}
+
+// The precondition holds only under the antecedent: checked per binding.
+method precondition_by_antecedent(y: Ref)
+  requires acc(y.val)
+{
+  inhale forall i: Int :: { t(i) } t(i) && y.val > 0 ==> pos(y) > i
+}
+
+// An instance gives the call's value at the quantifier's heap.
+method instance(y: Ref)
+  requires acc(y.val)
+{
+  inhale forall i: Int :: { t(i) } t(i) ==> get(y) == 4
+  inhale t(7)
+  assert y.val == 4
+}
+
+// A caller learns the postcondition through the quantifier.
+method callee(y: Ref)
+  requires acc(y.val)
+  ensures acc(y.val)
+  ensures forall i: Int :: { t(i) } t(i) ==> get(y) > 0
+
+method client(y: Ref)
+  requires acc(y.val)
+{
+  callee(y)
+  inhale t(1)
+  assert y.val > 0
+}
+
+// A binder-free call in a quantified permission's amount.
+method amount(y: Ref, s: Set[Ref], z: Ref)
+  requires acc(y.val) && y.val > 0 && !(y in s) && z in s
+{
+  inhale forall x: Ref :: x in s ==> acc(x.val, get(y) > 0 ? write : none)
+  z.val := 1
+}

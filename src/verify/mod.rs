@@ -6,14 +6,16 @@ use crate::vmir;
 mod expr;
 
 mod analysis;
+mod builtin_axioms;
 mod cert;
-mod coll_axioms;
 mod context;
 mod declaration;
 mod error;
+mod eval;
 mod func_registry;
 mod heap;
 pub mod lang;
+mod qp_trace;
 mod quant;
 mod rewrite;
 mod stats;
@@ -51,6 +53,7 @@ pub fn verify_with_stats(
     VerifyStats,
 ) {
     stats::reset_stats();
+    qp_trace::begin_program();
     let program = &analyzed.program;
     let mut results = Vec::new();
     let mut member_times: Vec<(String, std::time::Duration)> = Vec::new();

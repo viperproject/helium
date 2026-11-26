@@ -87,7 +87,11 @@ fn fmt_heap_node<Ext: ShowExt>(
 }
 
 /// Render a `forall` quantifier (binders, trigger groups, body).
-fn fmt_forall(q: &Forall, f: &mut Formatter<'_>, interner: &Interner) -> fmt::Result {
+fn fmt_forall<Ext: ShowExt>(
+    q: &Forall<Ext>,
+    f: &mut Formatter<'_>,
+    interner: &Interner,
+) -> fmt::Result {
     write!(f, "forall ")?;
     for (i, bv) in q.bound.iter().enumerate() {
         if i > 0 {
@@ -479,6 +483,33 @@ macro_rules! impl_spatial_display {
                         write!(f, "acc({}, {})", self.with(res), self.with(perm))
                     }
                     SpatialExpKind::Pure(e) => write!(f, "{}", self.with(e)),
+                    SpatialExpKind::Forall(q) => {
+                        write!(f, "(forall ")?;
+                        for (i, bv) in q.bound.iter().enumerate() {
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
+                            write!(f, "{}", self.with(bv))?;
+                        }
+                        write!(f, " :: ")?;
+                        for group in &q.triggers {
+                            write!(f, "{{")?;
+                            for (i, t) in group.iter().enumerate() {
+                                if i > 0 {
+                                    write!(f, ", ")?;
+                                }
+                                write!(f, "{}", self.with(t))?;
+                            }
+                            write!(f, "}} ")?;
+                        }
+                        write!(
+                            f,
+                            "{} ==> acc({}, {}))",
+                            self.with(&q.cond),
+                            self.with(&q.res),
+                            self.with(&q.perm)
+                        )
+                    }
                 }
             }
         }

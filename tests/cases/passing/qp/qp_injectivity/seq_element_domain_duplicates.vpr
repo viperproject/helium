@@ -1,0 +1,10 @@
+// QP injectivity over the elements of a sequence that has a duplicate: still
+// injective, because the quantifier ranges over elements, not positions. The
+// contrast is `failing/qp_injectivity/seq_duplicates_by_index.vpr`.
+field f: Int
+
+method seq_element_domain_duplicates(xs: Seq[Ref], a: Ref)
+{
+  inhale xs == Seq(a, a)
+  inhale forall x: Ref :: x in xs ==> acc(x.f)
+}

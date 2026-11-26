@@ -1,0 +1,19 @@
+// A function body quantifying over calls on its binder: it does not hold
+// where a member's value is not 0.
+//
+// Must FAIL (assertion).
+field val: Int
+function get(x: Ref): Int
+  requires acc(x.val, wildcard)
+{ x.val }
+
+function allz(s: Set[Ref]): Bool
+  requires forall x: Ref :: x in s ==> acc(x.val, wildcard)
+{ forall x: Ref :: { get(x) } x in s ==> get(x) == 0 }
+
+method m(s: Set[Ref], a: Ref)
+  requires forall x: Ref :: x in s ==> acc(x.val)
+  requires a in s && a.val == 1
+{
+  assert allz(s)
+}

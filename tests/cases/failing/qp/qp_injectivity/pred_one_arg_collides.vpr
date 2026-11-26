@@ -1,0 +1,12 @@
+// QP injectivity over a two-argument predicate: the second argument depends on
+// `i` only through `g`, which may map two indices to the same reference.
+//
+// Must FAIL (quantified permission might not be injective).
+predicate P(x: Ref, y: Ref)
+
+function g(i: Int): Ref
+
+method pred_one_arg_collides(a: Ref, n: Int)
+{
+  inhale forall i: Int :: 0 <= i && i < n ==> acc(P(a, g(i)))
+}

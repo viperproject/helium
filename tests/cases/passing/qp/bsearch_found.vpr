@@ -1,0 +1,47 @@
+// QP hard: binary search over an array (`slot(a, i)` encoding), "found =>
+// correct" direction only. Needs no sortedness, so no field read inside a
+// quantifier; it needs the branch join (the elseif chain) and the heap sum at
+// the loop exit, both with the array's chunk set held.
+//
+// Must VERIFY.
+field val: Int
+
+domain IArray {
+  function slot(a: IArray, i: Int): Ref
+  function len(a: IArray): Int
+  function first(r: Ref): IArray
+  function second(r: Ref): Int
+
+  axiom slot_injective {
+    forall a: IArray, i: Int :: { slot(a, i) } first(slot(a, i)) == a && second(slot(a, i)) == i
+  }
+  axiom len_nonneg {
+    forall a: IArray :: { len(a) } len(a) >= 0
+  }
+}
+
+method bsearch_found(a: IArray, key: Int) returns (res: Int)
+  requires forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+  ensures  forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+  ensures  -1 <= res && res < len(a)
+  ensures  0 <= res ==> slot(a, res).val == key
+{
+  var lo: Int := 0
+  var hi: Int := len(a)
+  res := -1
+  while (lo < hi && res == -1)
+    invariant 0 <= lo && lo <= hi && hi <= len(a)
+    invariant -1 <= res && res < len(a)
+    invariant forall k: Int :: 0 <= k && k < len(a) ==> acc(slot(a, k).val, 1/2)
+    invariant 0 <= res ==> slot(a, res).val == key
+  {
+    var mid: Int := lo + (hi - lo) / 2
+    if (slot(a, mid).val == key) {
+      res := mid
+    } elseif (slot(a, mid).val < key) {
+      lo := mid + 1
+    } else {
+      hi := mid
+    }
+  }
+}
