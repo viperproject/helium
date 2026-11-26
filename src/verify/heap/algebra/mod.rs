@@ -461,12 +461,10 @@ mod tests {
         ));
     }
 
-    // KNOWN LIMITATION. A ground miss whose demand is zero under the pc owes
-    // nothing, also when the graph is already saturated as the consume starts, so
-    // that its own saturate changes nothing. The first pass never asks the
-    // zero-demand probe, and the retry skips it on a graph that was already
-    // saturated, so here nobody asks and the consume fails. This asserts the
-    // current (wrong) verdict; the fix flips it to `expect`.
+    // A ground miss whose demand is zero under the pc owes nothing, also when the
+    // graph is already saturated as the consume starts, so that its own saturate
+    // changes nothing: the retry asks the zero-demand probe however settled the
+    // graph was.
     #[test]
     fn heap_subtract_zero_demand_on_saturated_graph() {
         let interner = lasso::Rodeo::new();
@@ -479,7 +477,7 @@ mod tests {
         // Saturated before the consume, so the graph is settled when it starts.
         ctx.saturate();
 
-        let err = heap_subtract(
+        heap_subtract(
             &mut ctx,
             &Heap::empty(),
             &test_kind(),
@@ -488,10 +486,6 @@ mod tests {
             &[(c, Polarity::Negative)],
             Demand::Concrete,
         )
-        .expect_err("known limitation: the zero-demand probe is not asked");
-        assert!(matches!(
-            err.root_cause(),
-            VerifyError::InsufficientPermission
-        ));
+        .expect("a demand that is zero under the pc needs no permission");
     }
 }
