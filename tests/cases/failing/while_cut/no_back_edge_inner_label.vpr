@@ -1,0 +1,20 @@
+// A `while` without a back edge whose body jumps to a label inside the body
+// before leaving.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, c: Bool, b: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f)
+  {
+    if (b) { goto inner }
+    label inner
+    goto out
+  }
+  label out
+  assert x.f == 3
+}

@@ -1,0 +1,20 @@
+// Two `goto` exits of one `while` into the same label: the frame comes back
+// once on each exit's path, not once per exit on every path.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the exhale).
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f, 1/2)
+{
+  while (c)
+    invariant true
+  {
+    if (d) { goto out }
+    goto out
+  }
+  assume false
+  label out
+  exhale acc(x.f, 1/2) && acc(x.f, 1/2)
+}

@@ -1,0 +1,18 @@
+// no_back_edge_havoc.vpr with a literal `true` guard, so the only way out is the
+// body's `goto`.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (true)
+    invariant acc(x.f)
+  {
+    goto out
+  }
+  label out
+  assert x.f == 3
+}

@@ -1,0 +1,24 @@
+// An inner loop's arm that leaves it by `goto` to the outer body runs on the
+// inner invariant's permissions only, not on the outer frame.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access y.f"
+// (at the assignment).
+field f: Int
+
+method m(x: Ref, y: Ref, b: Bool, c: Bool, d: Bool)
+  requires acc(x.f) && acc(y.f)
+{
+  while (c)
+    invariant acc(x.f) && acc(y.f)
+  {
+    while (d)
+      invariant acc(x.f)
+    {
+      if (b) {
+        y.f := 1
+        goto mid
+      }
+    }
+    label mid
+  }
+}

@@ -227,6 +227,12 @@ struct Builder {
     defined: HashSet<Spur>,
     /// `while`s seen so far, for [`LoopHeadKey::While`] numbering.
     whiles: usize,
+    /// Each `while`'s head with the blocks of its statement body: a `while` is a
+    /// loop whatever its body's edges (see [`Loops::detect`]).
+    while_bodies: Vec<(BlockId, Vec<BlockId>)>,
+    /// Indices into `while_bodies` of the `while`s being processed, outermost
+    /// first: every block created meanwhile is in their bodies.
+    open_whiles: Vec<usize>,
     /// Head keys in assignment order, checked against [`loop_head_keys`].
     assigned_keys: Vec<LoopHeadKey>,
 }
@@ -242,16 +248,25 @@ struct BlockData {
 
 impl Builder {
     fn new_block(&mut self) -> BlockId {
-        self.blocks.push_and_get_key(BlockData::default())
+        let b = self.blocks.push_and_get_key(BlockData::default());
+        self.enter_open_whiles(b);
+        b
+    }
+
+    fn enter_open_whiles(&mut self, b: BlockId) {
+        for &w in &self.open_whiles {
+            self.while_bodies[w].1.push(b);
+        }
     }
 
     /// The block for label `l`, created on first reference (a `goto` may precede
-    /// the `label` declaration).
+    /// the `label` declaration). Which `while` bodies it is in is decided by the
+    /// declaration, not by the reference.
     fn label_block(&mut self, l: Spur) -> BlockId {
         if let Some(&b) = self.labels.get(&l) {
             return b;
         }
-        let b = self.new_block();
+        let b = self.blocks.push_and_get_key(BlockData::default());
         self.blocks[b].label = Some(l);
         self.labels.insert(l, b);
         b
@@ -314,6 +329,7 @@ impl Builder {
                 Statement::Label(l, invs) => {
                     self.defined.insert(*l);
                     let lb = self.label_block(*l);
+                    self.enter_open_whiles(lb);
                     // The block may already exist (a `goto` referenced the label
                     // before its declaration); the declaration is what carries
                     // the invariants.
@@ -357,6 +373,8 @@ impl Builder {
 
                     let body_e = self.new_block();
                     let exit = self.new_block();
+                    self.while_bodies.push((head, vec![body_e]));
+                    self.open_whiles.push(self.while_bodies.len() - 1);
                     self.open_seal(
                         head,
                         Terminator::Branch {
@@ -365,12 +383,13 @@ impl Builder {
                             else_: exit,
                         },
                     );
-                    // The back edge — the whole point of the construct. A body
-                    // that ends unreachable (`goto`/`return`) has none, exactly
-                    // as with an `if` arm.
+                    // The back edge. A body that ends unreachable (`goto`/`return`)
+                    // has none, exactly as with an `if` arm; the head is a loop
+                    // head all the same (`while_bodies`).
                     if let Some(bx) = self.process(&body.0, Some(body_e)) {
                         self.open_seal(bx, Terminator::Goto(head));
                     }
+                    self.open_whiles.pop();
                     cur = Some(exit);
                 }
                 // Everything else is straight-line: append to the current block.
@@ -390,6 +409,8 @@ impl Builder {
             defined,
             assigned_keys,
             whiles: _,
+            while_bodies,
+            open_whiles: _,
         } = self;
 
         // `declare` allocates one Resource slot per key from `loop_head_keys`;
@@ -423,14 +444,14 @@ impl Builder {
         // DAG, which is what keeps `topo_order` (and the `preds precede`
         // invariant the VMIR lowering and verifier both assume) valid.
         let mut blocks = blocks;
-        let mut loops = detect(&blocks, entry)?;
+        let mut loops = detect(&blocks, entry, &while_bodies)?;
 
         // Give every loop head a single in-edge, so the lowering has one place
         // to establish the invariant and one frame to restore on exit. Distinct
         // in-edges would otherwise each carry their own residual heap.
         if insert_preheaders(&mut blocks, &loops, entry) {
             // Block ids moved; re-derive rather than patching the structure.
-            loops = detect(&blocks, entry)?;
+            loops = detect(&blocks, entry, &while_bodies)?;
         }
 
         Ok(Cfg {
@@ -444,8 +465,12 @@ impl Builder {
 
 /// Natural-loop detection over the block graph, mapping the analysis' error into
 /// a [`CfgError`].
-fn detect(blocks: &TiVec<BlockId, BasicBlock>, entry: BlockId) -> Result<Loops, CfgError> {
-    Loops::detect(&block_graph(blocks), entry).map_err(|e| match e {
+fn detect(
+    blocks: &TiVec<BlockId, BasicBlock>,
+    entry: BlockId,
+    while_bodies: &[(BlockId, Vec<BlockId>)],
+) -> Result<Loops, CfgError> {
+    Loops::detect(&block_graph(blocks), entry, while_bodies).map_err(|e| match e {
         LoopError::Irreducible(doors) => CfgError::Irreducible(doors),
     })
 }
@@ -692,6 +717,39 @@ mod tests {
         );
         assert!(matches!(cfg.blocks[head].term, Terminator::Branch { .. }));
         assert!(cfg.labels.is_empty());
+    }
+
+    /// `while (c) { if (c) { goto L } ; goto L } ; label L`: no back edge, still
+    /// a loop, whose body is the whole statement body and not `L`.
+    #[test]
+    fn while_left_only_by_goto_is_a_loop() {
+        let mut r = Rodeo::default();
+        let l = r.get_or_intern("L");
+        let arm = block(vec![Statement::If(
+            cond(),
+            block(vec![Statement::Goto(l)]),
+            None,
+        )]);
+        let body = block(vec![
+            Statement::While(
+                cond(),
+                vec![],
+                block(vec![Statement::Block(arm), Statement::Goto(l)]),
+            ),
+            Statement::Label(l, vec![]),
+        ]);
+        let cfg = build_cfg(&body).unwrap();
+        assert_eq!(cfg.loops.loops.len(), 1);
+        assert!(cfg.loops.back_edges.is_empty());
+        let lp = &cfg.loops.loops[0];
+        let Terminator::Branch { then_, .. } = cfg.blocks[lp.head].term else {
+            panic!("a while head branches");
+        };
+        let Terminator::Branch { then_: arm, .. } = cfg.blocks[then_].term else {
+            panic!("the body starts with the if");
+        };
+        assert!(lp.body.contains(&then_) && lp.body.contains(&arm));
+        assert!(!lp.body.contains(&cfg.labels[&l]));
     }
 
     /// Two forward edges into one head collapse onto a single pre-header, so the

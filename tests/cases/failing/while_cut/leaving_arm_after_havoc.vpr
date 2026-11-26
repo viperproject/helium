@@ -1,0 +1,19 @@
+// An arm that leaves the loop by `goto` before the body restores `x.f`: there
+// `x.f` is the head's havoc.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, b: Bool, c: Bool)
+  requires acc(x.f)
+{
+  x.f := 3
+  while (c)
+    invariant acc(x.f)
+  {
+    if (b) { goto out }
+    x.f := 3
+  }
+  label out
+  assert x.f == 3
+}

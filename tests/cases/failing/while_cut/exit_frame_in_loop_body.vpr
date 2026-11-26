@@ -1,0 +1,23 @@
+// exit_frame_on_normal_exit.vpr inside an outer loop's body: the inner
+// `while`'s normal exit and its `goto` exit join at `next`.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the exhale).
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool, e: Bool)
+  requires acc(x.f, 1/2)
+{
+  while (e)
+    invariant acc(x.f, 1/2)
+  {
+    while (c)
+      invariant true
+    {
+      if (d) { goto next }
+    }
+    label next
+    if (!c) { exhale acc(x.f, 1/2) && acc(x.f, 1/2) }
+    inhale acc(x.f, 1/2)
+  }
+}
