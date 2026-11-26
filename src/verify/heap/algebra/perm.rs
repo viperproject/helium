@@ -1,11 +1,11 @@
 //! Permission amounts: arithmetic over [`ChunkPerm`] and the proofs about it (sufficient, positive, write).
 
+use crate::verify::heap::cond::meet;
 use crate::verify::{
     context::VerifyContext,
     heap::{ChunkPerm, Shape},
     lang::Symbolic,
 };
-use crate::verify::heap::cond::meet;
 use crate::vmir::{BinOp, Bound, Literal, Polarity};
 
 /// [`perm_add`], but a leaf whose sum mentions a `wildcard` becomes a **fresh
