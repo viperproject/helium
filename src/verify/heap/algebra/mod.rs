@@ -460,4 +460,32 @@ mod tests {
             VerifyError::InsufficientPermission
         ));
     }
+
+    // A ground miss whose demand is zero under the pc owes nothing, also when the
+    // graph is already saturated as the consume starts, so that its own saturate
+    // changes nothing: the retry asks the zero-demand probe however settled the
+    // graph was.
+    #[test]
+    fn heap_subtract_zero_demand_on_saturated_graph() {
+        let interner = lasso::Rodeo::new();
+        let mut ctx = fresh_ctx(&interner);
+
+        let a = ctx.add(Symbolic::Fresh(0));
+        let c = ctx.add(Symbolic::Fresh(1));
+        let (one, zero) = (real(&mut ctx, 1, 1), real(&mut ctx, 0, 1));
+        let demand = expr!(&mut ctx, if {c} then {one} else {zero});
+        // Saturated before the consume, so the graph is settled when it starts.
+        ctx.saturate();
+
+        heap_subtract(
+            &mut ctx,
+            &Heap::empty(),
+            &test_kind(),
+            a,
+            ChunkPerm::leaf(demand),
+            &[(c, Polarity::Negative)],
+            Demand::Concrete,
+        )
+        .expect("a demand that is zero under the pc needs no permission");
+    }
 }
