@@ -284,7 +284,9 @@ fn decl_deps(decl: &Declaration, out: &mut Vec<MemberId>) {
 
 /// The members a trigger pattern mentions: the function at each application head
 /// it matches on (an ADT head is not a declaration the verifier schedules — its
-/// ids are minted on demand).
+/// ids are minted on demand). A location head (`TrigHead::Loc`) is not one,
+/// for the reason an address-typed call is not (see [`inst_deps`]): a predicate
+/// quantifying over its own instances, triggered on them, would be a self-cycle.
 fn trig_term_deps(term: &crate::vmir::TrigTerm, out: &mut Vec<MemberId>) {
     if let crate::vmir::TrigTerm::App { head, args, .. } = term {
         if let crate::vmir::TrigHead::Func(id) = head {

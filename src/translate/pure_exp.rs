@@ -1081,7 +1081,7 @@ pub(crate) fn location_trig_term<Ext: PureExt>(
         .map(|a| lower_trig_term(b, a, env))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(vmir::TrigTerm::App {
-        head: vmir::TrigHead::Func(function),
+        head: vmir::TrigHead::Loc(function),
         type_args: Vec::new(),
         args: args.into(),
     })

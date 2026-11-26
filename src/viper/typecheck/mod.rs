@@ -3405,6 +3405,99 @@ domain D { function f(i: Int): Bool  axiom q { forall x: Int :: {f(x + 1)} f(x) 
     }
 
     #[test]
+    fn predicate_trigger_accepted_where_there_is_a_heap() {
+        // In a function precondition (a quantified permission), a method
+        // precondition (a pure `forall`) and a method statement.
+        let result = run_pipeline(
+            r#"
+predicate P(x: Ref)
+predicate Q(x: Ref, i: Int)
+function f(s: Set[Ref]): Int
+  requires forall x: Ref :: {P(x)} x in s ==> acc(P(x), wildcard)
+method m(s: Set[Ref])
+  requires forall x: Ref, i: Int :: {Q(x, i)} x in s ==> i == i
+{ assert forall x: Ref :: {P(x)} {x in s} x in s ==> x == x }
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn predicate_trigger_rejected_in_axiom() {
+        // An axiom has no heap, so no predicate instance to match.
+        let result = run_pipeline(
+            r#"
+predicate P(x: Ref)
+domain D { function h(x: Ref): Bool axiom a { forall x: Ref :: {P(x)} h(x) } }
+"#,
+        );
+        assert!(
+            result.as_ref().is_err_and(|es| es
+                .iter()
+                .any(|e| matches!(e, TypeError::PredicateInPureContext(_)))),
+            "expected PredicateInPureContext, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn location_below_trigger_root_rejected() {
+        // A predicate is no value, so it cannot be an argument; a field read
+        // below the root would stand for the read's value, which no pattern
+        // names.
+        let pred = run_pipeline(
+            r#"
+predicate P(x: Ref)
+function g(b: Bool): Bool
+method m(s: Set[Ref]) { assert forall x: Ref :: {g(P(x))} x in s ==> true }
+"#,
+        );
+        assert!(
+            pred.as_ref().is_err_and(|es| es
+                .iter()
+                .any(|e| matches!(e, TypeError::PredicateInPureContext(_)))),
+            "expected PredicateInPureContext, got: {pred:?}"
+        );
+        let field = run_pipeline(
+            r#"
+field f: Int
+function g(i: Int): Bool
+method m(s: Set[Ref]) { assert forall x: Ref :: {g(x.f)} x in s ==> true }
+"#,
+        );
+        assert!(
+            field
+                .as_ref()
+                .is_err_and(|es| es.iter().any(|e| matches!(e, TypeError::TriggerBadSubterm))),
+            "expected TriggerBadSubterm, got: {field:?}"
+        );
+    }
+
+    #[test]
+    fn predicate_trigger_arguments_are_typed() {
+        // `P(true)` does not fit `P(x: Ref)`; and the arguments must still
+        // cover the binders.
+        let ill_typed = run_pipeline(
+            r#"
+predicate P(x: Ref)
+method m(s: Set[Ref]) { assert forall x: Ref :: {P(true)} x in s ==> true }
+"#,
+        );
+        assert!(ill_typed.is_err(), "expected a type error, got: {ill_typed:?}");
+        let uncovering = run_pipeline(
+            r#"
+predicate P(x: Ref)
+method m(s: Set[Ref], y: Ref) { assert forall x: Ref :: {P(y)} x in s ==> true }
+"#,
+        );
+        assert!(
+            uncovering.as_ref().is_err_and(|es| es
+                .iter()
+                .any(|e| matches!(e, TypeError::TriggerNotCovering(_)))),
+            "expected TriggerNotCovering, got: {uncovering:?}"
+        );
+    }
+
+    #[test]
     fn trigger_not_covering_all_binders_rejected() {
         // `f(x)` leaves `y` uninstantiated — and every group must cover, so an
         // alternative group that does cover is no excuse.

@@ -1798,7 +1798,7 @@ pub(crate) fn prepare_trig_term(
                 type_args: type_args.iter().cloned().collect(),
             };
             let head = match head {
-                vmir::TrigHead::Func(id) => {
+                vmir::TrigHead::Func(id) | vmir::TrigHead::Loc(id) => {
                     func(crate::verify::func_registry::func_id_for_member(*id))
                 }
                 vmir::TrigHead::AdtCons { adt, variant } => func(alloc.cons(*adt, *variant)),
