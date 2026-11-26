@@ -38,25 +38,23 @@ upper bounds.
 | Case | Error | Blocked | Sole | Cumulative | Main sources |
 |---|---|---|---|---|---|
 | `axiom_without_trigger.vpr` | `forall` needs an explicit trigger | 261 | 95 | 95 | Nagini, Mendel, `Vi/viper`, `DaV/viper` |
-| `inhale_exhale_expression.vpr` | inhale-exhale expression `[A, B]` | 178 | 19 | 199 | Nagini, Ru1 Prusti, Voila |
-| *(no case: timeouts)* | over 180 s | 61 | 61 | 260 | Ru2 Prusti (30), Nagini (28), Gobra Dafny-book chap05 / chap10 |
-| *(no case: see below)* | cannot find callable | 40 | 14 | 275 | reachability and flow preambles |
-| `field_read_argument_in_trigger.vpr` | a trigger may only contain variables, literals and nested applications | 37 | 1 | 277 | Flow framework, Voila, Ru1 Prusti |
-| `function_call_permission_amount.vpr` | purify: snap value outside footprint, then assertion failed | 35 | 13 | 309 | Ru1 Prusti enum `discriminant` functions |
-| `exists.vpr` | unsupported construct: `exists` | 31 | 1 | 321 | Voila, reachability, Nagini, Mendel |
-| *(no case: Ru2 lifetime tokens)* | insufficient permission | 27 | 27 | 348 | Ru2 Prusti |
-| *(no case: see below)* | assertion failed | 26 | 4 | 372 | Nagini, Ru2 Prusti, single files |
-| `magic_wand.vpr` | magic wand `--*`, `package`, `apply` | 23 | 16 | 394 | Ru1 / Ru2 Prusti pledges |
-| `pure_conjunct_in_quantified_permission.vpr` | pure conjunct inside a quantified permission | 23 | 0 | 398 | Flow framework |
-| `macro_bound_variable_clash.vpr` | name already declared in this scope | 19 | 0 | 417 | Flow framework |
-| *(no case: Ru2 `snap_*` postconditions)* | purify: snap value outside footprint | 17 | 17 | 434 | Ru2 Prusti |
-| `macro_field_parameter.vpr` | unknown field `$field$` | 17 | 1 | 447 | reachability preamble |
-| `quasihavoc.vpr` | `quasihavoc`, `quasihavocall` | 17 | 0 | 464 | Voila |
-| `chained_comparison.vpr` | cannot unify `Bool` and a number | 13 | 9 | 477 | `Vi/viper/dp` |
-| `forperm.vpr` | unsupported construct: `forperm` | 13 | 13 | 490 | RSL2Viper |
-| `acc_in_let.vpr` | unsupported pure expression: `Acc(..)` | 9 | 5 | 497 | Gobra |
-| `int_times_perm.vpr` | cannot unify `Int` and `Perm` | 7 | 4 | 504 | 2vyper |
-| *(no case)* | 12 smaller errors, listed below | 31 | 2 | 535 | |
+| `inhale_exhale_expression.vpr` | inhale-exhale expression `[A, B]` | 178 | 38 | 218 | Nagini, Ru1 Prusti, Voila |
+| *(no case: timeouts)* | over 180 s | 61 | 61 | 279 | Ru2 Prusti (30), Nagini (28), Gobra Dafny-book chap05 / chap10 |
+| *(no case: see below)* | cannot find callable | 40 | 14 | 294 | reachability and flow preambles |
+| `field_read_argument_in_trigger.vpr` | a trigger may only contain variables, literals and nested applications | 37 | 4 | 299 | Flow framework, Voila, Ru1 Prusti |
+| `exists.vpr` | unsupported construct: `exists` | 31 | 1 | 311 | Voila, reachability, Nagini, Mendel |
+| *(no case: Ru2 lifetime tokens)* | insufficient permission | 27 | 27 | 338 | Ru2 Prusti |
+| *(no case: see below)* | assertion failed | 26 | 6 | 362 | Nagini, Ru2 Prusti, single files |
+| `magic_wand.vpr` | magic wand `--*`, `package`, `apply` | 23 | 16 | 384 | Ru1 / Ru2 Prusti pledges |
+| `pure_conjunct_in_quantified_permission.vpr` | pure conjunct inside a quantified permission | 23 | 0 | 388 | Flow framework |
+| `macro_bound_variable_clash.vpr` | name already declared in this scope | 19 | 0 | 407 | Flow framework |
+| `macro_field_parameter.vpr` | unknown field `$field$` | 17 | 1 | 420 | reachability preamble |
+| `quasihavoc.vpr` | `quasihavoc`, `quasihavocall` | 17 | 0 | 437 | Voila |
+| `chained_comparison.vpr` | cannot unify `Bool` and a number | 13 | 9 | 450 | `Vi/viper/dp` |
+| `forperm.vpr` | unsupported construct: `forperm` | 13 | 13 | 463 | RSL2Viper |
+| `acc_in_let.vpr` | unsupported pure expression: `Acc(..)` | 9 | 5 | 472 | Gobra |
+| `int_times_perm.vpr` | cannot unify `Int` and `Perm` | 7 | 4 | 479 | 2vyper |
+| *(no case)* | 11 smaller errors, listed below | 26 | 2 | 505 | |
 
 
 ### Not reduced
@@ -69,11 +67,7 @@ upper bounds.
   verify, and the take/return pattern on its own (with `newlft`, symbolic
   amounts `p / 24`, `intersect(Set(..))` lifetimes) verifies too. The file
   takes about 2 minutes, which makes delta reduction slow.
-- **Ru2 `snap_*` postconditions** (`snap value outside footprint`, 17 files):
-  `snap_owned_non_aliased$struct$..#ensures`, `snap_current_unique_ref`,
-  `snap_current_frac_ref` and `assign$N#ensures` for generic structs
-  (`SimpleBox<T>`). Not re-measured after the change above.
-- **`assertion failed`** outside the Prusti `discriminant` functions: 15
+- **`assertion failed`** (26 files): 15
   Nagini recursive functions fail `#requires` (`fib`, `fib4__rec`,
   `popcount`, ...). A reduction to the `int___ge__(n, __prim__int___box__(0))`
   subtype obligation verifies. The others are the single-file reductions in
@@ -81,10 +75,9 @@ upper bounds.
 - **`cannot find callable`** (40 files): mostly preamble files of
   `Rea/reachability` and `Flo/` that are not complete programs (for example
   `_preambles/common/zopg` uses `exists_DEP` without declaring it).
-- **12 smaller errors** (31 files): `Undefined variable` (7, RSL2Viper),
-  `undeclared type` (7, preambles and Dafny-book chapter 10), purify: snap
-  value outside footprint outside Prusti (5), `` `child` is a macro, not a
-  field`` (4, reachability), `cannot unify Perm and Int` (4, RSL2Viper), purify:
+- **11 smaller errors** (26 files): `Undefined variable` (7, RSL2Viper),
+  `undeclared type` (7, preambles and Dafny-book chapter 10),
+  `` `child` is a macro, not a field`` (4, reachability), `cannot unify Perm and Int` (4, RSL2Viper), purify:
   deref outside footprint (3, the PVL kernels below), and one file each for
   `insufficient permission`, a heap read in a nested quantifier, a `wildcard`
   literal, a quantified permission in `assert` / `assume` and a sibling-scope
@@ -105,7 +98,6 @@ errors as well, so they are not ranked above.
 | `recursive_call_in_own_postcondition.vpr` | assertion failed | VerCors `Util.isPrefix` and its lemmas |
 | `unfolding_reads_permission_held_outside_predicate.vpr` | insufficient permission | AVLTree.iterative `has` (invariant; this file is not in the current export) |
 | `../domain_tag_exhaustiveness_with_partial_arg.vpr` (existing) | assertion failed | Dafny-book chap04 `Eval`, `EvalList` |
-| `conditional_precondition_function_after_refold.vpr` | purify: snap value outside footprint (`contains`), assertion failed | Gobra Tree / binary_tree `deleteLeftMost` |
 | `unfolding_in_quantifier.vpr` | unsupported: `unfolding` inside a quantifier | linkedlists `test02` (now rejected earlier, for a missing trigger) |
 
 - `PP/mpp/toplas_p3_no_heap/pldi16_so_PokerHand_true` (`compare`): Silicon
