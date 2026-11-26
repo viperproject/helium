@@ -1,0 +1,37 @@
+// A binder-free heap read inside a quantifier is framed per instance under
+// the body's guards: a guard on the binder matters through whether any
+// instance satisfies it. `vacuous` has no instance at all, so nothing need
+// frame `x.f` (and no holder exists); in `nonempty_range` an instance exists
+// only when `n > 0`, which is what frames `x.f`. `vacuous_call` is the same
+// for a heap-dependent call's footprint slot. Silicon verifies all three.
+//
+// Formerly a known limitation: an unsatisfiable pc was taken for a read
+// framed by several holders (`heap::ReadResolver`, `Covering::Unreachable`).
+//
+// Must VERIFY.
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+function get(x: Ref): Int
+  requires acc(x.f)
+{ x.f }
+
+method vacuous(x: Ref)
+{
+  inhale forall i: Int :: { t(i) } false ==> x.f == i
+}
+
+method nonempty_range(x: Ref, n: Int)
+  requires n > 0 ==> acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } 0 <= i && i < n ==> x.f == i
+}
+
+method vacuous_call(x: Ref)
+{
+  inhale forall i: Int :: { t(i) } false ==> get(x) == i
+}

@@ -202,6 +202,19 @@ impl Framing {
     }
 }
 
+/// What frames one read of a quantifier body on its own ([`Heap::covering_holder`]).
+pub(super) enum Covering {
+    /// One holder, at its place in the heap, with the location's value there.
+    Holder(HolderAt, egg::Id),
+    /// No binding reaches the read: its pc is unsatisfiable, so nothing need
+    /// hold it and any value stands for it. Decided before any holder is
+    /// asked, since under an unsatisfiable pc every holder's share would prove
+    /// positive.
+    Unreachable,
+    /// Only several holders together.
+    Several,
+}
+
 impl Heap {
     /// The holders that frame `loc` ([`View::shares`]), as a [`Framing`]: it
     /// decides the read's framing and gives its value, the same as
@@ -233,26 +246,32 @@ impl Heap {
         Ok(shares.value(ctx, read_recipe))
     }
 
-    /// The one holder that frames a read of `loc` on its own: the first of the
-    /// [`Heap::read`] holders whose share is positive under `pc`, with its value
-    /// there. `Ok(None)` when only several holders together frame it;
-    /// `InsufficientPermission` when they do not.
+    /// What frames a read of `loc` on its own under `pc` ([`Covering`]):
+    /// nothing when `pc` is unsatisfiable, else the first of the
+    /// [`Heap::read`] holders whose share is positive there, else several
+    /// holders together. `InsufficientPermission` when they do not frame it.
     pub(super) fn covering_holder(
         &self,
         ctx: &mut VerifyContext<'_>,
         loc: &Loc,
         pc: &[(egg::Id, Polarity)],
-    ) -> Result<Option<(HolderAt, egg::Id)>, VerifyError> {
+    ) -> Result<Covering, VerifyError> {
         let pc = &self.effective_pc(ctx, pc)[..];
+        // First: under an unsatisfiable pc every share proves positive, so a
+        // holder found there would only be one by vacuity.
+        let false_ = expr!(ctx, false);
+        if ctx.prove_under_pc(false_, pc) {
+            return Ok(Covering::Unreachable);
+        }
         let shares = self.view(pc).all_shares(ctx, &loc.kind, loc.addr)?;
         if let Some(s) = shares
             .iter()
             .find(|s| prove_perm_positive(ctx, &s.perm, pc))
         {
-            return Ok(Some((s.at, s.value)));
+            return Ok(Covering::Holder(s.at, s.value));
         }
         match shares.total(ctx).prove_positive(ctx, pc) {
-            true => Ok(None),
+            true => Ok(Covering::Several),
             false => Err(VerifyError::InsufficientPermission),
         }
     }

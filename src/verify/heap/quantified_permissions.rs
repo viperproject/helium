@@ -41,7 +41,7 @@ use crate::verify::eval::{
 };
 use crate::verify::heap::QpCheck;
 use crate::verify::heap::algebra::{prove_framed_aligned, prove_sufficient_aligned};
-use crate::verify::heap::interface::Captures;
+use crate::verify::heap::interface::{Captures, Covering};
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
 use crate::vmir;
@@ -536,6 +536,11 @@ fn eval_body_at(
 ///
 /// A heap-dependent call is checked per binding by the same walk, and each
 /// footprint slot of it is resolved like a read ([`BodyReads::call`]).
+///
+/// A read (or slot) whose pc is unsatisfiable is reached by no binding
+/// ([`Covering::Unreachable`]): nothing need frame it, and any value stands
+/// for it. The walk reads a scratch value there; [`Self::finish`] mints the
+/// live one, since a scratch e-class does not outlive the walk.
 pub(crate) struct ReadResolver<F> {
     /// The heap a body `Deref` names, as it is at the quantifier.
     heap_of: F,
@@ -543,6 +548,22 @@ pub(crate) struct ReadResolver<F> {
     covers: Vec<ResolvedRead>,
     /// Per call in body order: what resolves its footprint slots.
     calls: Vec<ResolvedCall>,
+    /// The reads and slots no binding reaches, whose stand [`Self::finish`]
+    /// mints.
+    unreached: Vec<Unreached>,
+}
+
+/// A read or footprint slot of a [`ReadResolver`] that no binding reaches.
+enum Unreached {
+    /// `covers[i]`.
+    Read(usize),
+    /// `calls[call].slots[slot]`.
+    Slot { call: usize, slot: usize },
+}
+
+/// Any value of `kind`'s type, standing for a location no binding reads.
+fn unreached_stand(ctx: &mut VerifyContext<'_>, kind: &LocationKind) -> Stand {
+    Stand::Value(ctx.fresh_symbolic_value(kind.value.clone()))
 }
 
 impl<F> ReadResolver<F>
@@ -554,6 +575,7 @@ where
             heap_of,
             covers: Vec::new(),
             calls: Vec::new(),
+            unreached: Vec::new(),
         }
     }
 
@@ -571,12 +593,22 @@ where
             .loc(ctx, addr)
             .expect("a read's operand is an address");
         let h = (self.heap_of)(ctx, heap)?;
-        let Some((at, value)) = h.covering_holder(ctx, &loc, pc)? else {
-            return Err(VerifyError::Unimplemented(
-                "heap read in a quantifier framed by several holders",
-            ));
+        let (stand, recipe, value) = match h.covering_holder(ctx, &loc, pc)? {
+            Covering::Holder(at, value) => {
+                let (stand, recipe) = stand_of(&h, &loc.kind, at, value);
+                (stand, recipe, value)
+            }
+            Covering::Unreachable => {
+                self.unreached.push(Unreached::Read(self.covers.len()));
+                let stand = unreached_stand(ctx, &loc.kind);
+                (stand, None, stand.id())
+            }
+            Covering::Several => {
+                return Err(VerifyError::Unimplemented(
+                    "heap read in a quantifier framed by several holders",
+                ));
+            }
         };
-        let (stand, recipe) = stand_of(&h, &loc.kind, at, value);
         self.covers.push(ResolvedRead {
             heap: *heap,
             addr: addr.clone(),
@@ -587,8 +619,27 @@ where
         Ok(value)
     }
 
-    /// The reads met, and the calls, resolved.
-    pub(crate) fn finish(self) -> Resolved {
+    /// The reads met, and the calls, resolved. Run in the live graph, after
+    /// the walk's scratch graph is gone: it mints the stand of each read and
+    /// slot no binding reaches.
+    pub(crate) fn finish(mut self, ctx: &mut VerifyContext<'_>) -> Resolved {
+        let mut slots: Vec<Vec<ResolvedSlot>> =
+            self.calls.iter().map(|c| c.slots.to_vec()).collect();
+        for u in std::mem::take(&mut self.unreached) {
+            match u {
+                Unreached::Read(i) => {
+                    let read = &mut self.covers[i];
+                    read.stand = unreached_stand(ctx, &read.kind);
+                }
+                Unreached::Slot { call, slot } => {
+                    let s = &mut slots[call][slot];
+                    s.stand = unreached_stand(ctx, &s.kind);
+                }
+            }
+        }
+        for (call, slots) in self.calls.iter_mut().zip(slots) {
+            call.slots = slots.into();
+        }
         Resolved {
             reads: self.covers.into(),
             calls: self.calls.into(),
@@ -658,12 +709,21 @@ where
                     "heap-dependent call in a quantifier whose precondition holds a quantified permission",
                 ));
             };
-            let Some((at, value)) = h.covering_holder(ctx, loc, pc)? else {
-                return Err(VerifyError::Unimplemented(
-                    "heap-dependent call in a quantifier framed by several holders",
-                ));
+            let (stand, recipe) = match h.covering_holder(ctx, loc, pc)? {
+                Covering::Holder(at, value) => stand_of(&h, &loc.kind, at, value),
+                Covering::Unreachable => {
+                    self.unreached.push(Unreached::Slot {
+                        call: self.calls.len(),
+                        slot: slots.len(),
+                    });
+                    (unreached_stand(ctx, &loc.kind), None)
+                }
+                Covering::Several => {
+                    return Err(VerifyError::Unimplemented(
+                        "heap-dependent call in a quantifier framed by several holders",
+                    ));
+                }
             };
-            let (stand, recipe) = stand_of(&h, &loc.kind, at, value);
             slots.push(ResolvedSlot {
                 kind: loc.kind.clone(),
                 stand,
@@ -713,7 +773,7 @@ pub(crate) fn resolve_reads(
             eval_body_at(ctx, &caps, q, &xs, pc, Some(&mut resolver)).map(|_| ())
         })
     })?;
-    caps.reads = resolver.finish();
+    caps.reads = resolver.finish(ctx);
     Ok(caps)
 }
 

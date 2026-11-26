@@ -681,7 +681,7 @@ pub(crate) fn check_forall_wd(
             )
         })
     })?;
-    Ok(resolver.finish())
+    Ok(resolver.finish(ctx))
 }
 
 /// The **effective** path condition of an instruction:

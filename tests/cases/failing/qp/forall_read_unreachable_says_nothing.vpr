@@ -1,0 +1,19 @@
+// Counterpart of passing/qp/forall_read_framed_by_instance_guard.vpr: a read
+// no instance reaches stands for an arbitrary value, so the quantifier tells
+// nothing about `x.f` — not even when a chunk holds it.
+//
+// Must FAIL.
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref)
+  requires acc(x.f)
+{
+  inhale forall i: Int :: { t(i) } false ==> x.f == i
+  inhale t(3)
+  assert x.f == 3
+}
