@@ -839,7 +839,7 @@ fn push(out: &mut Vec<AxiomInst>, first: usize, p: AxiomPure) -> Val {
 
 /// Append a certificate recipe's steps to `out` (temps from `first`), its
 /// parameters read as `args` and its slot values as `values`; its result.
-fn splice(
+pub(crate) fn splice(
     out: &mut Vec<AxiomInst>,
     first: usize,
     r: &BodyRecipe,
@@ -883,7 +883,7 @@ fn splice(
 /// Whether a footprint slot of permission `perm` (at `v`) is present, as a
 /// step of `out`: `None` when it always is (a `wildcard`, as every amount of
 /// a function's precondition is).
-fn presence(
+pub(crate) fn presence(
     out: &mut Vec<AxiomInst>,
     first: usize,
     perm: &PermRecipe,

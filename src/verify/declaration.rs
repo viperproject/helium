@@ -845,12 +845,31 @@ fn walk_single_slot(
         addr,
     };
     let slot_loc = loc.clone();
+    // A frame check's presence `0 < ite(guard, 1, 0)` (folds to the gating
+    // guard). The slot's value matters only where it is present -- the member
+    // is `present ? Some(v) : None` -- so it is read under the pc extended by
+    // presence: a conditional precondition slot (`x != null ==> acc(P(x))`)
+    // reached where the pc leaves `x != null` open is then still read from the
+    // chunk that holds it wherever it is present.
+    let presence = wc_slot.then(|| {
+        let pp = perm.to_id(ctx);
+        expr!(ctx, (0 / 1) < r { pp })
+    });
+    let read_pc: Vec<(egg::Id, Polarity)> = match presence {
+        Some(g) => w
+            .pc_lits
+            .iter()
+            .copied()
+            .chain(std::iter::once((g, Polarity::Positive)))
+            .collect(),
+        None => w.pc_lits.to_vec(),
+    };
     let (value, recipe) = match w.source {
         ValueSource::Stands(slots) => (stand_value(ctx, &slots[i], addr), None),
         _ => slot_value(ctx, w, i, elem, |ctx, h| {
             // The bodies of its chunk sets evaluated once already, at their inhales.
             let read = h
-                .read(ctx, &loc, w.pc_lits, None)
+                .read(ctx, &loc, &read_pc, None)
                 .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
             match read {
                 Some(v) => (v.id, v.recipe),
@@ -858,11 +877,9 @@ fn walk_single_slot(
             }
         }),
     };
-    let present = if wc_slot {
+    let present = if let Some(guard) = presence {
         // A frame check: no heap effect; presence is the gating guard
         // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
-        let pp = perm.to_id(ctx);
-        let guard = expr!(ctx, (0 / 1) < r { pp });
         if !matches!(w.direction, Direction::Build) {
             let access = Access::Single { loc, perm };
             heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
@@ -1271,21 +1288,26 @@ fn eval_resource_op(
     }
     if let Some(res_id) = hi.snap_yield(&program.decls) {
         let s = build_snapshot(ctx, res_id, members);
-        // A certificate walk mirrors the snapshot as `cons(Some(v_i))`
-        // over the read values' recipes -- a self-framed footprint is
-        // fully held, so every slot is `Some`. Only a frame-only exhale
-        // (a function's precondition check) is ever reached during a
-        // recipe walk; a consuming inhale/exhale is method-only, where no
-        // recipe is in flight and this yields `None` as before.
-        let recipe = snapshot_recipe(ctx, certs, res_id, &slot_recipes, &pc_lits)?;
+        // A certificate walk mirrors the snapshot member by member (see
+        // [`snapshot_recipe`]). Only a frame-only exhale (a function's
+        // precondition check) is ever reached during a recipe walk; a
+        // consuming inhale/exhale is method-only, where no recipe is in
+        // flight and this yields `None` as before.
+        let arg_recipes: Vec<Option<Val>> = call.args.iter().map(|v| state.recipe_of(v)).collect();
+        let recipe = snapshot_recipe(ctx, certs, res_id, &arg_recipes, &slot_recipes, &pc_lits)?;
         state.push_val(s, Type::Snap(res_id), recipe);
     }
     Ok(())
 }
 
 /// The certificate recipe of a frame-only exhale's snapshot (`None` outside a
-/// certificate walk): `cons(Some(v_i))` over the read slot values' recipes --
-/// a self-framed footprint is fully held, so every slot is `Some`. Only a
+/// certificate walk), mirroring the snapshot [`walk_single_slot`] builds: per
+/// slot `present ? Some(v_i) : None` over the read slot value's recipe, where
+/// `present` is the slot's permission recipe over the call's `arg_recipes` and
+/// the earlier slot values (`wildcard` read as present, as
+/// `quant::presence` does for a quantifier body's call). A conditional
+/// precondition (`x != null ==> acc(P(x))`) thus purifies to the same member
+/// a caller's snapshot holds on both sides of its condition. Only a
 /// frame-only exhale (a function's precondition check) is ever reached during
 /// a recipe walk; a consuming inhale/exhale is method-only, where no recipe is
 /// in flight.
@@ -1293,14 +1315,15 @@ fn snapshot_recipe(
     ctx: &mut VerifyContext<'_>,
     certs: &HashMap<MemberId, ResourceDefinition>,
     res_id: MemberId,
+    arg_recipes: &[Option<Val>],
     slot_recipes: &[Option<Val>],
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Result<Option<Val>, VerifyError> {
+    use crate::verify::rewrite::{AxiomInst, AxiomPure};
     if ctx.recipe.is_none() {
         return Ok(None);
     }
     let def = certs.get(&res_id).ok_or(VerifyError::DependencyFailed)?;
-    let elems: Vec<Type> = def.footprint.iter().map(|sl| sl.elem.clone()).collect();
     let some_id = ctx.alloc.option_some();
     let cons_id = ctx.alloc.cons(res_id, 0);
     // A slot read without provenance on a path the walk proves dead
@@ -1314,19 +1337,21 @@ fn snapshot_recipe(
     };
     let (none_id, value_id) = (ctx.alloc.option_none(), ctx.alloc.option_value());
     let rb = ctx.recipe.as_mut().unwrap();
+    let mut values: Vec<Val> = Vec::with_capacity(slot_recipes.len());
     let mut members_r = Vec::with_capacity(slot_recipes.len());
-    for (i, r) in slot_recipes.iter().enumerate() {
+    for (slot, r) in def.footprint.iter().zip(slot_recipes) {
+        let elem = slot.elem.clone();
         let v = match r.clone() {
             Some(v) => v,
             None if dead_path => {
-                let none = rb.emit(crate::verify::rewrite::AxiomPure::App {
+                let none = rb.emit(AxiomPure::App {
                     func: none_id,
-                    type_args: vec![elems[i].clone()],
+                    type_args: vec![elem.clone()],
                     args: Vec::new(),
                 });
-                rb.emit(crate::verify::rewrite::AxiomPure::App {
+                rb.emit(AxiomPure::App {
                     func: value_id,
-                    type_args: vec![elems[i].clone()],
+                    type_args: vec![elem.clone()],
                     args: vec![none],
                 })
             }
@@ -1336,13 +1361,46 @@ fn snapshot_recipe(
                 ));
             }
         };
-        members_r.push(rb.emit(crate::verify::rewrite::AxiomPure::App {
+        let some = rb.emit(AxiomPure::App {
             func: some_id,
-            type_args: vec![elems[i].clone()],
-            args: vec![v],
-        }));
+            type_args: vec![elem.clone()],
+            args: vec![v.clone()],
+        });
+        // A quantified slot is always present (see `walk_qp_slot`).
+        let present = match &slot.shape {
+            SlotShape::Single { perm, .. } if !matches!(perm.res, vmir::PermVal::Wildcard) => {
+                let args = arg_recipes
+                    .iter()
+                    .cloned()
+                    .collect::<Option<Vec<Val>>>()
+                    .ok_or(VerifyError::Unimplemented(
+                        "purify: conditional precondition slot over an argument without recipe",
+                    ))?;
+                let mut steps: Vec<AxiomInst> = Vec::new();
+                let first = rb.next_index();
+                let p = crate::verify::quant::presence(
+                    &mut steps, first, perm, &perm.res, &args, &values,
+                )?;
+                rb.emit_steps(steps);
+                p
+            }
+            _ => None,
+        };
+        let member = match present {
+            None => some,
+            Some(present) => {
+                let none = rb.emit(AxiomPure::App {
+                    func: none_id,
+                    type_args: vec![elem],
+                    args: Vec::new(),
+                });
+                rb.emit(AxiomPure::Ternary(present, some, none))
+            }
+        };
+        values.push(v);
+        members_r.push(member);
     }
-    Ok(Some(rb.emit(crate::verify::rewrite::AxiomPure::App {
+    Ok(Some(rb.emit(AxiomPure::App {
         func: cons_id,
         type_args: Vec::new(),
         args: members_r,
