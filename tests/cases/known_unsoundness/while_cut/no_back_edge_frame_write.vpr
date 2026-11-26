@@ -1,0 +1,18 @@
+// The body of a `while` without a back edge holds only the invariant's
+// permissions; the frame is restored when the body leaves.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the assignment).
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  while (c)
+    invariant true
+  {
+    x.f := 5
+    goto out
+  }
+  label out
+}

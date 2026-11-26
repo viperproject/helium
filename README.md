@@ -35,6 +35,7 @@ Helium was initially developed by Jakub Adam Trzykowski.
     - `passing/` – cases that are expected to verify
     - `failing/` – cases that are expected to be rejected
     - `known_limitations/` – tracked incompletenesses
+    - `known_unsoundness/` – programs that must be rejected but still verify; the suite expects them to verify, and a fixed one is promoted to the same path under `failing/`
     - `unsupported/` – unsupported constructs that must be reported cleanly
 - `benchmarks/` – benchmark suites and baseline snapshots (see `benchmarks/README.md`)
 - `bench/` – the benchmark runner (a separate workspace member): times rustc, Helium and Silicon per file, extracts Rust and Viper shape metrics, writes one JSON per run

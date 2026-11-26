@@ -1,0 +1,21 @@
+// A `while` without a back edge nested in another loop's body: its invariant
+// must hold on entry on every iteration of the outer loop.
+//
+// Must FAIL. Silicon: "Loop invariant acc(x.f, write) && x.f == 3 might not hold
+// on entry."
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  while (c)
+    invariant acc(x.f)
+  {
+    while (d)
+      invariant acc(x.f) && x.f == 3
+    {
+      goto next
+    }
+    label next
+  }
+}
