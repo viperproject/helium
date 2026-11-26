@@ -14,8 +14,8 @@ use crate::viper::typed::{
     AssignLhs, AssignRhs, AxiomExt, BinOp, BuiltinCollection, Call, Declaration, Domain,
     DomainFunction, Field, Forall, FuncEnsuresExt, Function, HeapExt, HeapNode, Ident, Literal,
     Method, MethodBodyExt, MethodEnsuresExt, Predicate, PredicateWithPerm, Program, PureExpKind,
-    ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, Statement, StmtBlock, Type,
-    TriggerTerm, TypedIdent, TypedPureExp, UnOp,
+    ResourceExp, ResourceExpKind, SpatialExp, SpatialExpKind, Statement, StmtBlock, TriggerTerm,
+    Type, TypedIdent, TypedPureExp, UnOp,
 };
 
 /// Interner-aware formatting wrapper.

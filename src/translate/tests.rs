@@ -1398,8 +1398,14 @@ method m(s: Set[Ref]) {
         panic!("expected two trigger groups");
     };
     let binder = [vmir::TrigTerm::Var(q.binder_base)];
-    assert_eq!(only_app(field), (&vmir::TrigHead::Loc(p.id("f").unwrap()), &binder[..]));
-    assert_eq!(only_app(pred), (&vmir::TrigHead::Loc(p.id("P").unwrap()), &binder[..]));
+    assert_eq!(
+        only_app(field),
+        (&vmir::TrigHead::Loc(p.id("f").unwrap()), &binder[..])
+    );
+    assert_eq!(
+        only_app(pred),
+        (&vmir::TrigHead::Loc(p.id("P").unwrap()), &binder[..])
+    );
 }
 
 #[test]

@@ -10,7 +10,7 @@ use crate::viper::{
     typed::{
         self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MapIndexOp, MethodBodyExt,
         MethodEnsuresExt, PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp,
-        SpatialExp, SpatialExpKind, Type, TriggerTerm, TypedIdent, TypedPureExp, UnOp,
+        SpatialExp, SpatialExpKind, TriggerTerm, Type, TypedIdent, TypedPureExp, UnOp,
     },
 };
 
@@ -3482,7 +3482,10 @@ predicate P(x: Ref)
 method m(s: Set[Ref]) { assert forall x: Ref :: {P(true)} x in s ==> true }
 "#,
         );
-        assert!(ill_typed.is_err(), "expected a type error, got: {ill_typed:?}");
+        assert!(
+            ill_typed.is_err(),
+            "expected a type error, got: {ill_typed:?}"
+        );
         let uncovering = run_pipeline(
             r#"
 predicate P(x: Ref)
