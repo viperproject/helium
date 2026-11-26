@@ -1,0 +1,14 @@
+// A consume through an arm-local alias drains both halves: after
+// `exhale acc(y.f, 1/1)` under `x == y`, nothing is left at `x.f` on that arm,
+// however the debit is gated. Silicon rejects.
+field f: Int
+
+method pc_alias_double_spend_in_arm(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  if (c) {
+    inhale x == y
+    exhale acc(y.f, 1/1)
+    exhale acc(x.f, 1/2)
+  }
+}
