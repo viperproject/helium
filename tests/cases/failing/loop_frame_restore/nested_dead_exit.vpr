@@ -1,0 +1,25 @@
+// dead_exit_union.vpr inside the body of an outer loop.
+//
+// Must FAIL. Silicon: "Assertion x.f == 3 might not hold."
+field f: Int
+
+method m(x: Ref, q: Perm, b: Bool, n: Int)
+  requires none < q && q <= write && acc(x.f)
+{
+  x.f := 3
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f) && x.f == 3
+  {
+    var c: Bool := true
+    while (c)
+      invariant acc(x.f, q)
+    {
+      if (b) { goto out }
+    }
+    label out
+    assert x.f == 3
+    x.f := 3
+    i := i + 1
+  }
+}
