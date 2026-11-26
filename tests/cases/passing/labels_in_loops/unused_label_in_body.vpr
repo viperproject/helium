@@ -1,0 +1,17 @@
+// A label inside a loop body that nothing refers to. It only names a state;
+// the loop must verify exactly as it would without it.
+field f: Int
+
+method unused_label_in_body(x: Ref, n: Int)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    label L
+    x.f := x.f + 1
+    i := i + 1
+  }
+}

@@ -1,0 +1,23 @@
+// A Prusti-style `label ... invariant` goto loop nested in a `while` body:
+// the label is itself a loop head inside another loop.
+field f: Int
+
+method goto_loop_inside_while(x: Ref, n: Int, m: Int)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    var j: Int := 0
+    label Head
+      invariant acc(x.f)
+    if (j < m) {
+      x.f := x.f + 1
+      j := j + 1
+      goto Head
+    }
+    i := i + 1
+  }
+}

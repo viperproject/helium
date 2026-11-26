@@ -1,0 +1,27 @@
+// KNOWN LIMITATION: a label declared inside a loop body cannot be named by
+// `old[L]`. Typecheck's `collect_labels` (src/viper/typecheck/mod.rs) skips
+// `while` bodies, so this is rejected with "label is not defined in this
+// method" before verification. Silicon accepts it. Promote to
+// passing/labels_in_loops/ once old[L] on loop labels is supported.
+
+// `old[L]` reads the heap snapshot at `L`, not the current permission: its
+// value is still known after the permission is given away and taken back
+// (the re-inhaled current value is fresh; only `old[L]` stays pinned).
+field f: Int
+
+method old_label_survives_exhale_inhale(x: Ref, n: Int)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    var v: Int := x.f
+    label L
+    exhale acc(x.f)
+    inhale acc(x.f)
+    assert old[L](x.f) == v
+    i := i + 1
+  }
+}

@@ -1,0 +1,30 @@
+// KNOWN LIMITATION: a label declared inside a loop body cannot be named by
+// `old[L]`. Typecheck's `collect_labels` (src/viper/typecheck/mod.rs) skips
+// `while` bodies, so this is rejected with "label is not defined in this
+// method" before verification. Silicon accepts it. Promote to
+// passing/labels_in_loops/ once old[L] on loop labels is supported.
+
+// The label dominates an `if`; each arm writes differently and states its
+// own relation to `old[L]`, then the merge states one covering both arms.
+field f: Int
+
+method label_before_branch(x: Ref, n: Int, b: Bool)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    label L
+    if (b) {
+      x.f := x.f + 1
+      assert x.f == old[L](x.f) + 1
+    } else {
+      x.f := x.f + 2
+      assert x.f == old[L](x.f) + 2
+    }
+    assert x.f == old[L](x.f) + 1 || x.f == old[L](x.f) + 2
+    i := i + 1
+  }
+}

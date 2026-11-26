@@ -1,0 +1,28 @@
+// NOTE: today this is rejected for the wrong reason (typecheck refuses
+// `old[L]` on a label inside a loop body). Once that is supported, it must
+// still be rejected by the verifier itself.
+
+// The inner loop writes `x.g`, so after it `x.g` is havocked and no longer
+// known to equal its value at the outer label. Must FAIL.
+field g: Int
+
+method inner_loop_havocs_outer_label_value(x: Ref, n: Int, m: Int)
+  requires acc(x.g)
+  ensures acc(x.g)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.g)
+  {
+    label Outer
+    var j: Int := 0
+    while (j < m)
+      invariant acc(x.g)
+    {
+      x.g := x.g + 1
+      j := j + 1
+    }
+    assert x.g == old[Outer](x.g)
+    i := i + 1
+  }
+}

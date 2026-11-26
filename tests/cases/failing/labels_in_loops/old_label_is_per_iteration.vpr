@@ -1,0 +1,23 @@
+// NOTE: today this is rejected for the wrong reason (typecheck refuses
+// `old[L]` on a label inside a loop body). Once that is supported, it must
+// still be rejected by the verifier itself.
+
+// `L` is re-reached every iteration, so `old[L]` is the value at the start of
+// the *current* iteration, not the first one. On iteration two
+// `old[L](x.f)` is 1, so the assertion must FAIL.
+field f: Int
+
+method old_label_is_per_iteration(x: Ref, n: Int)
+  requires acc(x.f) && x.f == 0
+  ensures acc(x.f)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant acc(x.f)
+  {
+    label L
+    assert old[L](x.f) == 0
+    x.f := x.f + 1
+    i := i + 1
+  }
+}
