@@ -1,0 +1,9 @@
+// KNOWN LIMITATION: "unsupported construct: exists".
+//
+// Used by Nagini (`Py/nagini/.../jetbrains/034-unique.py`, `InArray`),
+// Mendel (`Ru3/mendel`) and the reachability encodings (`Rea/reachability`).
+method m(s: Seq[Int])
+  requires 0 < |s|
+{
+  assert exists i: Int :: { s[i] } 0 <= i && i < |s| && s[i] == s[0]
+}

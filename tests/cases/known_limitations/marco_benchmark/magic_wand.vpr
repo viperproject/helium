@@ -1,0 +1,14 @@
+// KNOWN LIMITATION: "unsupported construct: package" (and `apply`, magic wand
+// `--*`).
+//
+// Prusti's pledges (`Ru1/prusti`, `Ru2/prusti`) and a few `Vi/viper` and
+// Gobra (`GoC/gobra`) files use magic wands.
+field f: Int
+
+method m(x: Ref)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  package acc(x.f) --* acc(x.f)
+  apply acc(x.f) --* acc(x.f)
+}

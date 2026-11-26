@@ -2,8 +2,10 @@
 // inferred". Silicon infers `{ p(x) }` here.
 //
 // Nagini's prelude (`PredicateInstancesNestedRelation.nestedReflex`, `PyType`,
-// `tuple_types`) and Gobra's Dafny-book output have trigger-less axioms:
-// 14 of the 838 listed marco_benchmark files hit this.
+// `tuple_types`) and Gobra's Dafny-book output have trigger-less axioms. With
+// trigger-less quantifiers in contracts and bodies (Mendel, `Vi/viper`,
+// `DaV/viper`, VerCors), this error blocks 261 of the 1017 re-run
+// marco_benchmark files and is the only error in 89.
 domain D {
   function p(x: Int): Bool
 

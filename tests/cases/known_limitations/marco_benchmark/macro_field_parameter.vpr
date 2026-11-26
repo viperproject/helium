@@ -1,0 +1,17 @@
+// KNOWN LIMITATION: "unknown field `$field$`" for a macro whose parameter is
+// used as a field name. Silver expands macros syntactically, so
+// `NODE_for(next, x, write)` becomes `acc(x.next, write)`.
+//
+// The reachability preamble (`Rea/reachability/_preambles/memspecs`:
+// `NODE_for`, `NODES_for`, `CLOSED_for`, ...) is written this way, and every
+// reachability example that imports it fails on it.
+field next: Ref
+
+define NODE_for($field$, node, p) (acc(node.$field$, p))
+
+method m(x: Ref)
+  requires NODE_for(next, x, write)
+  ensures NODE_for(next, x, write) && x.next == null
+{
+  x.next := null
+}

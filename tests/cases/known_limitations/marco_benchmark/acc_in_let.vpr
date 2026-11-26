@@ -4,7 +4,8 @@
 //
 // Gobra's struct allocation (`inhale (let fn$$1 == (fn$$0) in acc(..) && ..)`)
 // has this shape: `Go/gobra/.../tour/Tree.gobra` and
-// `.../evaluation/binary_tree.gobra` (2 of the 838 listed marco_benchmark files).
+// `.../evaluation/binary_tree.gobra`, among 9 Gobra files of the re-run
+// marco_benchmark list.
 field f: Int
 
 method m(x: Ref) {

@@ -2,7 +2,8 @@
 //
 // Nagini's obligation checks use `forperm` inside the inhale-exhale
 // expressions of `inhale_exhale_expression.vpr`, so the same Nagini files
-// need it as soon as `[A, B]` is supported.
+// need it as soon as `[A, B]` is supported. RSL2Viper (`RSL/RSL2Viper`) uses
+// it directly: it is the only error in 13 of those files.
 field f: Int
 
 method m(x: Ref)

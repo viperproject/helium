@@ -1,0 +1,12 @@
+// KNOWN LIMITATION: "unsupported construct: pure conjunct inside a quantified
+// permission" for `forall x :: x in s ==> acc(x.f) && x.f == 1`.
+//
+// The flow-framework examples (`Flo/acyclic`, `Flo/last-edge`, method `sync`:
+// `x1 in dirty ==> acc(x1.intf) && dom(x1.intf) == Set(x1)`) have this shape.
+field f: Int
+
+method m(s: Set[Ref])
+  requires forall x: Ref :: { x in s } x in s ==> acc(x.f) && x.f == 1
+  ensures forall x: Ref :: { x in s } x in s ==> acc(x.f) && x.f == 1
+{
+}
