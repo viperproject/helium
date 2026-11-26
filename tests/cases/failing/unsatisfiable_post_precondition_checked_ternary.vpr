@@ -1,0 +1,12 @@
+// Soundness canary: as `unsatisfiable_post_precondition_checked.vpr`, with the
+// call under a ternary. Its precondition is still owed where the branch is taken.
+
+function f(x: Int): Int
+  requires x > 0
+  ensures false
+
+method m(x: Int, b: Bool)
+{
+  var y: Int
+  y := b ? f(x) : 0
+}

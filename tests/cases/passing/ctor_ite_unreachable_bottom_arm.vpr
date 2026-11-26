@@ -1,0 +1,53 @@
+// `ite-reduce` inverts a case tower whose bottom arm is a call of a function
+// whose postcondition is `false` (Prusti's `s_T_unreachable()`).
+//
+// The bottom arm has no constructor, so no fingerprint rules it out. What does
+// is the body's propagated callee token: `tower(d)` calls `unreachable()` only
+// under `d != 2 && d != 1 && d != 0`, and a callee whose postcondition is
+// `false` is never reached, so that path is refuted. A class pinned to one
+// constructor then pins the guard of the one arm that can produce it.
+//
+// The canaries (an open bottom arm, a reachable unknown arm, the other
+// polarity) live in `failing/ctor_ite_unreachable_bottom_arm_*.vpr`.
+
+adt E { c0() c1(x: Int) c2() }
+
+function unreachable(): E
+  ensures false
+
+function tower(d: Int, k: Int): E
+{
+  d == 2 ? c2() : (d == 1 ? c1(k) : (d == 0 ? c0() : unreachable()))
+}
+
+// the top arm: every arm below it differs or is unreachable
+method top_arm(d: Int, k: Int)
+{
+  assume tower(d, k) == c2()
+  assert d == 2
+}
+
+// a middle arm: the top arm differs, the arms below differ or are unreachable
+method middle_arm(d: Int, k: Int, j: Int)
+{
+  assume tower(d, k) == c1(j)
+  assert d == 1
+  assert k == j
+}
+
+// the bottom constructor arm needed no exclusion before; still pinned
+method bottom_arm(d: Int, k: Int)
+{
+  assume tower(d, k) == c0()
+  assert d == 0
+}
+
+// a reached call of a function whose postcondition is `false` refutes its path
+method reached_call_is_dead(b: Bool)
+{
+  var e: E
+  if (b) {
+    e := unreachable()
+    assert false
+  }
+}

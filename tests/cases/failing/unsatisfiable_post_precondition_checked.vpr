@@ -1,0 +1,13 @@
+// Soundness canary: refuting the `%pre` token of an `ensures false` callee must
+// not discharge the call's own precondition. Calling `f` at a possibly
+// non-positive argument still fails.
+
+function f(x: Int): Int
+  requires x > 0
+  ensures false
+
+method m(x: Int)
+{
+  var y: Int
+  y := f(x)
+}

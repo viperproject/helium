@@ -1,0 +1,8 @@
+// Soundness canary: a function declaring `ensures false` must still fail its
+// own postcondition check; refuting its callers' tokens licenses nothing about
+// the body.
+
+function own(x: Int): Int
+  requires x > 0
+  ensures false
+{ 5 }
