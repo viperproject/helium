@@ -1,0 +1,19 @@
+// The normal exit and a `goto` exit of one `while` join at `out`. Each exit
+// restores the frame on its own edge, so on the normal exit's path it comes
+// back once: only the precondition's half of `x.f` is held there.
+//
+// Must FAIL. Silicon: "There might be insufficient permission to access x.f"
+// (at the exhale).
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f, 1/2)
+{
+  while (c)
+    invariant true
+  {
+    if (d) { goto out }
+  }
+  label out
+  if (!c) { exhale acc(x.f, 1/2) && acc(x.f, 1/2) }
+}

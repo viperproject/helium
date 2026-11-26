@@ -1,11 +1,16 @@
 //! Natural-loop detection over a block CFG.
 //!
-//! A loop is *any* back edge — an edge `n → h` where `h` dominates `n`. Source
-//! `while` is only a special case: Prusti emits goto CFGs with no `while` at
-//! all, carrying invariants on the loop head's `label`, so back-edge detection
-//! is the primary path rather than a fallback. This mirrors Silver's
-//! `LoopDetector`, which likewise runs dominator-based detection over the goto
-//! CFG and only then classifies edges.
+//! A loop is *any* back edge — an edge `n → h` where `h` dominates `n`. Prusti
+//! emits goto CFGs with no `while` at all, carrying invariants on the loop
+//! head's `label`, so back-edge detection is the primary path rather than a
+//! fallback. This mirrors Silver's `LoopDetector`, which likewise runs
+//! dominator-based detection over the goto CFG and only then classifies edges.
+//!
+//! A source `while` is a loop by syntax, not by its edges: its head is a loop
+//! head even when the body never returns to it (every path leaves by `goto`),
+//! and its body is the whole statement body, also the parts that leave. Silicon
+//! cuts it the same way: the invariant is checked on entry and the body runs on
+//! the havocked state with only the invariant's permissions.
 //!
 //! The analysis is generic over the node type so it can be unit-tested against
 //! a bare `DiGraphMap` without building a whole method body.
@@ -28,14 +33,16 @@ use petgraph::algo::{dominators, tarjan_scc};
 use petgraph::prelude::DiGraphMap;
 
 /// A natural loop: a header plus every block that can reach one of the header's
-/// back-edge tails without passing through the header.
+/// back-edge tails (and, for a `while`, its statement body) without passing
+/// through the header.
 #[derive(Debug, Clone)]
 pub struct Loop<N> {
     /// The single entry point. Natural loops are single-entry by construction —
     /// a multi-entry cycle is irreducible and rejected by [`Loops::detect`].
     pub head: N,
     /// Tails of the back edges targeting `head`. A `continue` inside a
-    /// conditional gives more than one; each becomes its own exhale leaf.
+    /// conditional gives more than one; each becomes its own exhale leaf. A
+    /// `while` whose body always leaves by `goto` has none.
     pub back_edge_tails: Vec<N>,
     /// Every block in the loop, including `head`.
     pub body: HashSet<N>,
@@ -95,12 +102,26 @@ impl<N> Loops<N>
 where
     N: Copy + Ord + Hash,
 {
-    /// Detect every natural loop reachable from `entry`.
+    /// Detect every natural loop reachable from `entry`, plus the structured
+    /// loops in `structured`: each a source `while`'s head with the blocks of its
+    /// statement body.
+    ///
+    /// A structured loop's body is the backward closure, stopped at the head, of
+    /// its back-edge tails *and* of its live statement body. Seeding the natural
+    /// loop with the statement body is what takes in a body that never reaches a
+    /// back edge. It is a loop only if its head dominates that body, i.e. a
+    /// `goto` enters it only through the head; the closure then stays among the
+    /// blocks the head dominates, so every edge into the loop still enters at the
+    /// head.
     ///
     /// Unreachable blocks are ignored: they are dead code a `goto` left behind
     /// and are dropped before lowering anyway, and `simple_fast` reports no
     /// dominators for them.
-    pub fn detect(graph: &DiGraphMap<N, ()>, entry: N) -> Result<Self, LoopError<N>> {
+    pub fn detect(
+        graph: &DiGraphMap<N, ()>,
+        entry: N,
+        structured: &[(N, Vec<N>)],
+    ) -> Result<Self, LoopError<N>> {
         check_reducible(graph, entry)?;
 
         let doms = dominators::simple_fast(graph, entry);
@@ -119,11 +140,27 @@ where
             }
         }
 
-        let mut loops: Vec<Loop<N>> = tails_of
+        let dominated_by = |n: N, h: N| doms.dominators(n).is_some_and(|mut ds| ds.any(|d| d == h));
+        let mut seeds_of: HashMap<N, Vec<N>> = tails_of.clone();
+        for (head, stmt_body) in structured {
+            let live = stmt_body
+                .iter()
+                .copied()
+                .filter(|&n| doms.dominators(n).is_some());
+            // Unreachable, or entered past its head by a `goto` into its body: then
+            // only the natural loops of the cycles through it are loops.
+            if doms.dominators(*head).is_none() || !live.clone().all(|n| dominated_by(n, *head)) {
+                continue;
+            }
+            seeds_of.entry(*head).or_default().extend(live);
+        }
+
+        let mut loops: Vec<Loop<N>> = seeds_of
             .into_iter()
-            .map(|(head, mut tails)| {
+            .map(|(head, seeds)| {
+                let mut tails = tails_of.get(&head).cloned().unwrap_or_default();
                 tails.sort();
-                let body = natural_loop_body(graph, head, &tails);
+                let body = natural_loop_body(graph, head, &seeds);
                 Loop {
                     head,
                     back_edge_tails: tails,
@@ -200,19 +237,20 @@ where
     }
 }
 
-/// The natural loop of `head`: every node that reaches one of `tails` without
+/// The natural loop of `head`: every node that reaches one of `seeds` (its
+/// back-edge tails, for a structured loop also its statement body) without
 /// passing through `head`, plus `head` itself.
 ///
-/// Standard backward worklist from the tails. `head` is seeded as visited so the
+/// Standard backward worklist from the seeds. `head` is seeded as visited so the
 /// walk stops there, which is exactly what makes the result single-entry.
-fn natural_loop_body<N>(graph: &DiGraphMap<N, ()>, head: N, tails: &[N]) -> HashSet<N>
+fn natural_loop_body<N>(graph: &DiGraphMap<N, ()>, head: N, seeds: &[N]) -> HashSet<N>
 where
     N: Copy + Ord + Hash,
 {
     let mut body: HashSet<N> = HashSet::default();
     body.insert(head);
     let mut stack: Vec<N> = Vec::new();
-    for &t in tails {
+    for &t in seeds {
         if body.insert(t) {
             stack.push(t);
         }
@@ -300,21 +338,21 @@ mod tests {
 
     #[test]
     fn straight_line_has_no_loops() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 2)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (1, 2)]), 0, &[]).unwrap();
         assert!(ls.is_empty());
         assert!(ls.back_edges.is_empty());
     }
 
     #[test]
     fn diamond_has_no_loops() {
-        let ls = Loops::detect(&g(&[(0, 1), (0, 2), (1, 3), (2, 3)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (0, 2), (1, 3), (2, 3)]), 0, &[]).unwrap();
         assert!(ls.is_empty());
     }
 
     /// `0 → 1 ⇄ 2`, exit `1 → 3`. The classic while loop.
     #[test]
     fn simple_loop() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3)]), 0, &[]).unwrap();
         assert_eq!(ls.loops.len(), 1);
         let l = &ls.loops[0];
         assert_eq!(l.head, 1);
@@ -324,12 +362,63 @@ mod tests {
         assert!(!ls.is_back_edge(1, 2));
     }
 
+    /// `while` whose body `2` always leaves by `goto` (to `4`): no back edge, but
+    /// `1` is still a loop head, and both of its out edges and the `goto` leave.
+    #[test]
+    fn structured_loop_without_back_edge() {
+        let graph = g(&[(0, 1), (1, 2), (1, 3), (2, 4), (3, 4)]);
+        let ls = Loops::detect(&graph, 0, &[(1, vec![2])]).unwrap();
+        assert_eq!(ls.loops.len(), 1);
+        let l = &ls.loops[0];
+        assert_eq!(l.head, 1);
+        assert!(l.back_edge_tails.is_empty());
+        assert_eq!(body(l), vec![1, 2]);
+        assert!(ls.back_edges.is_empty());
+        assert!(!ls.classify(1, 2).is_exit());
+        assert!(ls.classify(1, 3).is_exit());
+        assert!(ls.classify(2, 4).is_exit());
+    }
+
+    /// `while` with a back edge `2 → 1` and an arm `5` that leaves by `goto`:
+    /// the arm is in the loop, so only its `goto` leaves. Dead body blocks (`9`)
+    /// are ignored.
+    #[test]
+    fn structured_loop_takes_in_arms_that_leave() {
+        let graph = g(&[
+            (0, 1),
+            (1, 2),
+            (2, 1),
+            (2, 5),
+            (1, 3),
+            (5, 4),
+            (3, 4),
+            (9, 1),
+        ]);
+        let ls = Loops::detect(&graph, 0, &[(1, vec![2, 5, 9])]).unwrap();
+        assert_eq!(ls.loops.len(), 1);
+        assert_eq!(ls.loops[0].back_edge_tails, vec![2]);
+        assert_eq!(body(&ls.loops[0]), vec![1, 2, 5]);
+        assert!(!ls.classify(2, 5).is_exit());
+        assert!(ls.classify(5, 4).is_exit());
+    }
+
+    /// A `goto` from `0` into the body block `2` of the `while` at `1`: `1` does
+    /// not dominate its body, so only the natural loop of `2` is a loop.
+    #[test]
+    fn structured_loop_entered_past_its_head_is_not_one() {
+        let graph = g(&[(0, 2), (2, 1), (1, 3), (3, 2), (1, 4)]);
+        let ls = Loops::detect(&graph, 0, &[(1, vec![3, 2])]).unwrap();
+        assert_eq!(ls.loops.len(), 1);
+        assert_eq!(ls.loops[0].head, 2);
+        assert!(ls.at_head(1).is_none());
+    }
+
     /// Cutting the back edges must leave a DAG — the invariant the whole
     /// lowering strategy rests on.
     #[test]
     fn cutting_back_edges_leaves_a_dag() {
         let graph = g(&[(0, 1), (1, 2), (2, 1), (1, 3), (3, 4), (4, 3)]);
-        let ls = Loops::detect(&graph, 0).unwrap();
+        let ls = Loops::detect(&graph, 0, &[]).unwrap();
         let mut cut = graph.clone();
         for &(u, v) in &ls.back_edges {
             cut.remove_edge(u, v);
@@ -339,7 +428,7 @@ mod tests {
 
     #[test]
     fn self_loop() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 1), (1, 2)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (1, 1), (1, 2)]), 0, &[]).unwrap();
         assert_eq!(ls.loops.len(), 1);
         assert_eq!(ls.loops[0].head, 1);
         assert_eq!(body(&ls.loops[0]), vec![1]);
@@ -348,7 +437,12 @@ mod tests {
     /// A `continue` inside a conditional: two back edges, one head, one loop.
     #[test]
     fn multiple_back_edges_to_one_head() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (2, 3), (3, 1), (1, 4)]), 0).unwrap();
+        let ls = Loops::detect(
+            &g(&[(0, 1), (1, 2), (2, 1), (2, 3), (3, 1), (1, 4)]),
+            0,
+            &[],
+        )
+        .unwrap();
         assert_eq!(ls.loops.len(), 1);
         assert_eq!(ls.loops[0].back_edge_tails, vec![2, 3]);
         assert_eq!(body(&ls.loops[0]), vec![1, 2, 3]);
@@ -360,6 +454,7 @@ mod tests {
         let ls = Loops::detect(
             &g(&[(0, 1), (1, 2), (2, 3), (3, 2), (2, 4), (4, 1), (1, 5)]),
             0,
+            &[],
         )
         .unwrap();
         assert_eq!(ls.loops.len(), 2);
@@ -384,6 +479,7 @@ mod tests {
                 (1, 5),
             ]),
             0,
+            &[],
         )
         .unwrap();
         let c = ls.classify(3, 4);
@@ -408,6 +504,7 @@ mod tests {
                 (1, 5),
             ]),
             0,
+            &[],
         )
         .unwrap();
         let c = ls.classify(3, 9);
@@ -418,7 +515,7 @@ mod tests {
 
     #[test]
     fn entering_a_loop_is_classified() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3)]), 0, &[]).unwrap();
         let c = ls.classify(0, 1);
         assert_eq!(c.entries.len(), 1);
         assert!(c.exits.is_empty());
@@ -427,7 +524,7 @@ mod tests {
 
     #[test]
     fn back_edge_is_not_an_exit_of_its_own_loop() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3)]), 0, &[]).unwrap();
         let c = ls.classify(2, 1);
         assert_eq!(c.back, Some(0));
         assert!(c.exits.is_empty(), "the head is inside the body");
@@ -435,14 +532,14 @@ mod tests {
 
     #[test]
     fn normal_edge_is_normal() {
-        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3), (3, 4)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3), (3, 4)]), 0, &[]).unwrap();
         assert!(ls.classify(3, 4).is_normal());
     }
 
     /// Two entries into the same cycle: `1 → 2 → 1` reachable at both 1 and 2.
     #[test]
     fn irreducible_is_rejected() {
-        let r = Loops::detect(&g(&[(0, 1), (0, 2), (1, 2), (2, 1)]), 0);
+        let r = Loops::detect(&g(&[(0, 1), (0, 2), (1, 2), (2, 1)]), 0, &[]);
         assert!(matches!(r, Err(LoopError::Irreducible(_))));
     }
 
@@ -453,7 +550,8 @@ mod tests {
         assert!(
             Loops::detect(
                 &g(&[(0, 1), (1, 2), (2, 3), (3, 2), (2, 4), (4, 1), (1, 5)]),
-                0
+                0,
+                &[]
             )
             .is_ok()
         );
@@ -466,7 +564,7 @@ mod tests {
     #[test]
     fn dead_edge_into_a_loop_is_not_a_second_entry() {
         // live: 0 → 1 → 2 → 1 (back edge), 1 → 3.  dead: 4 → 2.
-        let r = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3), (4, 2)]), 0);
+        let r = Loops::detect(&g(&[(0, 1), (1, 2), (2, 1), (1, 3), (4, 2)]), 0, &[]);
         let ls = r.expect("a dead in-edge does not make the loop irreducible");
         assert_eq!(ls.loops.len(), 1);
         assert_eq!(ls.loops[0].head, 1);
@@ -476,7 +574,7 @@ mod tests {
     /// both doors of `1 ⇄ 2` are reachable here.
     #[test]
     fn irreducible_with_dead_code_present_is_still_rejected() {
-        let r = Loops::detect(&g(&[(0, 1), (0, 2), (1, 2), (2, 1), (9, 1)]), 0);
+        let r = Loops::detect(&g(&[(0, 1), (0, 2), (1, 2), (2, 1), (9, 1)]), 0, &[]);
         assert!(matches!(r, Err(LoopError::Irreducible(_))));
     }
 
@@ -484,7 +582,7 @@ mod tests {
     /// than panicking or inventing a loop.
     #[test]
     fn unreachable_cycle_is_ignored() {
-        let ls = Loops::detect(&g(&[(0, 1), (7, 8), (8, 7)]), 0).unwrap();
+        let ls = Loops::detect(&g(&[(0, 1), (7, 8), (8, 7)]), 0, &[]).unwrap();
         assert!(ls.is_empty());
     }
 }

@@ -189,9 +189,6 @@ fn eval_heap_inst(
         // location add and values there must agree. Contrast `Merge`, which
         // selects between mutually exclusive predecessor states.
         HeapInst::Union { a, b } => {
-            let region = state.region(ctx);
-            let ha = get_heap(ctx, state, a, &region)?;
-            let hb = get_heap(ctx, state, b, &region)?;
             // The block cube is load-bearing here, not decorative: a loop exit's
             // union runs under `<!guard>`, and both the positivity decision and the
             // guarded value equality have to be relative to it.
@@ -200,6 +197,15 @@ fn eval_heap_inst(
                 .iter()
                 .map(|(v, p)| (state.get_val(ctx, v), *p))
                 .collect();
+            // Both operands are read under the union's effective pc, the block
+            // cube and the inst's delta: a frame restore on one edge into a join
+            // runs under that edge's condition, where the predecessor's heap
+            // exists, and the block cube alone (the OR of all edges) does not
+            // establish the predecessor's region.
+            let mut region = state.region(ctx);
+            region.extend(pc_lits.iter().copied());
+            let ha = get_heap(ctx, state, a, &region)?;
+            let hb = get_heap(ctx, state, b, &region)?;
             Ok(ha.union(ctx, &hb, &pc_lits))
         }
         // The heap at a `label`: unchanged, but defined in the label's block,
