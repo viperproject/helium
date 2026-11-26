@@ -1,0 +1,20 @@
+// dead_exit_assert_false.vpr with a live normal exit: the exit by `goto out`
+// under `d` stays reachable.
+//
+// Must FAIL. Silicon: "Assertion !d might not hold."
+field f: Int
+
+method m(x: Ref, q: Perm, c: Bool)
+  requires none < q && q <= write && acc(x.f)
+{
+  x.f := 3
+  var d: Bool := false
+  while (c)
+    invariant acc(x.f, q) && (d ==> x.f == 4)
+  {
+    if (d) { goto out }
+    d := x.f == 4
+  }
+  label out
+  assert !d
+}

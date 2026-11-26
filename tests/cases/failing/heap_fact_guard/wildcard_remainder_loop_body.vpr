@@ -1,0 +1,19 @@
+// A loop body is a block like any other: its wildcard remainder fact must not
+// reach the code after the loop. The body ends in `inhale false`, so preserving
+// the invariant is vacuous; the facts assumed before it still must stay under
+// the body's cube. Silicon rejects.
+field f: Int
+
+method wildcard_remainder_loop_body(x: Ref, p: Perm, n: Int)
+  requires p >= none && acc(x.f, p)
+{
+  var i: Int := 0
+  while (i < n)
+    invariant p >= none && acc(x.f, p)
+  {
+    inhale p > none
+    exhale acc(x.f, wildcard)
+    inhale false
+  }
+  assert p > none
+}

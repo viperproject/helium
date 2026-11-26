@@ -1,0 +1,16 @@
+// The call form of `wildcard_remainder_leaks_past_join.vpr`: the callee's
+// wildcard precondition is consumed on one arm only. Silicon rejects.
+field f: Int
+
+method takes_a_share(x: Ref)
+  requires acc(x.f, wildcard)
+
+method wildcard_remainder_call_in_arm(x: Ref, p: Perm, c: Bool)
+  requires p >= none && acc(x.f, p)
+{
+  if (c) {
+    inhale p > none
+    takes_a_share(x)
+  }
+  assert p > none
+}

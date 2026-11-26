@@ -1,0 +1,17 @@
+// `l` is reached only when both `a` and `b` hold; the read is guarded by `a`
+// alone.
+field f: Int
+
+method m(x: Ref, a: Bool, b: Bool)
+  requires acc(x.f)
+{
+  if (a) {
+    if (b) {
+      x.f := 1
+      label l
+    }
+  }
+  if (a) {
+    assert old[l](x.f) == 1
+  }
+}

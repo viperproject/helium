@@ -1,0 +1,17 @@
+// `wildcard_remainder_leaks_past_join.vpr` on the middle arm of an else-if
+// chain. Silicon rejects.
+field f: Int
+
+method wildcard_remainder_else_chain(x: Ref, p: Perm, k: Int, v: Int)
+  requires p >= none && acc(x.f, p)
+{
+  if (k == 0) {
+    inhale v == 0
+  } elseif (k == 1) {
+    inhale p > none
+    exhale acc(x.f, wildcard)
+  } else {
+    inhale v == 2
+  }
+  assert p > none
+}

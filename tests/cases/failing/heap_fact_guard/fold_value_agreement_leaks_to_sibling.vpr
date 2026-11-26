@@ -1,0 +1,21 @@
+// The value agreement of two chunks at one location holds only where both are
+// held. A `fold` on one arm adds a predicate chunk whose snapshot is built from
+// that arm's field value (`y`) to the held half of `P(x)`, so the two snapshots
+// agree there. Assumed under the pc delta only, the agreement reached ground and
+// told the else arm that `P(x)`'s field is `y`. Silicon rejects.
+field f: Int
+
+predicate P(r: Ref) { acc(r.f, 1/2) }
+
+method fold_value_agreement_leaks_to_sibling(x: Ref, y: Int, c: Bool)
+  requires acc(x.f, 1/2) && acc(P(x), 1/2)
+{
+  if (c) {
+    inhale acc(x.f, 1/2)
+    x.f := y
+    fold acc(P(x), 1/2)
+  } else {
+    unfold acc(P(x), 1/2)
+    assert x.f == y
+  }
+}

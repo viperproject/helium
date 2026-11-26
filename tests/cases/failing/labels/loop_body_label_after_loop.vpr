@@ -1,0 +1,21 @@
+// A label inside a (goto) loop body, read after the loop: the loop is left
+// from its head, in the state the invariant describes, and no path out of the
+// head passes through the body's label.
+field f: Int
+
+method m(x: Ref, n: Int)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+  if (i >= n) {
+    goto out
+  }
+  label body
+  x.f := x.f + 1
+  i := i + 1
+  goto head
+  label out
+  assert old[body](x.f) == old[body](x.f)
+}

@@ -1,0 +1,17 @@
+// A consume that draws on two chunks aliased only on its arm (`x == y` there)
+// equates both chunks' values with the value it takes. That agreement holds only
+// on the arm: on the else arm `x` and `y` may differ, and so may their values.
+// The consume's debit leaves the block's cube out of its gate (the heap is the
+// block's own), but the agreement is a ground fact and keeps it. Silicon rejects.
+field f: Int
+
+method pc_alias_agreement_leaks_to_sibling(x: Ref, y: Ref, c: Bool)
+  requires acc(x.f, 1/2) && acc(y.f, 1/2)
+{
+  if (c) {
+    inhale x == y
+    exhale acc(y.f, 1/1)
+  } else {
+    assert x.f == y.f
+  }
+}

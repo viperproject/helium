@@ -1,0 +1,18 @@
+// A loop head label read in its own invariant: the invariant is checked on
+// entry, before the label's state exists.
+field f: Int
+
+method m(x: Ref, n: Int)
+  requires acc(x.f) && n >= 0
+{
+  var i: Int := 0
+  label head
+    invariant acc(x.f) && 0 <= i && i <= n
+    invariant old[head](perm(x.f)) == write
+  if (i >= n) {
+    goto out
+  }
+  i := i + 1
+  goto head
+  label out
+}

@@ -1,0 +1,13 @@
+// A local initialised from an unreached label.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 3
+    label l
+  }
+  var v: Int := old[l](x.f)
+  assert v == 3
+}
