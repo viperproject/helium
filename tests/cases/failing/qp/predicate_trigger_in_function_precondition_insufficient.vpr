@@ -1,0 +1,14 @@
+// A predicate trigger `{ P(a) }` on a quantified predicate permission in a
+// function precondition; the caller holds `P(0)` but not `P(1)`.
+//
+// Must FAIL (insufficient permission).
+predicate P(a: Int)
+
+function f(n: Int): Int
+  requires forall a: Int :: { P(a) } 0 <= a && a < n ==> acc(P(a), wildcard)
+
+method client()
+  requires acc(P(0))
+{
+  var r: Int := f(2)
+}

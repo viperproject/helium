@@ -881,8 +881,7 @@ pub(crate) trait PureExt: Sized + Clone + std::fmt::Debug {
     ) -> Result<Val, TranslationError>;
 
     /// What a trigger term rooted at this extension node matches on. Typecheck
-    /// (`check_triggers`) admits only the [`TrigNode::Call`] and
-    /// [`TrigNode::Field`] shapes.
+    /// (`check_triggers`) admits only the [`TrigNode::Call`] shape.
     fn trig_node(&self) -> TrigNode<'_, Self>;
 }
 
@@ -890,20 +889,16 @@ pub(crate) trait PureExt: Sized + Clone + std::fmt::Debug {
 pub(crate) enum TrigNode<'a, Ext> {
     /// A Silver `function` application.
     Call(&'a typed::Call<Ext>),
-    /// A field read `e.f`: it matches the field's location term `f(e)`, which
-    /// every read of the field builds (as a quantified permission's default
-    /// location trigger does).
-    Field(&'a typed::TypedPureExp<Ext>, Spur),
-    /// Anything else; rejected by typecheck.
+    /// Anything else (a field read included: at a trigger's root it is a
+    /// [`typed::TriggerTerm::Location`]); rejected by typecheck.
     NotMatchable,
 }
 
 /// [`PureExt::trig_node`] of a heap node.
 fn heap_trig_node<Ext>(node: &typed::HeapNode<Ext>) -> TrigNode<'_, Ext> {
     match node {
-        typed::HeapNode::Field(e, f) => TrigNode::Field(e, f.0),
         typed::HeapNode::FunctionCall(call) => TrigNode::Call(call),
-        typed::HeapNode::Unfolding(..) => TrigNode::NotMatchable,
+        typed::HeapNode::Field(..) | typed::HeapNode::Unfolding(..) => TrigNode::NotMatchable,
     }
 }
 
@@ -1019,7 +1014,7 @@ fn lower_forall<Ext: PureExt>(
     for group in &q.triggers {
         let terms = group
             .iter()
-            .map(|t| lower_trig_term(b, t, &inner_env))
+            .map(|t| lower_trigger(b, t, &inner_env))
             .collect::<Result<Vec<_>, _>>()?;
         triggers.push(vmir::QuantTrigger {
             terms: terms.into(),
@@ -1053,6 +1048,45 @@ fn lower_forall<Ext: PureExt>(
     Ok(step)
 }
 
+/// Lower one term of a trigger group (see [`typed::TriggerTerm`]).
+pub(crate) fn lower_trigger<Ext: PureExt>(
+    b: &TranslationContext<'_>,
+    term: &typed::TriggerTerm<Ext>,
+    env: &HashMap<Spur, Val>,
+) -> Result<vmir::TrigTerm, TranslationError> {
+    match term {
+        typed::TriggerTerm::Exp(e) => lower_trig_term(b, e, env),
+        typed::TriggerTerm::Location(res) => location_trig_term(b, res, env),
+    }
+}
+
+/// The pattern of a location's term, `f(e)` of a field or `P(args)` of a
+/// predicate: the address call `resource::lower_resource_addr` emits for every
+/// read, `acc`, `fold`, `unfold` and `unfolding` of that location.
+pub(crate) fn location_trig_term<Ext: PureExt>(
+    b: &TranslationContext<'_>,
+    res: &typed::ResourceExp<Ext>,
+    env: &HashMap<Spur, Val>,
+) -> Result<vmir::TrigTerm, TranslationError> {
+    let (name, args) = match &*res.0 {
+        typed::ResourceExpKind::Field(e, f) => (f.0, std::slice::from_ref(e)),
+        typed::ResourceExpKind::PredicateCall(c) => (c.name.0, &c.args[..]),
+    };
+    let function = *b
+        .name_map
+        .get(&name)
+        .ok_or_else(|| TranslationError::UnknownIdent(b.interner.resolve(&name).to_string()))?;
+    let args = args
+        .iter()
+        .map(|a| lower_trig_term(b, a, env))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(vmir::TrigTerm::App {
+        head: vmir::TrigHead::Loc(function),
+        type_args: Vec::new(),
+        args: args.into(),
+    })
+}
+
 /// Lower one trigger term into its VMIR pattern tree. A variable resolves through
 /// `env` to the temp it names — a binder or an enclosing value, told apart later
 /// by `binder_base` alone; a literal to `Lit`; anything else is an application,
@@ -1071,27 +1105,14 @@ pub(crate) fn lower_trig_term<Ext: PureExt>(
             .collect::<Result<Vec<_>, _>>()
     };
     // An extension node is a trigger application only as a Silver `function`
-    // call or a field read (typecheck's `check_triggers`).
-    let ext_node = match term.exp.as_ref() {
-        P::Ext(ext) => Some(ext.trig_node()),
+    // call (typecheck's `check_triggers`; a field read is a
+    // `TriggerTerm::Location`, see `lower_trigger`).
+    let call = match term.exp.as_ref() {
+        P::DomainFunctionCall(call) => Some(call),
+        P::Ext(ext) if let TrigNode::Call(call) = ext.trig_node() => Some(call),
         _ => None,
     };
-    let call = match (term.exp.as_ref(), &ext_node) {
-        (P::DomainFunctionCall(call), _) => Some(call),
-        (_, Some(TrigNode::Call(call))) => Some(*call),
-        _ => None,
-    };
-    if let Some(TrigNode::Field(base, field)) = ext_node {
-        // `e.f` matches the location term `f(e)` every read of `f` builds.
-        let function = *b.name_map.get(&field).ok_or_else(|| {
-            TranslationError::UnknownIdent(b.interner.resolve(&field).to_string())
-        })?;
-        return Ok(vmir::TrigTerm::App {
-            head: vmir::TrigHead::Func(function),
-            type_args: Vec::new(),
-            args: Box::new([lower_trig_term(b, base, env)?]),
-        });
-    }
+
     match term.exp.as_ref() {
         P::Ident(id) => match env.get(&id.0) {
             Some(Val::Temp(k)) => Ok(vmir::TrigTerm::Var(*k)),

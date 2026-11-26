@@ -494,6 +494,11 @@ pub enum TrigTerm {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TrigHead {
     Func(crate::vmir::MemberId),
+    /// The location term of a field or predicate (the address call
+    /// `f(e)` / `P(args)` every access to it builds). Matched like a `Func` of
+    /// the same member, but no dependency on it (`analyze`): forming an address
+    /// needs no certificate, as for an address-typed `FunctionCall`.
+    Loc(crate::vmir::MemberId),
     AdtCons {
         adt: crate::vmir::MemberId,
         variant: usize,
@@ -535,7 +540,7 @@ impl<'a> Display for VmirDisplay<'a, &'a TrigTerm> {
                 args,
             } => {
                 match head {
-                    TrigHead::Func(id) => write!(f, "{}", self.member(*id))?,
+                    TrigHead::Func(id) | TrigHead::Loc(id) => write!(f, "{}", self.member(*id))?,
                     TrigHead::AdtCons { adt, variant } => {
                         write!(f, "{}", self.adt_variant(*adt, *variant))?
                     }

@@ -372,7 +372,7 @@ fn lower_quant_chunks<Ext: PureExt>(
     for group in &q.triggers {
         let terms = group
             .iter()
-            .map(|t| pure_exp::lower_trig_term(b, t, &inner_env))
+            .map(|t| pure_exp::lower_trigger(b, t, &inner_env))
             .collect::<Result<Vec<_>, _>>()?;
         triggers.push(vmir::QuantTrigger {
             terms: terms.into(),
@@ -382,21 +382,8 @@ fn lower_quant_chunks<Ext: PureExt>(
     // every read or write of a member builds. Only when typecheck found it
     // matchable (`location_can_trigger`); otherwise there is none.
     if q.location_trigger {
-        let (name, args) = match &*q.res.0 {
-            typed::ResourceExpKind::Field(e, f) => (f.0, std::slice::from_ref(e)),
-            typed::ResourceExpKind::PredicateCall(c) => (c.name.0, &c.args[..]),
-        };
-        let args: &[typed::TypedPureExp<Ext>] = args;
-        let args = args
-            .iter()
-            .map(|a| pure_exp::lower_trig_term(b, a, &inner_env))
-            .collect::<Result<Vec<_>, _>>()?;
         triggers.push(vmir::QuantTrigger {
-            terms: Box::new([vmir::TrigTerm::App {
-                head: vmir::TrigHead::Func(b.name_map[&name]),
-                type_args: vec![],
-                args: args.into(),
-            }]),
+            terms: Box::new([pure_exp::location_trig_term(b, &q.res, &inner_env)?]),
         });
     }
 

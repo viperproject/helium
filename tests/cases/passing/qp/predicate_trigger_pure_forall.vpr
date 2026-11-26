@@ -1,0 +1,16 @@
+// A pure `forall` triggered on a predicate instance: holding `P(y)` builds the
+// location term `P(y)`, which instantiates the quantifier at `y`.
+//
+// Must VERIFY.
+predicate P(x: Ref)
+
+domain D {
+  function good(x: Ref): Bool
+}
+
+method m(s: Set[Ref], y: Ref)
+  requires forall x: Ref :: { P(x) } x in s ==> good(x)
+  requires y in s && acc(P(y))
+{
+  assert good(y)
+}

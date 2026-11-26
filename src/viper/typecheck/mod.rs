@@ -10,7 +10,7 @@ use crate::viper::{
     typed::{
         self, BinOp, Call, FuncEnsuresExt, Ident, Literal, MapIndexOp, MethodBodyExt,
         MethodEnsuresExt, PredicateWithPerm, PureExpKind, ResourceExp, ResourceExpKind, SeqIndexOp,
-        SpatialExp, SpatialExpKind, Type, TypedIdent, TypedPureExp, UnOp,
+        SpatialExp, SpatialExpKind, TriggerTerm, Type, TypedIdent, TypedPureExp, UnOp,
     },
 };
 
@@ -375,33 +375,33 @@ trait PureExt: Sized + Clone {
     fn build_forall(
         _kind: viper::QuantifierKind,
         _bound: Vec<typed::TypedIdent>,
-        _triggers: Vec<Vec<TypedPureExp<Self>>>,
+        _triggers: Vec<Vec<TriggerTerm<Self>>>,
         _body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         unreachable!("build_forall on a context with LOWER_FORALL = false")
     }
     /// How a trigger term rooted at this extension node can be matched: the
-    /// operands of an application, a field read, or not at all.
+    /// operands of an application, or not at all.
     fn trigger_shape(&self) -> TriggerShape<'_, Self>;
+    /// Whether this context has a heap, so that a trigger may be a location
+    /// (a field read or a predicate instance, [`TriggerTerm::Location`]).
+    const HAS_HEAP: bool;
 }
 
 /// What [`PureExt::trigger_shape`] says about an extension node.
 enum TriggerShape<'a, Ext> {
     /// An application with these operands.
     App(Vec<&'a TypedPureExp<Ext>>),
-    /// A field read `e.f`, matchable only as a trigger term's root: there it
-    /// is the location term `f(e)` every read of `e.f` builds
-    /// (`lower_trig_term`). Below the root it would stand for the read's
-    /// value, which a trigger pattern cannot name.
-    Read(&'a TypedPureExp<Ext>),
-    /// Not matchable (a nested `forall`, `old`, `unfolding`, `perm`, `result`).
+    /// Not matchable (a nested `forall`, `old`, `unfolding`, `perm`, `result`,
+    /// or a field read below a trigger's root: at the root it is a
+    /// [`TriggerTerm::Location`], below it would stand for the read's value).
     NotMatchable,
 }
 
 /// [`PureExt::trigger_shape`] of a heap node, shared by every heap-bearing host.
 fn heap_node_trigger_shape<Ext>(node: &typed::HeapNode<Ext>) -> TriggerShape<'_, Ext> {
     match node {
-        typed::HeapNode::Field(e, _) => TriggerShape::Read(e),
+        typed::HeapNode::Field(..) => TriggerShape::NotMatchable,
         typed::HeapNode::FunctionCall(call) => TriggerShape::App(call.args.iter().collect()),
         typed::HeapNode::Unfolding(..) => TriggerShape::NotMatchable,
     }
@@ -412,7 +412,7 @@ fn heap_node_trigger_shape<Ext>(node: &typed::HeapNode<Ext>) -> TriggerShape<'_,
 fn assemble_forall<Ext>(
     kind: viper::QuantifierKind,
     bound: Vec<typed::TypedIdent>,
-    triggers: Vec<Vec<TypedPureExp<Ext>>>,
+    triggers: Vec<Vec<TriggerTerm<Ext>>>,
     body: TypedPureExp<Ext>,
 ) -> Result<Box<typed::Forall<Ext>>, TypeError> {
     match kind {
@@ -454,10 +454,11 @@ impl PureExt for typed::AxiomExt {
         }
     }
     const LOWER_FORALL: bool = true;
+    const HAS_HEAP: bool = false;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        triggers: Vec<Vec<TriggerTerm<Self>>>,
         body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(typed::AxiomExt::Forall(assemble_forall(
@@ -467,6 +468,7 @@ impl PureExt for typed::AxiomExt {
 }
 
 impl PureExt for ! {
+    const HAS_HEAP: bool = false;
     fn lower_old(
         _label: Option<Spur>,
         _inner: TypedPureExp<!>,
@@ -510,10 +512,11 @@ impl PureExt for typed::HeapExt {
         }
     }
     const LOWER_FORALL: bool = true;
+    const HAS_HEAP: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        triggers: Vec<Vec<TriggerTerm<Self>>>,
         body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(typed::HeapExt::Forall(assemble_forall(
@@ -547,10 +550,11 @@ impl PureExt for FuncEnsuresExt {
         }
     }
     const LOWER_FORALL: bool = true;
+    const HAS_HEAP: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        triggers: Vec<Vec<TriggerTerm<Self>>>,
         body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(FuncEnsuresExt::Forall(assemble_forall(
@@ -584,10 +588,11 @@ impl PureExt for MethodEnsuresExt {
         }
     }
     const LOWER_FORALL: bool = true;
+    const HAS_HEAP: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        triggers: Vec<Vec<TriggerTerm<Self>>>,
         body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(MethodEnsuresExt::Forall(assemble_forall(
@@ -627,10 +632,11 @@ impl PureExt for MethodBodyExt {
         }
     }
     const LOWER_FORALL: bool = true;
+    const HAS_HEAP: bool = true;
     fn build_forall(
         kind: viper::QuantifierKind,
         bound: Vec<typed::TypedIdent>,
-        triggers: Vec<Vec<TypedPureExp<Self>>>,
+        triggers: Vec<Vec<TriggerTerm<Self>>>,
         body: TypedPureExp<Self>,
     ) -> Result<PureExpKind<Self>, TypeError> {
         Ok(PureExpKind::Ext(MethodBodyExt::Forall(assemble_forall(
@@ -741,10 +747,20 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         }
         // Constrain every trigger term inside the binder scope, so each
         // gets a resolved type for later lowering (a dropped trigger
-        // would panic `resolved_ty`).
+        // would panic `resolved_ty`). A predicate instance is no value: only
+        // its arguments are typed, as in `acc(P(..))` (`lower_trigger_term`).
         for trig in triggers.iter_mut() {
             for e in trig.exp.iter_mut() {
-                self.constrain_pure(e)?;
+                match e.kind.as_mut() {
+                    viper::ExpKind::Call(call)
+                        if matches!(call.kind, Some(viper::ExpCallKind::Predicate)) =>
+                    {
+                        self.constrain_predicate_resource(call)?
+                    }
+                    _ => {
+                        self.constrain_pure(e)?;
+                    }
+                }
             }
         }
         let result = body(self);
@@ -1689,15 +1705,7 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                         ty: type_with_generics(&bv.ty, &self.rigid),
                     })
                     .collect();
-                let lowered_triggers: Vec<Vec<TypedPureExp<Ext>>> = triggers
-                    .iter()
-                    .map(|trig| {
-                        trig.exp
-                            .iter()
-                            .map(|e| self.lower_pure::<Ext>(e))
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let lowered_triggers = self.lower_triggers::<Ext>(triggers)?;
                 let lowered_body = self.lower_pure::<Ext>(body)?;
                 // Triggers are validated for `forall` only — `build_forall`
                 // rejects `exists` outright, and that is the error worth showing.
@@ -1839,6 +1847,53 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
             ExpCallKind::Macro => Err(TypeError::Other(
                 "macro in expression (should have been inlined)".to_string(),
             )),
+        }
+    }
+
+    /// Lower a quantifier's trigger groups (shared by the pure `forall` and the
+    /// quantified permission). Their shape is checked by [`check_triggers`].
+    fn lower_triggers<Ext: PureExt>(
+        &self,
+        triggers: &[viper::Trigger],
+    ) -> Result<Vec<Vec<TriggerTerm<Ext>>>, TypeError> {
+        triggers
+            .iter()
+            .map(|trig| {
+                trig.exp
+                    .iter()
+                    .map(|e| self.lower_trigger_term::<Ext>(e))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect()
+    }
+
+    /// Lower one trigger term. A field read or a predicate instance at the root
+    /// is a [`TriggerTerm::Location`] where the host has a heap. Without one, a
+    /// field read is lowered as an expression, which rejects it with its usual
+    /// error (`FieldAccessInAxiom`, ...), and a predicate instance is rejected
+    /// here: it has no type key to lower as an expression
+    /// (`ConstraintCtx::with_binders`).
+    fn lower_trigger_term<Ext: PureExt>(
+        &self,
+        exp: &viper::Exp,
+    ) -> Result<TriggerTerm<Ext>, TypeError> {
+        match &*exp.kind {
+            viper::ExpKind::Call(call)
+                if matches!(call.kind, Some(viper::ExpCallKind::Predicate)) =>
+            {
+                if !Ext::HAS_HEAP {
+                    return Err(TypeError::PredicateInPureContext(
+                        self.env.interner.resolve(&call.name.id()).to_string(),
+                    ));
+                }
+                Ok(TriggerTerm::Location(
+                    self.lower_predicate_resource::<Ext>(call)?,
+                ))
+            }
+            viper::ExpKind::Field(..) if Ext::HAS_HEAP => {
+                Ok(TriggerTerm::Location(self.lower_resource::<Ext>(exp)?))
+            }
+            _ => Ok(TriggerTerm::Exp(self.lower_pure::<Ext>(exp)?)),
         }
     }
 
@@ -2019,15 +2074,7 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
                         ty: type_with_generics(&bv.ty, &self.rigid),
                     })
                     .collect();
-                let lowered_triggers: Vec<Vec<TypedPureExp<Ext>>> = triggers
-                    .iter()
-                    .map(|trig| {
-                        trig.exp
-                            .iter()
-                            .map(|e| self.lower_pure::<Ext>(e))
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let lowered_triggers = self.lower_triggers::<Ext>(triggers)?;
                 if !lowered_triggers.is_empty() {
                     check_triggers(&bound, &lowered_triggers, self.env.interner)?;
                 }
@@ -2767,11 +2814,13 @@ fn typecheck_method(
 /// A group is a conjunctive multi-pattern; each of its terms must be an
 /// *application* (function, domain function, ADT constructor / destructor /
 /// discriminator) whose subterms are variables, literals or nested applications —
-/// interpreted operators cannot be e-matched. The group must mention every bound
-/// variable (at any depth), or a match would leave a binder uninstantiated.
+/// interpreted operators cannot be e-matched. A location (`e.f`, `P(args)`) is
+/// a term too, at the root only, with its arguments as subterms. The group must
+/// mention every bound variable (at any depth), or a match would leave a binder
+/// uninstantiated.
 fn check_triggers<Ext: PureExt>(
     bound: &[TypedIdent],
-    triggers: &[Vec<TypedPureExp<Ext>>],
+    triggers: &[Vec<TriggerTerm<Ext>>],
     interner: &Interner,
 ) -> Result<(), TypeError> {
     if triggers.is_empty() || triggers.iter().any(|g| g.is_empty()) {
@@ -2780,15 +2829,18 @@ fn check_triggers<Ext: PureExt>(
     for group in triggers {
         let mut covered: HashSet<Spur> = HashSet::default();
         for term in group {
-            if !is_trigger_application(term) {
-                return Err(TypeError::TriggerNotAnApplication);
-            }
-            match &*term.exp {
-                // A root field read: only its receiver is a subterm.
-                PureExpKind::Ext(ext) if let TriggerShape::Read(e) = ext.trigger_shape() => {
+            match term {
+                TriggerTerm::Exp(e) => {
+                    if !is_trigger_application(e) {
+                        return Err(TypeError::TriggerNotAnApplication);
+                    }
                     check_trigger_subterms(e, &mut covered)?
                 }
-                _ => check_trigger_subterms(term, &mut covered)?,
+                TriggerTerm::Location(res) => {
+                    for a in location_args(res) {
+                        check_trigger_subterms(a, &mut covered)?;
+                    }
+                }
             }
         }
         if let Some(bv) = bound.iter().find(|bv| !covered.contains(&bv.name.0)) {
@@ -2806,14 +2858,19 @@ fn check_triggers<Ext: PureExt>(
 /// Not an error when it cannot: e.g. a constant receiver must still reach the
 /// verifier's injectivity check.
 fn location_can_trigger<Ext: PureExt>(bound: &[TypedIdent], res: &ResourceExp<Ext>) -> bool {
-    let args = match &*res.0 {
-        ResourceExpKind::Field(e, _) => std::slice::from_ref(e),
-        ResourceExpKind::PredicateCall(c) => &c.args[..],
-    };
     let mut covered: HashSet<Spur> = HashSet::default();
-    args.iter()
+    location_args(res)
+        .iter()
         .all(|a| check_trigger_subterms(a, &mut covered).is_ok())
         && bound.iter().all(|bv| covered.contains(&bv.name.0))
+}
+
+/// The arguments of a location's term: `e` of `f(e)`, `args` of `P(args)`.
+fn location_args<Ext>(res: &ResourceExp<Ext>) -> &[TypedPureExp<Ext>] {
+    match &*res.0 {
+        ResourceExpKind::Field(e, _) => std::slice::from_ref(e),
+        ResourceExpKind::PredicateCall(c) => &c.args,
+    }
 }
 
 /// Whether a trigger term's root is an application — the only shape a trigger
@@ -2901,7 +2958,7 @@ fn check_trigger_subterms<Ext: PureExt>(
                 }
                 Ok(())
             }
-            TriggerShape::Read(_) | TriggerShape::NotMatchable => Err(TypeError::TriggerBadSubterm),
+            TriggerShape::NotMatchable => Err(TypeError::TriggerBadSubterm),
         },
         P::Unary(..)
         | P::Binary(..)
@@ -2983,9 +3040,13 @@ fn check_axiom_function_calls(
             check_call(call)
         }
         P::Ext(typed::AxiomExt::Forall(q)) => {
-            for group in &q.triggers {
-                for t in group {
-                    check_axiom_function_calls(t, fns_with_precond, interner)?;
+            for t in q.triggers.iter().flatten() {
+                match t {
+                    TriggerTerm::Exp(e) => {
+                        check_axiom_function_calls(e, fns_with_precond, interner)?
+                    }
+                    // An axiom has no heap (`HAS_HEAP`), so no location.
+                    TriggerTerm::Location(_) => unreachable!("location trigger in an axiom"),
                 }
             }
             check_axiom_function_calls(&q.body, fns_with_precond, interner)
@@ -3340,6 +3401,102 @@ domain D { function f(i: Int): Bool  axiom q { forall x: Int :: {f(x + 1)} f(x) 
                 .as_ref()
                 .is_err_and(|es| es.iter().any(|e| matches!(e, TypeError::TriggerBadSubterm))),
             "expected TriggerBadSubterm, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn predicate_trigger_accepted_where_there_is_a_heap() {
+        // In a function precondition (a quantified permission), a method
+        // precondition (a pure `forall`) and a method statement.
+        let result = run_pipeline(
+            r#"
+predicate P(x: Ref)
+predicate Q(x: Ref, i: Int)
+function f(s: Set[Ref]): Int
+  requires forall x: Ref :: {P(x)} x in s ==> acc(P(x), wildcard)
+method m(s: Set[Ref])
+  requires forall x: Ref, i: Int :: {Q(x, i)} x in s ==> i == i
+{ assert forall x: Ref :: {P(x)} {x in s} x in s ==> x == x }
+"#,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn predicate_trigger_rejected_in_axiom() {
+        // An axiom has no heap, so no predicate instance to match.
+        let result = run_pipeline(
+            r#"
+predicate P(x: Ref)
+domain D { function h(x: Ref): Bool axiom a { forall x: Ref :: {P(x)} h(x) } }
+"#,
+        );
+        assert!(
+            result.as_ref().is_err_and(|es| es
+                .iter()
+                .any(|e| matches!(e, TypeError::PredicateInPureContext(_)))),
+            "expected PredicateInPureContext, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn location_below_trigger_root_rejected() {
+        // A predicate is no value, so it cannot be an argument; a field read
+        // below the root would stand for the read's value, which no pattern
+        // names.
+        let pred = run_pipeline(
+            r#"
+predicate P(x: Ref)
+function g(b: Bool): Bool
+method m(s: Set[Ref]) { assert forall x: Ref :: {g(P(x))} x in s ==> true }
+"#,
+        );
+        assert!(
+            pred.as_ref().is_err_and(|es| es
+                .iter()
+                .any(|e| matches!(e, TypeError::PredicateInPureContext(_)))),
+            "expected PredicateInPureContext, got: {pred:?}"
+        );
+        let field = run_pipeline(
+            r#"
+field f: Int
+function g(i: Int): Bool
+method m(s: Set[Ref]) { assert forall x: Ref :: {g(x.f)} x in s ==> true }
+"#,
+        );
+        assert!(
+            field
+                .as_ref()
+                .is_err_and(|es| es.iter().any(|e| matches!(e, TypeError::TriggerBadSubterm))),
+            "expected TriggerBadSubterm, got: {field:?}"
+        );
+    }
+
+    #[test]
+    fn predicate_trigger_arguments_are_typed() {
+        // `P(true)` does not fit `P(x: Ref)`; and the arguments must still
+        // cover the binders.
+        let ill_typed = run_pipeline(
+            r#"
+predicate P(x: Ref)
+method m(s: Set[Ref]) { assert forall x: Ref :: {P(true)} x in s ==> true }
+"#,
+        );
+        assert!(
+            ill_typed.is_err(),
+            "expected a type error, got: {ill_typed:?}"
+        );
+        let uncovering = run_pipeline(
+            r#"
+predicate P(x: Ref)
+method m(s: Set[Ref], y: Ref) { assert forall x: Ref :: {P(y)} x in s ==> true }
+"#,
+        );
+        assert!(
+            uncovering.as_ref().is_err_and(|es| es
+                .iter()
+                .any(|e| matches!(e, TypeError::TriggerNotCovering(_)))),
+            "expected TriggerNotCovering, got: {uncovering:?}"
         );
     }
 

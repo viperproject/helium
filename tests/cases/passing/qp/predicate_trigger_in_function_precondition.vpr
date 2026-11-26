@@ -1,0 +1,19 @@
+// A predicate trigger `{ P(a) }` on a quantified predicate permission in a
+// function precondition. The trigger matches the location term `P(a)`, the
+// same trigger the quantified permission gets without one.
+//
+// Prusti's `snap_owned_range_aliased`, `snap_frac_ref_range_aliased` and
+// `snap_unique_ref_current_range_aliased` (slices / `Vec` / `ArrayList`) have
+// this shape.
+//
+// Must VERIFY.
+predicate P(a: Int)
+
+function f(n: Int): Int
+  requires forall a: Int :: { P(a) } 0 <= a && a < n ==> acc(P(a), wildcard)
+
+method client()
+  requires acc(P(0)) && acc(P(1))
+{
+  var r: Int := f(2)
+}

@@ -19,7 +19,6 @@ upper bounds.
 
 | Case | Error | Blocked | Sole | Cumulative |
 |---|---|---|---|---|
-| `qp_predicate_in_function_precondition.vpr` | Predicate `P` used in pure expression context (a predicate trigger) | 49 | 0 | 808 |
 | *(no case: timeouts)* | over 180 s (4 Ru2, Dafny-book chap05 / chap10) | 6 | 6 | 814 |
 
 The counts are from the measurement above. Since then, quantifier bodies
@@ -30,6 +29,16 @@ permission row) and `result_in_quantifier.vpr` now verify and moved to
 `tests/cases/passing/` (`qp/field_read_trigger_in_*.vpr`,
 `functions/result_in_quantifier.vpr`), and so does `field_read_in_quantifier.vpr`
 (now `qp/forall_read_in_contract.vpr`). The counts were not re-measured.
+
+The former row above the timeouts, a predicate trigger `{ P(a) }`
+(`qp_predicate_in_function_precondition.vpr`: 49 blocked, 0 sole, 808
+cumulative), is resolved: a field read or predicate instance at a trigger's
+root is a location (`typed::TriggerTerm::Location`) and matches its location
+term. The reduction verifies and moved to
+`tests/cases/passing/qp/predicate_trigger_in_function_precondition.vpr`. With
+no sole files, the row's 49 files still fail on something else; they were not
+re-measured, and the timeouts row's cumulative count is still from the old
+ranking.
 
 The former top row, a heap-dependent function inside a `forall` (440 blocked, 0 sole,
 676 cumulative), is resolved for binder-free calls: its reductions
