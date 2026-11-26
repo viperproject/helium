@@ -1,0 +1,12 @@
+// An `inhale` whose assertion reads an unreached label: the inhaled
+// assertion's own well-definedness fails.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    label l
+  }
+  inhale old[l](x.f) == old[l](x.f)
+}

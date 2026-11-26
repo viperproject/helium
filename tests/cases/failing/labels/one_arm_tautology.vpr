@@ -1,0 +1,12 @@
+// Even a claim that holds on every path where `l` exists is rejected: the
+// read itself is ill-defined where `l` was not reached.
+field f: Int
+
+method m(x: Ref, c: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    label l
+  }
+  assert old[l](x.f) == x.f
+}

@@ -1,0 +1,27 @@
+// Prusti's path-flag shape with the wrong flag: the read is guarded by the
+// flag of the arm that skips the label.
+field f: Int
+
+method m(x: Ref, k: Int)
+  requires acc(x.f)
+{
+  var from_a: Bool := false
+  var from_b: Bool := false
+  if (k == 0) {
+    from_a := true
+    goto ba
+  } else {
+    from_b := true
+    goto bb
+  }
+  label ba
+  goto join
+  label bb
+  x.f := 1
+  label l
+  goto join
+  label join
+  if (from_a) {
+    assert old[l](x.f) == 1
+  }
+}

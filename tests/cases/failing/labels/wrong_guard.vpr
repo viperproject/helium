@@ -1,0 +1,14 @@
+// A read guarded by an unrelated condition.
+field f: Int
+
+method m(x: Ref, c: Bool, d: Bool)
+  requires acc(x.f)
+{
+  if (c) {
+    x.f := 1
+    label l
+  }
+  if (d) {
+    assert old[l](x.f) == 1
+  }
+}

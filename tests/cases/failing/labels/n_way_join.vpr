@@ -1,0 +1,24 @@
+// A label on one arm of a three-way (goto) join.
+field f: Int
+
+method m(x: Ref, a: Bool, b: Bool)
+  requires acc(x.f)
+{
+  if (a) {
+    goto la
+  }
+  if (b) {
+    goto lb
+  }
+  goto lc
+  label la
+  x.f := 1
+  label l
+  goto done
+  label lb
+  goto done
+  label lc
+  goto done
+  label done
+  assert old[l](x.f) == 1
+}
