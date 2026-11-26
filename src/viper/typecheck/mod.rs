@@ -747,10 +747,20 @@ impl<'a, 'g> ConstraintCtx<'a, 'g> {
         }
         // Constrain every trigger term inside the binder scope, so each
         // gets a resolved type for later lowering (a dropped trigger
-        // would panic `resolved_ty`).
+        // would panic `resolved_ty`). A predicate instance is no value: only
+        // its arguments are typed, as in `acc(P(..))` (`lower_trigger_term`).
         for trig in triggers.iter_mut() {
             for e in trig.exp.iter_mut() {
-                self.constrain_pure(e)?;
+                match e.kind.as_mut() {
+                    viper::ExpKind::Call(call)
+                        if matches!(call.kind, Some(viper::ExpCallKind::Predicate)) =>
+                    {
+                        self.constrain_predicate_resource(call)?
+                    }
+                    _ => {
+                        self.constrain_pure(e)?;
+                    }
+                }
             }
         }
         let result = body(self);
@@ -1857,15 +1867,29 @@ impl<'a, 'g> LoweringCtx<'a, 'g> {
             .collect()
     }
 
-    /// Lower one trigger term. A field read at the root is a
-    /// [`TriggerTerm::Location`] where the host has a heap; otherwise the term
-    /// is lowered as an expression, which rejects a location the host has no
-    /// heap for with its usual error (`FieldAccessInAxiom`, ...).
+    /// Lower one trigger term. A field read or a predicate instance at the root
+    /// is a [`TriggerTerm::Location`] where the host has a heap. Without one, a
+    /// field read is lowered as an expression, which rejects it with its usual
+    /// error (`FieldAccessInAxiom`, ...), and a predicate instance is rejected
+    /// here: it has no type key to lower as an expression
+    /// (`ConstraintCtx::with_binders`).
     fn lower_trigger_term<Ext: PureExt>(
         &self,
         exp: &viper::Exp,
     ) -> Result<TriggerTerm<Ext>, TypeError> {
         match &*exp.kind {
+            viper::ExpKind::Call(call)
+                if matches!(call.kind, Some(viper::ExpCallKind::Predicate)) =>
+            {
+                if !Ext::HAS_HEAP {
+                    return Err(TypeError::PredicateInPureContext(
+                        self.env.interner.resolve(&call.name.id()).to_string(),
+                    ));
+                }
+                Ok(TriggerTerm::Location(
+                    self.lower_predicate_resource::<Ext>(call)?,
+                ))
+            }
             viper::ExpKind::Field(..) if Ext::HAS_HEAP => {
                 Ok(TriggerTerm::Location(self.lower_resource::<Ext>(exp)?))
             }
