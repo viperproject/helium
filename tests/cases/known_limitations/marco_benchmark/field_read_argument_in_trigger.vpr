@@ -1,0 +1,18 @@
+// KNOWN LIMITATION: "a trigger may only contain variables, literals and nested
+// applications" for a trigger whose application takes a field read as an
+// argument, `{ lookup(x.r, i) }`. Silicon accepts field reads in triggers
+// (`qp/field_read_trigger_in_*.vpr` covers a bare `{ r.v }`).
+//
+// Prusti (`Ru1/prusti`, `selection_sort`: `{ lookup_pure(_9.val_ref, i) }`)
+// and the flow-framework and Voila examples (`Flo/acyclic`, `Flo/last-edge`,
+// `Vo/voila`) write triggers this way.
+field r: Ref
+
+function lookup(a: Ref, i: Int): Int
+
+method m(x: Ref)
+  requires acc(x.r, 1/2)
+  requires forall i: Int :: { lookup(x.r, i) } 0 <= i ==> lookup(x.r, i) == 0
+{
+  assert lookup(x.r, 3) == 0
+}

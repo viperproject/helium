@@ -1,0 +1,19 @@
+// KNOWN LIMITATION: "name `z` already declared in this scope" when a macro
+// whose body quantifies over `z` is used under a quantifier that also binds
+// `z`. Silver renames the macro's bound variables on expansion, so the two
+// `z` do not clash.
+//
+// The flow-framework examples (`Flo/acyclic`, `Flo/last-edge`: `alloc`,
+// `aquire`) use `node(x)`, whose body has `forall z`, inside
+// `forall z :: z in X1 ==> node(z)`.
+domain D {
+  function g(x: Int, y: Int): Bool
+}
+
+define Q(x) (forall z: Int :: { g(x, z) } g(x, z))
+
+method m()
+  requires forall z: Int :: { g(z, 0) } Q(z)
+{
+  assert g(1, 0)
+}

@@ -1,0 +1,11 @@
+// KNOWN LIMITATION: "unsupported construct: quasihavoc" (and `quasihavocall`).
+//
+// All 17 listed Voila files (`Vo/voila`) use `quasihavoc` or `quasihavocall`.
+field f: Int
+
+method m(x: Ref)
+  requires acc(x.f)
+  ensures acc(x.f)
+{
+  quasihavoc x.f
+}

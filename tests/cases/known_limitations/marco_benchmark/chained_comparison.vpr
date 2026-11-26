@@ -1,0 +1,15 @@
+// KNOWN LIMITATION: "type mismatch: cannot unify `Bool` and a number (`Int` or
+// `Perm`)" for a chained comparison `0 <= a <= b`. Silver reads it as
+// `0 <= a && a <= b`; Helium parses it as `(0 <= a) <= b`.
+//
+// The dynamic-programming examples under `Vi/viper/dp` (`coins_rec`,
+// `frog_rec`, `allElemsLTSum`, ...) write their bounds this way.
+function f(a: Int, b: Int): Int
+  requires 0 <= a <= b
+{
+  b - a
+}
+
+method m() {
+  assert f(1, 3) == 2
+}

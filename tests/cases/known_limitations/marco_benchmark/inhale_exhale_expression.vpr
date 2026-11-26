@@ -1,8 +1,9 @@
 // KNOWN LIMITATION: "unsupported construct: inhale-exhale expression `[A, B]`".
 //
 // Nagini wraps its obligation checks in `[true, perm(..) == none && forperm ..]`
-// in nearly every contract and loop invariant: 9 of the 838 listed
-// marco_benchmark files hit this (see also `forperm.vpr`, which those
+// in nearly every contract and loop invariant; Prusti (`Ru1/prusti`) and
+// Voila emit `[A, B]` too. This error blocks 178 of the 1017 re-run
+// marco_benchmark files (see also `forperm.vpr`, which those
 // contracts need next). `unsupported/inhale_exhale.vpr` pins the rejection
 // itself; this case pins that the program should verify.
 field f: Int

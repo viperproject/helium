@@ -1,0 +1,12 @@
+// KNOWN LIMITATION: "type mismatch: cannot unify `Int` and `Perm`" for an
+// integer-times-permission product `1 * write`, which Silver types as `Perm`.
+//
+// 2vyper emits `perm(e$OpenMinter(q$a)) == 1 * write` in every method's
+// resource bookkeeping (`SC/2vyper`, `SCR/2vyper`).
+predicate P(x: Int)
+
+method m(x: Int)
+  requires acc(P(x))
+{
+  assert perm(P(x)) == 1 * write
+}
