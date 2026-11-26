@@ -1,0 +1,22 @@
+// `x.f` and `old(x.f)` in one quantifier are two reads in two heaps, so they
+// must stay two values: after `inc`, `x.f` is 6, not the 5 it was before.
+// Silicon rejects this (assertion might not hold).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method inc(x: Ref)
+  requires acc(x.f)
+  ensures acc(x.f)
+  ensures forall i: Int :: { t(i) } t(i) ==> x.f == old(x.f) + 1
+
+method m(x: Ref)
+  requires acc(x.f) && x.f == 5
+{
+  inc(x)
+  assume t(0)
+  assert x.f == 5
+}

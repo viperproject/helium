@@ -1,11 +1,3 @@
-// KNOWN LIMITATION: "label `L` is not defined in this method" for an
-// `old[L](..)` naming a label inside a loop body. Typecheck collects labels
-// for `old[L]` outside loops only (`collect_labels`), although translation
-// captures a label heap per CFG block, loop bodies included. Enabling it needs
-// a decision on `old[L]` after the loop, where the body's label block is not
-// reached on every path.
-//
-// Silicon verifies this.
 field f: Int
 
 method m(x: Ref, n: Int)

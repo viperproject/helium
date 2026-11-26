@@ -1,0 +1,15 @@
+// `old(e)` inside a quantifier reads the pre-state, so it must be framed
+// there. The method holds `x.f` only afterwards: `old(x.f)` is unframed even
+// though `x.f` is. Silicon rejects this (insufficient permission).
+
+field f: Int
+field g: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref)
+  requires acc(x.g)
+  ensures acc(x.f)
+  ensures forall i: Int :: { t(i) } t(i) ==> x.f == old(x.f) + i

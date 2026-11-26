@@ -1,0 +1,13 @@
+// A quantifier may read the heap only where the read is framed. Here the
+// postcondition reads `x.f` without holding it: the read mentions no binder, so
+// it is checked once where the postcondition is stated, and fails there.
+// Silicon rejects this (insufficient permission).
+
+field f: Int
+
+domain D {
+  function t(i: Int): Bool
+}
+
+method m(x: Ref)
+  ensures forall i: Int :: { t(i) } t(i) ==> x.f == i

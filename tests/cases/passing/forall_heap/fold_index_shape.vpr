@@ -1,0 +1,41 @@
+// A quantified postcondition that reads the post-state and, through `old`, the
+// pre-state, in the shape Prusti emits for `p_Array_fold_index` /
+// `p_Slice_fold_index`: every heap read (the `*_snap` / `*_frame` functions)
+// mentions no binder, so it has one value for all instances and is framed where
+// the postcondition is stated. The binder `i` only reaches the heap-free `idx`.
+// The bodyless method checks that the contract is well-defined; `caller`
+// instantiates the postcondition at two indices. Silicon verifies this.
+
+domain Vals {
+  function idx(s: Vals, i: Int): Int
+}
+
+predicate Arr(x: Ref)
+predicate Cell(x: Ref, i: Int)
+predicate Rest(x: Ref, i: Int)
+
+function arr_snap(x: Ref): Vals
+  requires acc(Arr(x))
+
+function cell_snap(x: Ref, i: Int): Int
+  requires acc(Cell(x, i))
+
+function rest_frame(x: Ref, i: Int): Vals
+  requires acc(Rest(x, i))
+
+method fold_index(index: Int, x: Ref)
+  requires acc(Cell(x, index))
+  requires acc(Rest(x, index))
+  ensures acc(Arr(x))
+  ensures (forall i: Int :: { idx(arr_snap(x), i) }
+    idx(arr_snap(x), i) ==
+      (i == index ? old(cell_snap(x, index)) : old(idx(rest_frame(x, index), i))))
+
+method caller(x: Ref, k: Int)
+  requires acc(Cell(x, k)) && cell_snap(x, k) == 7
+  requires acc(Rest(x, k)) && idx(rest_frame(x, k), k + 1) == 3
+{
+  fold_index(k, x)
+  assert idx(arr_snap(x), k) == 7
+  assert idx(arr_snap(x), k + 1) == 3
+}
