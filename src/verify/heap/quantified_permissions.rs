@@ -759,7 +759,7 @@ fn instance_of(
 ) -> QpInstance {
     let perm = eval_perm_structural(ctx, state, &q.body.perm);
     let perm = match caps.scale {
-        Some(s) => perm.scaled(ctx, s, false),
+        Some(s) => perm.scaled(ctx, s),
         None => perm,
     };
     QpInstance {

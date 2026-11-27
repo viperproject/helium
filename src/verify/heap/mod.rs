@@ -118,6 +118,31 @@ impl MergeTrace {
 ///
 /// Recursive operations over the tree should not match on `Gate` themselves:
 /// [`ChunkPerm::shape`] presents it as the branch on its outermost literal.
+/// What a resource body's permissions are multiplied by: the amount the
+/// resource is unfolded, inhaled or exhaled at.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Scale {
+    /// A fixed amount: `1/2`, a symbolic `p`.
+    Amount(egg::Id),
+    /// A `wildcard`, evaluated to a fresh positive amount. Every leaf it scales
+    /// is wildcard-derived, whatever its own amount was, so a later take from
+    /// it debits a fresh smaller share rather than a fixed amount.
+    Wildcard(egg::Id),
+}
+
+impl Scale {
+    /// The amount's term (the fresh positive amount, for a `wildcard`).
+    pub(crate) fn amount(self) -> egg::Id {
+        match self {
+            Scale::Amount(id) | Scale::Wildcard(id) => id,
+        }
+    }
+
+    pub(crate) fn is_wildcard(self) -> bool {
+        matches!(self, Scale::Wildcard(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ChunkPerm {
     Zero,
@@ -230,34 +255,30 @@ impl ChunkPerm {
         }
     }
 
-    /// Scale every leaf by `pm`, preserving the branch structure.
+    /// Scale every leaf by `scale`, preserving the branch structure.
     ///
-    /// Distributing rather than wrapping (`ite(c, pm*t, pm*e)` over
-    /// `pm * ite(c, t, e)`) is what keeps the tree intact through an
+    /// Distributing rather than wrapping (`ite(c, s*t, s*e)` over
+    /// `s * ite(c, t, e)`) is what keeps the tree intact through an
     /// `unfolding`'s or `unfold`'s multiplier. The two are equal but not
     /// identical; `mul-one-real-l` puts them in one class once `ctx.reduce()`
-    /// runs, which is why the common `1/1` scale costs nothing. `pm_wild`: the
-    /// scale itself came from a `wildcard`, which makes every scaled leaf
-    /// wildcard-derived, whatever its own amount was.
-    pub(crate) fn scaled(
-        self,
-        ctx: &mut VerifyContext<'_>,
-        pm: egg::Id,
-        pm_wild: bool,
-    ) -> ChunkPerm {
+    /// runs, which is why the common `1/1` scale costs nothing.
+    pub(crate) fn scaled(self, ctx: &mut VerifyContext<'_>, scale: Scale) -> ChunkPerm {
         match self {
             ChunkPerm::Zero => ChunkPerm::Zero,
             ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
-                id: ctx.add(Symbolic::Binary(crate::vmir::BinOp::MulR, [pm, id])),
-                wild: wild || pm_wild,
+                id: ctx.add(Symbolic::Binary(
+                    crate::vmir::BinOp::MulR,
+                    [scale.amount(), id],
+                )),
+                wild: wild || scale.is_wildcard(),
             },
             ChunkPerm::Gate { when, then } => {
-                let t = then.scaled(ctx, pm, pm_wild);
+                let t = then.scaled(ctx, scale);
                 ChunkPerm::gate(ctx, &when, t)
             }
             ChunkPerm::Select { cond, then, els } => {
-                let t = then.scaled(ctx, pm, pm_wild);
-                let e = els.scaled(ctx, pm, pm_wild);
+                let t = then.scaled(ctx, scale);
+                let e = els.scaled(ctx, scale);
                 ChunkPerm::select(ctx, cond, t, e)
             }
         }

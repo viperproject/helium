@@ -51,7 +51,7 @@ use crate::verify::heap::quantified_permissions::{
 };
 use crate::verify::heap::value::{Map, Scalar};
 use crate::verify::heap::view::{HolderAt, Shares};
-use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
+use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind, Scale};
 use crate::verify::lang::FuncId;
 use crate::verify::quant::Resolved;
 use crate::vmir::{self, Polarity, Type, Val};
@@ -116,10 +116,10 @@ pub(crate) struct Captures {
     /// per location, not one shared by all. `None` for a set without a
     /// wildcard, and for a demand.
     pub(crate) wildcard: Option<FuncId>,
-    /// A set produced by an `unfold` at a fraction `s` of a predicate whose
-    /// body holds it: its amount at a binding is `s · p(xs)`. `None` is `1`.
-    /// Never a `wildcard`, and never set on a demand.
-    pub(crate) scale: Option<egg::Id>,
+    /// A set produced by an `unfold` (or an `unfolding`) at an amount `s`
+    /// other than `1` of a predicate whose body holds it: its amount at a
+    /// binding is `s · p(xs)`. `None` is `1`. Never set on a demand.
+    pub(crate) scale: Option<Scale>,
 }
 
 impl FromIterator<(usize, egg::Id)> for Captures {

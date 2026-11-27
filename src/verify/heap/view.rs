@@ -39,10 +39,10 @@ use crate::verify::heap::interface::{ReadRecipe, Value};
 use crate::verify::heap::quantified_permissions::qp_perm_at;
 use crate::verify::heap::value::Map;
 use crate::verify::heap::{
-    Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind, QuantChunk, Restored, Taken,
+    Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind, QuantChunk, Restored, Shape, Taken,
 };
 use crate::verify::lang::Symbolic;
-use crate::vmir::{BinOp, Literal, Type, Val};
+use crate::vmir::{BinOp, Literal, Polarity, Type, Val};
 
 /// A heap bound to the path condition of the state it is read in. Built by
 /// [`Heap::view`]; every question about who holds a location is asked of one,
@@ -611,6 +611,51 @@ impl Shares {
         Ok((out, value))
     }
 
+    /// Take a `wildcard` share at `addr` from the one chunk set these shares
+    /// are ([`View::set_shares`]), held there outright. The rule is the one
+    /// `debit_wildcard` applies to a single chunk, per arm of the demand
+    /// ([`wildcard_debit`]): where something is demanded the set must hold a
+    /// positive amount, and a fresh `d` leaves it, `0 < d` (from its minting)
+    /// and `d < held` (assumed there), so what stays is positive and smaller.
+    /// It is recorded as a debit at `addr` ([`Taken::Single`]), which
+    /// [`qp_perm_at`] subtracts from then on.
+    ///
+    /// `Err(InsufficientPermission)` when the set is not shown to hold a
+    /// positive amount where one is demanded; `Unimplemented` for a share with
+    /// a `when` (none today, see below).
+    pub(super) fn take_wildcard(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        out: Heap,
+        addr: egg::Id,
+        needed: &ChunkPerm,
+    ) -> Result<(Heap, Value), VerifyError> {
+        let [s] = &self.shares[..] else {
+            unreachable!("a wildcard take asks one chunk set at a time")
+        };
+        debug_assert!(matches!(s.source, ShareSource::Set(_)));
+        // A set's condition, its address gate and its debits are all inside
+        // its amount (`qp_perm_at`), so its share has no `when` today. Checked
+        // at run time anyway: a debit taken without its `when` would take
+        // where the holder does not sit.
+        if !s.when.is_empty() {
+            unreachable!("a set is never held conditionally")
+        }
+        let mut pc = self.pc.clone();
+        let debit = wildcard_debit(ctx, &s.hold, needed, &mut pc)?;
+        if matches!(debit, ChunkPerm::Zero) {
+            return Ok((out, self.resolve(ctx, None)));
+        }
+        let mut covered = self.clone_shares();
+        if debit.as_leaf().is_some() {
+            // Demanded on every path, so the set was shown to hold some there.
+            covered.shares[0].positivity = Positivity::Proven;
+        }
+        let value = covered.resolve(ctx, None);
+        let what = Taken::Single { addr, perm: debit };
+        Ok((take_from_set(ctx, out, &self.kind, s.at, what), value))
+    }
+
     fn clone_shares(&self) -> Shares {
         Shares {
             kind: self.kind.clone(),
@@ -736,6 +781,46 @@ impl Share {
             Positivity::Proven => true,
             Positivity::Unproven => false,
             Positivity::Open => prove_perm_positive(ctx, &self.perm, pc),
+        }
+    }
+}
+
+/// What a `wildcard` demand `needed` takes from a holder that holds `held`,
+/// walking the demand's branches with their literals pushed onto `pc`: nothing
+/// on an arm where the demand is provably not positive; elsewhere a fresh
+/// `d` with `d < held` assumed under the arm's pc, after proving `0 < held`
+/// there. The debits keep the demand's branch structure, so a guarded
+/// `exhale b ==> acc(x.f, wildcard)` takes only where `b` holds.
+fn wildcard_debit(
+    ctx: &mut VerifyContext<'_>,
+    held: &ChunkPerm,
+    needed: &ChunkPerm,
+    pc: &mut Vec<Lit>,
+) -> Result<ChunkPerm, VerifyError> {
+    match needed.shape() {
+        Shape::Zero => Ok(ChunkPerm::Zero),
+        Shape::Leaf { id, .. } => {
+            let nonpos = expr!(ctx, not((0 / 1) < r { id }));
+            if ctx.prove_under_pc(nonpos, pc) {
+                return Ok(ChunkPerm::Zero);
+            }
+            if !prove_perm_positive(ctx, held, pc) {
+                return Err(VerifyError::InsufficientPermission);
+            }
+            let held = held.to_id(ctx);
+            let d = ctx.fresh_wildcard();
+            let below = expr!(ctx, { d } < r { held });
+            ctx.assume_all_guarded([below], pc);
+            Ok(ChunkPerm::wild_leaf(d))
+        }
+        Shape::Branch { cond, then, els } => {
+            pc.push((cond, Polarity::Positive));
+            let t = wildcard_debit(ctx, held, &then, pc);
+            pc.pop();
+            pc.push((cond, Polarity::Negative));
+            let e = wildcard_debit(ctx, held, &els, pc);
+            pc.pop();
+            Ok(ChunkPerm::select(ctx, cond, t?, e?))
         }
     }
 }

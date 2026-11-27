@@ -14,7 +14,7 @@ use crate::{
         cert::{FunctionDefinition, ResourceDefinition},
         context::VerifyContext,
         error::VerifyError,
-        heap::{ChunkPerm, Heap, LocationKind},
+        heap::{ChunkPerm, Heap, LocationKind, Scale},
         lang::Symbolic,
         stats,
         viz::Snapshotter,
@@ -612,10 +612,7 @@ fn walk_footprint(
     base: Heap,
     source: ValueSource,
     direction: Direction,
-    scale: Option<egg::Id>,
-    // `scale_wild`: whether `scale` itself came from a `wildcard` (an `unfolding`
-    // in a function body), which makes every scaled leaf wildcard-derived.
-    scale_wild: bool,
+    scale: Option<Scale>,
     pc_lits: &[(egg::Id, Polarity)],
     // The guard under which the body boolean is discharged (asserted for
     // `Consume`, assumed for `Produce`). Usually `pc_lits`; an `inhale` passes
@@ -649,7 +646,6 @@ fn walk_footprint(
         source: &source,
         direction: &direction,
         scale,
-        scale_wild,
         pc_lits,
         frame_only,
         before: &before,
@@ -677,21 +673,20 @@ fn walk_footprint(
             SlotShape::Quant { q, caps } => {
                 // The amount the produced set holds per binding is scaled by
                 // `qp_scale`: `None` where the walk's scale is provably `1`.
-                // Only a produce at a fraction (`unfold acc(P(..), s)`) is
-                // scaled; a wildcard scale (an `unfolding` in a function), a
-                // wildcard body and a consume at a fraction (`fold`) are not
-                // supported yet.
+                // Only a produce is scaled (`unfold acc(P(..), s)`, and an
+                // `unfolding` in a function at `wildcard`); a wildcard body and
+                // a consume at a scale (`fold`) are not supported yet.
                 let qp_scale = match walk.scale {
                     None => None,
-                    Some(pm) => {
+                    Some(s) => {
+                        let pm = s.amount();
                         let is_one = expr!(ctx, { pm } == (1 / 1));
                         if ctx.prove_under_pc(is_one, walk.pc_lits) {
                             None
                         } else if matches!(walk.direction, Direction::Produce)
-                            && !walk.scale_wild
                             && !q.body.contains_wc_permission()
                         {
-                            Some(pm)
+                            Some(s)
                         } else {
                             return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
                         }
@@ -767,8 +762,7 @@ struct SlotWalk<'a> {
     arg_recipes: Option<&'a [Val]>,
     source: &'a ValueSource,
     direction: &'a Direction,
-    scale: Option<egg::Id>,
-    scale_wild: bool,
+    scale: Option<Scale>,
     pc_lits: &'a [(egg::Id, Polarity)],
     frame_only: bool,
     /// The heap the walk started from.
@@ -921,7 +915,7 @@ fn walk_qp_slot(
     q: &Rc<vmir::QuantChunks>,
     caps_r: &[(usize, BodyRecipe)],
     // The set's `Captures::scale`; `Some` only on a produce.
-    scale: Option<egg::Id>,
+    scale: Option<Scale>,
     values: &[egg::Id],
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
@@ -1087,12 +1081,12 @@ fn slot_held_recipe(
         return None;
     }
     let args = w.arg_recipes?;
-    let scale_positive = w.scale.is_none_or(|pm| {
-        w.scale_wild
-            || matches!(
-                ctx.egraph[ctx.egraph.find(pm)].data.known(),
-                Some(vmir::Literal::Real(r)) if *r > num::BigRational::from(num::BigInt::from(0))
-            )
+    let scale_positive = w.scale.is_none_or(|s| match s {
+        Scale::Wildcard(_) => true,
+        Scale::Amount(pm) => matches!(
+            ctx.egraph[ctx.egraph.find(pm)].data.known(),
+            Some(vmir::Literal::Real(r)) if *r > num::BigRational::from(num::BigInt::from(0))
+        ),
     });
     if !scale_positive {
         return None;
@@ -1145,7 +1139,7 @@ fn apply_slot_perm(
     heap: &mut Heap,
 ) -> Result<egg::Id, VerifyError> {
     let scaled = match w.scale {
-        Some(pm) => perm.clone().scaled(ctx, pm, w.scale_wild),
+        Some(s) => perm.clone().scaled(ctx, s),
         None => perm.clone(),
     };
     let access = Access::Single {
@@ -1367,8 +1361,13 @@ fn eval_resource_op(
         // did. Scaling by the (unused) `1/1` operand would rebuild every
         // slot permission as `1 * p`, which is equal but not identical,
         // and identity is what the `old(f(x)) == f(x)` congruence needs.
-        if frame_only { None } else { Some(scale) },
-        state.perm_is_wild(perm),
+        if frame_only {
+            None
+        } else if state.perm_is_wild(perm) {
+            Some(Scale::Wildcard(scale))
+        } else {
+            Some(Scale::Amount(scale))
+        },
         &pc_lits,
         &bool_guard,
         frame_only,
@@ -1537,7 +1536,7 @@ pub(crate) fn frame_snapshot(
     let FootprintResult {
         members, slot_locs, ..
     } = walk_footprint(
-        ctx, certs, resource, args, None, heap, source, direction, None, false, pc, pc, true,
+        ctx, certs, resource, args, None, heap, source, direction, None, pc, pc, true,
     )?;
     let snap = build_snapshot(ctx, resource, members);
     Ok(FrameSnapshot {
@@ -1607,7 +1606,6 @@ fn eval_from_snap(
         ValueSource::ProjectSnap(s, s_recipe),
         Direction::Produce,
         None,
-        false,
         &pc_lits,
         &pc_lits,
         false,
