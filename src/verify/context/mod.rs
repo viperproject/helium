@@ -70,6 +70,8 @@ pub(crate) struct VerifyContext<'a> {
     /// `heap::quantified_permissions::InverseAxioms`). Holds e-class ids, so a
     /// scratch graph's additions are dropped with it.
     pub(crate) inverse_axioms: crate::verify::heap::InverseAxioms,
+    /// The functions of spread value maps (`heap::spread`), with their definitions.
+    pub(crate) spread_fns: crate::verify::heap::SpreadFns,
     /// Cheap string repr for member/constructor names.
     pub(crate) interner: &'a Rodeo,
     /// Member names indexed by `MemberId` (for `member_name`/`func_name`).
@@ -204,6 +206,7 @@ impl<'a> VerifyContext<'a> {
             fresh_counter: 0,
             heap_id_counter: 0,
             inverse_axioms: Default::default(),
+            spread_fns: Default::default(),
             interner,
             decls,
             groups,

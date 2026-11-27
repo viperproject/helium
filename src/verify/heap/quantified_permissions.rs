@@ -295,8 +295,7 @@ fn mint_and_assume_inverse_axiom(
     };
     // The children, in `Canonical`'s slot order: captured temps, then reads
     // and calls.
-    let temp_ids = caps.temps.iter().map(|&(_, id)| id);
-    let cap_ids: Vec<Id> = temp_ids.chain(caps.reads.cap_ids()).collect();
+    let cap_ids = caps.cap_ids();
     let (rid, inv) = match ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
         Some(found) => {
             crate::verify::qp_trace::note(|| "inverse axiom: reused".to_string());
@@ -422,13 +421,13 @@ impl InverseAxioms {
 }
 
 /// `a ∧ b`, as `a ? b : false` (the shape the e-graph's `ite` rule splits).
-fn and(c: &mut Canonical, a: Val, b: Val) -> Val {
+pub(super) fn and(c: &mut Canonical, a: Val, b: Val) -> Val {
     c.push(AxiomPure::Ternary(a, b, crate::vmir::FALSE))
 }
 
 /// `0 < p` as a boolean, pushed through the permission's `ite`s; a `wildcard`
 /// is positive by definition.
-fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
+pub(super) fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
     match p {
         PermVal::Amount(v) => {
             let v = c.rename(v);
@@ -695,11 +694,13 @@ pub(crate) fn resolve_reads(
     ctx: &mut VerifyContext<'_>,
     q: &vmir::QuantChunks,
     temps: Rc<[(usize, Id)]>,
+    temp_recipes: Option<Rc<[Val]>>,
     heap_of: &mut dyn FnMut(&mut VerifyContext<'_>, &vmir::HeapVal) -> Result<Heap, VerifyError>,
     pc: &[(Id, Polarity)],
 ) -> Result<Captures, VerifyError> {
     let mut caps = Captures {
         temps,
+        temp_recipes,
         reads: Resolved::default(),
         wildcard: None,
         scale: None,

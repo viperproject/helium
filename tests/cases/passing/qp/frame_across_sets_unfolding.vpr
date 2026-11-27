@@ -1,0 +1,25 @@
+// As `frame_across_sets_conditional.vpr`, with the two sets produced by
+// unfolding a predicate that holds the quantified permission in both arms of a
+// conditional.
+//
+// Ru2 Prusti (`Ru2/new`): `OwnedNonAliased$struct$m_Vec$T$0$` holds its
+// elements as `Size$T$0$() != 0 ? (.. forall .. acc(OwnedNonAliased$T$0(..)) ..)
+// : (forall .. acc(OwnedNonAliased$T$0(..)) ..)`, and the postconditions of
+// `snap_owned_non_aliased$`, `snap_current_frac_ref$` and
+// `snap_current_unique_ref$` for `Vec<T>` / `ArrayList<T>` call
+// `snap_owned_range_aliased$ptr$T$0`, whose precondition is that quantified
+// permission. Before the spread map this failed with "purify: snap value
+// outside footprint".
+field f: Int
+
+predicate P(xs: Set[Ref], b: Bool) {
+  b ? (forall a: Ref :: { a.f } a in xs ==> acc(a.f))
+    : (forall a: Ref :: { a.f } a in xs ==> acc(a.f))
+}
+
+function g(xs: Set[Ref]): Int
+  requires forall a: Ref :: { a.f } a in xs ==> acc(a.f, wildcard)
+
+function h(xs: Set[Ref], b: Bool): Int
+  requires acc(P(xs, b), wildcard)
+  ensures unfolding acc(P(xs, b), wildcard) in result == g(xs)

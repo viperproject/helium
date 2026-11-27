@@ -399,6 +399,26 @@ impl FuncRegistry {
         self.skolem(&name, SkolemSig { params, ret })
     }
 
+    /// Mint the positivity function of a chunk set over its captures and a
+    /// location (see `heap::spread`).
+    pub(crate) fn spread_positivity(&mut self, params: Vec<Type>) -> FuncId {
+        let name = format!("qp_pos#{}", self.skolems.len());
+        self.skolem(
+            &name,
+            SkolemSig {
+                params,
+                ret: Type::Bool,
+            },
+        )
+    }
+
+    /// Mint the value-map function of a spread over its holders' arguments
+    /// (see `heap::spread`).
+    pub(crate) fn spread_map(&mut self, params: Vec<Type>, ret: Type) -> FuncId {
+        let name = format!("qp_spread#{}", self.skolems.len());
+        self.skolem(&name, SkolemSig { params, ret })
+    }
+
     /// Mint the fresh wildcard function of a produced quantified permission,
     /// from its location's address type to a permission (see
     /// `heap::Captures::wildcard`).

@@ -1,0 +1,13 @@
+// The call `g(xs)` frames a quantified permission that no single chunk set
+// covers: `h` holds it in two sets, one per arm of the conditional. The framed
+// value is a spread map over both (`heap::spread`), defined from each set's map
+// where that set holds a positive amount, and named in `h`'s certificate.
+field f: Int
+
+function g(xs: Set[Ref]): Int
+  requires forall a: Ref :: { a.f } a in xs ==> acc(a.f, wildcard)
+
+function h(xs: Set[Ref], b: Bool): Int
+  requires b ? (forall a: Ref :: { a.f } a in xs ==> acc(a.f, wildcard))
+             : (forall a: Ref :: { a.f } a in xs ==> acc(a.f, wildcard))
+  ensures result == g(xs)

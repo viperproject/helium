@@ -701,6 +701,7 @@ fn walk_footprint(
                     caps,
                     qp_scale,
                     &values,
+                    &recipes,
                     &mut heap,
                     &mut changed,
                 )?
@@ -834,7 +835,7 @@ fn walk_single_slot(
     // location is read through all its holders, as a `Deref` is, and the read
     // names a set's value by the slot address's recipe.
     let read_r = ReadRecipe {
-        addr: slot_addr_recipe(ctx, w, addr_r, recipes),
+        addr: slot_term_recipe(ctx, w, addr_r, recipes),
     };
     let loc = Loc {
         kind: kind.clone(),
@@ -917,6 +918,7 @@ fn walk_qp_slot(
     // The set's `Captures::scale`; `Some` only on a produce.
     scale: Option<Scale>,
     values: &[egg::Id],
+    recipes: &[Option<Val>],
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
 ) -> Result<SlotOut, VerifyError> {
@@ -943,6 +945,10 @@ fn walk_qp_slot(
         .iter()
         .map(|&(k, id)| (k, ctx.egraph.find(id)))
         .collect();
+    let cap_recipes = caps_r
+        .iter()
+        .map(|(_, r)| slot_term_recipe(ctx, w, r, recipes))
+        .collect::<Option<Rc<[Val]>>>();
     // The body's heap reads, resolved against the caller's heap, which is the
     // one heap every footprint heap of the resource body stands for here: as
     // produced so far on a produce, as before the walk on a consume (an exhale
@@ -952,7 +958,8 @@ fn walk_qp_slot(
         Direction::Consume | Direction::Build => w.before.clone(),
     };
     let mut heap_of = |_: &mut VerifyContext<'_>, _: &_| Ok(reads_from.clone());
-    let mut caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
+    let mut caps =
+        crate::verify::heap::resolve_reads(ctx, q, caps, cap_recipes, &mut heap_of, w.pc_lits)?;
     caps.scale = scale;
 
     let value = match w.direction {
@@ -1105,13 +1112,14 @@ fn slot_held_recipe(
     Some(present.unwrap_or(vmir::TRUE))
 }
 
-/// The recipe of a footprint slot's address, `addr_r` spliced over the call's
-/// arguments and the earlier slots' values (whose recipes are `recipes`).
-/// `None` outside a certificate walk and when an operand has no recipe.
-fn slot_addr_recipe(
+/// The recipe of a term of a footprint slot (its address, a captured value of
+/// its quantifier body), `term_r` spliced over the call's arguments and the
+/// earlier slots' values (whose recipes are `recipes`). `None` outside a
+/// certificate walk and when an operand has no recipe.
+fn slot_term_recipe(
     ctx: &mut VerifyContext<'_>,
     w: &SlotWalk<'_>,
-    addr_r: &BodyRecipe,
+    term_r: &BodyRecipe,
     recipes: &[Option<Val>],
 ) -> Option<Val> {
     let args = w.arg_recipes?;
@@ -1121,9 +1129,9 @@ fn slot_addr_recipe(
     let first = rb.next_index();
     // An operand the splice cannot carry leaves the address without one: a
     // read from a chunk set then names no value, as before.
-    let addr = crate::verify::quant::splice(&mut steps, first, addr_r, args, &values).ok()?;
+    let term = crate::verify::quant::splice(&mut steps, first, term_r, args, &values).ok()?;
     rb.emit_steps(steps);
-    Some(addr)
+    Some(term)
 }
 
 /// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
@@ -2158,10 +2166,23 @@ fn quant_spec_of(
     q: &vmir::QuantChunks,
     pc: &PathConds,
 ) -> Result<QuantSpec, VerifyError> {
-    let temps = q.free_temps().into_iter().map(|k| (k, state.vals[k]));
+    let free = q.free_temps();
+    let temps = free.iter().map(|&k| (k, state.vals[k]));
+    let temp_recipes = ctx.recipe.as_ref().and_then(|_| {
+        free.iter()
+            .map(|&k| state.recipe_of(&Val::Temp(k)))
+            .collect::<Option<Rc<[Val]>>>()
+    });
     let pc_lits = pc_lits_raw(ctx, state, pc);
     let mut heap_of = |ctx: &mut VerifyContext<'_>, h: &_| get_heap(ctx, state, h, &pc_lits);
-    let caps = crate::verify::heap::resolve_reads(ctx, q, temps.collect(), &mut heap_of, &pc_lits)?;
+    let caps = crate::verify::heap::resolve_reads(
+        ctx,
+        q,
+        temps.collect(),
+        temp_recipes,
+        &mut heap_of,
+        &pc_lits,
+    )?;
     Ok(QuantSpec {
         q: Rc::new(q.clone()),
         caps,

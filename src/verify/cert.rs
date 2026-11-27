@@ -333,6 +333,13 @@ impl RecipeBuilder {
         self.token_steps.push(TokenStep { token, guards });
     }
 
+    /// Record `fact`, a definition that holds for any arguments (a recipe
+    /// temp of `Bool`), to be released wherever the recipe is instantiated: an
+    /// orphan step like a `g%pre` token, with no guard.
+    pub(crate) fn record_definition(&mut self, fact: Val) {
+        self.record_token_step(fact, Vec::new());
+    }
+
     fn next_temp(&self) -> Val {
         Val::Temp(self.n_params + self.steps.len())
     }

@@ -109,6 +109,11 @@ pub(crate) enum Access {
 #[derive(Debug, Clone)]
 pub(crate) struct Captures {
     pub(crate) temps: Rc<[(usize, egg::Id)]>,
+    /// In a certificate walk, the recipe of each of `temps`, in order: what
+    /// names the set's captures in the certificate, so a term built over them
+    /// can be stated there too ([`Self::cap_recipes`]). `None` outside a
+    /// certificate walk and when a temp has none.
+    pub(crate) temp_recipes: Option<Rc<[Val]>>,
     pub(crate) reads: Resolved,
     /// A held set whose amount is a `wildcard`: the fresh function `W` over
     /// its locations, minted when it is produced. Its amount at location `l`
@@ -127,10 +132,27 @@ impl FromIterator<(usize, egg::Id)> for Captures {
     fn from_iter<I: IntoIterator<Item = (usize, egg::Id)>>(temps: I) -> Self {
         Captures {
             temps: temps.into_iter().collect(),
+            temp_recipes: None,
             reads: Resolved::default(),
             wildcard: None,
             scale: None,
         }
+    }
+}
+
+impl Captures {
+    /// Every captured e-class, in [`crate::verify::quant::Canonical`]'s slot
+    /// order: the temps, then the read and call stand-ins.
+    pub(crate) fn cap_ids(&self) -> Vec<egg::Id> {
+        let temps = self.temps.iter().map(|&(_, id)| id);
+        temps.chain(self.reads.cap_ids()).collect()
+    }
+
+    /// The recipe of every capture, in [`Self::cap_ids`] order; `None` unless
+    /// each has one.
+    pub(crate) fn cap_recipes(&self) -> Option<Vec<Val>> {
+        let temps = self.temp_recipes.as_ref()?.iter().cloned().map(Some);
+        temps.chain(self.reads.cap_recipes()).collect()
     }
 }
 
@@ -359,6 +381,7 @@ impl Heap {
                 // below what the covering set held (`Captures::wildcard`).
                 let wild = spec.q.body.contains_wc_permission();
                 let kind = spec.kind();
+                let spec_loc_ty = spec.q.loc_ty.clone();
                 // The exhaled set's values are the covering set's (an exhale
                 // changes no value), known only once one is found below; until
                 // then it carries a placeholder map that is never read.
@@ -383,9 +406,7 @@ impl Heap {
                     spec.check,
                 )?;
                 let Some(i) = find_covering_qp(ctx, self, &kind, &exhaled)? else {
-                    // No single set covers it: try all holders together. The
-                    // exhaled set's values are then not tied to theirs yet (a
-                    // fresh map: sound, but its snapshot says nothing).
+                    // No single set covers it: try all holders together.
                     let n = self.qp_chunks_of(&kind).len();
                     let n_points = self.chunks_of(&kind).len();
                     if !covered_by_sum(ctx, self, &kind, &exhaled)? {
@@ -406,6 +427,28 @@ impl Heap {
                             "wildcard exhale of a quantified permission across several holders",
                         ));
                     }
+                    // Its values are those of all holders together, in a map
+                    // made for this demand alone (`spread`); a fresh one
+                    // where a holder cannot be described.
+                    let value = crate::verify::heap::spread::spread_value(
+                        ctx,
+                        self,
+                        &kind,
+                        &spec_loc_ty,
+                        pc,
+                    )?;
+                    crate::verify::qp_trace::note(|| match &value {
+                        Some(v) => format!(
+                            "values: a spread map over all holders{}",
+                            if v.recipe.is_some() {
+                                ", with a recipe"
+                            } else {
+                                ""
+                            }
+                        ),
+                        None => "values: a fresh map (a holder cannot be described)".to_string(),
+                    });
+                    let value = value.unwrap_or_else(|| Value::plain(placeholder));
                     let heap = match mode {
                         ConsumeMode::Take => {
                             // Every set may give: each keeps its index in the
@@ -417,7 +460,7 @@ impl Heap {
                         }
                         ConsumeMode::Frame => self.clone(),
                     };
-                    return Ok((heap, Value::plain(placeholder)));
+                    return Ok((heap, value));
                 };
                 let held = &self.qp_chunks_of(&kind)[i];
                 crate::verify::qp_trace::note(|| {

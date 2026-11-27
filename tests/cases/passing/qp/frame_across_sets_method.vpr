@@ -1,0 +1,30 @@
+// The spread map of `frame_across_sets_conditional.vpr` in a method: the calls
+// to `g` frame a quantified permission that only several chunk sets cover
+// together, and the map's definition ties `g`'s result to `y.f`.
+//
+// `m1`: one set per arm of a conditional. `m2`: two unconditional sets whose
+// union is demanded.
+field f: Int
+
+function g(xs: Set[Ref], y: Ref): Int
+  requires forall a: Ref :: { a.f } a in xs ==> acc(a.f, wildcard)
+  requires y in xs
+{
+  y.f
+}
+
+method m1(xs: Set[Ref], y: Ref, b: Bool)
+  requires b ? (forall a: Ref :: { a.f } a in xs ==> acc(a.f))
+             : (forall a: Ref :: { a.f } a in xs ==> acc(a.f))
+  requires y in xs
+{
+  assert g(xs, y) == y.f
+}
+
+method m2(xs: Set[Ref], ys: Set[Ref], y: Ref)
+  requires forall a: Ref :: { a.f } a in xs ==> acc(a.f)
+  requires forall a: Ref :: { a.f } a in ys ==> acc(a.f)
+  requires y in xs
+{
+  assert g(xs union ys, y) == y.f
+}

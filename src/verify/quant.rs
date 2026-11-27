@@ -525,6 +525,11 @@ impl ResolvedRead {
 /// (`heap::quantified_permissions`), which [`Self::push`]es steps after it.
 pub(crate) struct Canonical {
     binder_base: usize,
+    /// The recipe's own bound variables ahead of the body's binders: `0` when
+    /// the body's binders are the recipe's ([`Self::new`]); otherwise the body
+    /// is evaluated at a binding the recipe computes, and its binders are the
+    /// first steps ([`Self::at_binding`]).
+    lead: usize,
     /// Enclosing temp -> capture slot.
     slot: HashMap<usize, usize>,
     /// How many read stand-ins, then call stand-ins, are captured after the
@@ -567,6 +572,81 @@ impl Canonical {
         triggers: &[vmir::QuantTrigger],
         insts: &[vmir::Inst],
     ) -> Result<Self, VerifyError> {
+        Self::build(
+            alloc,
+            table,
+            names,
+            certs,
+            binder_base,
+            n_bound,
+            free,
+            reads,
+            shape,
+            triggers,
+            insts,
+            0,
+        )
+    }
+
+    /// The body of [`Self::new`] evaluated at a binding the recipe computes
+    /// from `lead` bound variables of its own (temps `n_caps..n_caps + lead`).
+    /// The body's `n_bound` binders are the temps right after them, which the
+    /// caller defines with [`Self::bind`] before pushing anything else. The
+    /// body's triggers name its binders, which the recipe does not bind, so
+    /// none are prepared: the caller sets [`Self::groups`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn at_binding(
+        alloc: &mut FuncRegistry,
+        table: &RecipeTable,
+        names: &dyn Fn(vmir::MemberId) -> String,
+        certs: Certs<'_>,
+        binder_base: usize,
+        n_bound: usize,
+        free: &[usize],
+        reads: &[vmir::HeapRead],
+        shape: &Shape,
+        insts: &[vmir::Inst],
+        lead: usize,
+    ) -> Result<Self, VerifyError> {
+        Self::build(
+            alloc,
+            table,
+            names,
+            certs,
+            binder_base,
+            n_bound,
+            free,
+            reads,
+            shape,
+            &[],
+            insts,
+            lead,
+        )
+    }
+
+    /// Define the body's binders of an [`Self::at_binding`] body, in order, as
+    /// steps over the captures and the lead variables.
+    pub(crate) fn bind(&mut self, binding: Vec<AxiomPure>) {
+        debug_assert!(self.lead > 0, "only a body at a computed binding is bound");
+        self.insts
+            .splice(0..0, binding.into_iter().map(AxiomInst::Val));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        alloc: &mut FuncRegistry,
+        table: &RecipeTable,
+        names: &dyn Fn(vmir::MemberId) -> String,
+        certs: Certs<'_>,
+        binder_base: usize,
+        n_bound: usize,
+        free: &[usize],
+        reads: &[vmir::HeapRead],
+        shape: &Shape,
+        triggers: &[vmir::QuantTrigger],
+        insts: &[vmir::Inst],
+        lead: usize,
+    ) -> Result<Self, VerifyError> {
         let by_value = &shape.by_value;
         // Read `j`'s stand-in is the capture after the temps': slot `free.len() + j`.
         let read_of = |heap: &vmir::HeapVal, addr: &Val| {
@@ -577,6 +657,7 @@ impl Canonical {
         };
         let mut c = Self {
             binder_base,
+            lead,
             slot: free.iter().copied().zip(0..).collect(),
             n_reads: reads.len(),
             n_calls: shape.calls.iter().map(Vec::len).sum(),
@@ -633,7 +714,7 @@ impl Canonical {
             }
         }
         let extra: usize = c.extra.iter().map(|&(_, n)| n).sum();
-        c.next = c.n_caps() + n_bound + n_vals - c.dropped.len() + extra;
+        c.next = c.n_caps() + lead + n_bound + n_vals - c.dropped.len() + extra;
         let read = |heap: &vmir::HeapVal, addr: &Val| {
             let (j, slot) = read_of(heap, addr)?;
             if by_value[j] {
@@ -686,7 +767,7 @@ impl Canonical {
                     .filter(|(t, _)| t <= k)
                     .map(|&(_, n)| n)
                     .sum();
-                Val::Temp(self.n_caps() + (k - self.binder_base) - gaps + extra)
+                Val::Temp(self.n_caps() + self.lead + (k - self.binder_base) - gaps + extra)
             }
             lit => lit.clone(),
         }
@@ -701,6 +782,7 @@ impl Canonical {
     /// receiver reads the heap: the read is a `lookup` of a captured map here,
     /// which a VMIR trigger cannot name.
     pub(crate) fn pattern_of(&self, v: &Val, n_bound: usize) -> Option<PreparedTerm> {
+        debug_assert_eq!(self.lead, 0, "a body at a computed binding binds no binder");
         fn build(
             c: &Canonical,
             v: &Val,

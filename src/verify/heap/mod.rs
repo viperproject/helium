@@ -5,6 +5,7 @@ mod cond;
 mod holder;
 mod interface;
 mod quantified_permissions;
+mod spread;
 mod value;
 mod view;
 
@@ -12,6 +13,7 @@ pub(crate) use interface::{
     Access, Captures, ConsumeMode, Framing, Loc, QpCheck, QuantSpec, ReadRecipe, Value,
 };
 pub(crate) use quantified_permissions::{InverseAxioms, ReadResolver, resolve_reads};
+pub(crate) use spread::SpreadFns;
 
 use std::borrow::Cow;
 use std::cell::Cell;
