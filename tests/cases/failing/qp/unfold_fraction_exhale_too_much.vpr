@@ -1,0 +1,12 @@
+// An `unfold` at 1/2 gives 1/2 of each element, not 3/4.
+field f: Int
+predicate P(xs: Set[Ref]) {
+  forall x: Ref :: { x.f } x in xs ==> acc(x.f)
+}
+
+method m(xs: Set[Ref], y: Ref, z: Ref)
+  requires acc(P(xs), 1/2) && y in xs
+{
+  unfold acc(P(xs), 1/2)
+  exhale acc(y.f, 3/4)
+}
