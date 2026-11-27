@@ -1,0 +1,22 @@
+// A summed footprint chunk's value is named in the predicate's certificate
+// (see `tests/cases/passing/predicates/summed_footprint_chunks_name_their_value.vpr`).
+// The name is the location's value: a function reading it through the
+// predicate learns what the location held at the fold, and nothing else.
+
+field f: Int
+
+predicate P(x: Ref) {
+  acc(x.f, 1/2) && acc(x.f, 1/2) && x.f > 0
+}
+
+function val(x: Ref): Int
+  requires P(x)
+{ unfolding P(x) in x.f }
+
+method client(x: Ref)
+  requires acc(x.f)
+{
+  x.f := 3
+  fold P(x)
+  assert val(x) == 4
+}

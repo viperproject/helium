@@ -1,0 +1,23 @@
+// The value `at(s, x)` names is the one at `x.f`, not at another location of
+// the set: asserting `z`'s value fails.
+// Counterpart: `tests/cases/passing/qp/call_through_set_precondition_names_its_value.vpr`.
+
+field f: Int
+
+function h(x: Ref): Int
+  requires acc(x.f)
+{ x.f }
+
+function at(s: Set[Ref], x: Ref): Int
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s
+{ h(x) }
+
+method client(s: Set[Ref], x: Ref, z: Ref)
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s && z in s
+{
+  x.f := 3
+  z.f := 4
+  assert at(s, x) == 4
+}

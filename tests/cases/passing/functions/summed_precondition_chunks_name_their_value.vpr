@@ -1,0 +1,43 @@
+// A function precondition holding one location through two `acc`s: the two
+// chunks are summed when the precondition heap is rebuilt, and the read value
+// has to keep a name in the function's certificate. The sum used to drop it,
+// so each body failed with `purify: deref outside footprint` (a read) or
+// `purify: snap value outside footprint` (a call). The summed value is named
+// `ite(0 < p1, v1, v2)` in recipe space too (`heap::value`), which needs the
+// positivity of each chunk's amount, gated (`b ==> ..`) or not.
+// Counterpart: `tests/cases/failing/functions/summed_precondition_value_is_the_location.vpr`.
+
+field f: Int
+
+function halves(x: Ref): Int
+  requires acc(x.f, 1/2) && acc(x.f, 1/2)
+{ x.f }
+
+function whole(x: Ref): Int
+  requires acc(x.f)
+{ x.f }
+
+function halves_call(x: Ref): Int
+  requires acc(x.f, 1/2) && acc(x.f, 1/2)
+{ whole(x) }
+
+function gated_halves(x: Ref, b: Bool): Int
+  requires b ==> acc(x.f, 1/2)
+  requires b ==> acc(x.f, 1/2)
+{ b ? x.f : 0 }
+
+function either_arm(x: Ref, b: Bool): Int
+  requires b ==> acc(x.f)
+  requires !b ==> acc(x.f)
+{ x.f }
+
+method client(x: Ref, b: Bool)
+  requires acc(x.f)
+{
+  x.f := 5
+  assert halves(x) == 5
+  assert halves_call(x) == 5
+  assert gated_halves(x, true) == 5
+  assert gated_halves(x, false) == 0
+  assert either_arm(x, b) == 5
+}

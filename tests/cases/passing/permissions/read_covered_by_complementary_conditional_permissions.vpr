@@ -1,15 +1,16 @@
-// KNOWN LIMITATION: "unimplemented: purify: deref outside footprint" on
-// `m#requires`.
-//
 // `x.v` is held on both paths, through two conditional chunks with
 // complementary guards (`b` and `!b`), so the unguarded read `x.v == 1` is
-// framed. Precondition purification looks for one footprint slot that covers
-// the read and finds none.
+// framed. The two chunks are summed at the location, and the precondition's
+// certificate names the read value `ite(0 < (b ? 1 : 0), v1, v2)` over the
+// two footprint slots (`heap::value`). The sum used to drop the name, and the
+// contract failed with `purify: deref outside footprint`.
 //
 // Reduced from the PVL kernels under `Vi/viper/quantifiedpermissions/third_party`
 // (`test_forward_dep_pvl`, `test_kernel_example_v2_pvl`, `test_binomial_auto`:
 // `Ref__main_barrier`, where the guards are `last_barrier == 0 / 1` and the read
-// sits under `this_barrier == 1`, which implies `last_barrier == 0`).
+// sits under `this_barrier == 1`, which implies `last_barrier == 0`). Formerly
+// `known_limitations/marco_benchmark/`.
+
 field v: Int
 
 method m(x: Ref, b: Bool)

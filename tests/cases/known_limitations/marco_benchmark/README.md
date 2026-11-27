@@ -78,7 +78,7 @@ upper bounds.
 - **11 smaller errors** (26 files): `Undefined variable` (7, RSL2Viper),
   `undeclared type` (7, preambles and Dafny-book chapter 10),
   `` `child` is a macro, not a field`` (4, reachability), `cannot unify Perm and Int` (4, RSL2Viper), purify:
-  deref outside footprint (3, the PVL kernels below), and one file each for
+  deref outside footprint (3, the PVL kernels; fixed, see below), and one file each for
   `insufficient permission`, a heap read in a nested quantifier, a `wildcard`
   literal, a quantified permission in `assert` / `assume` and a sibling-scope
   redeclaration (`sibling_scope_redeclaration.vpr`, Nagini SIF `lookup`).
@@ -93,7 +93,6 @@ errors as well, so they are not ranked above.
 | Case | Error | Source |
 |---|---|---|
 | `field_permission_implies_non_null.vpr` | assertion failed: `acc(t.h)` does not give `t != null` | AVLTree.nokeys `rebalance*` |
-| `read_covered_by_complementary_conditional_permissions.vpr` | purify: deref outside footprint | PVL kernels `Ref__main_barrier` |
 | `function_through_nested_fold.vpr` | assertion failed | linkedlists `append`, `insert` |
 | `recursive_call_in_own_postcondition.vpr` | assertion failed | VerCors `Util.isPrefix` and its lemmas |
 | `unfolding_reads_permission_held_outside_predicate.vpr` | insufficient permission | AVLTree.iterative `has` (invariant; this file is not in the current export) |
