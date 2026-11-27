@@ -254,9 +254,10 @@ fn eval_heap_inst(
             let l = state
                 .loc(ctx, loc)
                 .expect("acc location must be Addr-typed");
-            let access = Access::Single {
+            let mut access = Access::Single {
                 loc: l.clone(),
                 perm: eval_perm_structural(ctx, state, perm),
+                held: None,
             };
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let Some(bind) = bind else {
@@ -307,6 +308,11 @@ fn eval_heap_inst(
                 let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
                 let perm_r = perm_recipe(state, perm)?;
                 let rb = ctx.recipe.as_mut().unwrap();
+                // The chunk keeps the recipe of its amount's positivity, so a
+                // second `acc` at its location can name the summed value.
+                if let Access::Single { held, .. } = &mut access {
+                    *held = Some(rb.emit_positive(&perm_r));
+                }
                 let i = rb.pending_slots.len();
                 let seed = rb.emit_seed(SeedRef::SlotValue(i));
                 rb.pending_slots.push((
@@ -633,6 +639,8 @@ fn walk_footprint(
     certs: &HashMap<MemberId, ResourceDefinition>,
     resource: MemberId,
     args: &[egg::Id],
+    // `args` in recipe space (see `SlotWalk::arg_recipes`).
+    arg_recipes: Option<&[Val]>,
     base: Heap,
     source: ValueSource,
     direction: Direction,
@@ -669,6 +677,7 @@ fn walk_footprint(
     let walk = SlotWalk {
         resource,
         args,
+        arg_recipes,
         source: &source,
         direction: &direction,
         scale,
@@ -693,6 +702,7 @@ fn walk_footprint(
                 addr,
                 perm,
                 &values,
+                &recipes,
                 &mut heap,
                 &mut changed,
             )?,
@@ -767,6 +777,9 @@ fn walk_footprint(
 struct SlotWalk<'a> {
     resource: MemberId,
     args: &'a [egg::Id],
+    /// `args` in recipe space: in a certificate walk where every argument has
+    /// a recipe, else `None`.
+    arg_recipes: Option<&'a [Val]>,
     source: &'a ValueSource,
     direction: &'a Direction,
     scale: Option<egg::Id>,
@@ -802,6 +815,7 @@ fn walk_single_slot(
     addr_r: &crate::verify::cert::BodyRecipe,
     perm_r: &PermRecipe,
     values: &[egg::Id],
+    recipes: &[Option<Val>],
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
 ) -> Result<SlotOut, VerifyError> {
@@ -881,7 +895,11 @@ fn walk_single_slot(
         // A frame check: no heap effect; presence is the gating guard
         // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
         if !matches!(w.direction, Direction::Build) {
-            let access = Access::Single { loc, perm };
+            let access = Access::Single {
+                loc,
+                perm,
+                held: None,
+            };
             heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
         }
         guard
@@ -895,7 +913,8 @@ fn walk_single_slot(
             id: value,
             recipe: recipe.clone(),
         };
-        apply_slot_perm(ctx, w, loc, perm, value, heap)?
+        let held = slot_held_recipe(ctx, w, perm_r, recipes);
+        apply_slot_perm(ctx, w, loc, perm, held, value, heap)?
     };
     let member = ctx.option_member(elem.clone(), present, value);
     Ok(SlotOut {
@@ -1052,11 +1071,64 @@ fn slot_value(
 /// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
 /// (`Consume`) or add it (`Produce`), with `perm` scaled by `w.scale` when set.
 /// Returns the slot's presence `0 < perm` (unscaled).
+/// The recipe-space arguments of a resource call: in a certificate walk where
+/// every argument has a recipe, else `None`.
+fn arg_recipes(ctx: &VerifyContext<'_>, state: &EvalState, args: &[Val]) -> Option<Vec<Val>> {
+    ctx.recipe.as_ref()?;
+    args.iter().map(|v| state.recipe_of(v)).collect()
+}
+
+/// The recipe of `0 < perm` for a footprint slot produced by the walk `w`,
+/// `perm_r` over the call's arguments and the earlier slots' values (whose
+/// recipes are `recipes`), as `quant::presence` builds it for a snapshot
+/// member. `None` outside a certificate walk and when an operand has no
+/// recipe.
+///
+/// A walk that scales the slot by `s` holds `s · p`, which is positive exactly
+/// where `p` is when `s` is positive (amounts are never negative): a
+/// `wildcard` scale (an `unfolding` in a function body) or a positive literal.
+/// Any other scale leaves the slot without a recipe, since naming the wrong
+/// positivity would let a summed value name the wrong slot.
+fn slot_held_recipe(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    perm_r: &PermRecipe,
+    recipes: &[Option<Val>],
+) -> Option<Val> {
+    if !matches!(w.direction, Direction::Produce) {
+        return None;
+    }
+    let args = w.arg_recipes?;
+    let scale_positive = w.scale.is_none_or(|pm| {
+        w.scale_wild
+            || matches!(
+                ctx.egraph[ctx.egraph.find(pm)].data.known(),
+                Some(vmir::Literal::Real(r)) if *r > num::BigRational::from(num::BigInt::from(0))
+            )
+    });
+    if !scale_positive {
+        return None;
+    }
+    let values: Vec<Val> = recipes.iter().cloned().collect::<Option<_>>()?;
+    let rb = ctx.recipe.as_mut()?;
+    let mut steps = Vec::new();
+    let first = rb.next_index();
+    // An operand the splice cannot carry leaves the slot without one: the sum
+    // then names no value, as before.
+    let present =
+        crate::verify::quant::presence(&mut steps, first, perm_r, &perm_r.res, args, &values)
+            .ok()?;
+    rb.emit_steps(steps);
+    // No condition: present wherever the slot is (a `wildcard`, or `1/1`).
+    Some(present.unwrap_or(vmir::TRUE))
+}
+
 fn apply_slot_perm(
     ctx: &mut VerifyContext<'_>,
     w: &SlotWalk<'_>,
     loc: Loc,
     perm: ChunkPerm,
+    held: Option<Val>,
     value: Value,
     heap: &mut Heap,
 ) -> Result<egg::Id, VerifyError> {
@@ -1064,7 +1136,11 @@ fn apply_slot_perm(
         Some(pm) => scale_perm(ctx, pm, w.scale_wild, perm.clone()),
         None => perm.clone(),
     };
-    let access = Access::Single { loc, perm: scaled };
+    let access = Access::Single {
+        loc,
+        perm: scaled,
+        held,
+    };
     *heap = match w.direction {
         Direction::Consume => {
             let (out, taken) = heap.consume(ctx, access, ConsumeMode::Take, w.pc_lits)?;
@@ -1129,6 +1205,7 @@ fn eval_sub_yield(
     let access = Access::Single {
         loc: l,
         perm: cperm.clone(),
+        held: None,
     };
     let (out, taken) = base_h.consume(ctx, access, ConsumeMode::Take, &pc_lits)?;
     if ctx.recipe.is_some() && taken.recipe.is_none() {
@@ -1269,6 +1346,7 @@ fn eval_resource_op(
         certs,
         call.resource,
         &args,
+        arg_recipes(ctx, state, &call.args).as_deref(),
         base_h,
         source,
         direction,
@@ -1447,7 +1525,7 @@ pub(crate) fn frame_snapshot(
     let FootprintResult {
         members, slot_locs, ..
     } = walk_footprint(
-        ctx, certs, resource, args, heap, source, direction, None, false, pc, pc, true,
+        ctx, certs, resource, args, None, heap, source, direction, None, false, pc, pc, true,
     )?;
     let snap = build_snapshot(ctx, resource, members);
     Ok(FrameSnapshot {
@@ -1512,6 +1590,7 @@ fn eval_from_snap(
         certs,
         *resource,
         &arg_ids,
+        arg_recipes(ctx, state, args).as_deref(),
         Heap::empty(),
         ValueSource::ProjectSnap(s, s_recipe),
         Direction::Produce,

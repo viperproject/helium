@@ -5,6 +5,7 @@ mod cond;
 mod holder;
 mod interface;
 mod quantified_permissions;
+mod value;
 mod view;
 
 pub(crate) use interface::{

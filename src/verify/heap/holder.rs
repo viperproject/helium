@@ -27,6 +27,7 @@ use std::rc::Rc;
 
 use crate::verify::context::VerifyContext;
 use crate::verify::heap::cond::{Cube, Lit};
+use crate::verify::heap::interface::Value;
 use crate::verify::heap::{ChunkPerm, Handover, QPTaken, Restored, SetId, TakeId, Taken};
 use crate::vmir;
 
@@ -119,18 +120,21 @@ pub(crate) struct Point {
     pub(crate) addr: egg::Id,
     /// The amount, without the presence. Private: see the module docs.
     perm: ChunkPerm,
-    /// The value it was given. Private, like the amount: it is the location's
-    /// value only where this chunk holds a positive share, and a chunk drained
-    /// to zero on some path keeps its old one. Reads and takes get a value
+    /// The value it was given, with its recipe (see [`Value`]): in a
+    /// certificate walk (function/resource verification) the recipe-space term
+    /// that names it, so a later `Deref` purifies to the pure term this chunk
+    /// was produced from. Private, like the amount: it is the location's value
+    /// only where this chunk holds a positive share, and a chunk drained to
+    /// zero on some path keeps its old one. Reads and takes get a value
     /// through `view::Shares`, which resolves it under that condition; see
     /// [`Chunk::stored_value`] for the code that only carries it along.
-    value: egg::Id,
-    /// Recipe provenance of `value` — the recipe-space temp a certificate walk
-    /// (function/resource verification) associates with the held value, so a
-    /// later `Deref` purifies to the pure term this chunk was produced from.
-    /// `None` in method bodies (no recipe is built) and for values without a
-    /// pure recipe (fresh, merged).
-    pub(crate) recipe: Option<vmir::Val>,
+    value: Value,
+    /// In a certificate walk, the recipe of `0 < perm` (of the bare amount):
+    /// what the sum of two chunks at one location needs to mirror the value
+    /// it picks (`Value::sum`). `None` outside a certificate walk, and once
+    /// the amount changes in a way it does not follow (a debit). Private, like
+    /// the amount it is about.
+    held: Option<vmir::Val>,
 }
 
 /// A single location's permission, held under a presence cube.
@@ -143,22 +147,23 @@ impl Chunk {
     /// structure are not lost on the way in.
     #[cfg(test)]
     pub fn new(addr: egg::Id, perm: egg::Id, value: egg::Id) -> Self {
-        Self::new_perm(addr, ChunkPerm::leaf(perm), value)
+        Self::new_perm(addr, ChunkPerm::leaf(perm), None, Value::plain(value))
     }
 
     /// An unconditional chunk holding `perm`: an inhaled `acc`, or a demand.
-    pub(super) fn new_perm(addr: egg::Id, perm: ChunkPerm, value: egg::Id) -> Self {
+    /// `held` is the recipe of `0 < perm` (see [`Point`]).
+    pub(super) fn new_perm(
+        addr: egg::Id,
+        perm: ChunkPerm,
+        held: Option<vmir::Val>,
+        value: Value,
+    ) -> Self {
         Holder::unconditional(Point {
             addr,
             perm,
             value,
-            recipe: None,
+            held,
         })
-    }
-
-    pub(super) fn with_recipe(mut self, recipe: Option<vmir::Val>) -> Self {
-        self.body.recipe = recipe;
-        self
     }
 
     /// The value this chunk was given, **not** the location's value: that is
@@ -168,11 +173,23 @@ impl Chunk {
     /// agreement is gated on both amounts, a write's `ite`, a debug dump. To
     /// *use* the location's value, ask `view::Shares::value`.
     pub(crate) fn stored_value(&self) -> egg::Id {
-        self.body.value
+        self.body.value.id
     }
 
-    /// This chunk holding `value` instead (a write, a join, a heap sum).
-    pub(super) fn set_value(&mut self, value: egg::Id) {
+    /// [`Chunk::stored_value`] with its recipe: what a share of this chunk
+    /// names, or what a combinator builds the next value from.
+    pub(super) fn value(&self) -> &Value {
+        &self.body.value
+    }
+
+    /// The recipe of the stored value (certificate walks only).
+    pub(super) fn recipe(&self) -> Option<&vmir::Val> {
+        self.body.value.recipe.as_ref()
+    }
+
+    /// This chunk holding `value` instead (a write, a join, a heap sum). The
+    /// recipe goes with it: a new value never keeps the old one's name.
+    pub(super) fn set_value(&mut self, value: Value) {
         self.body.value = value;
     }
 
@@ -209,49 +226,78 @@ impl Chunk {
         }
         Holder::unconditional(Point {
             perm: self.gated_perm(ctx),
+            // The positivity of the bare amount, not of the gated one.
+            held: None,
             ..self.body.clone()
         })
     }
 
     /// This chunk holding `f(amount)` under the same presence. The new amount
-    /// stays conditional on it, so `f` may work on the bare amount.
+    /// stays conditional on it, so `f` may work on the bare amount. Its
+    /// positivity recipe is dropped: `f` is a debit, which it does not follow.
     pub(super) fn map_perm(&self, f: impl FnOnce(&ChunkPerm) -> ChunkPerm) -> Chunk {
         let perm = f(&self.body.perm);
         Holder {
             presence: self.presence.clone(),
             body: Point {
                 perm,
+                held: None,
                 ..self.body.clone()
             },
         }
     }
 
+    /// This chunk with `held` as the recipe of `0 < amount` (a sum that
+    /// mirrored it).
+    pub(super) fn set_held(&mut self, held: Option<vmir::Val>) {
+        self.body.held = held;
+    }
+
     /// Combine two chunks at one address into one, at `a`'s address and with
-    /// `a`'s value and recipe (the caller sets others). `f` builds the new
-    /// amount from the two operand amounts, and may return a by-product.
+    /// `a`'s value (the caller sets another) and no positivity recipe (the
+    /// caller sets one). `f` builds the new amount from the two operand
+    /// amounts, and may return a by-product.
     ///
     /// - **presences equal** — the two are held in exactly the same region, so
     ///   `f` gets the bare amounts and the result keeps the shared presence.
-    ///   Flat, no `ite`, and free on the unconditional hot path.
+    ///   Flat, no `ite`, and free on the unconditional hot path. `f` also gets
+    ///   the amounts' positivity recipes ([`Point`]'s `held`).
     /// - **presences differ** — no single flat cube describes the result, so each
     ///   presence is folded into its own amount and the result is
-    ///   unconditional, its conditionality inside the amount.
+    ///   unconditional, its conditionality inside the amount. The recipes are
+    ///   about the bare amounts, so `f` gets none.
     pub(super) fn zip<T>(
         ctx: &mut VerifyContext<'_>,
         a: &Chunk,
         b: &Chunk,
-        f: impl FnOnce(&mut VerifyContext<'_>, &ChunkPerm, &ChunkPerm) -> (ChunkPerm, T),
+        f: impl FnOnce(
+            &mut VerifyContext<'_>,
+            &ChunkPerm,
+            &ChunkPerm,
+            (Option<&vmir::Val>, Option<&vmir::Val>),
+        ) -> (ChunkPerm, T),
     ) -> (Chunk, T) {
-        let (pa, pb, presence) = if a.presence.same(ctx, &b.presence) {
-            (a.body.perm.clone(), b.body.perm.clone(), a.presence.clone())
+        let (pa, pb, presence, held) = if a.presence.same(ctx, &b.presence) {
+            (
+                a.body.perm.clone(),
+                b.body.perm.clone(),
+                a.presence.clone(),
+                (a.body.held.as_ref(), b.body.held.as_ref()),
+            )
         } else {
-            (a.gated_perm(ctx), b.gated_perm(ctx), Cube::empty())
+            (
+                a.gated_perm(ctx),
+                b.gated_perm(ctx),
+                Cube::empty(),
+                (None, None),
+            )
         };
-        let (perm, out) = f(ctx, &pa, &pb);
+        let (perm, out) = f(ctx, &pa, &pb, held);
         let chunk = Holder {
             presence,
             body: Point {
                 perm,
+                held: None,
                 ..a.body.clone()
             },
         };
@@ -312,12 +358,10 @@ pub(crate) struct SetBody {
     /// permission at the address from this set's own, so the set's permission
     /// is never rebuilt.
     pub(super) taken: Rc<[Debit]>,
-    /// The value map associated with that chunk
-    pub(super) value_map: egg::Id,
-    /// Recipe provenance of `value_map`, same role as [`Point::recipe`]: in a
-    /// resource body the footprint seed `SlotValue(i)`, so a read through
-    /// this set purifies to `lookup(seed, addr)`. `None` in a method body.
-    pub(super) recipe: Option<vmir::Val>,
+    /// The set's value map, with its recipe (same role as [`Point`]'s): in a
+    /// resource body the footprint seed `SlotValue(i)`, so a read through this
+    /// set purifies to `lookup(seed, addr)`.
+    pub(super) value_map: Value,
     /// The maps minted when a taken set was given back to this one (see
     /// [`Restored`]); each is defined at an address where it is read.
     pub(super) restored: Rc<[Restored]>,

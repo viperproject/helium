@@ -1,13 +1,14 @@
 //! Producing: adding a chunk to a heap, merging it with one already at its address, value agreement and the location axioms.
 
 use super::*;
-use crate::verify::heap::agree::joint_value;
+use crate::verify::heap::interface::Value;
+use crate::verify::heap::value::{Sum, held_sum};
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Cube, Heap, LocationKind, cond::meet},
     lang::Symbolic,
 };
-use crate::vmir::{Bound, Literal, Polarity};
+use crate::vmir::{Bound, Literal, Polarity, Val};
 
 /// Merge two fractional chunks at the same address. Decouples the operational
 /// value pick from the declarative agreement axiom: `perm = p0 + p1`,
@@ -57,39 +58,51 @@ fn merge_chunks(
     b: &Chunk,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Chunk {
+    // In a certificate walk no holder is conditional (only a join makes one),
+    // so the two amounts are summed bare and their positivity recipes apply.
+    if ctx.recipe.is_some() {
+        assert!(
+            a.presence().is_empty() && b.presence().is_empty(),
+            "a conditional chunk in a certificate walk: only a heap join makes one"
+        );
+    }
     // `Chunk::zip` compares the presences by canonical e-class (`Cube::same`): a
     // false negative is merely conservative — it takes the gated path, still
     // sound — but costs an `ite` per merge.
-    let (mut merged, value) = Chunk::zip(ctx, a, b, |ctx, pa, pb| {
+    let (mut merged, (value, held)) = Chunk::zip(ctx, a, b, |ctx, pa, pb, held| {
         // Neither amount is asked about: an inhale merges at once.
-        sum_at_location(
+        let (perm, value, held) = sum_at_location(
             ctx,
             pa,
             pb,
-            (a.stored_value(), b.stored_value()),
+            (a.value(), b.value()),
+            held,
             (false, false),
             pc_lits,
-        )
+        );
+        (perm, (value, held))
     });
     merged.addr = addr;
     merged.set_value(value);
-    // A merged value is no single chunk's: it has no recipe.
-    merged.recipe = None;
+    merged.set_held(held);
     merged
 }
 
 /// `pa + pb` for two amounts held at once at one location (values `va`, `vb`),
-/// and the location's value with the agreement between the two assumed
-/// ([`joint_value`]; `known` says which amounts are known positive). Shared by
-/// the inhale merge ([`merge_chunks`]) and the heap sum ([`union_heaps`]).
+/// the location's value with the agreement between the two assumed
+/// ([`Value::sum`]; `known` says which amounts are known positive), and the
+/// recipe of `0 < pa + pb` from those of the operands (`held`, certificate
+/// walks only). Shared by the inhale merge ([`merge_chunks`]) and the heap sum
+/// ([`union_heaps`]).
 pub(super) fn sum_at_location(
     ctx: &mut VerifyContext<'_>,
     pa: &ChunkPerm,
     pb: &ChunkPerm,
-    (va, vb): (egg::Id, egg::Id),
+    (va, vb): (&Value, &Value),
+    (ha, hb): (Option<&Val>, Option<&Val>),
     known: (bool, bool),
     pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, egg::Id) {
+) -> (ChunkPerm, Value, Option<Val>) {
     // Structural sum: `perm_add` distributes over the gates' `Select`s, so the
     // total keeps one concrete amount per branch (`Select(b, 1/1+1/2, 0+1/2)`)
     // rather than collapsing to an opaque `AddR` whose positivity nothing can
@@ -106,8 +119,22 @@ pub(super) fn sum_at_location(
     } else {
         perm_add(ctx, pa, pb)
     };
-    let value = joint_value(ctx, (p0, va), (p1, vb), known, pc_lits);
-    (perm, value)
+    let value = Value::sum(
+        ctx,
+        Sum {
+            perm: p0,
+            held: ha,
+            value: va,
+        },
+        Sum {
+            perm: p1,
+            held: hb,
+            value: vb,
+        },
+        known,
+        pc_lits,
+    );
+    (perm, value, held_sum(ctx, ha, hb))
 }
 
 /// A location chunk extracted from a heap for the location axioms: its

@@ -33,6 +33,7 @@
 //! | `holder`                 | what a heap holds: a body under a presence cube (single chunks, chunk sets, what was taken from a set) |
 //! | `view`                   | a heap under a pc: who holds a location (`Shares`), the total, the value, taking from them |
 //! | `agree`                  | a location has one value: the agreement between holders (at merge, read, and exhale) |
+//! | `value`                  | a new [`Value`] from held ones (join, sum, write), its recipe mirrored once |
 //! | `algebra`                | amounts (`perm`), the consume ladder, produce, join and sum of heaps, location axioms |
 //! | `quantified_permissions` | chunk sets: injectivity, inverses, a set's amount at an address, containment |
 
@@ -86,8 +87,16 @@ pub(crate) struct ReadRecipe {
 
 /// What [`Heap::produce`] adds and [`Heap::consume`] takes.
 pub(crate) enum Access {
-    /// `acc(loc, perm)`.
-    Single { loc: Loc, perm: ChunkPerm },
+    /// `acc(loc, perm)`. `held` is, in a certificate walk, the recipe of
+    /// `0 < perm`: a produce keeps it with the chunk, so a later sum at the
+    /// location can name the value it picks (see `heap::value`). `None`
+    /// outside one, or where the walk has no recipe for it; a consume ignores
+    /// it.
+    Single {
+        loc: Loc,
+        perm: ChunkPerm,
+        held: Option<Val>,
+    },
     /// A quantified permission, its captured temps resolved.
     Set(QuantSpec),
 }
@@ -284,8 +293,8 @@ impl Heap {
     ) -> Result<Heap, VerifyError> {
         let pc = &self.effective_pc(ctx, pc)[..];
         match access {
-            Access::Single { loc, perm } => {
-                let chunk = Chunk::new_perm(loc.addr, perm, value.id).with_recipe(value.recipe);
+            Access::Single { loc, perm, held } => {
+                let chunk = Chunk::new_perm(loc.addr, perm, held, value);
                 Ok(heap_union(ctx, self, &loc.kind, chunk, pc))
             }
             Access::Set(mut spec) => {
@@ -294,9 +303,7 @@ impl Heap {
                     spec.caps.wildcard = Some(mint_wildcard(ctx, &spec.q));
                 }
                 crate::verify::qp_trace::qp_set(ctx, "produce", &spec.q, &spec.caps, spec.check);
-                let set = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, value.id, spec.check)?;
-                let mut set = set;
-                set.recipe = value.recipe;
+                let set = quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, value, spec.check)?;
                 let heap = self.with_qp_chunk(&kind, set);
                 crate::verify::qp_trace::note(|| {
                     format!(
@@ -321,7 +328,7 @@ impl Heap {
     ) -> Result<(Heap, Value), VerifyError> {
         let pc = &self.effective_pc(ctx, pc)[..];
         match access {
-            Access::Single { loc, perm } => match mode {
+            Access::Single { loc, perm, .. } => match mode {
                 ConsumeMode::Take => {
                     // Before a holder gives up its share, its value is tied to
                     // every other holder there (a chunk set among them: two
@@ -361,8 +368,14 @@ impl Heap {
                     &spec.caps,
                     spec.check,
                 );
-                let exhaled =
-                    quant_chunk_from_caps(ctx, &spec.q, spec.caps, pc, placeholder, spec.check)?;
+                let exhaled = quant_chunk_from_caps(
+                    ctx,
+                    &spec.q,
+                    spec.caps,
+                    pc,
+                    Value::plain(placeholder),
+                    spec.check,
+                )?;
                 let Some(i) = find_covering_qp(ctx, self, &kind, &exhaled)? else {
                     // No single set covers it: try all holders together. The
                     // exhaled set's values are then not tied to theirs yet (a
@@ -405,13 +418,10 @@ impl Heap {
                     format!(
                         "covered by held set #{i} of {}; value map {}",
                         self.qp_chunks_of(&kind).len(),
-                        crate::verify::qp_trace::eclass(ctx, held.value_map)
+                        crate::verify::qp_trace::eclass(ctx, held.value_map.id)
                     )
                 });
-                let value = Value {
-                    id: held.value_map,
-                    recipe: held.recipe.clone(),
-                };
+                let value = held.value_map.clone();
                 let heap = match mode {
                     ConsumeMode::Take => {
                         // Before the take: it may drop set `i` and shift the
@@ -447,7 +457,7 @@ impl Heap {
         if let Some(mut c) = self.chunk(&loc.kind, loc.addr).cloned() {
             let perm = c.gated_perm(ctx);
             if prove_perm_write(ctx, &perm, &loc.kind.bound, pc) {
-                c.set_value(value);
+                c.set_value(Value::written(ctx, value));
                 return Ok(self.with_chunk(&loc.kind, c));
             }
         }
@@ -470,7 +480,7 @@ impl Heap {
                         let eq = expr!(ctx, { c.addr } == { loc.addr });
                         ctx.add(Symbolic::Ite([eq, value, c.stored_value()]))
                     };
-                    c.set_value(new);
+                    c.set_value(Value::written(ctx, new));
                     heap = heap.with_chunk(&loc.kind, c);
                 }
                 HolderAt::Set(i) => {
@@ -481,11 +491,9 @@ impl Heap {
                     let map = ctx.add(Symbolic::FuncApp(
                         store,
                         Box::new([]),
-                        Box::new([set.value_map, loc.addr, value]),
+                        Box::new([set.value_map.id, loc.addr, value]),
                     ));
-                    set.value_map = map;
-                    // The old map's recipe no longer names the new map.
-                    set.recipe = None;
+                    set.value_map = Value::written(ctx, map);
                     heap = heap.with_qp_chunk_replaced(&loc.kind, i, set);
                 }
             }

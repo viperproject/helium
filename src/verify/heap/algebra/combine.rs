@@ -3,7 +3,9 @@
 use super::*;
 use crate::dhash::HashSet;
 use crate::verify::heap::holder::Debit;
+use crate::verify::heap::interface::Value;
 use crate::verify::heap::quantified_permissions::same_footprint;
+use crate::verify::heap::value::assert_no_recipe_walk;
 use crate::verify::heap::{QuantChunk, Restored};
 use crate::verify::{
     context::VerifyContext,
@@ -41,6 +43,7 @@ pub(in crate::verify::heap) fn merge_heaps(
     h_els: &Heap,
     region: &[(egg::Id, Polarity)],
 ) -> Heap {
+    assert_no_recipe_walk(ctx, "a heap join");
     let mut out = Heap::empty_in(region);
     let mut kinds: Vec<LocationKind> = h_then.kinds().cloned().collect();
     for k in h_els.kinds() {
@@ -61,12 +64,12 @@ pub(in crate::verify::heap) fn merge_heaps(
             let ce = h_els.chunk_canon(ctx, kind, addr).cloned();
             let chunk = match (ct, ce) {
                 (Some(a), Some(b)) => {
-                    let value =
-                        if ctx.egraph.find(a.stored_value()) == ctx.egraph.find(b.stored_value()) {
-                            a.stored_value()
-                        } else {
-                            expr!(ctx, if {cond} then {a.stored_value()} else {b.stored_value()})
-                        };
+                    let value = Value::join(
+                        ctx,
+                        a.value(),
+                        b.value(),
+                        |ctx| expr!(ctx, if {cond} then {a.stored_value()} else {b.stored_value()}),
+                    );
                     // Same presence on both arms → kept, and the amounts are
                     // bare: congruent ⇒ one, divergent ⇒ a single Select.
                     // Presences differ → a genuine disjunction: each folded
@@ -74,7 +77,7 @@ pub(in crate::verify::heap) fn merge_heaps(
                     if !a.presence().same(ctx, b.presence()) {
                         crate::verify::heap::MergeTrace::bump_zero();
                     }
-                    let (mut merged, ()) = Chunk::zip(ctx, &a, &b, |ctx, pa, pb| {
+                    let (mut merged, ()) = Chunk::zip(ctx, &a, &b, |ctx, pa, pb, _| {
                         (ChunkPerm::select(ctx, cond, pa.clone(), pb.clone()), ())
                     });
                     merged.set_value(value);
@@ -180,20 +183,15 @@ fn merge_set(
             .chain(els_only)
             .collect()
     };
-    let (value_map, recipe) = if ctx.egraph.find(t.value_map) == ctx.egraph.find(e.value_map) {
-        (t.value_map, t.recipe.clone())
-    } else {
+    let value_map = Value::join(ctx, &t.value_map, &e.value_map, |ctx| {
         let join = ctx.alloc.value_map(kind).join;
-        let args = Box::new([cond, t.value_map, e.value_map]);
-        (
-            ctx.add(crate::verify::lang::Symbolic::FuncApp(
-                join,
-                Box::new([]),
-                args,
-            )),
-            None,
-        )
-    };
+        let args = Box::new([cond, t.value_map.id, e.value_map.id]);
+        ctx.add(crate::verify::lang::Symbolic::FuncApp(
+            join,
+            Box::new([]),
+            args,
+        ))
+    });
     // A joined map reads one arm's map or the other's, so each arm's
     // restored maps still need their definitions.
     let mut restored = t.restored.to_vec();
@@ -216,7 +214,6 @@ fn merge_set(
     let mut out = t.clone();
     out.taken = taken;
     out.value_map = value_map;
-    out.recipe = recipe;
     out.restored = restored.into();
     out.handovers = handovers.into();
     out
@@ -271,6 +268,7 @@ pub(in crate::verify::heap) fn union_heaps(
     b: &Heap,
     pc_lits: &[(egg::Id, Polarity)],
 ) -> Heap {
+    assert_no_recipe_walk(ctx, "a heap sum");
     let mut out = a.clone();
     for (kind, cb) in b.entries() {
         let existing = a
@@ -284,11 +282,11 @@ pub(in crate::verify::heap) fn union_heaps(
         };
         // Under one shared presence the amounts are bare; otherwise each is gated
         // by its own (see `Chunk::zip`).
-        let (mut merged, value) = Chunk::zip(ctx, &ca, cb, |ctx, pa, pb| {
-            union_amounts(ctx, pa, pb, ca.stored_value(), cb.stored_value(), pc_lits)
+        // Method bodies only: no positivity recipe to carry.
+        let (mut merged, value) = Chunk::zip(ctx, &ca, cb, |ctx, pa, pb, _| {
+            union_amounts(ctx, pa, pb, (ca.value(), cb.value()), pc_lits)
         });
         merged.set_value(value);
-        merged.recipe = ca.recipe.clone().or_else(|| cb.recipe.clone());
         out = out.with_chunk(kind, merged);
     }
 
@@ -324,10 +322,9 @@ fn union_amounts(
     ctx: &mut VerifyContext<'_>,
     pa: &ChunkPerm,
     pb: &ChunkPerm,
-    va: egg::Id,
-    vb: egg::Id,
+    values: (&Value, &Value),
     pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, egg::Id) {
+) -> (ChunkPerm, Value) {
     // Decided against the *presence-gated* fractions: a chunk held only under
     // its presence is not held where it fails, however positive its bare amount
     // (`Chunk::zip` hands over bare amounts only under one shared presence).
@@ -337,7 +334,8 @@ fn union_amounts(
         prove_perm_positive(ctx, pa, pc_lits),
         prove_perm_positive(ctx, pb, pc_lits),
     );
-    sum_at_location(ctx, pa, pb, (va, vb), known, pc_lits)
+    let (perm, value, _) = sum_at_location(ctx, pa, pb, values, (None, None), known, pc_lits);
+    (perm, value)
 }
 
 /// `x` with `y` given back, or `None` when `y` is not something `x` gave away.
@@ -372,13 +370,13 @@ fn give_back(
     restored.extend(y.restored.iter().cloned());
     let mut own = x.clone();
     own.taken = Rc::from([]);
-    let (value_map, recipe) = if ctx.egraph.find(x.value_map) == ctx.egraph.find(y.value_map) {
-        (x.value_map, x.recipe.clone())
+    let value_map = if ctx.egraph.find(x.value_map.id) == ctx.egraph.find(y.value_map.id) {
+        x.value_map.clone()
     } else if same_footprint(ctx, &own, &region) {
         // `x` gave all it was inhaled with: every value it can name is `y`'s,
         // and outside its domain its map is never read. No map to define,
         // which also keeps the map whole where it leaves as a snapshot.
-        (y.value_map, y.recipe.clone())
+        y.value_map.clone()
     } else {
         let addr = Type::Addr {
             group: kind.group,
@@ -390,10 +388,10 @@ fn give_back(
             map,
             region,
             kept: x.clone(),
-            new: y.value_map,
-            old: x.value_map,
+            new: y.value_map.id,
+            old: x.value_map.id,
         });
-        (map, None)
+        Value::plain(map)
     };
     // The given-back values are `y`'s inside the region, so what `y` learned
     // from other sets is needed there too.
@@ -406,7 +404,6 @@ fn give_back(
     let mut out = x.clone();
     out.taken = taken.into();
     out.value_map = value_map;
-    out.recipe = recipe;
     out.restored = restored.into();
     out.handovers = handovers.into();
     Some(out)

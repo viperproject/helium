@@ -387,7 +387,7 @@ fn set_amount(
     let value = ctx.add(Symbolic::FuncApp(
         lookup,
         Box::new([]),
-        Box::new([set.value_map, addr]),
+        Box::new([set.value_map.id, addr]),
     ));
     let perm = qp_perm_at(ctx, set, addr)?;
     Ok(Share {
@@ -396,7 +396,7 @@ fn set_amount(
         when: Cube::empty(),
         value,
         positivity: Positivity::Open,
-        source: ShareSource::Set(set.recipe.clone()),
+        source: ShareSource::Set(set.value_map.recipe.clone()),
         at: HolderAt::Set(i),
     })
 }
@@ -444,7 +444,7 @@ fn define_handover(
     let kept = ctx.add(Symbolic::FuncApp(
         lookup,
         Box::new([]),
-        Box::new([h.kept.value_map, addr]),
+        Box::new([h.kept.value_map.id, addr]),
     ));
     assume_agree(ctx, kept, from.value, &[from_perm, kept_perm], &h.pc);
     Ok(())
@@ -715,7 +715,7 @@ impl Shares {
             };
             return Some(Value {
                 id: s.value,
-                recipe: c.recipe.clone(),
+                recipe: c.recipe().cloned(),
             });
         }
         if holders.is_empty() {
@@ -838,7 +838,7 @@ fn holder_recipe(
     addr_r: Option<&Val>,
 ) -> Option<Val> {
     match (&h.source, addr_r) {
-        (ShareSource::Chunk(c), _) => c.recipe.clone(),
+        (ShareSource::Chunk(c), _) => c.recipe().cloned(),
         (ShareSource::Set(Some(map_r)), Some(addr_r)) => {
             let lookup = ctx.alloc.value_map(kind).lookup;
             let rb = ctx

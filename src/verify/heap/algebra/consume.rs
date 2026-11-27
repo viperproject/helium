@@ -293,10 +293,7 @@ fn debit_wildcard(
     if let Some(e) = err {
         return Err(e);
     }
-    let value = Value {
-        id: existing.stored_value(),
-        recipe: existing.recipe.clone(),
-    };
+    let value = existing.value().clone();
     Ok((out.with_chunk(kind, rest), value))
 }
 

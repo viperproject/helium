@@ -41,7 +41,7 @@ use crate::verify::eval::{
 };
 use crate::verify::heap::QpCheck;
 use crate::verify::heap::algebra::{prove_framed_aligned, prove_sufficient_aligned};
-use crate::verify::heap::interface::Captures;
+use crate::verify::heap::interface::{Captures, Value};
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
 use crate::vmir;
@@ -603,11 +603,11 @@ fn stand_of(h: &Heap, kind: &LocationKind, at: HolderAt, value: Id) -> (Stand, O
     match at {
         HolderAt::Set(i) => {
             let set = &h.qp_chunks_of(kind)[i];
-            (Stand::Map(set.value_map), set.recipe.clone())
+            (Stand::Map(set.value_map.id), set.value_map.recipe.clone())
         }
         HolderAt::Chunk(at) => {
             let chunk = h.chunks_of(kind).iter().find(|c| c.addr == at);
-            (Stand::Value(value), chunk.and_then(|c| c.recipe.clone()))
+            (Stand::Value(value), chunk.and_then(|c| c.recipe().cloned()))
         }
     }
 }
@@ -1045,7 +1045,9 @@ pub(super) fn take_from_qp(
         return heap.with_qp_chunk_removed(kind, i);
     }
     let mut exhaled = exhaled;
-    exhaled.value_map = held.value_map;
+    // The exhaled set's values are the held set's. Recorded as taken, it is
+    // never read by its recipe.
+    exhaled.value_map = Value::plain(held.value_map.id);
     let held = held.with_taken_by(ctx, &exhaled, Taken::Set(SetBody::clone(&exhaled)));
     heap.with_qp_chunk_replaced(kind, i, held)
 }
@@ -1071,14 +1073,14 @@ fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChu
 /// either from the live state (an inhale or exhale of the set) or rebuilt from
 /// a resource footprint slot's recipes at a call site (`walk_footprint`).
 /// Proves what `check` asks of it under `pc_lits` ([`check_qp_well_formed`])
-/// and assumes the inverse axiom that injectivity licenses. The result carries
-/// no recipe; the caller sets one.
+/// and assumes the inverse axiom that injectivity licenses. It holds the value
+/// map `value_map`, with its recipe.
 pub(super) fn quant_chunk_from_caps(
     ctx: &mut VerifyContext<'_>,
     q: &Rc<vmir::QuantChunks>,
     caps: Captures,
     pc_lits: &[(egg::Id, Polarity)],
-    value_map: egg::Id,
+    value_map: Value,
     check: QpCheck,
 ) -> Result<QuantChunk, VerifyError> {
     if let Err(e) = check_qp_well_formed(ctx, q, &caps, pc_lits, check) {
@@ -1099,7 +1101,6 @@ pub(super) fn quant_chunk_from_caps(
         pc: pc_lits.into(),
         taken: Rc::from([]),
         value_map,
-        recipe: None,
         restored: Rc::from([]),
         handovers: Rc::from([]),
     }))
