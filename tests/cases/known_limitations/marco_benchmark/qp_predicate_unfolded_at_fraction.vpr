@@ -1,0 +1,34 @@
+// KNOWN LIMITATION: "unimplemented: scale not equal to 1/1 in QP" when a
+// predicate whose body is a quantified permission is unfolded at an amount
+// other than `write`: `wildcard` (every function precondition) or `1/2`.
+// Helium only walks a quantified slot of a predicate body at scale 1.
+//
+// Ru2 Prusti (`Ru2/new`) has this shape in `snap_owned_non_aliased$T#ensures`,
+// `snap_current_frac_ref$T#ensures` and `snap_current_unique_ref$T#ensures` of
+// every `Vec` / `ArrayList` / slice type: the `OwnedNonAliased` predicate holds
+// its elements as `forall element_address :: .. ==> acc(OwnedNonAliased$T(..))`
+// and the snapshot function unfolds it at `wildcard`. In
+// `marco_bench_incomplete_27_11.csv` it blocks 254 of 357 files (185 sole);
+// the `into_memory_block$T` and `move_place$T` assertion failures in the same
+// files probably follow from the missing snapshot postcondition.
+field f: Int
+
+predicate P(xs: Set[Ref]) {
+  forall x: Ref :: { x.f } x in xs ==> acc(x.f)
+}
+
+function get(xs: Set[Ref], y: Ref): Int
+  requires acc(P(xs), wildcard)
+  requires y in xs
+{
+  unfolding acc(P(xs), wildcard) in y.f
+}
+
+method m(xs: Set[Ref], y: Ref)
+  requires acc(P(xs), 1/2) && y in xs
+{
+  unfold acc(P(xs), 1/2)
+  var v: Int := y.f
+  fold acc(P(xs), 1/2)
+  assert v == get(xs, y)
+}
