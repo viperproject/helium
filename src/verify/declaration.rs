@@ -4,7 +4,7 @@ use crate::verify::eval::{
     eval_perm_inst, eval_perm_structural, eval_pure_inst, format_inst, get_heap,
     get_heap_unrehomed, pc_lits_raw, perm_recipe, pure_obligations,
 };
-use crate::verify::heap::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, Value};
+use crate::verify::heap::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, ReadRecipe, Value};
 use std::rc::Rc;
 
 use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
@@ -812,7 +812,7 @@ fn walk_single_slot(
     i: usize,
     kind: &LocationKind,
     elem: &Type,
-    addr_r: &crate::verify::cert::BodyRecipe,
+    addr_r: &BodyRecipe,
     perm_r: &PermRecipe,
     values: &[egg::Id],
     recipes: &[Option<Val>],
@@ -852,8 +852,11 @@ fn walk_single_slot(
     let addr = ctx.egraph.find(addr);
     // Values are read from the *original* heap (aliased slots agree); the hit
     // chunk's recipe provenance rides along. With a chunk set of this kind the
-    // location is read through all its holders, as a `Deref` is (a set's value
-    // has no recipe here: the slot address has none).
+    // location is read through all its holders, as a `Deref` is, and the read
+    // names a set's value by the slot address's recipe.
+    let read_r = ReadRecipe {
+        addr: slot_addr_recipe(ctx, w, addr_r, recipes),
+    };
     let loc = Loc {
         kind: kind.clone(),
         addr,
@@ -883,7 +886,7 @@ fn walk_single_slot(
         _ => slot_value(ctx, w, i, elem, |ctx, h| {
             // The bodies of its chunk sets evaluated once already, at their inhales.
             let read = h
-                .read(ctx, &loc, &read_pc, None)
+                .read(ctx, &loc, &read_pc, Some(&read_r))
                 .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
             match read {
                 Some(v) => (v.id, v.recipe),
@@ -1068,9 +1071,6 @@ fn slot_value(
     }
 }
 
-/// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
-/// (`Consume`) or add it (`Produce`), with `perm` scaled by `w.scale` when set.
-/// Returns the slot's presence `0 < perm` (unscaled).
 /// The recipe-space arguments of a resource call: in a certificate walk where
 /// every argument has a recipe, else `None`.
 fn arg_recipes(ctx: &VerifyContext<'_>, state: &EvalState, args: &[Val]) -> Option<Vec<Val>> {
@@ -1123,6 +1123,30 @@ fn slot_held_recipe(
     Some(present.unwrap_or(vmir::TRUE))
 }
 
+/// The recipe of a footprint slot's address, `addr_r` spliced over the call's
+/// arguments and the earlier slots' values (whose recipes are `recipes`).
+/// `None` outside a certificate walk and when an operand has no recipe.
+fn slot_addr_recipe(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    addr_r: &BodyRecipe,
+    recipes: &[Option<Val>],
+) -> Option<Val> {
+    let args = w.arg_recipes?;
+    let values: Vec<Val> = recipes.iter().cloned().collect::<Option<_>>()?;
+    let rb = ctx.recipe.as_mut()?;
+    let mut steps = Vec::new();
+    let first = rb.next_index();
+    // An operand the splice cannot carry leaves the address without one: a
+    // read from a chunk set then names no value, as before.
+    let addr = crate::verify::quant::splice(&mut steps, first, addr_r, args, &values).ok()?;
+    rb.emit_steps(steps);
+    Some(addr)
+}
+
+/// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
+/// (`Consume`) or add it (`Produce`), with `perm` scaled by `w.scale` when set.
+/// Returns the slot's presence `0 < perm` (unscaled).
 fn apply_slot_perm(
     ctx: &mut VerifyContext<'_>,
     w: &SlotWalk<'_>,
