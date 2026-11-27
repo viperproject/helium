@@ -37,11 +37,11 @@ use crate::verify::heap::algebra::{
 use crate::verify::heap::cond::{Cube, Lit};
 use crate::verify::heap::interface::{ReadRecipe, Value};
 use crate::verify::heap::quantified_permissions::qp_perm_at;
+use crate::verify::heap::value::Map;
 use crate::verify::heap::{
     Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind, QuantChunk, Restored, Taken,
 };
 use crate::verify::lang::Symbolic;
-use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{BinOp, Literal, Type, Val};
 
 /// A heap bound to the path condition of the state it is read in. Built by
@@ -383,12 +383,7 @@ fn set_amount(
     i: usize,
     addr: egg::Id,
 ) -> Result<Share, VerifyError> {
-    let lookup = ctx.alloc.value_map(kind).lookup;
-    let value = ctx.add(Symbolic::FuncApp(
-        lookup,
-        Box::new([]),
-        Box::new([set.value_map.id, addr]),
-    ));
+    let value = Map(kind).read_at(ctx, set.value_map.id, addr);
     let perm = qp_perm_at(ctx, set, addr)?;
     Ok(Share {
         hold: perm.clone(),
@@ -411,9 +406,7 @@ fn define_restored(
     let region = qp_perm_at(ctx, &rest.region, addr)?.to_id(ctx);
     let kept = qp_perm_at(ctx, &rest.kept, addr)?.to_id(ctx);
     let inside = expr!(ctx, (0 / 1) < r { region });
-    let lookup = ctx.alloc.value_map(kind).lookup;
-    let [read, new, old] = [rest.map, rest.new, rest.old]
-        .map(|m| ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([m, addr]))));
+    let [read, new, old] = [rest.map, rest.new, rest.old].map(|m| Map(kind).read_at(ctx, m, addr));
     let value = ctx.add(Symbolic::Ite([inside, new, old]));
     let fact = expr!(ctx, { read } == { value });
     ctx.assume_guarded(fact, std::iter::empty());
@@ -440,12 +433,7 @@ fn define_handover(
     let from = set_share_seen(ctx, kind, &h.from, 0, addr, seen)?;
     let from_perm = from.perm.to_id(ctx);
     let kept_perm = qp_perm_at(ctx, &h.kept, addr)?.to_id(ctx);
-    let lookup = ctx.alloc.value_map(kind).lookup;
-    let kept = ctx.add(Symbolic::FuncApp(
-        lookup,
-        Box::new([]),
-        Box::new([h.kept.value_map.id, addr]),
-    ));
+    let kept = Map(kind).read_at(ctx, h.kept.value_map.id, addr);
     assume_agree(ctx, kept, from.value, &[from_perm, kept_perm], &h.pc);
     Ok(())
 }
@@ -840,16 +828,7 @@ fn holder_recipe(
     match (&h.source, addr_r) {
         (ShareSource::Chunk(c), _) => c.recipe().cloned(),
         (ShareSource::Set(Some(map_r)), Some(addr_r)) => {
-            let lookup = ctx.alloc.value_map(kind).lookup;
-            let rb = ctx
-                .recipe
-                .as_mut()
-                .expect("holder recipe outside a certificate walk");
-            Some(rb.emit(AxiomPure::App {
-                func: lookup,
-                type_args: vec![],
-                args: vec![map_r.clone(), addr_r.clone()],
-            }))
+            Some(Map(kind).read_recipe(ctx, map_r, addr_r))
         }
         (ShareSource::Set(_), _) => None,
     }

@@ -2,14 +2,15 @@
 
 use super::*;
 use crate::dhash::HashSet;
+use crate::verify::heap::holder::Cell;
 use crate::verify::heap::holder::Debit;
 use crate::verify::heap::interface::Value;
 use crate::verify::heap::quantified_permissions::same_footprint;
-use crate::verify::heap::value::assert_no_recipe_walk;
+use crate::verify::heap::value::{Map, assert_no_recipe_walk};
 use crate::verify::heap::{QuantChunk, Restored};
 use crate::verify::{
     context::VerifyContext,
-    heap::{Chunk, ChunkPerm, Heap, LocationKind},
+    heap::{Chunk, Heap, LocationKind},
 };
 use crate::vmir::Polarity;
 use crate::vmir::Type;
@@ -64,12 +65,6 @@ pub(in crate::verify::heap) fn merge_heaps(
             let ce = h_els.chunk_canon(ctx, kind, addr).cloned();
             let chunk = match (ct, ce) {
                 (Some(a), Some(b)) => {
-                    let value = Value::join(
-                        ctx,
-                        a.value(),
-                        b.value(),
-                        |ctx| expr!(ctx, if {cond} then {a.stored_value()} else {b.stored_value()}),
-                    );
                     // Same presence on both arms → kept, and the amounts are
                     // bare: congruent ⇒ one, divergent ⇒ a single Select.
                     // Presences differ → a genuine disjunction: each folded
@@ -77,11 +72,10 @@ pub(in crate::verify::heap) fn merge_heaps(
                     if !a.presence().same(ctx, b.presence()) {
                         crate::verify::heap::MergeTrace::bump_zero();
                     }
-                    let (mut merged, ()) = Chunk::zip(ctx, &a, &b, |ctx, pa, pb, _| {
-                        (ChunkPerm::select(ctx, cond, pa.clone(), pb.clone()), ())
-                    });
-                    merged.set_value(value);
-                    Some(merged)
+                    let at = a.addr;
+                    Some(Chunk::zip(ctx, &a, &b, |ctx, ca, cb| {
+                        Cell::join(ctx, at, cond, ca, cb)
+                    }))
                 }
                 (Some(a), None) => Some(a.under(ctx, (cond, Polarity::Positive))),
                 (None, Some(b)) => Some(b.under(ctx, (cond, Polarity::Negative))),
@@ -183,15 +177,7 @@ fn merge_set(
             .chain(els_only)
             .collect()
     };
-    let value_map = Value::join(ctx, &t.value_map, &e.value_map, |ctx| {
-        let join = ctx.alloc.value_map(kind).join;
-        let args = Box::new([cond, t.value_map.id, e.value_map.id]);
-        ctx.add(crate::verify::lang::Symbolic::FuncApp(
-            join,
-            Box::new([]),
-            args,
-        ))
-    });
+    let value_map = Value::join(ctx, &Map(kind), cond, &t.value_map, &e.value_map);
     // A joined map reads one arm's map or the other's, so each arm's
     // restored maps still need their definitions.
     let mut restored = t.restored.to_vec();
@@ -282,11 +268,16 @@ pub(in crate::verify::heap) fn union_heaps(
         };
         // Under one shared presence the amounts are bare; otherwise each is gated
         // by its own (see `Chunk::zip`).
-        // Method bodies only: no positivity recipe to carry.
-        let (mut merged, value) = Chunk::zip(ctx, &ca, cb, |ctx, pa, pb, _| {
-            union_amounts(ctx, pa, pb, (ca.value(), cb.value()), pc_lits)
+        let merged = Chunk::zip(ctx, &ca, cb, |ctx, a, b| {
+            // Decided against the *presence-gated* fractions: a chunk held only
+            // under its presence is not held where it fails, however positive
+            // its bare amount (`Chunk::zip` hands over bare amounts only under
+            // one shared presence). Asked here, unlike an inhale: a loop under
+            // a path condition meets this on every exit, and a side known held
+            // saves the `ite` (see `joint_value`).
+            let known = (a.positive(ctx, pc_lits), b.positive(ctx, pc_lits));
+            Cell::sum(ctx, a, b, known, pc_lits)
         });
-        merged.set_value(value);
         out = out.with_chunk(kind, merged);
     }
 
@@ -313,29 +304,6 @@ pub(in crate::verify::heap) fn union_heaps(
     }
     ctx.egraph.rebuild();
     out
-}
-
-/// The sum of two amounts held at once at one location, `pa` (value `va`) and
-/// `pb` (value `vb`), and the location's value. See [`union_heaps`] for the
-/// value rule.
-fn union_amounts(
-    ctx: &mut VerifyContext<'_>,
-    pa: &ChunkPerm,
-    pb: &ChunkPerm,
-    values: (&Value, &Value),
-    pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, Value) {
-    // Decided against the *presence-gated* fractions: a chunk held only under
-    // its presence is not held where it fails, however positive its bare amount
-    // (`Chunk::zip` hands over bare amounts only under one shared presence).
-    // Asked here, unlike an inhale: a loop under a path condition meets this on
-    // every exit, and a side known held saves the `ite` (see `joint_value`).
-    let known = (
-        prove_perm_positive(ctx, pa, pc_lits),
-        prove_perm_positive(ctx, pb, pc_lits),
-    );
-    let (perm, value, _) = sum_at_location(ctx, pa, pb, values, (None, None), known, pc_lits);
-    (perm, value)
 }
 
 /// `x` with `y` given back, or `None` when `y` is not something `x` gave away.

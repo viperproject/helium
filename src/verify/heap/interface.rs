@@ -49,9 +49,10 @@ use crate::verify::heap::quantified_permissions::{
     covered_by_sum, find_covering_qp, mint_wildcard, quant_chunk_from_caps, take_from_qp,
     take_spread,
 };
+use crate::verify::heap::value::{Map, Scalar};
 use crate::verify::heap::view::{HolderAt, Shares};
 use crate::verify::heap::{Chunk, ChunkPerm, Handover, HandoverId, Heap, LocationKind};
-use crate::verify::lang::{FuncId, Symbolic};
+use crate::verify::lang::FuncId;
 use crate::verify::quant::Resolved;
 use crate::vmir::{self, Polarity, Type, Val};
 
@@ -457,7 +458,10 @@ impl Heap {
         if let Some(mut c) = self.chunk(&loc.kind, loc.addr).cloned() {
             let perm = c.gated_perm(ctx);
             if prove_perm_write(ctx, &perm, &loc.kind.bound, pc) {
-                c.set_value(Value::written(ctx, value));
+                let new = c
+                    .value()
+                    .written(ctx, &Scalar { addr: c.addr }, loc.addr, value);
+                c.set_value(new);
                 return Ok(self.with_chunk(&loc.kind, c));
             }
         }
@@ -466,6 +470,8 @@ impl Heap {
         if !prove_perm_write(ctx, &total, &loc.kind.bound, pc) {
             return Err(VerifyError::InsufficientPermission);
         }
+        // Every holder of the location stores the new value at it, in its own
+        // representation (`value::Repr`).
         let mut heap = self.clone();
         for h in holders.iter() {
             match h.at {
@@ -474,26 +480,15 @@ impl Heap {
                         .chunk(&loc.kind, at)
                         .expect("a share's chunk is held")
                         .clone();
-                    let new = if ctx.egraph.find(c.addr) == ctx.egraph.find(loc.addr) {
-                        value
-                    } else {
-                        let eq = expr!(ctx, { c.addr } == { loc.addr });
-                        ctx.add(Symbolic::Ite([eq, value, c.stored_value()]))
-                    };
-                    c.set_value(Value::written(ctx, new));
+                    let new = c
+                        .value()
+                        .written(ctx, &Scalar { addr: c.addr }, loc.addr, value);
+                    c.set_value(new);
                     heap = heap.with_chunk(&loc.kind, c);
                 }
                 HolderAt::Set(i) => {
-                    // Outside the set's domain its map is never read, so the
-                    // store is unconditional.
                     let mut set = heap.qp_chunks_of(&loc.kind)[i].clone();
-                    let store = ctx.alloc.value_map(&loc.kind).store;
-                    let map = ctx.add(Symbolic::FuncApp(
-                        store,
-                        Box::new([]),
-                        Box::new([set.value_map.id, loc.addr, value]),
-                    ));
-                    set.value_map = Value::written(ctx, map);
+                    set.value_map = set.value_map.written(ctx, &Map(&loc.kind), loc.addr, value);
                     heap = heap.with_qp_chunk_replaced(&loc.kind, i, set);
                 }
             }

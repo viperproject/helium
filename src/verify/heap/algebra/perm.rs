@@ -51,7 +51,7 @@ use crate::vmir::{BinOp, Bound, Literal, Polarity};
 /// path. The arm-dependence lives entirely in *which leaf* — which the per-leaf
 /// positivity test already decides — not in whether the leaf's fact holds. This is
 /// why no pc/guard cube is threaded here, unlike the bound axiom.
-pub(super) fn perm_add_wildcard(
+pub(in crate::verify::heap) fn perm_add_wildcard(
     ctx: &mut VerifyContext<'_>,
     a: &ChunkPerm,
     b: &ChunkPerm,

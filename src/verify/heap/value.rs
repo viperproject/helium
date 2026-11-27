@@ -10,9 +10,14 @@
 //!
 //! | operation | value                                  | recipe                       |
 //! |-----------|----------------------------------------|------------------------------|
-//! | join      | one of them, or `ite` / the maps' join | method bodies only: none     |
+//! | join      | one of them, or [`Repr::join`]         | method bodies only: none     |
 //! | sum       | `joint_value` (see [`Value::sum`])     | `Ternary(0 < pa, ra, rb)`    |
-//! | write     | the new value                          | method bodies only: none     |
+//! | write     | [`Repr::store_at`]                     | method bodies only: none     |
+//! | read      | the value, or [`Map::read_at`]         | the recipe, or [`Map::read_recipe`] |
+//!
+//! A single chunk's value is the location's value itself ([`Scalar`]); a chunk
+//! set's is a value map over its locations ([`Map`]). The operations that
+//! build a value term differ only in that, so they go through [`Repr`].
 //!
 //! A certificate walk never joins, sums two heaps or writes: `HeapInst::Merge`,
 //! `Union` and `Assign` are lowered only in method bodies, and a resource or
@@ -23,11 +28,116 @@
 //! of naming a value wrongly.
 
 use crate::verify::context::VerifyContext;
+use crate::verify::heap::LocationKind;
 use crate::verify::heap::agree::joint_value;
 use crate::verify::heap::cond::Lit;
 use crate::verify::heap::interface::Value;
+use crate::verify::lang::Symbolic;
 use crate::verify::rewrite::AxiomPure;
 use crate::vmir::{self, Val};
+
+/// How a holder's value term stands for the values of the locations it holds.
+pub(super) trait Repr {
+    /// The value term holding `a` where `cond` holds and `b` elsewhere.
+    fn join(&self, ctx: &mut VerifyContext<'_>, cond: egg::Id, a: egg::Id, b: egg::Id) -> egg::Id;
+
+    /// The value term `v` after `new` is written at the location `at`.
+    fn store_at(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        v: egg::Id,
+        at: egg::Id,
+        new: egg::Id,
+    ) -> egg::Id;
+}
+
+/// A single chunk's value: the value of the one location it holds.
+pub(super) struct Scalar {
+    /// The chunk's address.
+    pub(super) addr: egg::Id,
+}
+
+impl Repr for Scalar {
+    fn join(&self, ctx: &mut VerifyContext<'_>, cond: egg::Id, a: egg::Id, b: egg::Id) -> egg::Id {
+        expr!(ctx, if {cond} then {a} else {b})
+    }
+
+    /// `new` when `at` is the chunk's own address, else `ite(addr == at, new,
+    /// v)`: a write through a possibly aliasing address.
+    fn store_at(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        v: egg::Id,
+        at: egg::Id,
+        new: egg::Id,
+    ) -> egg::Id {
+        if ctx.egraph.find(self.addr) == ctx.egraph.find(at) {
+            return new;
+        }
+        let eq = expr!(ctx, { self.addr } == { at });
+        ctx.add(Symbolic::Ite([eq, new, v]))
+    }
+}
+
+/// A chunk set's value: a value map of its location kind, read with `lookup`.
+pub(super) struct Map<'k>(pub(super) &'k LocationKind);
+
+impl Map<'_> {
+    /// `lookup(map, at)`: the value the map gives the location `at`.
+    pub(super) fn read_at(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        map: egg::Id,
+        at: egg::Id,
+    ) -> egg::Id {
+        let lookup = ctx.alloc.value_map(self.0).lookup;
+        ctx.add(Symbolic::FuncApp(lookup, Box::new([]), Box::new([map, at])))
+    }
+
+    /// [`Map::read_at`] in recipe space, emitted into the certificate under
+    /// construction.
+    pub(super) fn read_recipe(&self, ctx: &mut VerifyContext<'_>, map: &Val, at: &Val) -> Val {
+        let lookup = ctx.alloc.value_map(self.0).lookup;
+        emit(
+            ctx,
+            AxiomPure::App {
+                func: lookup,
+                type_args: vec![],
+                args: vec![map.clone(), at.clone()],
+            },
+        )
+    }
+}
+
+impl Repr for Map<'_> {
+    /// `join(cond, a, b)`, read through the read-over-join axiom
+    /// (`builtin_axioms::value_map`).
+    fn join(&self, ctx: &mut VerifyContext<'_>, cond: egg::Id, a: egg::Id, b: egg::Id) -> egg::Id {
+        let join = ctx.alloc.value_map(self.0).join;
+        ctx.add(Symbolic::FuncApp(
+            join,
+            Box::new([]),
+            Box::new([cond, a, b]),
+        ))
+    }
+
+    /// `store(map, at, new)`. Outside the set's domain its map is never read,
+    /// so the store is unconditional.
+    fn store_at(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        v: egg::Id,
+        at: egg::Id,
+        new: egg::Id,
+    ) -> egg::Id {
+        let store = ctx.alloc.value_map(self.0).store;
+        ctx.add(Symbolic::FuncApp(
+            store,
+            Box::new([]),
+            Box::new([v, at, new]),
+        ))
+    }
+}
 
 /// Panics when `ctx` is in a certificate walk: `what` is an operation only a
 /// method body performs (see the module docs).
@@ -39,27 +149,35 @@ pub(super) fn assert_no_recipe_walk(ctx: &VerifyContext<'_>, what: &str) {
 }
 
 impl Value {
-    /// The value at a join of two arms holding `a` and `b`: `a` when the two
-    /// are one e-class already, else `build`'s term (an `ite` on the join's
-    /// condition, or the value maps' `join`). Method bodies only.
+    /// The value at a join on `cond` of two arms holding `a` and `b`: `a` when
+    /// the two are one e-class already, else [`Repr::join`]. Method bodies
+    /// only.
     pub(super) fn join(
         ctx: &mut VerifyContext<'_>,
+        repr: &impl Repr,
+        cond: egg::Id,
         a: &Value,
         b: &Value,
-        build: impl FnOnce(&mut VerifyContext<'_>) -> egg::Id,
     ) -> Value {
         assert_no_recipe_walk(ctx, "a heap join");
         if ctx.egraph.find(a.id) == ctx.egraph.find(b.id) {
             return a.clone();
         }
-        Value::plain(build(ctx))
+        Value::plain(repr.join(ctx, cond, a.id, b.id))
     }
 
-    /// The value `id` written over a held one: the old recipe never survives.
-    /// Method bodies only.
-    pub(super) fn written(ctx: &VerifyContext<'_>, id: egg::Id) -> Value {
+    /// `self` after `new` is written at the location `at`
+    /// ([`Repr::store_at`]): the old recipe never survives. Method bodies
+    /// only.
+    pub(super) fn written(
+        &self,
+        ctx: &mut VerifyContext<'_>,
+        repr: &impl Repr,
+        at: egg::Id,
+        new: egg::Id,
+    ) -> Value {
         assert_no_recipe_walk(ctx, "a field write");
-        Value::plain(id)
+        Value::plain(repr.store_at(ctx, self.id, at, new))
     }
 
     /// The value of a location two holders hold at once: `a` under amount

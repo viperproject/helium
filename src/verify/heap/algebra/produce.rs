@@ -1,14 +1,12 @@
 //! Producing: adding a chunk to a heap, merging it with one already at its address, value agreement and the location axioms.
 
-use super::*;
-use crate::verify::heap::interface::Value;
-use crate::verify::heap::value::{Sum, held_sum};
+use crate::verify::heap::holder::Cell;
 use crate::verify::{
     context::VerifyContext,
     heap::{Chunk, ChunkPerm, Cube, Heap, LocationKind, cond::meet},
     lang::Symbolic,
 };
-use crate::vmir::{Bound, Literal, Polarity, Val};
+use crate::vmir::{Bound, Literal, Polarity};
 
 /// Merge two fractional chunks at the same address. Decouples the operational
 /// value pick from the declarative agreement axiom: `perm = p0 + p1`,
@@ -69,72 +67,12 @@ fn merge_chunks(
     // `Chunk::zip` compares the presences by canonical e-class (`Cube::same`): a
     // false negative is merely conservative — it takes the gated path, still
     // sound — but costs an `ite` per merge.
-    let (mut merged, (value, held)) = Chunk::zip(ctx, a, b, |ctx, pa, pb, held| {
-        // Neither amount is asked about: an inhale merges at once.
-        let (perm, value, held) = sum_at_location(
-            ctx,
-            pa,
-            pb,
-            (a.value(), b.value()),
-            held,
-            (false, false),
-            pc_lits,
-        );
-        (perm, (value, held))
+    // Neither amount is asked about: an inhale merges at once.
+    let mut merged = Chunk::zip(ctx, a, b, |ctx, ca, cb| {
+        Cell::sum(ctx, ca, cb, (false, false), pc_lits)
     });
     merged.addr = addr;
-    merged.set_value(value);
-    merged.set_held(held);
     merged
-}
-
-/// `pa + pb` for two amounts held at once at one location (values `va`, `vb`),
-/// the location's value with the agreement between the two assumed
-/// ([`Value::sum`]; `known` says which amounts are known positive), and the
-/// recipe of `0 < pa + pb` from those of the operands (`held`, certificate
-/// walks only). Shared by the inhale merge ([`merge_chunks`]) and the heap sum
-/// ([`union_heaps`]).
-pub(super) fn sum_at_location(
-    ctx: &mut VerifyContext<'_>,
-    pa: &ChunkPerm,
-    pb: &ChunkPerm,
-    (va, vb): (&Value, &Value),
-    (ha, hb): (Option<&Val>, Option<&Val>),
-    known: (bool, bool),
-    pc_lits: &[(egg::Id, Polarity)],
-) -> (ChunkPerm, Value, Option<Val>) {
-    // Structural sum: `perm_add` distributes over the gates' `Select`s, so the
-    // total keeps one concrete amount per branch (`Select(b, 1/1+1/2, 0+1/2)`)
-    // rather than collapsing to an opaque `AddR` whose positivity nothing can
-    // decide. Safe only because the bound axiom gates each leaf by the arm that
-    // reaches it (`for_each_leaf_under`) — otherwise an over-bound arm would fold
-    // the bound ungated and make the unit inconsistent.
-    let (p0, p1) = (pa.to_id(ctx), pb.to_id(ctx));
-    // A sum with a wildcard in it is an opaque `AddR` leaf nothing can decide, so
-    // it is not built: [`perm_add_wildcard`] replaces the wildcard-bearing leaves
-    // with fresh shares carrying the facts instead. Gated on `has_wildcard` first,
-    // so a wildcard-free program builds byte-identical terms for one `bool` test.
-    let perm = if ctx.has_wildcard && (pa.has_wild() || pb.has_wild()) {
-        perm_add_wildcard(ctx, pa, pb)
-    } else {
-        perm_add(ctx, pa, pb)
-    };
-    let value = Value::sum(
-        ctx,
-        Sum {
-            perm: p0,
-            held: ha,
-            value: va,
-        },
-        Sum {
-            perm: p1,
-            held: hb,
-            value: vb,
-        },
-        known,
-        pc_lits,
-    );
-    (perm, value, held_sum(ctx, ha, hb))
 }
 
 /// A location chunk extracted from a heap for the location axioms: its
