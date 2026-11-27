@@ -469,7 +469,7 @@ fn eval_qp_instance(
     // `Deref` itself.
     ctx.pause_recipe(|ctx| {
         let state = eval_body_at(ctx, caps, q, binders, host_pc, None)?;
-        Ok(instance_of(ctx, &state, q))
+        Ok(instance_of(ctx, caps, &state, q))
     })
 }
 
@@ -702,6 +702,7 @@ pub(crate) fn resolve_reads(
         temps,
         reads: Resolved::default(),
         wildcard: None,
+        scale: None,
     };
     if q.heap_reads().is_empty() && q.heap_calls().is_empty() {
         return Ok(caps);
@@ -733,7 +734,7 @@ fn eval_qp_instance_checked(
         body_inst_pc(ctx, state, q, inst, host_pc)
     };
     eval_body_checked(ctx, &mut state, &q.body.insts, &mut pc_of, None)?;
-    Ok(instance_of(ctx, &state, q))
+    Ok(instance_of(ctx, caps, &state, q))
 }
 
 /// The body's frame at `binders`: the captures, then the binders.
@@ -748,16 +749,23 @@ fn instance_frame(caps: &Captures, q: &vmir::QuantChunks, binders: &[egg::Id]) -
     state
 }
 
-/// The instance an evaluated body `state` denotes.
+/// The instance an evaluated body `state` denotes, its amount scaled by the
+/// set's [`Captures::scale`].
 fn instance_of(
     ctx: &mut VerifyContext<'_>,
+    caps: &Captures,
     state: &EvalState,
     q: &vmir::QuantChunks,
 ) -> QpInstance {
+    let perm = eval_perm_structural(ctx, state, &q.body.perm);
+    let perm = match caps.scale {
+        Some(s) => perm.scaled(ctx, s, false),
+        None => perm,
+    };
     QpInstance {
         cond: state.get_val(ctx, &q.body.cond),
         addr: state.get_val(ctx, &q.body.loc),
-        perm: eval_perm_structural(ctx, state, &q.body.perm),
+        perm,
     }
 }
 

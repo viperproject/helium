@@ -20,7 +20,7 @@ use crate::{
         viz::Snapshotter,
     },
     vmir::{
-        self, Assign, BinOp, Bind, Function, HeapInst, Inst, InstKind, Literal, MemberId, Method,
+        self, Assign, Bind, Function, HeapInst, Inst, InstKind, Literal, MemberId, Method,
         PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
@@ -98,38 +98,6 @@ fn build_perm(
         built.push(ChunkPerm::select(ctx, c, t, e));
     }
     leaf(ctx, &perm.res, &built, resolve, pc, changed, wildcard_as)
-}
-
-/// Scale every leaf of a permission by `pm`, preserving the branch structure.
-///
-/// Distributing rather than wrapping (`ite(c, pm*t, pm*e)` over `pm * ite(c, t, e)`)
-/// is what keeps the `ChunkPerm` tree intact through an `unfolding`'s multiplier. The
-/// two are equal but not identical; `mul-one-real-l` puts them in one class once the
-/// slot's `ctx.reduce()` runs, which is why the common `1/1` scale costs nothing.
-fn scale_perm(
-    ctx: &mut VerifyContext<'_>,
-    pm: egg::Id,
-    pm_wild: bool,
-    perm: ChunkPerm,
-) -> ChunkPerm {
-    match perm {
-        ChunkPerm::Zero => ChunkPerm::Zero,
-        // A wildcard *scale* (an `unfolding` inside a function body) makes every
-        // scaled leaf wildcard-derived, whatever the slot's own amount was.
-        ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
-            id: ctx.add(Symbolic::Binary(BinOp::MulR, [pm, id])),
-            wild: wild || pm_wild,
-        },
-        ChunkPerm::Gate { when, then } => {
-            let t = scale_perm(ctx, pm, pm_wild, *then);
-            ChunkPerm::gate(ctx, &when, t)
-        }
-        ChunkPerm::Select { cond, then, els } => {
-            let t = scale_perm(ctx, pm, pm_wild, *then);
-            let e = scale_perm(ctx, pm, pm_wild, *els);
-            ChunkPerm::select(ctx, cond, t, e)
-        }
-    }
 }
 
 /// Invariant 6 of the two-egraph block model (`design/block-vmir/82-*.md`):
@@ -707,12 +675,28 @@ fn walk_footprint(
                 &mut changed,
             )?,
             SlotShape::Quant { q, caps } => {
-                if let Some(pm) = walk.scale {
-                    let is_one = expr!(ctx, { pm } == (1 / 1));
-                    if !ctx.prove_under_pc(is_one, walk.pc_lits) {
-                        return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
+                // The amount the produced set holds per binding is scaled by
+                // `qp_scale`: `None` where the walk's scale is provably `1`.
+                // Only a produce at a fraction (`unfold acc(P(..), s)`) is
+                // scaled; a wildcard scale (an `unfolding` in a function), a
+                // wildcard body and a consume at a fraction (`fold`) are not
+                // supported yet.
+                let qp_scale = match walk.scale {
+                    None => None,
+                    Some(pm) => {
+                        let is_one = expr!(ctx, { pm } == (1 / 1));
+                        if ctx.prove_under_pc(is_one, walk.pc_lits) {
+                            None
+                        } else if matches!(walk.direction, Direction::Produce)
+                            && !walk.scale_wild
+                            && !q.body.contains_wc_permission()
+                        {
+                            Some(pm)
+                        } else {
+                            return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
+                        }
                     }
-                }
+                };
                 walk_qp_slot(
                     ctx,
                     &walk,
@@ -720,6 +704,7 @@ fn walk_footprint(
                     &slot.elem,
                     q,
                     caps,
+                    qp_scale,
                     &values,
                     &mut heap,
                     &mut changed,
@@ -935,6 +920,8 @@ fn walk_qp_slot(
     elem: &Type,
     q: &Rc<vmir::QuantChunks>,
     caps_r: &[(usize, BodyRecipe)],
+    // The set's `Captures::scale`; `Some` only on a produce.
+    scale: Option<egg::Id>,
     values: &[egg::Id],
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
@@ -971,7 +958,8 @@ fn walk_qp_slot(
         Direction::Consume | Direction::Build => w.before.clone(),
     };
     let mut heap_of = |_: &mut VerifyContext<'_>, _: &_| Ok(reads_from.clone());
-    let caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
+    let mut caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
+    caps.scale = scale;
 
     let value = match w.direction {
         Direction::Produce => {
@@ -1157,7 +1145,7 @@ fn apply_slot_perm(
     heap: &mut Heap,
 ) -> Result<egg::Id, VerifyError> {
     let scaled = match w.scale {
-        Some(pm) => scale_perm(ctx, pm, w.scale_wild, perm.clone()),
+        Some(pm) => perm.clone().scaled(ctx, pm, w.scale_wild),
         None => perm.clone(),
     };
     let access = Access::Single {
@@ -2881,6 +2869,7 @@ mod tests {
     use super::*;
     use crate::verify::lang::Symbolic;
     use crate::verify::test_support::fresh_ctx;
+    use crate::vmir::BinOp;
 
     #[test]
     fn prove_under_empty_pc_proves_known_goal() {

@@ -116,6 +116,10 @@ pub(crate) struct Captures {
     /// per location, not one shared by all. `None` for a set without a
     /// wildcard, and for a demand.
     pub(crate) wildcard: Option<FuncId>,
+    /// A set produced by an `unfold` at a fraction `s` of a predicate whose
+    /// body holds it: its amount at a binding is `s · p(xs)`. `None` is `1`.
+    /// Never a `wildcard`, and never set on a demand.
+    pub(crate) scale: Option<egg::Id>,
 }
 
 impl FromIterator<(usize, egg::Id)> for Captures {
@@ -125,6 +129,7 @@ impl FromIterator<(usize, egg::Id)> for Captures {
             temps: temps.into_iter().collect(),
             reads: Resolved::default(),
             wildcard: None,
+            scale: None,
         }
     }
 }

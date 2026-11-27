@@ -230,6 +230,39 @@ impl ChunkPerm {
         }
     }
 
+    /// Scale every leaf by `pm`, preserving the branch structure.
+    ///
+    /// Distributing rather than wrapping (`ite(c, pm*t, pm*e)` over
+    /// `pm * ite(c, t, e)`) is what keeps the tree intact through an
+    /// `unfolding`'s or `unfold`'s multiplier. The two are equal but not
+    /// identical; `mul-one-real-l` puts them in one class once `ctx.reduce()`
+    /// runs, which is why the common `1/1` scale costs nothing. `pm_wild`: the
+    /// scale itself came from a `wildcard`, which makes every scaled leaf
+    /// wildcard-derived, whatever its own amount was.
+    pub(crate) fn scaled(
+        self,
+        ctx: &mut VerifyContext<'_>,
+        pm: egg::Id,
+        pm_wild: bool,
+    ) -> ChunkPerm {
+        match self {
+            ChunkPerm::Zero => ChunkPerm::Zero,
+            ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
+                id: ctx.add(Symbolic::Binary(crate::vmir::BinOp::MulR, [pm, id])),
+                wild: wild || pm_wild,
+            },
+            ChunkPerm::Gate { when, then } => {
+                let t = then.scaled(ctx, pm, pm_wild);
+                ChunkPerm::gate(ctx, &when, t)
+            }
+            ChunkPerm::Select { cond, then, els } => {
+                let t = then.scaled(ctx, pm, pm_wild);
+                let e = els.scaled(ctx, pm, pm_wild);
+                ChunkPerm::select(ctx, cond, t, e)
+            }
+        }
+    }
+
     /// Whether this is no permission: `Zero`, or a leaf whose class const-folds
     /// to `0`. Const-fold only, no prover.
     pub(super) fn is_zero(&self, ctx: &VerifyContext<'_>) -> bool {
