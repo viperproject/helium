@@ -1,0 +1,18 @@
+// A summed precondition chunk's value is named in the function's certificate
+// (see `tests/cases/passing/functions/summed_precondition_chunks_name_their_value.vpr`).
+// The name must be the location's value, read on either arm of the gates: a
+// caller learns exactly what the location holds, and nothing else.
+
+field f: Int
+
+function either_arm(x: Ref, b: Bool): Int
+  requires b ==> acc(x.f)
+  requires !b ==> acc(x.f)
+{ x.f }
+
+method client(x: Ref, b: Bool)
+  requires acc(x.f)
+{
+  x.f := 5
+  assert either_arm(x, b) == 6
+}

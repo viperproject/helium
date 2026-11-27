@@ -1,0 +1,40 @@
+// A function (or predicate) whose precondition holds a location through a
+// quantified permission, and passes that location on to a function needing
+// `acc(x.f)`. The callee's precondition slot is read from the chunk set, and
+// in the caller's certificate the read value needs a name: a set's value is
+// `lookup(map, addr)`, so the read needs the slot address's recipe. The slot
+// walk had none, so each body failed with `purify: snap value outside
+// footprint`. The address is now spliced from the call's argument recipes.
+// Counterpart: `tests/cases/failing/qp/call_through_set_precondition_value_is_the_location.vpr`.
+
+field f: Int
+
+function h(x: Ref): Int
+  requires acc(x.f)
+{ x.f }
+
+function at(s: Set[Ref], x: Ref): Int
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s
+{ h(x) }
+
+function at_pair(s: Set[Ref], x: Ref, z: Ref): Int
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s && z in s
+{ h(x) + h(z) }
+
+predicate Pos(s: Set[Ref], x: Ref) {
+  (forall y: Ref :: y in s ==> acc(y.f)) && x in s && h(x) > 0
+}
+
+method client(s: Set[Ref], x: Ref, z: Ref)
+  requires forall y: Ref :: y in s ==> acc(y.f)
+  requires x in s && z in s
+{
+  x.f := 3
+  assert at(s, x) == 3
+  assert at_pair(s, x, x) == 6
+  fold Pos(s, x)
+  unfold Pos(s, x)
+  assert at(s, x) == 3
+}

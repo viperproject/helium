@@ -4,7 +4,7 @@ use crate::verify::eval::{
     eval_perm_inst, eval_perm_structural, eval_pure_inst, format_inst, get_heap,
     get_heap_unrehomed, pc_lits_raw, perm_recipe, pure_obligations,
 };
-use crate::verify::heap::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, Value};
+use crate::verify::heap::{Access, ConsumeMode, Loc, QpCheck, QuantSpec, ReadRecipe, Value};
 use std::rc::Rc;
 
 use crate::verify::cert::{BodyRecipe, PermRecipe, SeedRef, SlotShape};
@@ -14,13 +14,13 @@ use crate::{
         cert::{FunctionDefinition, ResourceDefinition},
         context::VerifyContext,
         error::VerifyError,
-        heap::{ChunkPerm, Heap, LocationKind},
+        heap::{ChunkPerm, Heap, LocationKind, Scale},
         lang::Symbolic,
         stats,
         viz::Snapshotter,
     },
     vmir::{
-        self, Assign, BinOp, Bind, Function, HeapInst, Inst, InstKind, Literal, MemberId, Method,
+        self, Assign, Bind, Function, HeapInst, Inst, InstKind, Literal, MemberId, Method,
         PathConds, Polarity, PureInst, Resource, Type, Val,
     },
 };
@@ -98,38 +98,6 @@ fn build_perm(
         built.push(ChunkPerm::select(ctx, c, t, e));
     }
     leaf(ctx, &perm.res, &built, resolve, pc, changed, wildcard_as)
-}
-
-/// Scale every leaf of a permission by `pm`, preserving the branch structure.
-///
-/// Distributing rather than wrapping (`ite(c, pm*t, pm*e)` over `pm * ite(c, t, e)`)
-/// is what keeps the `ChunkPerm` tree intact through an `unfolding`'s multiplier. The
-/// two are equal but not identical; `mul-one-real-l` puts them in one class once the
-/// slot's `ctx.reduce()` runs, which is why the common `1/1` scale costs nothing.
-fn scale_perm(
-    ctx: &mut VerifyContext<'_>,
-    pm: egg::Id,
-    pm_wild: bool,
-    perm: ChunkPerm,
-) -> ChunkPerm {
-    match perm {
-        ChunkPerm::Zero => ChunkPerm::Zero,
-        // A wildcard *scale* (an `unfolding` inside a function body) makes every
-        // scaled leaf wildcard-derived, whatever the slot's own amount was.
-        ChunkPerm::Leaf { id, wild } => ChunkPerm::Leaf {
-            id: ctx.add(Symbolic::Binary(BinOp::MulR, [pm, id])),
-            wild: wild || pm_wild,
-        },
-        ChunkPerm::Gate { when, then } => {
-            let t = scale_perm(ctx, pm, pm_wild, *then);
-            ChunkPerm::gate(ctx, &when, t)
-        }
-        ChunkPerm::Select { cond, then, els } => {
-            let t = scale_perm(ctx, pm, pm_wild, *then);
-            let e = scale_perm(ctx, pm, pm_wild, *els);
-            ChunkPerm::select(ctx, cond, t, e)
-        }
-    }
 }
 
 /// Invariant 6 of the two-egraph block model (`design/block-vmir/82-*.md`):
@@ -254,9 +222,10 @@ fn eval_heap_inst(
             let l = state
                 .loc(ctx, loc)
                 .expect("acc location must be Addr-typed");
-            let access = Access::Single {
+            let mut access = Access::Single {
                 loc: l.clone(),
                 perm: eval_perm_structural(ctx, state, perm),
+                held: None,
             };
             let pc_lits = pc_lits_raw(ctx, state, pc);
             let Some(bind) = bind else {
@@ -307,6 +276,11 @@ fn eval_heap_inst(
                 let addr_r = state.require_recipe(loc, OPERAND_RECIPE)?;
                 let perm_r = perm_recipe(state, perm)?;
                 let rb = ctx.recipe.as_mut().unwrap();
+                // The chunk keeps the recipe of its amount's positivity, so a
+                // second `acc` at its location can name the summed value.
+                if let Access::Single { held, .. } = &mut access {
+                    *held = Some(rb.emit_positive(&perm_r));
+                }
                 let i = rb.pending_slots.len();
                 let seed = rb.emit_seed(SeedRef::SlotValue(i));
                 rb.pending_slots.push((
@@ -633,13 +607,12 @@ fn walk_footprint(
     certs: &HashMap<MemberId, ResourceDefinition>,
     resource: MemberId,
     args: &[egg::Id],
+    // `args` in recipe space (see `SlotWalk::arg_recipes`).
+    arg_recipes: Option<&[Val]>,
     base: Heap,
     source: ValueSource,
     direction: Direction,
-    scale: Option<egg::Id>,
-    // `scale_wild`: whether `scale` itself came from a `wildcard` (an `unfolding`
-    // in a function body), which makes every scaled leaf wildcard-derived.
-    scale_wild: bool,
+    scale: Option<Scale>,
     pc_lits: &[(egg::Id, Polarity)],
     // The guard under which the body boolean is discharged (asserted for
     // `Consume`, assumed for `Produce`). Usually `pc_lits`; an `inhale` passes
@@ -669,10 +642,10 @@ fn walk_footprint(
     let walk = SlotWalk {
         resource,
         args,
+        arg_recipes,
         source: &source,
         direction: &direction,
         scale,
-        scale_wild,
         pc_lits,
         frame_only,
         before: &before,
@@ -693,16 +666,32 @@ fn walk_footprint(
                 addr,
                 perm,
                 &values,
+                &recipes,
                 &mut heap,
                 &mut changed,
             )?,
             SlotShape::Quant { q, caps } => {
-                if let Some(pm) = walk.scale {
-                    let is_one = expr!(ctx, { pm } == (1 / 1));
-                    if !ctx.prove_under_pc(is_one, walk.pc_lits) {
-                        return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
+                // The amount the produced set holds per binding is scaled by
+                // `qp_scale`: `None` where the walk's scale is provably `1`.
+                // Only a produce is scaled (`unfold acc(P(..), s)`, and an
+                // `unfolding` in a function at `wildcard`); a wildcard body and
+                // a consume at a scale (`fold`) are not supported yet.
+                let qp_scale = match walk.scale {
+                    None => None,
+                    Some(s) => {
+                        let pm = s.amount();
+                        let is_one = expr!(ctx, { pm } == (1 / 1));
+                        if ctx.prove_under_pc(is_one, walk.pc_lits) {
+                            None
+                        } else if matches!(walk.direction, Direction::Produce)
+                            && !q.body.contains_wc_permission()
+                        {
+                            Some(s)
+                        } else {
+                            return Err(VerifyError::Unimplemented("scale not equal to 1/1 in QP"));
+                        }
                     }
-                }
+                };
                 walk_qp_slot(
                     ctx,
                     &walk,
@@ -710,7 +699,9 @@ fn walk_footprint(
                     &slot.elem,
                     q,
                     caps,
+                    qp_scale,
                     &values,
+                    &recipes,
                     &mut heap,
                     &mut changed,
                 )?
@@ -767,10 +758,12 @@ fn walk_footprint(
 struct SlotWalk<'a> {
     resource: MemberId,
     args: &'a [egg::Id],
+    /// `args` in recipe space: in a certificate walk where every argument has
+    /// a recipe, else `None`.
+    arg_recipes: Option<&'a [Val]>,
     source: &'a ValueSource,
     direction: &'a Direction,
-    scale: Option<egg::Id>,
-    scale_wild: bool,
+    scale: Option<Scale>,
     pc_lits: &'a [(egg::Id, Polarity)],
     frame_only: bool,
     /// The heap the walk started from.
@@ -799,9 +792,10 @@ fn walk_single_slot(
     i: usize,
     kind: &LocationKind,
     elem: &Type,
-    addr_r: &crate::verify::cert::BodyRecipe,
+    addr_r: &BodyRecipe,
     perm_r: &PermRecipe,
     values: &[egg::Id],
+    recipes: &[Option<Val>],
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
 ) -> Result<SlotOut, VerifyError> {
@@ -838,8 +832,11 @@ fn walk_single_slot(
     let addr = ctx.egraph.find(addr);
     // Values are read from the *original* heap (aliased slots agree); the hit
     // chunk's recipe provenance rides along. With a chunk set of this kind the
-    // location is read through all its holders, as a `Deref` is (a set's value
-    // has no recipe here: the slot address has none).
+    // location is read through all its holders, as a `Deref` is, and the read
+    // names a set's value by the slot address's recipe.
+    let read_r = ReadRecipe {
+        addr: slot_term_recipe(ctx, w, addr_r, recipes),
+    };
     let loc = Loc {
         kind: kind.clone(),
         addr,
@@ -869,7 +866,7 @@ fn walk_single_slot(
         _ => slot_value(ctx, w, i, elem, |ctx, h| {
             // The bodies of its chunk sets evaluated once already, at their inhales.
             let read = h
-                .read(ctx, &loc, &read_pc, None)
+                .read(ctx, &loc, &read_pc, Some(&read_r))
                 .unwrap_or_else(|e| panic!("quantified chunk body failed to re-evaluate: {e:?}"));
             match read {
                 Some(v) => (v.id, v.recipe),
@@ -881,7 +878,11 @@ fn walk_single_slot(
         // A frame check: no heap effect; presence is the gating guard
         // `0 < ite(guard, 1, 0)` (folds to `guard`, `true` when unconditional).
         if !matches!(w.direction, Direction::Build) {
-            let access = Access::Single { loc, perm };
+            let access = Access::Single {
+                loc,
+                perm,
+                held: None,
+            };
             heap.consume(ctx, access, ConsumeMode::Frame, w.pc_lits)?;
         }
         guard
@@ -895,7 +896,8 @@ fn walk_single_slot(
             id: value,
             recipe: recipe.clone(),
         };
-        apply_slot_perm(ctx, w, loc, perm, value, heap)?
+        let held = slot_held_recipe(ctx, w, perm_r, recipes);
+        apply_slot_perm(ctx, w, loc, perm, held, value, heap)?
     };
     let member = ctx.option_member(elem.clone(), present, value);
     Ok(SlotOut {
@@ -913,7 +915,10 @@ fn walk_qp_slot(
     elem: &Type,
     q: &Rc<vmir::QuantChunks>,
     caps_r: &[(usize, BodyRecipe)],
+    // The set's `Captures::scale`; `Some` only on a produce.
+    scale: Option<Scale>,
     values: &[egg::Id],
+    recipes: &[Option<Val>],
     heap: &mut Heap,
     changed: &mut Vec<egg::Id>,
 ) -> Result<SlotOut, VerifyError> {
@@ -940,6 +945,10 @@ fn walk_qp_slot(
         .iter()
         .map(|&(k, id)| (k, ctx.egraph.find(id)))
         .collect();
+    let cap_recipes = caps_r
+        .iter()
+        .map(|(_, r)| slot_term_recipe(ctx, w, r, recipes))
+        .collect::<Option<Rc<[Val]>>>();
     // The body's heap reads, resolved against the caller's heap, which is the
     // one heap every footprint heap of the resource body stands for here: as
     // produced so far on a produce, as before the walk on a consume (an exhale
@@ -949,7 +958,9 @@ fn walk_qp_slot(
         Direction::Consume | Direction::Build => w.before.clone(),
     };
     let mut heap_of = |_: &mut VerifyContext<'_>, _: &_| Ok(reads_from.clone());
-    let caps = crate::verify::heap::resolve_reads(ctx, q, caps, &mut heap_of, w.pc_lits)?;
+    let mut caps =
+        crate::verify::heap::resolve_reads(ctx, q, caps, cap_recipes, &mut heap_of, w.pc_lits)?;
+    caps.scale = scale;
 
     let value = match w.direction {
         Direction::Produce => {
@@ -1049,6 +1060,80 @@ fn slot_value(
     }
 }
 
+/// The recipe-space arguments of a resource call: in a certificate walk where
+/// every argument has a recipe, else `None`.
+fn arg_recipes(ctx: &VerifyContext<'_>, state: &EvalState, args: &[Val]) -> Option<Vec<Val>> {
+    ctx.recipe.as_ref()?;
+    args.iter().map(|v| state.recipe_of(v)).collect()
+}
+
+/// The recipe of `0 < perm` for a footprint slot produced by the walk `w`,
+/// `perm_r` over the call's arguments and the earlier slots' values (whose
+/// recipes are `recipes`), as `quant::presence` builds it for a snapshot
+/// member. `None` outside a certificate walk and when an operand has no
+/// recipe.
+///
+/// A walk that scales the slot by `s` holds `s · p`, which is positive exactly
+/// where `p` is when `s` is positive (amounts are never negative): a
+/// `wildcard` scale (an `unfolding` in a function body) or a positive literal.
+/// Any other scale leaves the slot without a recipe, since naming the wrong
+/// positivity would let a summed value name the wrong slot.
+fn slot_held_recipe(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    perm_r: &PermRecipe,
+    recipes: &[Option<Val>],
+) -> Option<Val> {
+    if !matches!(w.direction, Direction::Produce) {
+        return None;
+    }
+    let args = w.arg_recipes?;
+    let scale_positive = w.scale.is_none_or(|s| match s {
+        Scale::Wildcard(_) => true,
+        Scale::Amount(pm) => matches!(
+            ctx.egraph[ctx.egraph.find(pm)].data.known(),
+            Some(vmir::Literal::Real(r)) if *r > num::BigRational::from(num::BigInt::from(0))
+        ),
+    });
+    if !scale_positive {
+        return None;
+    }
+    let values: Vec<Val> = recipes.iter().cloned().collect::<Option<_>>()?;
+    let rb = ctx.recipe.as_mut()?;
+    let mut steps = Vec::new();
+    let first = rb.next_index();
+    // An operand the splice cannot carry leaves the slot without one: the sum
+    // then names no value, as before.
+    let present =
+        crate::verify::quant::presence(&mut steps, first, perm_r, &perm_r.res, args, &values)
+            .ok()?;
+    rb.emit_steps(steps);
+    // No condition: present wherever the slot is (a `wildcard`, or `1/1`).
+    Some(present.unwrap_or(vmir::TRUE))
+}
+
+/// The recipe of a term of a footprint slot (its address, a captured value of
+/// its quantifier body), `term_r` spliced over the call's arguments and the
+/// earlier slots' values (whose recipes are `recipes`). `None` outside a
+/// certificate walk and when an operand has no recipe.
+fn slot_term_recipe(
+    ctx: &mut VerifyContext<'_>,
+    w: &SlotWalk<'_>,
+    term_r: &BodyRecipe,
+    recipes: &[Option<Val>],
+) -> Option<Val> {
+    let args = w.arg_recipes?;
+    let values: Vec<Val> = recipes.iter().cloned().collect::<Option<_>>()?;
+    let rb = ctx.recipe.as_mut()?;
+    let mut steps = Vec::new();
+    let first = rb.next_index();
+    // An operand the splice cannot carry leaves the address without one: a
+    // read from a chunk set then names no value, as before.
+    let term = crate::verify::quant::splice(&mut steps, first, term_r, args, &values).ok()?;
+    rb.emit_steps(steps);
+    Some(term)
+}
+
 /// Apply a single slot `loc ↦ value` to `heap` per `w.direction`: take it
 /// (`Consume`) or add it (`Produce`), with `perm` scaled by `w.scale` when set.
 /// Returns the slot's presence `0 < perm` (unscaled).
@@ -1057,14 +1142,19 @@ fn apply_slot_perm(
     w: &SlotWalk<'_>,
     loc: Loc,
     perm: ChunkPerm,
+    held: Option<Val>,
     value: Value,
     heap: &mut Heap,
 ) -> Result<egg::Id, VerifyError> {
     let scaled = match w.scale {
-        Some(pm) => scale_perm(ctx, pm, w.scale_wild, perm.clone()),
+        Some(s) => perm.clone().scaled(ctx, s),
         None => perm.clone(),
     };
-    let access = Access::Single { loc, perm: scaled };
+    let access = Access::Single {
+        loc,
+        perm: scaled,
+        held,
+    };
     *heap = match w.direction {
         Direction::Consume => {
             let (out, taken) = heap.consume(ctx, access, ConsumeMode::Take, w.pc_lits)?;
@@ -1129,6 +1219,7 @@ fn eval_sub_yield(
     let access = Access::Single {
         loc: l,
         perm: cperm.clone(),
+        held: None,
     };
     let (out, taken) = base_h.consume(ctx, access, ConsumeMode::Take, &pc_lits)?;
     if ctx.recipe.is_some() && taken.recipe.is_none() {
@@ -1269,6 +1360,7 @@ fn eval_resource_op(
         certs,
         call.resource,
         &args,
+        arg_recipes(ctx, state, &call.args).as_deref(),
         base_h,
         source,
         direction,
@@ -1277,8 +1369,13 @@ fn eval_resource_op(
         // did. Scaling by the (unused) `1/1` operand would rebuild every
         // slot permission as `1 * p`, which is equal but not identical,
         // and identity is what the `old(f(x)) == f(x)` congruence needs.
-        if frame_only { None } else { Some(scale) },
-        state.perm_is_wild(perm),
+        if frame_only {
+            None
+        } else if state.perm_is_wild(perm) {
+            Some(Scale::Wildcard(scale))
+        } else {
+            Some(Scale::Amount(scale))
+        },
         &pc_lits,
         &bool_guard,
         frame_only,
@@ -1447,7 +1544,7 @@ pub(crate) fn frame_snapshot(
     let FootprintResult {
         members, slot_locs, ..
     } = walk_footprint(
-        ctx, certs, resource, args, heap, source, direction, None, false, pc, pc, true,
+        ctx, certs, resource, args, None, heap, source, direction, None, pc, pc, true,
     )?;
     let snap = build_snapshot(ctx, resource, members);
     Ok(FrameSnapshot {
@@ -1512,11 +1609,11 @@ fn eval_from_snap(
         certs,
         *resource,
         &arg_ids,
+        arg_recipes(ctx, state, args).as_deref(),
         Heap::empty(),
         ValueSource::ProjectSnap(s, s_recipe),
         Direction::Produce,
         None,
-        false,
         &pc_lits,
         &pc_lits,
         false,
@@ -2069,10 +2166,23 @@ fn quant_spec_of(
     q: &vmir::QuantChunks,
     pc: &PathConds,
 ) -> Result<QuantSpec, VerifyError> {
-    let temps = q.free_temps().into_iter().map(|k| (k, state.vals[k]));
+    let free = q.free_temps();
+    let temps = free.iter().map(|&k| (k, state.vals[k]));
+    let temp_recipes = ctx.recipe.as_ref().and_then(|_| {
+        free.iter()
+            .map(|&k| state.recipe_of(&Val::Temp(k)))
+            .collect::<Option<Rc<[Val]>>>()
+    });
     let pc_lits = pc_lits_raw(ctx, state, pc);
     let mut heap_of = |ctx: &mut VerifyContext<'_>, h: &_| get_heap(ctx, state, h, &pc_lits);
-    let caps = crate::verify::heap::resolve_reads(ctx, q, temps.collect(), &mut heap_of, &pc_lits)?;
+    let caps = crate::verify::heap::resolve_reads(
+        ctx,
+        q,
+        temps.collect(),
+        temp_recipes,
+        &mut heap_of,
+        &pc_lits,
+    )?;
     Ok(QuantSpec {
         q: Rc::new(q.clone()),
         caps,
@@ -2778,6 +2888,7 @@ mod tests {
     use super::*;
     use crate::verify::lang::Symbolic;
     use crate::verify::test_support::fresh_ctx;
+    use crate::vmir::BinOp;
 
     #[test]
     fn prove_under_empty_pc_proves_known_goal() {

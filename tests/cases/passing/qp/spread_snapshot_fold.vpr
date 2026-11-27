@@ -1,10 +1,10 @@
 // A quantified permission that no single held chunk set covers is taken from
-// all holders together (`covered_by_sum` / `take_spread`). Its value map is a
-// summary map, tied to every holder's map where both hold a share (`Summary`).
+// all holders together (`covered_by_sum` / `take_spread`). Its value map is the
+// spread map over them (`heap::spread`).
 //
 // `fold` consumes the predicate body. In `fold_one` one held set covers it, so
 // the predicate's snapshot is that set's map. In `fold_two` and `fold_second`
-// only both sets together cover it, so the snapshot is the summary map, and
+// only both sets together cover it, so the snapshot is the spread map, and
 // `unfold` gives the values back through it from either set.
 field f: Int
 

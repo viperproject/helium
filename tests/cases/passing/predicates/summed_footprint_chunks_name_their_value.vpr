@@ -1,0 +1,32 @@
+// A predicate body holding one location through two `acc`s, then reading it:
+// the second `acc` is summed with the first, and the read value has to keep a
+// name in the predicate's certificate. The sum used to drop it, so the body
+// failed with `purify: deref outside footprint` and every client was skipped.
+// Counterpart: `tests/cases/failing/predicates/summed_footprint_value_is_the_location.vpr`.
+
+field f: Int
+
+predicate P(x: Ref) {
+  acc(x.f, 1/2) && acc(x.f, 1/2) && x.f > 0
+}
+
+predicate Q(x: Ref, b: Bool) {
+  (b ==> acc(x.f, 1/2)) && (b ==> acc(x.f, 1/2)) && (b ==> x.f > 0)
+}
+
+function val(x: Ref): Int
+  requires P(x)
+{ unfolding P(x) in x.f }
+
+method client(x: Ref)
+  requires acc(x.f)
+{
+  x.f := 3
+  fold P(x)
+  assert val(x) == 3
+  unfold P(x)
+  assert x.f > 0
+  fold Q(x, true)
+  unfold Q(x, true)
+  assert x.f == 3
+}

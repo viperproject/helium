@@ -1,0 +1,51 @@
+// `unfold acc(P(xs), s)` of a predicate whose body is a quantified permission
+// produces the body's chunk set at `s · p(x)` per element (`Captures::scale`).
+// Two halves add up to a full set: written, then folded back at `write`.
+field f: Int
+predicate P(xs: Set[Ref]) {
+  forall x: Ref :: { x.f } x in xs ==> acc(x.f)
+}
+method read_half(xs: Set[Ref], y: Ref)
+  requires acc(P(xs), 1/2) && y in xs
+  ensures acc(y.f, 1/2)
+{
+  unfold acc(P(xs), 1/2)
+  var v: Int := y.f
+  exhale acc(y.f, 1/2)
+  inhale acc(y.f, 1/2)
+}
+
+method two_halves(xs: Set[Ref], y: Ref)
+  requires acc(P(xs), 1/2) && acc(P(xs), 1/2) && y in xs
+{
+  unfold acc(P(xs), 1/2)
+  unfold acc(P(xs), 1/2)
+  y.f := 3
+  assert y.f == 3
+}
+
+method symbolic(xs: Set[Ref], y: Ref, p: Perm)
+  requires none < p && p < write
+  requires acc(P(xs), p) && y in xs
+{
+  unfold acc(P(xs), p)
+  var v: Int := y.f
+  exhale acc(y.f, p)
+}
+
+method value_kept(xs: Set[Ref], y: Ref)
+  requires acc(P(xs), 1/2) && y in xs
+  requires unfolding acc(P(xs), 1/2) in y.f == 5
+{
+  unfold acc(P(xs), 1/2)
+  assert y.f == 5
+}
+
+method refold_full(xs: Set[Ref], y: Ref)
+  requires acc(P(xs), 1/2) && acc(P(xs), 1/2) && y in xs
+  ensures acc(P(xs))
+{
+  unfold acc(P(xs), 1/2)
+  unfold acc(P(xs), 1/2)
+  fold acc(P(xs))
+}

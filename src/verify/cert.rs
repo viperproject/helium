@@ -333,6 +333,13 @@ impl RecipeBuilder {
         self.token_steps.push(TokenStep { token, guards });
     }
 
+    /// Record `fact`, a definition that holds for any arguments (a recipe
+    /// temp of `Bool`), to be released wherever the recipe is instantiated: an
+    /// orphan step like a `g%pre` token, with no guard.
+    pub(crate) fn record_definition(&mut self, fact: Val) {
+        self.record_token_step(fact, Vec::new());
+    }
+
     fn next_temp(&self) -> Val {
         Val::Temp(self.n_params + self.steps.len())
     }
@@ -341,6 +348,27 @@ impl RecipeBuilder {
         let v = self.next_temp();
         self.steps.push(RecipeStep::Inst(AxiomInst::Val(p)));
         v
+    }
+
+    /// The recipe of `0 < perm` for a permission already in this walk's temp
+    /// space (`eval::perm_recipe`): `0 < v` for an amount, `true` for a
+    /// `wildcard` (positive by definition), and an `ite` through each branch.
+    /// The walk-space counterpart of `quant::presence`.
+    pub(crate) fn emit_positive(&mut self, perm: &PermRecipe<Val>) -> Val {
+        fn go(rb: &mut RecipeBuilder, p: &PermVal<Val>, steps: &[PermInst<Val>]) -> Val {
+            match p {
+                PermVal::Amount(v) => {
+                    rb.emit(AxiomPure::Binary(vmir::BinOp::LtR, vmir::none(), v.clone()))
+                }
+                PermVal::Wildcard => vmir::TRUE,
+                PermVal::Temp(i) => {
+                    let PermInst::Ite(c, t, e) = &steps[*i];
+                    let (t, e) = (go(rb, t, steps), go(rb, e, steps));
+                    rb.emit(AxiomPure::Ternary(c.clone(), t, e))
+                }
+            }
+        }
+        go(self, &perm.res, &perm.steps)
     }
 
     /// The temp index the next emitted step gets: steps prepared elsewhere

@@ -293,10 +293,7 @@ fn debit_wildcard(
     if let Some(e) = err {
         return Err(e);
     }
-    let value = Value {
-        id: existing.stored_value(),
-        recipe: existing.recipe.clone(),
-    };
+    let value = existing.value().clone();
     Ok((out.with_chunk(kind, rest), value))
 }
 
@@ -494,8 +491,8 @@ fn pc_alias_members(
 /// greedily ([`Shares::take`]). Hands back the heap after and the value of what
 /// was taken.
 ///
-/// A wildcard demand on a chunk set is unimplemented: it needs a fresh amount
-/// below what the set holds.
+/// A wildcard demand takes a fresh smaller share from one chunk set that holds
+/// a positive amount by itself ([`Shares::take_wildcard`]).
 pub(in crate::verify::heap) fn subtract_location(
     ctx: &mut VerifyContext<'_>,
     heap: &Heap,
@@ -512,12 +509,27 @@ pub(in crate::verify::heap) fn subtract_location(
         Err(VerifyError::InsufficientPermission) => {}
         done => return done,
     }
+    let view = heap.view(pc_lits);
     if demand == Demand::Wildcard {
+        // One set that holds a positive share by itself gives a fresh smaller
+        // one ([`Shares::take_wildcard`]); spread over several holders, a
+        // wildcard take is not supported.
+        for i in 0..heap.qp_chunks_of(kind).len() {
+            let one = view.set_shares(ctx, kind, i, addr)?;
+            match one.take_wildcard(ctx, heap.clone(), addr, &needed) {
+                Err(VerifyError::InsufficientPermission) => {}
+                done => return done,
+            }
+        }
+        // Nothing holds a positive share there, even together: the
+        // demand is not covered. Otherwise only several holders together do.
+        if !view.all_shares(ctx, kind, addr)?.frames(ctx) {
+            return Err(VerifyError::InsufficientPermission);
+        }
         return Err(VerifyError::Unimplemented(
-            "exhaling a wildcard location from a quantified permission",
+            "wildcard exhale of a location only several holders hold together",
         ));
     }
-    let view = heap.view(pc_lits);
     // One set by itself first: it costs one `qp_perm_at` per set, where every
     // holder together costs an alias probe per chunk as well.
     for i in 0..heap.qp_chunks_of(kind).len() {

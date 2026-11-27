@@ -1,6 +1,6 @@
 // A callee's quantified precondition taken from two held sets together: the
-// precondition snapshot holds the summary map, and the callee's two-state
-// `#ensures` reads `old(x.f)` through it as a pure term (no heap read).
+// precondition snapshot is the spread map over both (`heap::spread`), and the
+// callee's two-state `#ensures` reads `old(x.f)` through it as a pure term.
 field f: Int
 
 method callee(s: Set[Ref], x: Ref)

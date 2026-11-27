@@ -1,0 +1,12 @@
+// An `unfold` gives nothing for an element outside the set.
+field f: Int
+predicate P(xs: Set[Ref]) {
+  forall x: Ref :: { x.f } x in xs ==> acc(x.f)
+}
+
+method m(xs: Set[Ref], y: Ref, z: Ref)
+  requires acc(P(xs), 1/2) && y in xs
+{
+  unfold acc(P(xs), 1/2)
+  var v: Int := z.f
+}

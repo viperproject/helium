@@ -41,7 +41,7 @@ use crate::verify::eval::{
 };
 use crate::verify::heap::QpCheck;
 use crate::verify::heap::algebra::{prove_framed_aligned, prove_sufficient_aligned};
-use crate::verify::heap::interface::Captures;
+use crate::verify::heap::interface::{Captures, Value};
 use crate::verify::heap::view::HolderAt;
 use crate::verify::heap::{Heap, LocationKind, QuantChunk, SetId, Taken, holder::SetBody};
 use crate::vmir;
@@ -295,8 +295,7 @@ fn mint_and_assume_inverse_axiom(
     };
     // The children, in `Canonical`'s slot order: captured temps, then reads
     // and calls.
-    let temp_ids = caps.temps.iter().map(|&(_, id)| id);
-    let cap_ids: Vec<Id> = temp_ids.chain(caps.reads.cap_ids()).collect();
+    let cap_ids = caps.cap_ids();
     let (rid, inv) = match ctx.inverse_axioms.find(&mut ctx.egraph, &shape, &cap_ids) {
         Some(found) => {
             crate::verify::qp_trace::note(|| "inverse axiom: reused".to_string());
@@ -422,13 +421,13 @@ impl InverseAxioms {
 }
 
 /// `a ∧ b`, as `a ? b : false` (the shape the e-graph's `ite` rule splits).
-fn and(c: &mut Canonical, a: Val, b: Val) -> Val {
+pub(super) fn and(c: &mut Canonical, a: Val, b: Val) -> Val {
     c.push(AxiomPure::Ternary(a, b, crate::vmir::FALSE))
 }
 
 /// `0 < p` as a boolean, pushed through the permission's `ite`s; a `wildcard`
 /// is positive by definition.
-fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
+pub(super) fn positive(c: &mut Canonical, p: &PermVal, perms: &[&PermInst]) -> Val {
     match p {
         PermVal::Amount(v) => {
             let v = c.rename(v);
@@ -469,7 +468,7 @@ fn eval_qp_instance(
     // `Deref` itself.
     ctx.pause_recipe(|ctx| {
         let state = eval_body_at(ctx, caps, q, binders, host_pc, None)?;
-        Ok(instance_of(ctx, &state, q))
+        Ok(instance_of(ctx, caps, &state, q))
     })
 }
 
@@ -603,11 +602,11 @@ fn stand_of(h: &Heap, kind: &LocationKind, at: HolderAt, value: Id) -> (Stand, O
     match at {
         HolderAt::Set(i) => {
             let set = &h.qp_chunks_of(kind)[i];
-            (Stand::Map(set.value_map), set.recipe.clone())
+            (Stand::Map(set.value_map.id), set.value_map.recipe.clone())
         }
         HolderAt::Chunk(at) => {
             let chunk = h.chunks_of(kind).iter().find(|c| c.addr == at);
-            (Stand::Value(value), chunk.and_then(|c| c.recipe.clone()))
+            (Stand::Value(value), chunk.and_then(|c| c.recipe().cloned()))
         }
     }
 }
@@ -695,13 +694,16 @@ pub(crate) fn resolve_reads(
     ctx: &mut VerifyContext<'_>,
     q: &vmir::QuantChunks,
     temps: Rc<[(usize, Id)]>,
+    temp_recipes: Option<Rc<[Val]>>,
     heap_of: &mut dyn FnMut(&mut VerifyContext<'_>, &vmir::HeapVal) -> Result<Heap, VerifyError>,
     pc: &[(Id, Polarity)],
 ) -> Result<Captures, VerifyError> {
     let mut caps = Captures {
         temps,
+        temp_recipes,
         reads: Resolved::default(),
         wildcard: None,
+        scale: None,
     };
     if q.heap_reads().is_empty() && q.heap_calls().is_empty() {
         return Ok(caps);
@@ -733,7 +735,7 @@ fn eval_qp_instance_checked(
         body_inst_pc(ctx, state, q, inst, host_pc)
     };
     eval_body_checked(ctx, &mut state, &q.body.insts, &mut pc_of, None)?;
-    Ok(instance_of(ctx, &state, q))
+    Ok(instance_of(ctx, caps, &state, q))
 }
 
 /// The body's frame at `binders`: the captures, then the binders.
@@ -748,16 +750,23 @@ fn instance_frame(caps: &Captures, q: &vmir::QuantChunks, binders: &[egg::Id]) -
     state
 }
 
-/// The instance an evaluated body `state` denotes.
+/// The instance an evaluated body `state` denotes, its amount scaled by the
+/// set's [`Captures::scale`].
 fn instance_of(
     ctx: &mut VerifyContext<'_>,
+    caps: &Captures,
     state: &EvalState,
     q: &vmir::QuantChunks,
 ) -> QpInstance {
+    let perm = eval_perm_structural(ctx, state, &q.body.perm);
+    let perm = match caps.scale {
+        Some(s) => perm.scaled(ctx, s),
+        None => perm,
+    };
     QpInstance {
         cond: state.get_val(ctx, &q.body.cond),
         addr: state.get_val(ctx, &q.body.loc),
-        perm: eval_perm_structural(ctx, state, &q.body.perm),
+        perm,
     }
 }
 
@@ -1045,7 +1054,9 @@ pub(super) fn take_from_qp(
         return heap.with_qp_chunk_removed(kind, i);
     }
     let mut exhaled = exhaled;
-    exhaled.value_map = held.value_map;
+    // The exhaled set's values are the held set's. Recorded as taken, it is
+    // never read by its recipe.
+    exhaled.value_map = Value::plain(held.value_map.id);
     let held = held.with_taken_by(ctx, &exhaled, Taken::Set(SetBody::clone(&exhaled)));
     heap.with_qp_chunk_replaced(kind, i, held)
 }
@@ -1071,14 +1082,14 @@ fn emptied_by(ctx: &mut VerifyContext<'_>, held: &QuantChunk, exhaled: &QuantChu
 /// either from the live state (an inhale or exhale of the set) or rebuilt from
 /// a resource footprint slot's recipes at a call site (`walk_footprint`).
 /// Proves what `check` asks of it under `pc_lits` ([`check_qp_well_formed`])
-/// and assumes the inverse axiom that injectivity licenses. The result carries
-/// no recipe; the caller sets one.
+/// and assumes the inverse axiom that injectivity licenses. It holds the value
+/// map `value_map`, with its recipe.
 pub(super) fn quant_chunk_from_caps(
     ctx: &mut VerifyContext<'_>,
     q: &Rc<vmir::QuantChunks>,
     caps: Captures,
     pc_lits: &[(egg::Id, Polarity)],
-    value_map: egg::Id,
+    value_map: Value,
     check: QpCheck,
 ) -> Result<QuantChunk, VerifyError> {
     if let Err(e) = check_qp_well_formed(ctx, q, &caps, pc_lits, check) {
@@ -1099,7 +1110,6 @@ pub(super) fn quant_chunk_from_caps(
         pc: pc_lits.into(),
         taken: Rc::from([]),
         value_map,
-        recipe: None,
         restored: Rc::from([]),
         handovers: Rc::from([]),
     }))
