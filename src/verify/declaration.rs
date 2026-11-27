@@ -2240,9 +2240,17 @@ pub(crate) fn verify_method(
         // `HeapInst::Merge` for a `Join`). Stage 3 threads the heap linearly via
         // the insts' explicit `base: HeapVal` refs, so there is nothing to do.
         // ───────────────────────────────────────────────────────────────────
-        // No scratch during the join phase: the cube's reach boolean is
+        // No scratch *use* during the join phase: the cube's reach boolean is
         // materialized *by* the join, so it isn't resolvable until join runs.
-        ctx.end_block();
+        // The previous block's scratch is kept (still mirrored, unread) only
+        // when this block is its sole successor in line, the one block that can
+        // inherit it: `begin_block` decides, by whether this cube implies it.
+        // A join's cube never does (it is weaker than either arm's), so a join
+        // drops it here rather than mirroring its merge into a dead graph.
+        match &block.preds {
+            vmir::Preds::From(p) if p.0 + 1 == bid.0 => ctx.end_block_keeping_scratch(),
+            _ => ctx.end_block(),
+        }
         state.join_arms_dead = match &block.preds {
             vmir::Preds::Join { then_, els, .. } => Some((
                 state.dead_blocks.contains(&then_.0),
@@ -2261,8 +2269,9 @@ pub(crate) fn verify_method(
             eval_method_inst,
             None,
         )?;
-        // Record this block's cube for the (experimental) per-block scratch. All
-        // body insts share it (vmir::Block::cube), so the scratch assumes it once.
+        // Record this block's cube for the per-block scratch. All body insts
+        // share it (vmir::Block::cube), so the scratch assumes it once, or
+        // inherits the predecessor's and assumes only the literals it adds.
         let cube = pc_lits_raw(&mut ctx, &state, &block.cube);
         ctx.begin_block(cube);
         walk_body(

@@ -92,6 +92,11 @@ pub struct VerifyStats {
     pub block_scratch_saturations: u64,
     pub block_scratch_iterations: u64,
     pub block_scratch_freehits: u64,
+    /// Block scratches handed from a block to its single successor instead of
+    /// being dropped (`VerifyContext::begin_block`). A scratch passes down a
+    /// chain through blocks that never probe too, so this can exceed the clones
+    /// it saves: compare `block_scratch_clones` against a run without hand-over.
+    pub block_scratch_inherits: u64,
     /// total egg `Runner` iterations across all saturations/reductions/probes.
     pub sat_iterations: u64,
     /// Rule runs stopped by a termination bound (iteration or growth limit)
@@ -309,6 +314,7 @@ impl VerifyStats {
             block_scratch_saturations,
             block_scratch_iterations,
             block_scratch_freehits,
+            block_scratch_inherits,
             sat_iterations,
             sat_bound_stops,
             inst_deferred,
@@ -344,6 +350,7 @@ impl VerifyStats {
             ("block_scratch_saturations", n(block_scratch_saturations)),
             ("block_scratch_iterations", n(block_scratch_iterations)),
             ("block_scratch_freehits", n(block_scratch_freehits)),
+            ("block_scratch_inherits", n(block_scratch_inherits)),
             ("sat_iterations", n(sat_iterations)),
             ("sat_bound_stops", n(sat_bound_stops)),
             ("inst_deferred", n(inst_deferred)),

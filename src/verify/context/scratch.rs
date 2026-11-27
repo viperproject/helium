@@ -2,7 +2,8 @@
 //! derive from the two. Nothing else may enter it, so its graph is private and
 //! the only writes are [`BlockScratch::build`] (clone ground, assume the cube),
 //! the mirrors of a ground `add`/`union`, [`BlockScratch::import`] of a ground
-//! term, and rule runs. There is deliberately no way to assume a fact in the
+//! term, rule runs, and [`BlockScratch::refine`] (hand the scratch to a block
+//! whose cube is stronger, assuming the extra cube literals). There is deliberately no way to assume a fact in the
 //! scratch alone: it would hold on every path of the block
 //! (`tests/cases/failing/scratch_drops_guards/`). Reads are queries by
 //! [`ScratchId`]; the graph itself is never handed out.
@@ -102,6 +103,54 @@ impl BlockScratch {
             dirty_reduce: true,
             scope: rewrite::new_scope_id(),
         }
+    }
+
+    /// Whether this scratch may be handed to a block whose cube is `cube`:
+    /// every literal it assumed is in `cube`, so `cube ⇒ assumed` and all it
+    /// derived still holds there. Syntactic on raw ids, which is all the
+    /// hand-over needs. The translator's BDD can phrase a child's cube
+    /// differently from its parent's, and then the child builds afresh.
+    pub(super) fn serves(&self, cube: &[(egg::Id, Polarity)]) -> bool {
+        self.assumed.iter().all(|lit| cube.contains(lit))
+    }
+
+    /// Hand this scratch to a block with the stronger cube `cube`: assume the
+    /// literals it lacks and record `cube` as assumed. Consumes `self`, because
+    /// once the new literals are in, the graph is wrong for every other block,
+    /// and a sibling (which assumes the opposite branch literal) in particular.
+    ///
+    /// This is the one write besides [`Self::build`] that assumes anything, and
+    /// what it assumes is the new owner's cube, not an arbitrary fact. Panics
+    /// unless [`Self::serves`] holds: refining a scratch the cube does not
+    /// imply would leak the old cube's consequences into the new block.
+    pub(super) fn refine(
+        mut self,
+        ground: &Graph,
+        cube: &[(egg::Id, Polarity)],
+        true_id: egg::Id,
+        false_id: egg::Id,
+    ) -> Self {
+        assert!(
+            self.serves(cube),
+            "a block scratch was handed to a block whose cube does not imply it"
+        );
+        for lit @ (id, pol) in cube {
+            if self.assumed.contains(lit) {
+                continue;
+            }
+            let l = match pol {
+                Polarity::Positive => true_id,
+                Polarity::Negative => false_id,
+            };
+            // `id` is a ground id that may postdate the build: translate it.
+            let s = self.import(ground, *id);
+            self.egraph.union(s.0, l);
+        }
+        self.egraph.rebuild();
+        self.assumed = cube.to_vec();
+        self.dirty = true;
+        self.dirty_reduce = true;
+        self
     }
 
     /// The cube this scratch assumed: what it derives holds under it only.

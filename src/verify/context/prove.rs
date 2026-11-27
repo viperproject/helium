@@ -225,14 +225,28 @@ impl<'a> VerifyContext<'a> {
     }
 
     /// Enter a method block: record its control cube (shared pc of all its
-    /// insts) and drop any previous block's scratch (sibling cubes are mutually
-    /// exclusive, so it cannot be reused). The scratch itself is built lazily, on
-    /// the block's first `probe`-tier obligation — most blocks never reach the `probe` tier, and
+    /// insts). A scratch kept by [`Self::end_block_keeping_scratch`] is inherited
+    /// when this cube implies the cube it assumed ([`BlockScratch::serves`]):
+    /// it is refined with the extra literals and moved here, so no later block
+    /// can receive it. Otherwise it is dropped (a sibling's cube contradicts it,
+    /// a join's is weaker), and the scratch is built lazily, on the block's first
+    /// `probe`-tier obligation — most blocks never reach the `probe` tier, and
     /// building at entry measured 1.8x slower on `structs_enums`.
-    ///
     pub(crate) fn begin_block(&mut self, cube: Vec<(egg::Id, Polarity)>) {
-        self.scratch = None;
         self.block_dead = false;
+        self.scratch = match self.scratch.take() {
+            Some(sc) if sc.serves(&cube) => {
+                let true_id = expr!(self, true);
+                let false_id = expr!(self, false);
+                let sc = sc.refine(&self.egraph, &cube, true_id, false_id);
+                // As at a build: an inherited scratch that contradicts the new cube
+                // decides the block dead once, for every obligation in it.
+                self.block_dead = sc.is_inconsistent();
+                stats::bump(|s| s.block_scratch_inherits += 1);
+                Some(sc)
+            }
+            _ => None,
+        };
         self.current_cube = cube;
         self.in_block = true;
     }
@@ -240,9 +254,19 @@ impl<'a> VerifyContext<'a> {
     /// Leave the block walk (after the last block, or before a non-block walk):
     /// discard the scratch and clear block state.
     pub(crate) fn end_block(&mut self) {
+        self.end_block_keeping_scratch();
+        self.scratch = None;
+    }
+
+    /// Leave a block body but keep its scratch for the next block, whose only
+    /// predecessor it is: [`Self::begin_block`] inherits it if the next cube
+    /// implies it. The scratch stays mirrored through the next block's join phase,
+    /// so it sees that phase's ground facts. Out of a block it is never read
+    /// (every reader is gated on `in_block`), and `block_dead`, a fact about the
+    /// scratch's cube, is cleared so the join phase cannot consult it.
+    pub(crate) fn end_block_keeping_scratch(&mut self) {
         self.current_cube.clear();
         self.in_block = false;
-        self.scratch = None;
         self.block_dead = false;
     }
 
